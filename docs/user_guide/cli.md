@@ -120,50 +120,126 @@ echo "Quick note" | yams add - --name "reminder.txt" --mime-type "text/plain"
 
 ## get {#cmd-get}
 
-Retrieve a document by content hash.
+Retrieve a document by hash or name for downloading.
 
 Synopsis:
 - yams get <hash> [options]
+- yams get --name <name> [options]
 
 Options:
+- --name <name>
+  - Retrieve document by name instead of hash
 - -o, --output <path>
   - Write output to specified file instead of stdout
+- -v, --verbose
+  - Enable verbose output
 
 Description:
-- Fetches the raw content addressed by <hash>.
+- Downloads content by hash or name.
+- For viewing content directly, use the `cat` command instead.
 - Supports both stdout redirection and explicit output file specification.
 
 Examples:
 ```
-yams get abcd1234... > out.bin
-yams get abcd1234... -o ./restore.bin
-yams get abcd1234... --output "recovered-document.pdf"
+yams get abcd1234... -o output.txt
+yams get --name "document.pdf" -o restored.pdf
+yams get --name "config.json" > config.json
+yams get abcd1234... --verbose
+```
+
+---
+
+## cat {#cmd-cat}
+
+Display document content to stdout.
+
+Synopsis:
+- yams cat <hash>
+- yams cat --name <name>
+
+Options:
+- --name <name>
+  - Display document by name instead of hash
+
+Description:
+- Outputs content directly to stdout for viewing or piping.
+- Silent operation - no status messages (ideal for piping).
+- Use `get` command for downloading files.
+
+Examples:
+```
+yams cat abcd1234...
+yams cat --name "notes.txt"
+yams cat --name "config.json" | jq .
+yams cat --name "script.sh" | bash
 ```
 
 ---
 
 ## delete {#cmd-delete}
+## rm {#cmd-rm}
 
-Delete a document by content hash.
+Delete documents by hash, name, or pattern. (Alias: `rm`)
 
 Synopsis:
-- yams delete <hash> [--force]
+- yams delete <hash> [options]
+- yams delete --name <name> [options]
+- yams delete --names <name1,name2,...> [options]
+- yams delete --pattern <pattern> [options]
+
+Options:
+- --name <name>
+  - Delete a document by its name
+- --names <names>
+  - Delete multiple documents by names (comma-separated)
+- --pattern <pattern>
+  - Delete documents matching a glob pattern (e.g., *.log, temp_*.txt)
+- --force, --no-confirm
+  - Skip confirmation prompt
+- --dry-run
+  - Preview what would be deleted without actually deleting
+- --keep-refs
+  - Keep reference counts (don't decrement)
+- -v, --verbose
+  - Show detailed deletion progress
 
 Description:
-- Removes content and associated references as supported by your configuration.
-- Use --force to bypass confirmation where supported.
+- Supports deletion by hash (original behavior), name, multiple names, or pattern matching.
+- When deleting by name and multiple documents have the same name, you'll be prompted to confirm unless --force is used.
+- Pattern matching supports standard glob patterns (* for any characters, ? for single character).
+- Dry-run mode shows what would be deleted without making changes.
+- Bulk deletions show progress and report both successes and failures.
 
 Examples:
 ```
+# Delete by hash (original)
 yams delete abcd1234...
-yams delete abcd1234... --force
+yams rm abcd1234...  # Using alias
+
+# Delete by name
+yams delete --name "meeting-notes.txt"
+yams rm --name "old-file.txt" --force  # Using alias
+
+# Delete multiple files
+yams delete --names "old-report.pdf,draft.txt,temp.log"
+
+# Delete by pattern
+yams delete --pattern "*.tmp"
+yams delete --pattern "backup_*.zip" --dry-run
+
+# Force deletion without confirmation
+yams delete --pattern "temp_*" --force
+
+# Verbose output
+yams delete --names "file1.txt,file2.txt" --verbose
 ```
 
 ---
 
 ## list {#cmd-list}
+## ls {#cmd-ls}
 
-List stored documents with rich metadata display.
+List stored documents with rich metadata display. (Alias: `ls`)
 
 Synopsis:
 - yams list [options]
@@ -185,8 +261,9 @@ Description:
 Examples:
 ```
 yams list
+yams ls  # Using alias
 yams list --format json
-yams list --format csv --limit 50
+yams ls --format csv --limit 50  # Using alias
 yams list --format minimal --offset 20
 ```
 

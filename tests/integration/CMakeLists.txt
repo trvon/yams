@@ -7,6 +7,7 @@ add_executable(integration_tests
     full_system_test.cpp
     compression_integration_test.cpp
     cli_init_integration_test.cpp
+    cli_delete_test.cpp
 )
 
 target_link_libraries(integration_tests

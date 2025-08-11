@@ -1,0 +1,61 @@
+# Build directories and CMake artifacts
+build/
+_deps/
+_build/
+cmake-build-*/
+
+# Build outputs
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+install_manifest*.txt
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+.vs/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+build_output.log
+
+# Coverage and profiling
+*.gcda
+*.gcno
+*.profraw
+coverage/
+
+# Package files
+*.deb
+*.rpm
+*.dmg
+*.msi
+*.pkg
+
+# Local configuration
+.env
+.env.local
+
+# Git lock files (shouldn't be committed)
+.git/index.lock

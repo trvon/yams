@@ -1,41 +1,37 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 #include <spdlog/spdlog.h>
-#include <nlohmann/json.hpp>
 #include <iostream>
-#include <fstream>
 
 namespace yams::cli {
 
-using json = nlohmann::json;
-
-class GetCommand : public ICommand {
+class CatCommand : public ICommand {
 public:
-    std::string getName() const override { return "get"; }
+    std::string getName() const override { return "cat"; }
     
     std::string getDescription() const override { 
-        return "Retrieve a document from the content store";
+        return "Display document content to stdout";
     }
     
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
         
-        auto* cmd = app.add_subcommand("get", getDescription());
+        auto* cmd = app.add_subcommand("cat", getDescription());
         
         // Create option group for retrieval methods (only one can be used at a time)
         auto* group = cmd->add_option_group("retrieval_method");
-        group->add_option("hash", hash_, "Hash of the document to retrieve");
-        group->add_option("--name", name_, "Name of the document to retrieve");
+        group->add_option("hash", hash_, "Hash of the document to display");
+        group->add_option("--name", name_, "Name of the document to display");
         group->require_option(1);
         
-        cmd->add_option("-o,--output", outputPath_, "Output file path (default: stdout)");
-        cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+        // No output option - cat always goes to stdout
+        // This is intentional for piping and viewing content directly
         
         cmd->callback([this]() { 
             auto result = execute();
             if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                exit(1);
+                spdlog::error("Cat failed: {}", result.error().message);
+                std::exit(1);
             }
         });
     }
@@ -51,60 +47,41 @@ public:
                 return Error{ErrorCode::NotInitialized, "Content store not initialized"};
             }
             
-            // Resolve the hash to retrieve
-            std::string hashToRetrieve;
+            // Resolve the hash to display
+            std::string hashToDisplay;
             
             if (!hash_.empty()) {
-                // Direct hash retrieval
-                hashToRetrieve = hash_;
+                // Direct hash display
+                hashToDisplay = hash_;
             } else if (!name_.empty()) {
-                // Name-based retrieval
+                // Name-based display
                 auto resolveResult = resolveNameToHash(name_);
                 if (!resolveResult) {
                     return resolveResult.error();
                 }
-                hashToRetrieve = resolveResult.value();
-                
-                if (verbose_) {
-                    std::cerr << "Resolved '" << name_ << "' to hash: " 
-                             << hashToRetrieve.substr(0, 12) << "..." << std::endl;
-                }
+                hashToDisplay = resolveResult.value();
             } else {
-                return Error{ErrorCode::InvalidArgument, "No retrieval criteria specified"};
+                return Error{ErrorCode::InvalidArgument, "No document specified"};
             }
             
             // Check if document exists
-            auto existsResult = store->exists(hashToRetrieve);
+            auto existsResult = store->exists(hashToDisplay);
             if (!existsResult) {
                 return Error{existsResult.error().code, existsResult.error().message};
             }
             
             if (!existsResult.value()) {
-                return Error{ErrorCode::NotFound, "Document not found: " + hashToRetrieve};
+                return Error{ErrorCode::NotFound, "Document not found: " + hashToDisplay};
             }
             
-            // Check if outputting to stdout or file
-            if (outputPath_.empty() || outputPath_ == "-") {
-                // Output to stdout using stream interface
-                auto result = store->retrieveStream(hashToRetrieve, std::cout);
-                if (!result) {
-                    return Error{result.error().code, result.error().message};
-                }
-                // Silent output to stdout - just the content
-            } else {
-                // Retrieve to file
-                auto result = store->retrieve(hashToRetrieve, outputPath_);
-                if (!result) {
-                    return Error{result.error().code, result.error().message};
-                }
-                
-                auto& retrieveResult = result.value();
-                
-                // Output success message to stderr so it doesn't interfere with piped output
-                std::cerr << "Document retrieved successfully!" << std::endl;
-                std::cerr << "Output: " << outputPath_ << std::endl;
-                std::cerr << "Size: " << retrieveResult.size << " bytes" << std::endl;
+            // Output to stdout using stream interface - always silent (no metadata)
+            auto result = store->retrieveStream(hashToDisplay, std::cout);
+            if (!result) {
+                return Error{result.error().code, result.error().message};
             }
+            
+            // Cat command should not output any status messages
+            // This allows clean piping: yams cat --name file.txt | grep something
             
             return Result<void>();
             
@@ -134,7 +111,7 @@ private:
         }
         
         if (results.size() > 1) {
-            // Multiple documents with the same name
+            // Multiple documents with the same name - output to stderr to not interfere with stdout
             std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
             for (const auto& doc : results) {
                 std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " 
@@ -150,13 +127,11 @@ private:
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
-    std::filesystem::path outputPath_;
-    bool verbose_ = false;
 };
 
 // Factory function
-std::unique_ptr<ICommand> createGetCommand() {
-    return std::make_unique<GetCommand>();
+std::unique_ptr<ICommand> createCatCommand() {
+    return std::make_unique<CatCommand>();
 }
 
 } // namespace yams::cli

@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <fstream>
 #include <chrono>
+#include <cstddef>
+#include <cctype>
 #include <unistd.h>  // For isatty and STDOUT_FILENO
 
 namespace yams::cli {
@@ -51,6 +53,7 @@ struct DocumentInfo {
 class BrowseCommand::Impl {
 public:
     YamsCLI* cli;
+    ScreenInteractive* screen = nullptr;
     std::vector<DocumentInfo> documents;
     std::vector<DocumentInfo> allDocuments;  // All documents for searching
     std::vector<std::string> collections;
@@ -63,13 +66,15 @@ public:
     bool deleteConfirm = false;
     bool searchMode = false;
     bool useFuzzySearch = true;
+    bool commandMode = false;
+    std::string commandBuffer;
     std::vector<std::string> previewLines;
     
     Component CreateUI() {
         RefreshDocuments();
         RefreshCollections();
         
-        auto screen = ScreenInteractive::Fullscreen();
+        
         
         // Create renderer
         auto renderer = Renderer([&] {
@@ -81,13 +86,13 @@ public:
         
         // Event handler
         renderer |= CatchEvent([&](Event event) {
-            return HandleEvent(event, screen);
+            return HandleEvent(event);
         });
         
         return renderer;
     }
     
-    bool HandleEvent(Event event, ScreenInteractive& screen) {
+    bool HandleEvent(Event event) {
         // Help toggle
         if (event == Event::Character('?')) {
             showHelp = !showHelp;
@@ -98,10 +103,58 @@ public:
             showHelp = false;
             return true;
         }
+
+        // Command mode handling (process before other keys)
+        if (commandMode) {
+            if (event == Event::Escape) {
+                commandMode = false;
+                commandBuffer.clear();
+                statusMessage.clear();
+                return true;
+            }
+            if (event == Event::Return) {
+                // Process command
+                std::string cmd = commandBuffer;
+                // Trim spaces
+                while (!cmd.empty() && std::isspace(static_cast<unsigned char>(cmd.front()))) cmd.erase(cmd.begin());
+                while (!cmd.empty() && std::isspace(static_cast<unsigned char>(cmd.back()))) cmd.pop_back();
+
+                if (cmd == "q" || cmd == "quit" || cmd == "wq") {
+                    if (screen) screen->ExitLoopClosure()();
+                    return true;
+                }
+                statusMessage = "Unknown command: " + cmd;
+                commandMode = false;
+                commandBuffer.clear();
+                return true;
+            }
+            if (event == Event::Backspace) {
+                if (!commandBuffer.empty()) {
+                    commandBuffer.pop_back();
+                }
+                return true;
+            }
+            auto character = event.character();
+            if (character.size() == 1 && std::isprint(static_cast<unsigned char>(character[0]))) {
+                commandBuffer += character;
+                return true;
+            }
+            return true; // consume all events in command mode
+        }
         
         // Quit
         if (event == Event::Character('q') || event == Event::Escape) {
-            screen.ExitLoopClosure()();
+            if (screen) screen->ExitLoopClosure()();
+            return true;
+        }
+
+        // Enter command mode (':' or 'p')
+        if (event == Event::Character(':') || event == Event::Character('p')) {
+            if (!searchMode && !commandMode) {
+                commandMode = true;
+                commandBuffer.clear();
+                statusMessage.clear();
+            }
             return true;
         }
         
@@ -171,7 +224,7 @@ public:
             return true;
         }
         
-        // Search mode toggle
+        // Command mode is separate (':', 'p'), Search mode toggle here
         if (event == Event::Character('/')) {
             if (!searchMode) {
                 searchMode = true;
@@ -336,6 +389,8 @@ public:
         std::string status;
         if (searchMode) {
             status = "Search (" + std::string(useFuzzySearch ? "fuzzy" : "exact") + "): " + searchQuery + "_";
+        } else if (commandMode) {
+            status = ":" + commandBuffer + "_";
         } else if (!statusMessage.empty()) {
             status = statusMessage;
         } else {
@@ -359,6 +414,7 @@ public:
                 text("h/l:← → ") | dim,
                 text("d:del ") | dim,
                 text("r:refresh ") | dim,
+                text(":/p:cmd ") | dim,
                 text("?:help ") | dim,
                 text("q:quit ") | dim,
             }) | size(HEIGHT, EQUAL, 1),
@@ -388,6 +444,7 @@ public:
             text(""),
             text("  General:"),
             text("    ?          Toggle this help"),
+            text("    : or p     Command prompt (e.g., :q to quit)"),
             text("    q/Esc      Quit"),
             text(""),
             separator() | dim,
@@ -509,12 +566,64 @@ public:
     void LoadPreview() {
         previewLines.clear();
         if (selected >= 0 && selected < static_cast<int>(documents.size())) {
-            // Try to load first few lines of document content
+            const auto& doc = documents[selected];
+
+            // Try to load text content from metadata repository first
+            auto metadataRepo = cli->getMetadataRepository();
+            if (metadataRepo) {
+                auto contentRes = metadataRepo->getContent(doc.id);
+                if (contentRes.has_value()) {
+                    const auto& optContent = contentRes.value();
+                    if (optContent.has_value()) {
+                        std::istringstream iss(optContent->contentText);
+                        std::string line;
+                        while (std::getline(iss, line) && previewLines.size() < 200) {
+                            if (!line.empty() && line.back() == '\r') line.pop_back();
+                            previewLines.push_back(line);
+                        }
+                        if (!previewLines.empty()) {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Fallback to raw bytes from content store and attempt to show as text
             auto store = cli->getContentStore();
             if (store) {
-                // For now, just show metadata
-                // In future, could retrieve and show actual content
-                previewLines.push_back("Content preview not yet implemented");
+                auto bytesRes = store->retrieveBytes(doc.hash);
+                if (bytesRes && !bytesRes.value().empty()) {
+                    const auto& bytes = bytesRes.value();
+                    size_t max_bytes = std::min<size_t>(bytes.size(), 64 * 1024);
+                    std::string content;
+                    content.resize(max_bytes);
+                    for (size_t i = 0; i < max_bytes; ++i) {
+                        content[i] = static_cast<char>(std::to_integer<unsigned char>(bytes[i]));
+                    }
+                    // Simple binary detection
+                    size_t check = std::min<size_t>(max_bytes, 1024);
+                    size_t nonprint = 0;
+                    for (size_t i = 0; i < check; ++i) {
+                        unsigned char c = static_cast<unsigned char>(content[i]);
+                        if (c == '\n' || c == '\r' || c == '\t') continue;
+                        if (!std::isprint(c)) nonprint++;
+                    }
+                    if (nonprint > check / 10) {
+                        previewLines.push_back("Binary content. Preview unavailable.");
+                        return;
+                    }
+                    std::istringstream iss(content);
+                    std::string line;
+                    while (std::getline(iss, line) && previewLines.size() < 200) {
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        previewLines.push_back(line);
+                    }
+                    if (previewLines.empty()) {
+                        previewLines.push_back("No preview available.");
+                    }
+                } else {
+                    previewLines.push_back("No preview available.");
+                }
             }
         }
     }
@@ -592,6 +701,7 @@ public:
                 statusMessage = "Storage not initialized";
             }
         }
+        LoadPreview();
     }
     
     void RefreshCollections() {
@@ -658,8 +768,10 @@ Result<void> BrowseCommand::execute() {
         
         // Create and run the TUI
         auto screen = ScreenInteractive::Fullscreen();
+        pImpl->screen = &screen;
         auto ui = pImpl->CreateUI();
         screen.Loop(ui);
+        pImpl->screen = nullptr;
         
         return Result<void>();
     } catch (const std::exception& e) {

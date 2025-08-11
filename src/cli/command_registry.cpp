@@ -7,6 +7,7 @@ namespace yams::cli {
 std::unique_ptr<ICommand> createInitCommand();
 std::unique_ptr<ICommand> createAddCommand();
 std::unique_ptr<ICommand> createGetCommand();
+std::unique_ptr<ICommand> createCatCommand();
 std::unique_ptr<ICommand> createDeleteCommand();
 std::unique_ptr<ICommand> createListCommand();
 std::unique_ptr<ICommand> createSearchCommand();
@@ -24,6 +25,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createInitCommand());
     cli->registerCommand(CommandRegistry::createAddCommand());
     cli->registerCommand(CommandRegistry::createGetCommand());
+    cli->registerCommand(CommandRegistry::createCatCommand());
     cli->registerCommand(CommandRegistry::createDeleteCommand());
     cli->registerCommand(CommandRegistry::createListCommand());
     cli->registerCommand(CommandRegistry::createSearchCommand());
@@ -48,6 +50,10 @@ std::unique_ptr<ICommand> CommandRegistry::createAddCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createGetCommand() {
     return ::yams::cli::createGetCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createCatCommand() {
+    return ::yams::cli::createCatCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createDeleteCommand() {

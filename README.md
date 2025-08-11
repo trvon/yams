@@ -2,6 +2,8 @@
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
 
+My base prompt is [docs/PROMPT.md](PROMPT.md)
+
 ## Features
 
 - **Content-Addressed Storage** - SHA-256 based, ensures data integrity
@@ -93,25 +95,34 @@ yams init --non-interactive --print
 YAMS is designed to work seamlessly with Large Language Models through simple, pipeline-friendly commands:
 
 ```bash
-# Store conversation context
-echo "User asked about X, I explained Y" | yams add -
+# Store conversation context with descriptive name
+echo "User asked about X, I explained Y" | yams add - --name "context-$(date +%Y%m%d).txt"
 
-# Store code snippets
-echo "def function(): return 42" | yams add -
+# Store code snippets with tags
+echo "def function(): return 42" | yams add - --name "helper.py" --tags "python,utils"
 
-# Retrieve previous context
+# Delete temporary files by pattern
+yams delete --pattern "temp_*.txt" --force
+
+# Delete multiple specific files
+yams delete --names "draft1.md,draft2.md,notes.txt"
+
+# Retrieve documents by name (coming soon)
+# yams get --name "meeting-notes.txt"
+
+# Search with fuzzy matching
+yams search "databse" --fuzzy --similarity 0.8
+
+# List with rich metadata
+yams list --format table --limit 20
+
+# Chain commands for batch operations
 yams list --format minimal | tail -5 | while read hash; do
   yams get $hash
 done
 
-# Search for relevant content
-yams search "error handling" --format json
-
-# Chain commands
-yams list --format minimal | \
-  grep -v manifest | \
-  head -10 | \
-  xargs -I {} yams get {} > combined.txt
+# Preview deletions before executing
+yams delete --pattern "*.log" --dry-run
 ```
 
 #### Best Practices for LLMs

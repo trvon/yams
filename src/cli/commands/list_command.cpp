@@ -30,6 +30,7 @@ public:
         cli_ = cli;
         
         auto* cmd = app.add_subcommand("list", getDescription());
+        cmd->alias("ls");  // Add ls as alias for list
         
         cmd->add_option("--format", format_, "Output format: table, json, csv, minimal")
             ->default_val("table")
