@@ -98,7 +98,7 @@ struct CompressionHeader {
      */
     [[nodiscard]] double compressionRatio() const noexcept {
         return compressedSize > 0 
-            ? static_cast<double>(uncompressedSize) / compressedSize 
+            ? static_cast<double>(uncompressedSize) / static_cast<double>(compressedSize)
             : 0.0;
     }
     

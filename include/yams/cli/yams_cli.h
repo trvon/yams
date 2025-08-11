@@ -61,6 +61,16 @@ public:
     void setDataPath(const std::filesystem::path& p) { dataPath_ = p; }
     
     /**
+     * Get verbose flag
+     */
+    bool getVerbose() const { return verbose_; }
+    
+    /**
+     * Get JSON output flag
+     */
+    bool getJsonOutput() const { return jsonOutput_; }
+    
+    /**
      * Ensure storage is initialized (lazy)
      */
     Result<void> ensureStorageInitialized();

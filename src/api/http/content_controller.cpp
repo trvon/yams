@@ -2,12 +2,14 @@
 #include <yams/api/http/models.h>
 #include <yams/api/content_store_error.h>
 #include <yams/search/search_results.h>
+#include <yams/search/search_filters.h>
 
 #include <drogon/utils/Utilities.h>
 #include <spdlog/spdlog.h>
 
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 #include <chrono>
 
 namespace yams::api::http {
@@ -55,7 +57,7 @@ void ContentController::storeContent(const drogon::HttpRequestPtr& req,
     
     // Extract metadata from form fields
     ContentMetadata metadata;
-    metadata.originalName = file.getFileName();
+    metadata.name = file.getFileName();
     metadata.mimeType = file.getContentType();
     
     // Check for metadata JSON in form
@@ -79,9 +81,16 @@ void ContentController::storeContent(const drogon::HttpRequestPtr& req,
         // TODO: Implement SSE progress updates
     }
     
+    // Save uploaded file temporarily
+    auto tempPath = std::filesystem::temp_directory_path() / file.getFileName();
+    file.saveAs(tempPath.string());
+    
     // Store file asynchronously
-    store_->storeAsync(file.getFileLocation(), 
-        [callback, metadata](const Result<StoreResult>& result) {
+    store_->storeAsync(tempPath, 
+        [callback, metadata, tempPath, this](const Result<StoreResult>& result) {
+            // Clean up temporary file
+            std::filesystem::remove(tempPath);
+            
             if (result.has_value()) {
                 Json::Value response;
                 response["success"] = true;
@@ -91,7 +100,7 @@ void ContentController::storeContent(const drogon::HttpRequestPtr& req,
                 resp->setStatusCode(drogon::k201Created);
                 callback(resp);
             } else {
-                auto error = contentStoreErrorToString(toContentStoreError(result.error()));
+                auto error = contentStoreErrorToString(toContentStoreError(result.error().code));
                 callback(ContentController::makeErrorResponse(drogon::k500InternalServerError, error));
             }
         },
@@ -108,7 +117,7 @@ void ContentController::retrieveContent(const drogon::HttpRequestPtr& req,
     // Check if client wants JSON metadata only
     if (req->getHeader("Accept") == "application/json") {
         store_->getMetadataAsync(hash,
-            [callback, hash](const Result<ContentMetadata>& result) {
+            [callback, hash, this](const Result<ContentMetadata>& result) {
                 if (result.has_value()) {
                     Json::Value response;
                     response["success"] = true;
@@ -129,14 +138,14 @@ void ContentController::retrieveContent(const drogon::HttpRequestPtr& req,
                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     
     store_->retrieveAsync(hash, tempPath,
-        [callback, tempPath, hash](const Result<RetrieveResult>& result) {
+        [callback, tempPath, hash, this](const Result<RetrieveResult>& result) {
             if (result.has_value() && result.value().found) {
                 // Send file as response
                 auto resp = drogon::HttpResponse::newFileResponse(
                     tempPath.string(),
                     "",  // Let Drogon determine filename
                     drogon::CT_NONE,
-                    result.value().metadata.originalName
+                    result.value().metadata.name
                 );
                 
                 // Set content type if available
@@ -168,12 +177,12 @@ void ContentController::retrieveContent(const drogon::HttpRequestPtr& req,
 }
 
 // Delete content by hash
-void ContentController::deleteContent(const drogon::HttpRequestPtr& req,
+void ContentController::deleteContent(const drogon::HttpRequestPtr& /*req*/,
                                     std::function<void(const drogon::HttpResponsePtr&)>&& callback,
                                     const std::string& hash) {
     
     store_->removeAsync(hash,
-        [callback, hash](const Result<bool>& result) {
+        [callback, hash, this](const Result<bool>& result) {
             if (result.has_value()) {
                 Json::Value response;
                 response["success"] = true;
@@ -181,9 +190,11 @@ void ContentController::deleteContent(const drogon::HttpRequestPtr& req,
                 response["data"]["hash"] = hash;
                 
                 auto status = result.value() ? drogon::k200OK : drogon::k404NotFound;
-                callback(drogon::HttpResponse::newHttpJsonResponse(response, status));
+                auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                resp->setStatusCode(status);
+                callback(resp);
             } else {
-                auto error = contentStoreErrorToString(toContentStoreError(result.error()));
+                auto error = contentStoreErrorToString(toContentStoreError(result.error().code));
                 callback(ContentController::makeErrorResponse(drogon::k500InternalServerError, error));
             }
         }
@@ -191,12 +202,12 @@ void ContentController::deleteContent(const drogon::HttpRequestPtr& req,
 }
 
 // Check if content exists
-void ContentController::checkExists(const drogon::HttpRequestPtr& req,
+void ContentController::checkExists(const drogon::HttpRequestPtr& /*req*/,
                                   std::function<void(const drogon::HttpResponsePtr&)>&& callback,
                                   const std::string& hash) {
     
     store_->existsAsync(hash,
-        [callback](const Result<bool>& result) {
+        [callback, this](const Result<bool>& result) {
             if (result.has_value()) {
                 auto resp = drogon::HttpResponse::newHttpResponse();
                 resp->setStatusCode(result.value() ? drogon::k204NoContent : drogon::k404NotFound);
@@ -209,12 +220,12 @@ void ContentController::checkExists(const drogon::HttpRequestPtr& req,
 }
 
 // Get content metadata
-void ContentController::getMetadata(const drogon::HttpRequestPtr& req,
+void ContentController::getMetadata(const drogon::HttpRequestPtr& /*req*/,
                                   std::function<void(const drogon::HttpResponsePtr&)>&& callback,
                                   const std::string& hash) {
     
     store_->getMetadataAsync(hash,
-        [callback](const Result<ContentMetadata>& result) {
+        [callback, this](const Result<ContentMetadata>& result) {
             if (result.has_value()) {
                 Json::Value response;
                 response["success"] = true;
@@ -242,14 +253,14 @@ void ContentController::updateMetadata(const drogon::HttpRequestPtr& req,
     ContentMetadata metadata = jsonToContentMetadata(*json);
     
     store_->updateMetadataAsync(hash, metadata,
-        [callback](const Result<void>& result) {
+        [callback, this](const Result<void>& result) {
             if (result.has_value()) {
                 Json::Value response;
                 response["success"] = true;
                 response["message"] = "Metadata updated successfully";
                 callback(drogon::HttpResponse::newHttpJsonResponse(response));
             } else {
-                auto error = contentStoreErrorToString(toContentStoreError(result.error()));
+                auto error = contentStoreErrorToString(toContentStoreError(result.error().code));
                 callback(ContentController::makeErrorResponse(drogon::k500InternalServerError, error));
             }
         }
@@ -285,7 +296,7 @@ void ContentController::storeBatch(const drogon::HttpRequestPtr& req,
                        ("batch_" + std::to_string(tempFiles.size()));
         
         std::ofstream file(tempPath, std::ios::binary);
-        file.write(decoded.data(), decoded.size());
+        file.write(decoded.data(), static_cast<std::streamsize>(decoded.size()));
         file.close();
         
         tempFiles.push_back(tempPath);
@@ -316,7 +327,7 @@ void ContentController::storeBatch(const drogon::HttpRequestPtr& req,
                 item["data"] = storeResultToJson(result.value());
             } else {
                 item["success"] = false;
-                item["error"] = contentStoreErrorToString(toContentStoreError(result.error()));
+                item["error"] = contentStoreErrorToString(toContentStoreError(result.error().code));
             }
             items.append(item);
         }
@@ -358,7 +369,7 @@ void ContentController::deleteBatch(const drogon::HttpRequestPtr& req,
                 item["deleted"] = results[i].value();
             } else {
                 item["deleted"] = false;
-                item["error"] = contentStoreErrorToString(toContentStoreError(results[i].error()));
+                item["error"] = contentStoreErrorToString(toContentStoreError(results[i].error().code));
             }
             items.append(item);
         }
@@ -431,24 +442,38 @@ void ContentController::searchContent(const drogon::HttpRequestPtr& req,
     // Parse filter parameters
     auto contentTypeIt = params.find("contentType");
     if (contentTypeIt != params.end()) {
-        searchReq.filters.contentTypes.push_back(contentTypeIt->second);
+        // Add content type filter
+        search::ContentTypeFilter contentTypeFilter;
+        contentTypeFilter.allowedTypes.insert(contentTypeIt->second);
+        searchReq.filters.addContentTypeFilter(contentTypeFilter);
     }
     
     auto languageIt = params.find("language");
     if (languageIt != params.end()) {
-        searchReq.filters.languages.push_back(languageIt->second);
+        // Add language filter
+        search::LanguageFilter languageFilter;
+        languageFilter.allowedLanguages.insert(languageIt->second);
+        searchReq.filters.addLanguageFilter(languageFilter);
     }
     
     // Parse date range filters
     auto afterIt = params.find("createdAfter");
     if (afterIt != params.end()) {
         // Parse ISO date string (simplified for now)
-        searchReq.filters.dateRangeStart = std::chrono::system_clock::now() - std::chrono::hours(24*30); // Last 30 days default
+        // Add date range filter
+        search::DateRangeFilter dateFilter;
+        dateFilter.from = std::chrono::system_clock::now() - std::chrono::hours(24*30); // Last 30 days default
+        dateFilter.field = search::DateRangeFilter::DateField::Created;
+        searchReq.filters.addDateRangeFilter(dateFilter);
     }
     
     auto beforeIt = params.find("createdBefore");
     if (beforeIt != params.end()) {
-        searchReq.filters.dateRangeEnd = std::chrono::system_clock::now();
+        // Add or update date range filter for 'before' constraint
+        search::DateRangeFilter dateFilter;
+        dateFilter.to = std::chrono::system_clock::now();
+        dateFilter.field = search::DateRangeFilter::DateField::Created;
+        searchReq.filters.addDateRangeFilter(dateFilter);
     }
     
     // Parse options
@@ -483,7 +508,7 @@ void ContentController::searchContent(const drogon::HttpRequestPtr& req,
     
     // Add search results
     Json::Value items(Json::arrayValue);
-    for (const auto& item : searchResponse.results.getItems()) {
+    for (const auto& item : searchResponse.getItems()) {
         Json::Value itemJson;
         itemJson["documentId"] = item.documentId;
         itemJson["title"] = item.title;
@@ -522,24 +547,24 @@ void ContentController::searchContent(const drogon::HttpRequestPtr& req,
     }
     
     response["data"]["items"] = items;
-    response["data"]["total"] = searchResponse.totalResults;
-    response["data"]["offset"] = searchResponse.offset;
-    response["data"]["limit"] = searchResponse.limit;
-    response["data"]["hasNextPage"] = searchResponse.hasNextPage;
-    response["data"]["hasPreviousPage"] = searchResponse.hasPreviousPage;
+    response["data"]["total"] = static_cast<Json::UInt64>(searchResponse.getStatistics().totalResults);
+    response["data"]["offset"] = static_cast<Json::UInt64>(offset);
+    response["data"]["limit"] = static_cast<Json::UInt64>(limit);
+    response["data"]["hasNextPage"] = (offset + limit < searchResponse.getStatistics().totalResults);
+    response["data"]["hasPreviousPage"] = (offset > 0);
     
     // Add query information
-    response["query"]["original"] = searchResponse.originalQuery;
-    response["query"]["processed"] = searchResponse.processedQuery;
-    if (!searchResponse.suggestedQuery.empty()) {
-        response["query"]["suggested"] = searchResponse.suggestedQuery;
+    response["query"]["original"] = searchResponse.getStatistics().originalQuery;
+    response["query"]["processed"] = searchResponse.getStatistics().executedQuery;
+    if (searchResponse.getStatistics().queryRewritten) {
+        response["query"]["suggested"] = searchResponse.getStatistics().executedQuery;
     }
-    response["query"]["wasRewritten"] = searchResponse.queryWasRewritten;
+    response["query"]["wasRewritten"] = searchResponse.getStatistics().queryRewritten;
     
     // Add facets if available
-    if (!searchResponse.results.getFacets().empty()) {
+    if (!searchResponse.getFacets().empty()) {
         Json::Value facets(Json::arrayValue);
-        for (const auto& facet : searchResponse.results.getFacets()) {
+        for (const auto& facet : searchResponse.getFacets()) {
             Json::Value facetJson;
             facetJson["name"] = facet.name;
             facetJson["displayName"] = facet.displayName;
@@ -560,9 +585,10 @@ void ContentController::searchContent(const drogon::HttpRequestPtr& req,
         response["data"]["facets"] = facets;
     }
     
-    // Add performance metrics
-    response["performance"]["queryTime"] = static_cast<Json::Int64>(searchResponse.queryParseTime.count());
-    response["performance"]["searchTime"] = static_cast<Json::Int64>(searchResponse.searchTime.count());
+    // Add performance metrics  
+    auto stats = searchResponse.getStatistics();
+    response["performance"]["queryTime"] = static_cast<Json::Int64>(stats.queryTime.count());
+    response["performance"]["searchTime"] = static_cast<Json::Int64>(stats.searchTime.count());
     response["performance"]["totalTime"] = static_cast<Json::Int64>(duration.count());
     
     // Check if response time is under 1 second (CoS requirement)
@@ -597,7 +623,9 @@ void ContentController::healthCheck(const drogon::HttpRequestPtr& req,
     response["data"] = healthStatusToJson(health);
     
     auto status = health.isHealthy ? drogon::k200OK : drogon::k503ServiceUnavailable;
-    callback(drogon::HttpResponse::newHttpJsonResponse(response, status));
+    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+    resp->setStatusCode(status);
+    callback(resp);
 }
 
 // Helper methods
@@ -605,7 +633,20 @@ drogon::HttpResponsePtr ContentController::makeErrorResponse(
     drogon::HttpStatusCode status, const std::string& message) {
     
     ErrorResponse error;
-    error.error = drogon::statusCodeToString(status);
+    // Map status code to string manually since drogon::statusCodeToString doesn't exist
+    std::string statusString;
+    switch(status) {
+        case drogon::k200OK: statusString = "OK"; break;
+        case drogon::k400BadRequest: statusString = "Bad Request"; break;
+        case drogon::k401Unauthorized: statusString = "Unauthorized"; break;
+        case drogon::k403Forbidden: statusString = "Forbidden"; break;
+        case drogon::k404NotFound: statusString = "Not Found"; break;
+        case drogon::k429TooManyRequests: statusString = "Too Many Requests"; break;
+        case drogon::k500InternalServerError: statusString = "Internal Server Error"; break;
+        case drogon::k503ServiceUnavailable: statusString = "Service Unavailable"; break;
+        default: statusString = "HTTP " + std::to_string(static_cast<int>(status)); break;
+    }
+    error.error = statusString;
     error.message = message;
     error.code = static_cast<int>(status);
     error.requestId = drogon::utils::getUuid();
@@ -622,7 +663,9 @@ drogon::HttpResponsePtr ContentController::makeJsonResponse(
     response["success"] = (status >= 200 && status < 300);
     response["data"] = data;
     
-    return drogon::HttpResponse::newHttpJsonResponse(response, status);
+    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+    resp->setStatusCode(status);
+    return resp;
 }
 
 } // namespace yams::api::http

@@ -6,6 +6,7 @@ set(CLI_SOURCES
     command_registry.cpp
     commands/add_command.cpp
     commands/get_command.cpp
+    commands/restore_command.cpp
     commands/cat_command.cpp
     commands/init_command.cpp
     commands/search_command.cpp

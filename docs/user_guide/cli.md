@@ -42,6 +42,7 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 - init
 - add
 - get
+- cat
 - delete
 - list
 - search
@@ -393,7 +394,7 @@ yams migrate
 
 ## browse {#cmd-browse}
 
-Interactive terminal UI (FTXUI) to browse and search, view, and manage documents with ergonomic, Vim-inspired keybindings. Features include a three-pane layout, fuzzy/exact search, a full-screen viewer, hex/text preview modes, and external pager integration.
+Interactive terminal UI to browse, search, preview, and manage documents.
 
 Synopsis:
 - yams browse
@@ -500,22 +501,14 @@ Features:
 - Interactive navigation and selection
 
 Common keybindings:
-- j/k or ↑/↓: navigate up/down
-- h/l or ←/→: navigate left/right  
-- g/G: jump to top/bottom
-- /: enter search mode
-- Ctrl+F: toggle fuzzy search mode
-- Enter: select/open document
-- d/D: delete selected document
-- r: refresh document list
-- ?: show help
-- Escape/q: quit
-
-Description:
-- Provides an interactive TUI for browsing your document collection.
-- Fuzzy search allows approximate matching when exact terms aren't known.
-- Real-time filtering updates results as you type.
-- Integrates with metadata repository for rich document information.
+- j/k or ArrowUp/ArrowDown: navigate
+- h/l or ArrowLeft/ArrowRight: switch columns
+- /: search
+- Enter: open viewer
+- o: open in external pager ($PAGER, fallback to less -R)
+- r: refresh
+- d: delete (confirmation)
+- q or Esc: quit
 
 Examples:
 ```

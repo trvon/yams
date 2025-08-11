@@ -1,6 +1,6 @@
 # YAMS Monitoring (Operations)
 
-A guide to monitor YAMS in production. Copy/paste first, refine later.
+Monitor YAMS in production with the checks below.
 
 ## TL;DR
 
@@ -41,7 +41,7 @@ A guide to monitor YAMS in production. Copy/paste first, refine later.
 
 ---
 
-## Quick checks (copy/paste)
+## Quick checks
 
 ```bash
 # Service
@@ -62,7 +62,7 @@ nc -z 127.0.0.1 8080 || echo "port 8080 not reachable"
 
 ---
 
-## Prometheus: minimal exporter (textfile)
+## Prometheus exporter (textfile)
 
 If you run node_exporter with the textfile collector, translate `yams stats --json` to a `.prom` file.
 
@@ -148,7 +148,7 @@ systemctl enable --now yams-stats-exporter.timer
 
 ---
 
-## Suggested alerts (rules of thumb)
+## Suggested alerts
 
 - Service down:
   - yams_active == 0 for 2m
@@ -161,7 +161,7 @@ systemctl enable --now yams-stats-exporter.timer
 - Exporter stale:
   - `time() - yams_stats_exporter_timestamp_seconds > 180`
 
-Keep thresholds realistic; tune to noise levels.
+Tune thresholds to your environment.
 
 ---
 
@@ -187,7 +187,7 @@ Keep thresholds realistic; tune to noise levels.
 
 ---
 
-## Dashboards (starter ideas)
+## Dashboards (examples)
 
 - Storage
   - Documents over time, total bytes, compression ratio, unique blocks
@@ -200,7 +200,7 @@ Keep thresholds realistic; tune to noise levels.
 
 ---
 
-## Troubleshooting (fast)
+## Troubleshooting
 
 - Service won’t start:
   - `journalctl -u yams -n 200 --no-pager`

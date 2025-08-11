@@ -855,18 +855,29 @@ std::vector<DocumentChunk> SlidingWindowChunker::doChunking(
     
     size_t start = 0;
     size_t chunk_index = 0;
+    size_t last_start = SIZE_MAX; // Track last position to prevent infinite loops
     
     while (start < content.size()) {
+        // Safety check to prevent infinite loops
+        if (start == last_start) {
+            break;
+        }
+        last_start = start;
         size_t end = std::min(start + window_size, content.size());
         
-        // Adjust to word boundary if needed
+        // Adjust to word boundary if needed (with reasonable limits)
         if (config_.preserve_words && end < content.size()) {
-            while (end > start && !std::isspace(content[end])) {
+            size_t original_end = end;
+            size_t max_backup = std::min(window_size / 4, size_t(20)); // Max 25% or 20 chars
+            
+            // Look backwards for a word boundary, but not too far
+            while (end > start && end > original_end - max_backup && !std::isspace(content[end])) {
                 --end;
             }
             
-            if (end == start) {
-                end = std::min(start + window_size, content.size());
+            // If we couldn't find a reasonable word boundary, use original end
+            if (end <= start || end <= original_end - max_backup) {
+                end = original_end;
             }
         }
         
@@ -892,10 +903,10 @@ std::vector<DocumentChunk> SlidingWindowChunker::doChunking(
         start += stride;
         chunk_index++;
         
-        // Ensure we don't skip content at the end
-        if (start < content.size() && start + window_size >= content.size()) {
-            start = content.size() - window_size;
-            if (start < 0) start = 0;
+        // Check if we're close to the end and handle final chunk
+        if (start + stride >= content.size()) {
+            // We're at the last iteration, let the loop end naturally
+            break;
         }
     }
     

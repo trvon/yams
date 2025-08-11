@@ -60,7 +60,8 @@ public:
         
         // Get file size for progress reporting
         file.seekg(0, std::ios::end);
-        size_t fileSize = file.tellg();
+        auto pos = file.tellg();
+        size_t fileSize = (pos == std::ios::pos_type(-1)) ? 0 : static_cast<size_t>(pos);
         file.seekg(0, std::ios::beg);
         
         return processStream(file, fileSize, std::forward<F>(processor));
@@ -86,7 +87,7 @@ public:
         
         while (stream.good()) {
             stream.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE);
-            size_t bytesRead = stream.gcount();
+            size_t bytesRead = static_cast<size_t>(std::max(stream.gcount(), static_cast<std::streamsize>(0)));
             
             if (bytesRead == 0) break;
             

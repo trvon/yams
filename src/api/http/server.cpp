@@ -85,15 +85,17 @@ void Server::configureServer() {
     app.setIdleConnectionTimeout(config_.idleConnectionTimeout);
     
     // Custom 404 handler
-    app.setCustom404Page(
-        Json::FastWriter().write(Json::Value{
-            {"success", false},
-            {"error", "Not Found"},
-            {"message", "The requested endpoint does not exist"},
-            {"code", 404}
-        }),
-        drogon::CT_APPLICATION_JSON
-    );
+    Json::Value errorResponse;
+    errorResponse["success"] = false;
+    errorResponse["error"] = "Not Found";
+    errorResponse["message"] = "The requested endpoint does not exist";
+    errorResponse["code"] = 404;
+    
+    auto resp = drogon::HttpResponse::newHttpResponse();
+    resp->setStatusCode(drogon::k404NotFound);
+    resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    resp->setBody(Json::FastWriter().write(errorResponse));
+    app.setCustom404Page(resp);
     
     // Enable session (for future use)
     app.enableSession(1200);  // 20 minutes
@@ -126,22 +128,63 @@ void Server::registerFilters() {
     // Register global filters
     auto& app = drogon::app();
     
-    // Apply filters to API routes
+    // Register pre-routing advice for CORS preflight OPTIONS requests
+    app.registerPreRoutingAdvice([this](const drogon::HttpRequestPtr &req,
+                                         drogon::FilterCallback &&stop,
+                                         drogon::FilterChainCallback &&pass) {
+        // Handle CORS preflight OPTIONS requests
+        if (req->getMethod() == drogon::Options) {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k204NoContent);
+            
+            // Set CORS headers based on config
+            auto origin = req->getHeader("Origin");
+            if (config_.corsConfig.allowedOrigins.count("*") > 0 || 
+                config_.corsConfig.allowedOrigins.count(origin) > 0) {
+                resp->addHeader("Access-Control-Allow-Origin", origin.empty() ? "*" : origin);
+                
+                if (config_.corsConfig.allowCredentials) {
+                    resp->addHeader("Access-Control-Allow-Credentials", "true");
+                }
+                
+                // Allowed methods
+                std::stringstream methods;
+                for (auto it = config_.corsConfig.allowedMethods.begin(); it != config_.corsConfig.allowedMethods.end(); ++it) {
+                    if (it != config_.corsConfig.allowedMethods.begin()) methods << ", ";
+                    methods << *it;
+                }
+                resp->addHeader("Access-Control-Allow-Methods", methods.str());
+                
+                // Allowed headers
+                std::stringstream headers;
+                for (auto it = config_.corsConfig.allowedHeaders.begin(); it != config_.corsConfig.allowedHeaders.end(); ++it) {
+                    if (it != config_.corsConfig.allowedHeaders.begin()) headers << ", ";
+                    headers << *it;
+                }
+                resp->addHeader("Access-Control-Allow-Headers", headers.str());
+                
+                resp->addHeader("Access-Control-Max-Age", std::to_string(config_.corsConfig.maxAge));
+            }
+            
+            stop(resp); // Stop processing and return preflight response
+            return;
+        }
+        
+        // Not an OPTIONS request, continue to next filter
+        pass();
+    });
+    
+    // Apply filters to API routes (CorsFilter now implements middleware pattern)
     app.registerFilter(std::make_shared<CorsFilter>());
     app.registerFilter(std::make_shared<LoggingFilter>());
     app.registerFilter(std::make_shared<RateLimitFilter>());
     
     // Apply auth filter to protected routes
     if (config_.authConfig.enableApiKey || config_.authConfig.enableJWT || config_.authConfig.enableBasic) {
-        app.registerFilterBefore<AuthFilter>(
-            "/api/v1/content.*",
-            drogon::Post,
-            drogon::Put,
-            drogon::Delete
-        );
+        app.registerFilter(std::make_shared<AuthFilter>());
     }
     
-    spdlog::info("Registered HTTP filters");
+    spdlog::info("Registered HTTP filters with CORS pre-routing advice");
 }
 
 void Server::setupStaticFiles() {
@@ -200,7 +243,7 @@ std::unique_ptr<Server> createHttpServerFromConfig(
                 const auto& server = root["server"];
                 config.address = server.get("address", config.address).asString();
                 config.port = server.get("port", config.port).asUInt();
-                config.threadNum = server.get("threads", config.threadNum).asUInt();
+                config.threadNum = server.get("threads", static_cast<Json::UInt>(config.threadNum)).asUInt();
                 
                 // SSL settings
                 if (server.isMember("ssl")) {
@@ -214,9 +257,9 @@ std::unique_ptr<Server> createHttpServerFromConfig(
             // Parse limits
             if (root.isMember("limits")) {
                 const auto& limits = root["limits"];
-                config.maxConnectionNum = limits.get("maxConnections", config.maxConnectionNum).asUInt();
-                config.clientMaxBodySize = limits.get("maxBodySize", config.clientMaxBodySize).asUInt();
-                config.idleConnectionTimeout = limits.get("idleTimeout", config.idleConnectionTimeout).asUInt();
+                config.maxConnectionNum = limits.get("maxConnections", static_cast<Json::UInt>(config.maxConnectionNum)).asUInt();
+                config.clientMaxBodySize = limits.get("maxBodySize", static_cast<Json::UInt64>(config.clientMaxBodySize)).asUInt64();
+                config.idleConnectionTimeout = limits.get("idleTimeout", static_cast<Json::UInt>(config.idleConnectionTimeout)).asUInt();
             }
             
             // Parse auth settings

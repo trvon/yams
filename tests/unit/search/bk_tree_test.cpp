@@ -4,6 +4,8 @@
 #include <string>
 #include <algorithm>
 #include <random>
+#include <thread>
+#include <atomic>
 
 using namespace yams::search;
 
@@ -229,18 +231,17 @@ TEST_F(BKTreeTest, HybridSearchBasic) {
     
     // Add test documents
     for (size_t i = 0; i < testWords_.size(); ++i) {
-        search.addDocument(testWords_[i], testWords_[i], std::to_string(i));
+        search.addDocument(std::to_string(i), testWords_[i]);
     }
     
-    // Build index
-    search.buildIndex();
+    // No buildIndex() needed - indices are built automatically
     
     // Search for exact match
     auto results = search.search("hello", 10);
     
     ASSERT_FALSE(results.empty());
-    EXPECT_EQ(results[0].text, "hello");
-    EXPECT_FLOAT_EQ(results[0].score, 1.0);
+    EXPECT_EQ(results[0].title, "hello");
+    EXPECT_GT(results[0].score, 0.9f);  // High score for exact match
     
     // Search for fuzzy match
     results = search.search("helo", 10);
@@ -250,8 +251,8 @@ TEST_F(BKTreeTest, HybridSearchBasic) {
     bool foundHello = false;
     bool foundHelp = false;
     for (const auto& result : results) {
-        if (result.text == "hello") foundHello = true;
-        if (result.text == "help") foundHelp = true;
+        if (result.title == "hello") foundHello = true;
+        if (result.title == "help") foundHelp = true;
     }
     EXPECT_TRUE(foundHello);
     EXPECT_TRUE(foundHelp);
@@ -260,31 +261,34 @@ TEST_F(BKTreeTest, HybridSearchBasic) {
 TEST_F(BKTreeTest, HybridSearchWithOptions) {
     HybridFuzzySearch search;
     
-    // Add documents with content
-    search.addDocument("Machine Learning", "ML is about teaching computers", "doc1");
-    search.addDocument("Deep Learning", "DL is a subset of ML using neural networks", "doc2");
-    search.addDocument("Natural Language", "NLP processes human language", "doc3");
-    search.addDocument("Computer Vision", "CV enables computers to see", "doc4");
+    // Add documents with keywords
+    search.addDocument("doc1", "Machine Learning", {"ML", "teaching", "computers"});
+    search.addDocument("doc2", "Deep Learning", {"DL", "ML", "neural", "networks"});
+    search.addDocument("doc3", "Natural Language", {"NLP", "human", "language"});
+    search.addDocument("doc4", "Computer Vision", {"CV", "computers", "see"});
     
-    search.buildIndex();
+    // No buildIndex() needed
     
-    // Search with different strategies
-    SearchOptions options;
+    // Search with different options
+    HybridFuzzySearch::SearchOptions options;
     
     // BK-tree only
-    options.strategy = SearchStrategy::BKTreeOnly;
+    options.useTrigramPrefilter = false;
+    options.useBKTree = true;
     auto results = search.search("Machin Learning", 5, options);
     ASSERT_FALSE(results.empty());
-    EXPECT_EQ(results[0].text, "Machine Learning");
+    EXPECT_EQ(results[0].title, "Machine Learning");
     
     // Trigram only
-    options.strategy = SearchStrategy::TrigramOnly;
+    options.useTrigramPrefilter = true;
+    options.useBKTree = false;
     results = search.search("Lerning", 5, options);
     ASSERT_FALSE(results.empty());
     
     // Hybrid (default)
-    options.strategy = SearchStrategy::Hybrid;
-    options.maxDistance = 2;
+    options.useTrigramPrefilter = true;
+    options.useBKTree = true;
+    options.maxEditDistance = 2;
     results = search.search("Deap Learning", 5, options);
     ASSERT_FALSE(results.empty());
     EXPECT_EQ(results[0].text, "Deep Learning");
@@ -362,8 +366,7 @@ TEST_F(BKTreeTest, HybridSearchEmpty) {
     auto results = search.search("hello", 10);
     EXPECT_TRUE(results.empty());
     
-    // After building empty index
-    search.buildIndex();
+    // Still empty after searching again
     results = search.search("hello", 10);
     EXPECT_TRUE(results.empty());
 }
@@ -372,22 +375,22 @@ TEST_F(BKTreeTest, HybridSearchSpecialCharacters) {
     HybridFuzzySearch search;
     
     // Add documents with special characters
-    search.addDocument("hello@world.com", "email address", "1");
-    search.addDocument("test_file.txt", "filename", "2");
-    search.addDocument("C++ Programming", "programming language", "3");
-    search.addDocument("key=value", "key-value pair", "4");
+    search.addDocument("1", "hello@world.com", {"email", "address"});
+    search.addDocument("2", "test_file.txt", {"filename"});
+    search.addDocument("3", "C++ Programming", {"programming", "language"});
+    search.addDocument("4", "key=value", {"key-value", "pair"});
     
-    search.buildIndex();
+    // No buildIndex() needed
     
     // Search with special characters
     auto results = search.search("hello@world", 5);
     ASSERT_FALSE(results.empty());
-    EXPECT_TRUE(results[0].text.find("hello@world") != std::string::npos);
+    EXPECT_TRUE(results[0].title.find("hello@world") != std::string::npos);
     
     // Fuzzy search with special characters
     results = search.search("test_fil.txt", 5);
     ASSERT_FALSE(results.empty());
-    EXPECT_EQ(results[0].text, "test_file.txt");
+    EXPECT_EQ(results[0].title, "test_file.txt");
 }
 
 // Performance Tests
@@ -426,12 +429,12 @@ TEST_F(BKTreeTest, StressTestConcurrentSearch) {
     // Add a reasonable dataset
     for (int i = 0; i < 100; ++i) {
         search.addDocument(
+            std::to_string(i),
             "Document " + std::to_string(i),
-            "Content for document number " + std::to_string(i),
-            std::to_string(i)
+            {"content", "document", std::to_string(i)}
         );
     }
-    search.buildIndex();
+    // No buildIndex() needed
     
     // Perform multiple concurrent searches
     std::vector<std::thread> threads;

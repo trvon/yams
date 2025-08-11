@@ -480,7 +480,7 @@ void SearchExecutor::evictOldestCacheEntry() const {
     }
 }
 
-SearchResults SearchExecutor::createErrorResponse(const std::string& error, const SearchRequest& request) const {
+SearchResults SearchExecutor::createErrorResponse(const std::string& /*error*/, const SearchRequest& request) const {
     SearchResults response;
     auto& errorStats = response.getStatistics();
     errorStats.originalQuery = request.query;

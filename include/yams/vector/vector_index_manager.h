@@ -165,7 +165,7 @@ struct IndexStats {
     
     double getCacheHitRate() const {
         size_t total = cache_hits + cache_misses;
-        return total > 0 ? static_cast<double>(cache_hits) / total : 0.0;
+        return total > 0 ? static_cast<double>(cache_hits) / static_cast<double>(total) : 0.0;
     }
 };
 

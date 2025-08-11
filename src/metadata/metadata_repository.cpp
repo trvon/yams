@@ -1362,4 +1362,182 @@ Result<void> MetadataRepository::updateFuzzyIndex(int64_t documentId) {
     });
 }
 
+// Collection and snapshot operations
+Result<std::vector<DocumentInfo>> MetadataRepository::findDocumentsByCollection(
+    const std::string& collection) {
+    return executeQuery<std::vector<DocumentInfo>>([&](Database& db) -> Result<std::vector<DocumentInfo>> {
+        auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
+                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
+                   d.indexed_time, d.content_extracted, d.extraction_status,
+                   d.extraction_error
+            FROM documents d
+            JOIN metadata m ON d.id = m.document_id
+            WHERE m.key = 'collection' AND m.value = ?
+            ORDER BY d.indexed_time DESC
+        )");
+        
+        if (!stmtResult) return stmtResult.error();
+        
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, collection);
+        if (!bindResult) return bindResult.error();
+        
+        std::vector<DocumentInfo> documents;
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) return stepResult.error();
+            if (!stepResult.value()) break;
+            
+            documents.push_back(mapDocumentRow(stmt));
+        }
+        
+        return documents;
+    });
+}
+
+Result<std::vector<DocumentInfo>> MetadataRepository::findDocumentsBySnapshot(
+    const std::string& snapshotId) {
+    return executeQuery<std::vector<DocumentInfo>>([&](Database& db) -> Result<std::vector<DocumentInfo>> {
+        auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
+                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
+                   d.indexed_time, d.content_extracted, d.extraction_status,
+                   d.extraction_error
+            FROM documents d
+            JOIN metadata m ON d.id = m.document_id
+            WHERE m.key = 'snapshot_id' AND m.value = ?
+            ORDER BY d.indexed_time DESC
+        )");
+        
+        if (!stmtResult) return stmtResult.error();
+        
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, snapshotId);
+        if (!bindResult) return bindResult.error();
+        
+        std::vector<DocumentInfo> documents;
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) return stepResult.error();
+            if (!stepResult.value()) break;
+            
+            documents.push_back(mapDocumentRow(stmt));
+        }
+        
+        return documents;
+    });
+}
+
+Result<std::vector<DocumentInfo>> MetadataRepository::findDocumentsBySnapshotLabel(
+    const std::string& snapshotLabel) {
+    return executeQuery<std::vector<DocumentInfo>>([&](Database& db) -> Result<std::vector<DocumentInfo>> {
+        auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
+                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
+                   d.indexed_time, d.content_extracted, d.extraction_status,
+                   d.extraction_error
+            FROM documents d
+            JOIN metadata m ON d.id = m.document_id
+            WHERE m.key = 'snapshot_label' AND m.value = ?
+            ORDER BY d.indexed_time DESC
+        )");
+        
+        if (!stmtResult) return stmtResult.error();
+        
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, snapshotLabel);
+        if (!bindResult) return bindResult.error();
+        
+        std::vector<DocumentInfo> documents;
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) return stepResult.error();
+            if (!stepResult.value()) break;
+            
+            documents.push_back(mapDocumentRow(stmt));
+        }
+        
+        return documents;
+    });
+}
+
+Result<std::vector<std::string>> MetadataRepository::getCollections() {
+    return executeQuery<std::vector<std::string>>([&](Database& db) -> Result<std::vector<std::string>> {
+        auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT value
+            FROM metadata
+            WHERE key = 'collection'
+            ORDER BY value
+        )");
+        
+        if (!stmtResult) return stmtResult.error();
+        
+        Statement stmt = std::move(stmtResult).value();
+        std::vector<std::string> collections;
+        
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) return stepResult.error();
+            if (!stepResult.value()) break;
+            
+            collections.push_back(stmt.getString(0));
+        }
+        
+        return collections;
+    });
+}
+
+Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
+    return executeQuery<std::vector<std::string>>([&](Database& db) -> Result<std::vector<std::string>> {
+        auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT value
+            FROM metadata
+            WHERE key = 'snapshot_id'
+            ORDER BY value
+        )");
+        
+        if (!stmtResult) return stmtResult.error();
+        
+        Statement stmt = std::move(stmtResult).value();
+        std::vector<std::string> snapshots;
+        
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) return stepResult.error();
+            if (!stepResult.value()) break;
+            
+            snapshots.push_back(stmt.getString(0));
+        }
+        
+        return snapshots;
+    });
+}
+
+Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
+    return executeQuery<std::vector<std::string>>([&](Database& db) -> Result<std::vector<std::string>> {
+        auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT value
+            FROM metadata
+            WHERE key = 'snapshot_label'
+            ORDER BY value
+        )");
+        
+        if (!stmtResult) return stmtResult.error();
+        
+        Statement stmt = std::move(stmtResult).value();
+        std::vector<std::string> labels;
+        
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) return stepResult.error();
+            if (!stepResult.value()) break;
+            
+            labels.push_back(stmt.getString(0));
+        }
+        
+        return labels;
+    });
+}
+
 } // namespace yams::metadata

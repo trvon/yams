@@ -105,8 +105,8 @@ Result<void> atomicWriteOptimized(const std::filesystem::path& path,
     
     if (fd >= 0) {
         // Write data
-        ssize_t written = 0;
-        ssize_t remaining = data.size();
+        size_t written = 0;
+        size_t remaining = data.size();
         const char* ptr = reinterpret_cast<const char*>(data.data());
         
         while (remaining > 0) {
@@ -116,8 +116,9 @@ Result<void> atomicWriteOptimized(const std::filesystem::path& path,
                 ::close(fd);
                 return Result<void>(ErrorCode::Unknown);
             }
-            written += result;
-            remaining -= result;
+            const size_t uresult = static_cast<size_t>(result);
+            written += uresult;
+            remaining -= uresult;
         }
         
         // Sync data to disk
@@ -127,7 +128,7 @@ Result<void> atomicWriteOptimized(const std::filesystem::path& path,
         }
         
         // Link the file into the filesystem
-        std::string procPath = std::format("/proc/self/fd/{}", fd);
+        std::string procPath = std::string("/proc/self/fd/") + std::to_string(fd);
         if (::linkat(AT_FDCWD, procPath.c_str(), AT_FDCWD, path.c_str(), AT_SYMLINK_FOLLOW) == 0) {
             ::close(fd);
             return {};
@@ -153,7 +154,7 @@ size_t getOpenFileDescriptorCount() {
     
     // Count open file descriptors in /proc/self/fd
     try {
-        for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+        for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
             count++;
         }
     } catch (...) {

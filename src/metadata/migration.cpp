@@ -291,7 +291,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
         createFTS5Tables(),
         createMetadataIndexes(),
         createRelationshipTables(),
-        createSearchTables()
+        createSearchTables(),
+        createCollectionIndexes()
     };
 }
 
@@ -619,6 +620,52 @@ Migration MigrationBuilder::build() const {
         }
         m.downSQL = sql.str();
     }
+    
+    return m;
+}
+
+Migration YamsMetadataMigrations::createCollectionIndexes() {
+    Migration m;
+    m.version = 6;
+    m.name = "Add collection and snapshot indexes";
+    m.created = std::chrono::system_clock::now();
+    
+    m.upSQL = R"(
+        -- Create indexes for collection and snapshot-related metadata
+        -- These improve performance when filtering by collection, snapshot, or path
+        CREATE INDEX IF NOT EXISTS idx_metadata_collection 
+            ON metadata(key, value) WHERE key = 'collection';
+            
+        CREATE INDEX IF NOT EXISTS idx_metadata_collection_id 
+            ON metadata(key, value) WHERE key = 'collection_id';
+            
+        CREATE INDEX IF NOT EXISTS idx_metadata_snapshot_id 
+            ON metadata(key, value) WHERE key = 'snapshot_id';
+            
+        CREATE INDEX IF NOT EXISTS idx_metadata_snapshot_label 
+            ON metadata(key, value) WHERE key = 'snapshot_label';
+            
+        CREATE INDEX IF NOT EXISTS idx_metadata_path 
+            ON metadata(key, value) WHERE key = 'path';
+            
+        CREATE INDEX IF NOT EXISTS idx_metadata_source_uri 
+            ON metadata(key, value) WHERE key = 'source_uri';
+            
+        -- Compound index for common filtering patterns
+        CREATE INDEX IF NOT EXISTS idx_metadata_collection_snapshot 
+            ON metadata(document_id, key, value) 
+            WHERE key IN ('collection', 'snapshot_id', 'snapshot_label');
+    )";
+    
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_metadata_collection;
+        DROP INDEX IF EXISTS idx_metadata_collection_id;
+        DROP INDEX IF EXISTS idx_metadata_snapshot_id;
+        DROP INDEX IF EXISTS idx_metadata_snapshot_label;
+        DROP INDEX IF EXISTS idx_metadata_path;
+        DROP INDEX IF EXISTS idx_metadata_source_uri;
+        DROP INDEX IF EXISTS idx_metadata_collection_snapshot;
+    )";
     
     return m;
 }

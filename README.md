@@ -2,8 +2,6 @@
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
 
-My base prompt is [PROMPT.md](docs/PROMPT.md)
-
 ## Features
 
 - **Content-Addressed Storage** - SHA-256 based, ensures data integrity
@@ -12,6 +10,8 @@ My base prompt is [PROMPT.md](docs/PROMPT.md)
 - **Search** - Full-text (SQLite FTS5) and semantic (vector embeddings)
 - **Crash Recovery** - Write-ahead logging for durability
 - **High Performance** - 100MB/s+ throughput, thread-safe
+
+My base prompt is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
 
 ## Build
 
@@ -26,6 +26,9 @@ My base prompt is [PROMPT.md](docs/PROMPT.md)
 # Install Conan
 pip install conan
 
+# One-time: create default Conan profile (first-time users)
+conan profile detect --force
+
 # Build and Install
 conan install . --build=missing --settings=compiler.cppstd=20
 cmake --preset conan-release
@@ -39,15 +42,12 @@ sudo cmake --install build/Release
 |--------|---------|-------------|
 | `YAMS_USE_CONAN` | OFF | Use Conan package manager |
 | `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
-| `YAMS_BUILD_MCP_SERVER` | OFF | MCP server (requires Boost) |
+| `YAMS_BUILD_MCP_SERVER` | ON | MCP server (requires Boost) |
 | `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 
 ### Dependencies
 
-**Automatic with Conan**: spdlog, CLI11, nlohmann_json, SQLite3, zstd, lz4, OpenSSL, protobuf, ncurses, Drogon
-
-**Manual installation** (only if not using Conan):
 ```bash
 # macOS
 brew install openssl@3 protobuf sqlite3 ncurses
@@ -69,6 +69,33 @@ yams init --non-interactive
 
 # Print resulting config (secrets masked)
 yams init --non-interactive --print
+```
+
+### Troubleshooting
+If you see:
+```text
+ERROR: The default build profile '/home/trevon/.conan2/profiles/default' doesn't exist.
+You need to create a default profile (type 'conan profile detect' command)
+or specify your own profile with '--profile:build=<myprofile>'
+```
+
+Fix:
+```bash
+# Create default profile
+conan profile detect --force
+
+# Optional: ensure C++20 in the default profile
+# Linux/macOS (GNU sed):
+sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+# macOS (BSD sed):
+# sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+```
+
+Then re-run:
+```bash
+conan install . --build=missing --settings=compiler.cppstd=20
+cmake --preset conan-release
+cmake --build --preset conan-release
 ```
 
 ### LLM Integration Guide
@@ -327,14 +354,6 @@ yams --data-dir "$YAMS_STORAGE" get <hash> --json
 yams --data-dir "$YAMS_STORAGE" stats --json
 ```
 
-### Best Practices for LLMs
-
-1. **Always use explicit paths**: Use `--data-dir` to avoid ambiguity
-2. **Use JSON output**: Add `--json` flag for structured data
-3. **Prefer stdin input**: Pipe content directly instead of creating temp files
-4. **Use simple commands**: `add`, `search`, `get`, `stats` instead of complex TUI commands
-5. **Tag consistently**: Use descriptive tags like "code", "config", "memory", "context"
-
 ### Common Patterns
 
 ```bash
@@ -413,133 +432,6 @@ yams search "token expiry handling"
 ### MCP (Model Context Protocol) Integration
 
 MCP provides direct integration with Claude Desktop and other MCP-compatible clients.
-
-#### When to Use MCP vs CLI
-
-**Use MCP when:**
-- Working in Claude Desktop or MCP-enabled environment
-- Need real-time memory access during conversations
-- Want automatic context persistence
-- Building knowledge bases incrementally
-
-**Use CLI when:**
-- Scripting or automation needed
-- Working with git hooks or CI/CD
-- Batch processing files
-- Integration with existing tools
-
-#### MCP Server Setup
-
-1. **Install MCP Server**:
-```bash
-# Clone and build MCP server
-cd tools/mcp-server
-npm install
-npm run build
-```
-
-2. **Configure Claude Desktop**:
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "yams": {
-      "command": "/path/to/yams/mcp-server",
-      "args": ["--storage", "$HOME/yams"],
-      "env": {
-        "YAMS_STORAGE": "$HOME/yams"
-      }
-    }
-  }
-}
-```
-
-3. **MCP Usage Examples**:
-```typescript
-// Store via MCP
-await mcp.store({
-  content: "Implementation details...",
-  tags: ["feature", "auth"],
-  metadata: { version: "2.1" }
-});
-
-// Search via MCP
-const results = await mcp.search({
-  query: "authentication flow",
-  limit: 5
-});
-```
-
-## Architecture
-
-```
-yams/
-├── include/yams/    # Headers
-├── src/             # Implementation
-├── tests/           # Unit tests
-├── benchmarks/      # Performance
-└── tools/           # CLI
-```
-
-### Components
-- **Core** - Types, error handling
-- **Storage** - Content-addressed store
-- **Chunking** - Content-defined chunking
-- **Compression** - Multi-algorithm
-- **Metadata** - SQLite with FTS5
-- **Search** - Full-text and semantic
-- **WAL** - Write-ahead logging
-
-## Development
-
-```bash
-# Debug build
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-make -j
-
-# Test
-ctest --output-on-failure
-
-# Coverage
-cmake -DYAMS_ENABLE_COVERAGE=ON ..
-make coverage
-```
-
-## Troubleshooting
-
-### Build Issues
-
-**OpenSSL not found on macOS**:
-```bash
-export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
-export PKG_CONFIG_PATH="$OPENSSL_ROOT_DIR/lib/pkgconfig"
-```
-
-**Protobuf compilation errors**:
-```bash
-# Ensure protoc is in PATH
-which protoc
-# Reinstall if needed
-brew reinstall protobuf
-```
-
-### Runtime Issues
-
-**Storage initialization fails**:
-```bash
-# Check permissions
-ls -la ~/yams
-# Fix permissions
-chmod -R 755 ~/yams
-```
-
-**Search returns no results**:
-```bash
-# Rebuild search index
-yams reindex --full
-# Check metadata database
-yams stats --verbose
-```
 
 ### Performance Tuning
 

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <variant>
+#include <stdexcept>
 
 namespace yams::search {
 

@@ -79,6 +79,17 @@ public:
     virtual Result<std::vector<DocumentInfo>> findDocumentsModifiedSince(
         std::chrono::system_clock::time_point since) = 0;
     
+    // Collection and snapshot operations
+    virtual Result<std::vector<DocumentInfo>> findDocumentsByCollection(
+        const std::string& collection) = 0;
+    virtual Result<std::vector<DocumentInfo>> findDocumentsBySnapshot(
+        const std::string& snapshotId) = 0;
+    virtual Result<std::vector<DocumentInfo>> findDocumentsBySnapshotLabel(
+        const std::string& snapshotLabel) = 0;
+    virtual Result<std::vector<std::string>> getCollections() = 0;
+    virtual Result<std::vector<std::string>> getSnapshots() = 0;
+    virtual Result<std::vector<std::string>> getSnapshotLabels() = 0;
+    
     // Statistics
     virtual Result<int64_t> getDocumentCount() = 0;
     virtual Result<int64_t> getIndexedDocumentCount() = 0;
@@ -153,6 +164,17 @@ public:
         const std::string& extension) override;
     Result<std::vector<DocumentInfo>> findDocumentsModifiedSince(
         std::chrono::system_clock::time_point since) override;
+    
+    // Collection and snapshot operations
+    Result<std::vector<DocumentInfo>> findDocumentsByCollection(
+        const std::string& collection) override;
+    Result<std::vector<DocumentInfo>> findDocumentsBySnapshot(
+        const std::string& snapshotId) override;
+    Result<std::vector<DocumentInfo>> findDocumentsBySnapshotLabel(
+        const std::string& snapshotLabel) override;
+    Result<std::vector<std::string>> getCollections() override;
+    Result<std::vector<std::string>> getSnapshots() override;
+    Result<std::vector<std::string>> getSnapshotLabels() override;
     
     // Statistics
     Result<int64_t> getDocumentCount() override;

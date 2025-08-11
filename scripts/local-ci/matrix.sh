@@ -192,14 +192,18 @@ docker run --rm \
     # 4) Install main project (headers + libs + package config)
     cmake --install build
 
-    # 5) Configure consumer project against installed prefix
-    eval cmake -S test/consumer -B consumer_build -G \"${GEN}\" \
-      -DCMAKE_PREFIX_PATH=\"${INSTALL_PREFIX}\" \
-      ${CONSUMER_EXTRA_CMAKE_ARGS}
+    # 5) Configure consumer project against installed prefix (if present)
+    if [[ -d test/consumer ]]; then
+      eval cmake -S test/consumer -B consumer_build -G \"${GEN}\" \
+        -DCMAKE_PREFIX_PATH=\"${INSTALL_PREFIX}\" \
+        ${CONSUMER_EXTRA_CMAKE_ARGS}
 
-    # 6) Build & test consumer
-    cmake --build consumer_build -j "${JOBS}"
-    ctest --test-dir consumer_build --output-on-failure
+      # 6) Build & test consumer
+      cmake --build consumer_build -j "${JOBS}"
+      ctest --test-dir consumer_build --output-on-failure
+    else
+      echo "Skipping downstream consumer: directory 'test/consumer' not found."
+    fi
 
     echo "Container CI steps completed successfully."
   '

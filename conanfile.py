@@ -20,7 +20,7 @@ class YamsConan(ConanFile):
     }
     default_options = {
         "build_cli": True,
-        "build_mcp_server": False,  # Disabled by default to avoid boost/beast issues
+        "build_mcp_server": True,  # Enabled by default for v0.0.4
         "build_tests": False,
         "build_benchmarks": False,
     }
@@ -55,6 +55,11 @@ class YamsConan(ConanFile):
             self.test_requires("benchmark/1.8.3")
     
     def configure(self):
+        # SQLite3 configuration - enable FTS5 for full-text search
+        self.options["sqlite3"].enable_fts5 = True
+        self.options["sqlite3"].enable_fts4 = True  # For additional compatibility
+        self.options["sqlite3"].enable_fts3_parenthesis = True  # For advanced query syntax
+        
         # Drogon configuration
         if self.options.build_mcp_server:
             self.options["drogon"].with_ctl = False

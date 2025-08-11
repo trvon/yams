@@ -608,6 +608,93 @@ json MCPServer::listTools() {
         }}
     });
     
+    // Add directory tool
+    tools.push_back({
+        {"name", "add_directory"},
+        {"description", "Add all files from a directory with collection and snapshot metadata"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"directory_path", {{"type", "string"}, {"description", "Path to directory"}}},
+                {"collection", {{"type", "string"}, {"description", "Collection name for organization"}}},
+                {"snapshot_id", {{"type", "string"}, {"description", "Unique snapshot identifier"}}},
+                {"snapshot_label", {{"type", "string"}, {"description", "Human-readable snapshot label"}}},
+                {"recursive", {{"type", "boolean"}, {"default", true}, {"description", "Recursively add files"}}},
+                {"include_patterns", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "File patterns to include"}}},
+                {"exclude_patterns", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "File patterns to exclude"}}},
+                {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Additional tags"}}},
+                {"metadata", {{"type", "object"}, {"description", "Additional metadata"}}}
+            }},
+            {"required", json::array({"directory_path"})}
+        }}
+    });
+    
+    // Restore by collection tool
+    tools.push_back({
+        {"name", "restore_collection"},
+        {"description", "Restore all documents from a collection to filesystem"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"collection", {{"type", "string"}, {"description", "Collection name"}}},
+                {"output_directory", {{"type", "string"}, {"default", "."}, {"description", "Output directory"}}},
+                {"layout_template", {{"type", "string"}, {"default", "{path}"}, {"description", "Layout template for file placement"}}},
+                {"include_patterns", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "File patterns to include"}}},
+                {"exclude_patterns", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "File patterns to exclude"}}},
+                {"overwrite", {{"type", "boolean"}, {"default", false}, {"description", "Overwrite existing files"}}},
+                {"create_dirs", {{"type", "boolean"}, {"default", true}, {"description", "Create directories if needed"}}},
+                {"dry_run", {{"type", "boolean"}, {"default", false}, {"description", "Preview without restoring"}}}
+            }},
+            {"required", json::array({"collection"})}
+        }}
+    });
+    
+    // Restore by snapshot tool
+    tools.push_back({
+        {"name", "restore_snapshot"},
+        {"description", "Restore all documents from a snapshot to filesystem"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+                {"snapshot_label", {{"type", "string"}, {"description", "Snapshot label (alternative to ID)"}}},
+                {"output_directory", {{"type", "string"}, {"default", "."}, {"description", "Output directory"}}},
+                {"layout_template", {{"type", "string"}, {"default", "{path}"}, {"description", "Layout template for file placement"}}},
+                {"include_patterns", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "File patterns to include"}}},
+                {"exclude_patterns", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "File patterns to exclude"}}},
+                {"overwrite", {{"type", "boolean"}, {"default", false}, {"description", "Overwrite existing files"}}},
+                {"create_dirs", {{"type", "boolean"}, {"default", true}, {"description", "Create directories if needed"}}},
+                {"dry_run", {{"type", "boolean"}, {"default", false}, {"description", "Preview without restoring"}}}
+            }},
+            {"oneOf", json::array({
+                {{"required", json::array({"snapshot_id"})}},
+                {{"required", json::array({"snapshot_label"})}}
+            })}
+        }}
+    });
+    
+    // List collections tool
+    tools.push_back({
+        {"name", "list_collections"},
+        {"description", "List all available collections"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {}}
+        }}
+    });
+    
+    // List snapshots tool
+    tools.push_back({
+        {"name", "list_snapshots"},
+        {"description", "List all available snapshots"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"with_labels", {{"type", "boolean"}, {"default", true}, {"description", "Include snapshot labels"}}}
+            }}
+        }}
+    });
+    
     return {{"tools", tools}};
 }
 
@@ -648,6 +735,16 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return catDocument(arguments);
     } else if (name == "list_documents") {
         return listDocuments(arguments);
+    } else if (name == "add_directory") {
+        return addDirectory(arguments);
+    } else if (name == "restore_collection") {
+        return restoreCollection(arguments);
+    } else if (name == "restore_snapshot") {
+        return restoreSnapshot(arguments);
+    } else if (name == "list_collections") {
+        return listCollections(arguments);
+    } else if (name == "list_snapshots") {
+        return listSnapshots(arguments);
     } else {
         return {{"error", "Unknown tool: " + name}};
     }
@@ -1172,6 +1269,426 @@ Result<std::vector<std::pair<std::string, std::string>>> MCPServer::resolvePatte
     }
     
     return results;
+}
+
+json MCPServer::addDirectory(const json& args) {
+    try {
+        std::string directoryPath = args["directory_path"];
+        std::string collection = args.value("collection", "");
+        std::string snapshotId = args.value("snapshot_id", "");
+        std::string snapshotLabel = args.value("snapshot_label", "");
+        bool recursive = args.value("recursive", true);
+        
+        if (!std::filesystem::exists(directoryPath) || !std::filesystem::is_directory(directoryPath)) {
+            return {{"error", "Directory does not exist or is not a directory: " + directoryPath}};
+        }
+        
+        if (!recursive) {
+            return {{"error", "Non-recursive directory addition not supported via MCP"}};
+        }
+        
+        // Generate snapshot ID if only label provided
+        if (snapshotId.empty() && !snapshotLabel.empty()) {
+            auto now = std::chrono::system_clock::now();
+            auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            snapshotId = "snapshot_" + std::to_string(timestamp);
+        }
+        
+        std::vector<std::filesystem::path> filesToAdd;
+        
+        // Collect files to add
+        try {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(directoryPath)) {
+                if (!entry.is_regular_file()) continue;
+                
+                // TODO: Add include/exclude pattern filtering if needed
+                filesToAdd.push_back(entry.path());
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            return {{"error", "Failed to traverse directory: " + std::string(e.what())}};
+        }
+        
+        if (filesToAdd.empty()) {
+            return {{"error", "No files found in directory"}};
+        }
+        
+        // Process each file
+        size_t successCount = 0;
+        size_t failureCount = 0;
+        json results = json::array();
+        
+        for (const auto& filePath : filesToAdd) {
+            try {
+                // Build metadata with collection/snapshot info
+                api::ContentMetadata metadata;
+                metadata.name = filePath.filename().string();
+                
+                // Add collection and snapshot metadata
+                if (!collection.empty()) {
+                    metadata.tags["collection"] = collection;
+                }
+                if (!snapshotId.empty()) {
+                    metadata.tags["snapshot_id"] = snapshotId;
+                }
+                if (!snapshotLabel.empty()) {
+                    metadata.tags["snapshot_label"] = snapshotLabel;
+                }
+                
+                // Add relative path metadata
+                auto relativePath = std::filesystem::relative(filePath, directoryPath);
+                metadata.tags["path"] = relativePath.string();
+                
+                // Additional tags from arguments
+                if (args.contains("tags")) {
+                    for (const auto& tag : args["tags"]) {
+                        if (tag.is_string()) {
+                            metadata.tags[tag] = "";
+                        }
+                    }
+                }
+                
+                // Additional metadata from arguments
+                if (args.contains("metadata")) {
+                    for (const auto& [key, value] : args["metadata"].items()) {
+                        if (value.is_string()) {
+                            metadata.tags[key] = value;
+                        }
+                    }
+                }
+                
+                // Store the file
+                auto result = store_->store(filePath, metadata);
+                if (!result) {
+                    failureCount++;
+                    results.push_back({
+                        {"path", filePath.string()},
+                        {"status", "failed"},
+                        {"error", result.error().message}
+                    });
+                    continue;
+                }
+                
+                // Store metadata in database
+                auto metadataRepo = metadataRepo_;
+                if (metadataRepo) {
+                    metadata::DocumentInfo docInfo;
+                    docInfo.filePath = filePath.string();
+                    docInfo.fileName = filePath.filename().string();
+                    docInfo.fileExtension = filePath.extension().string();
+                    docInfo.fileSize = std::filesystem::file_size(filePath);
+                    docInfo.sha256Hash = result.value().contentHash;
+                    docInfo.mimeType = "application/octet-stream";
+                    
+                    auto now = std::chrono::system_clock::now();
+                    docInfo.createdTime = now;
+                    // Convert filesystem time to system_clock time
+                    auto fsTime = std::filesystem::last_write_time(filePath);
+                    auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                        fsTime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now()
+                    );
+                    docInfo.modifiedTime = systemTime;
+                    docInfo.indexedTime = now;
+                    
+                    auto insertResult = metadataRepo->insertDocument(docInfo);
+                    if (insertResult) {
+                        int64_t docId = insertResult.value();
+                        
+                        // Add all metadata
+                        for (const auto& [key, value] : metadata.tags) {
+                            metadataRepo->setMetadata(docId, key, metadata::MetadataValue(value));
+                        }
+                    }
+                }
+                
+                successCount++;
+                results.push_back({
+                    {"path", filePath.string()},
+                    {"status", "success"},
+                    {"hash", result.value().contentHash},
+                    {"bytes_stored", result.value().bytesStored}
+                });
+                
+            } catch (const std::exception& e) {
+                failureCount++;
+                results.push_back({
+                    {"path", filePath.string()},
+                    {"status", "failed"},
+                    {"error", std::string("Exception: ") + e.what()}
+                });
+            }
+        }
+        
+        return {
+            {"summary", {
+                {"files_processed", filesToAdd.size()},
+                {"files_added", successCount},
+                {"files_failed", failureCount}
+            }},
+            {"collection", collection},
+            {"snapshot_id", snapshotId},
+            {"snapshot_label", snapshotLabel},
+            {"results", results}
+        };
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Exception in addDirectory: ") + e.what()}};
+    }
+}
+
+json MCPServer::restoreCollection(const json& args) {
+    try {
+        std::string collection = args["collection"];
+        std::string outputDir = args.value("output_directory", ".");
+        std::string layoutTemplate = args.value("layout_template", "{path}");
+        bool overwrite = args.value("overwrite", false);
+        bool createDirs = args.value("create_dirs", true);
+        bool dryRun = args.value("dry_run", false);
+        
+        // Get documents from collection
+        auto documentsResult = metadataRepo_->findDocumentsByCollection(collection);
+        if (!documentsResult) {
+            return {{"error", "Failed to find documents in collection: " + documentsResult.error().message}};
+        }
+        
+        const auto& documents = documentsResult.value();
+        
+        if (documents.empty()) {
+            return {{"message", "No documents found in collection: " + collection}};
+        }
+        
+        return performRestore(documents, outputDir, layoutTemplate, overwrite, createDirs, dryRun, "collection: " + collection);
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Exception in restoreCollection: ") + e.what()}};
+    }
+}
+
+json MCPServer::restoreSnapshot(const json& args) {
+    try {
+        std::string snapshotId = args.value("snapshot_id", "");
+        std::string snapshotLabel = args.value("snapshot_label", "");
+        std::string outputDir = args.value("output_directory", ".");
+        std::string layoutTemplate = args.value("layout_template", "{path}");
+        bool overwrite = args.value("overwrite", false);
+        bool createDirs = args.value("create_dirs", true);
+        bool dryRun = args.value("dry_run", false);
+        
+        // Get documents from snapshot
+        Result<std::vector<metadata::DocumentInfo>> documentsResult = std::vector<metadata::DocumentInfo>();
+        std::string scope;
+        
+        if (!snapshotId.empty()) {
+            documentsResult = metadataRepo_->findDocumentsBySnapshot(snapshotId);
+            scope = "snapshot ID: " + snapshotId;
+        } else if (!snapshotLabel.empty()) {
+            documentsResult = metadataRepo_->findDocumentsBySnapshotLabel(snapshotLabel);
+            scope = "snapshot label: " + snapshotLabel;
+        } else {
+            return {{"error", "Either snapshot_id or snapshot_label must be provided"}};
+        }
+        
+        if (!documentsResult) {
+            return {{"error", "Failed to find documents in snapshot: " + documentsResult.error().message}};
+        }
+        
+        const auto& documents = documentsResult.value();
+        
+        if (documents.empty()) {
+            return {{"message", "No documents found in snapshot"}};
+        }
+        
+        return performRestore(documents, outputDir, layoutTemplate, overwrite, createDirs, dryRun, scope);
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Exception in restoreSnapshot: ") + e.what()}};
+    }
+}
+
+json MCPServer::listCollections(const json& args) {
+    try {
+        auto collectionsResult = metadataRepo_->getCollections();
+        if (!collectionsResult) {
+            return {{"error", "Failed to get collections: " + collectionsResult.error().message}};
+        }
+        
+        return {{"collections", collectionsResult.value()}};
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Exception in listCollections: ") + e.what()}};
+    }
+}
+
+json MCPServer::listSnapshots(const json& args) {
+    try {
+        bool withLabels = args.value("with_labels", true);
+        
+        auto snapshotsResult = metadataRepo_->getSnapshots();
+        if (!snapshotsResult) {
+            return {{"error", "Failed to get snapshots: " + snapshotsResult.error().message}};
+        }
+        
+        json response;
+        response["snapshot_ids"] = snapshotsResult.value();
+        
+        if (withLabels) {
+            auto labelsResult = metadataRepo_->getSnapshotLabels();
+            if (labelsResult) {
+                response["snapshot_labels"] = labelsResult.value();
+            }
+        }
+        
+        return response;
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Exception in listSnapshots: ") + e.what()}};
+    }
+}
+
+json MCPServer::performRestore(const std::vector<metadata::DocumentInfo>& documents,
+                               const std::string& outputDir,
+                               const std::string& layoutTemplate,
+                               bool overwrite,
+                               bool createDirs,
+                               bool dryRun,
+                               const std::string& scope) {
+    
+    size_t successCount = 0;
+    size_t failureCount = 0;
+    size_t skippedCount = 0;
+    json results = json::array();
+    
+    for (const auto& doc : documents) {
+        try {
+            // Get metadata for layout expansion
+            auto metadataResult = metadataRepo_->getAllMetadata(doc.id);
+            if (!metadataResult) {
+                failureCount++;
+                results.push_back({
+                    {"document", doc.fileName},
+                    {"status", "failed"},
+                    {"error", "Failed to get metadata: " + metadataResult.error().message}
+                });
+                continue;
+            }
+            
+            // Expand layout template
+            std::string layoutPath = expandLayoutTemplate(layoutTemplate, doc, metadataResult.value());
+            
+            std::filesystem::path outputPath = std::filesystem::path(outputDir) / layoutPath;
+            
+            if (dryRun) {
+                results.push_back({
+                    {"document", doc.fileName},
+                    {"status", "would_restore"},
+                    {"output_path", outputPath.string()},
+                    {"size", doc.fileSize}
+                });
+                successCount++;
+                continue;
+            }
+            
+            // Check if file already exists
+            if (std::filesystem::exists(outputPath) && !overwrite) {
+                skippedCount++;
+                results.push_back({
+                    {"document", doc.fileName},
+                    {"status", "skipped"},
+                    {"reason", "File exists and overwrite=false"}
+                });
+                continue;
+            }
+            
+            // Create parent directories if needed
+            if (createDirs) {
+                std::filesystem::create_directories(outputPath.parent_path());
+            }
+            
+            // Retrieve document
+            auto retrieveResult = store_->retrieve(doc.sha256Hash, outputPath);
+            if (!retrieveResult) {
+                failureCount++;
+                results.push_back({
+                    {"document", doc.fileName},
+                    {"status", "failed"},
+                    {"error", "Failed to retrieve: " + retrieveResult.error().message}
+                });
+                continue;
+            }
+            
+            successCount++;
+            results.push_back({
+                {"document", doc.fileName},
+                {"status", "restored"},
+                {"output_path", outputPath.string()},
+                {"size", doc.fileSize}
+            });
+            
+        } catch (const std::exception& e) {
+            failureCount++;
+            results.push_back({
+                {"document", doc.fileName},
+                {"status", "failed"},
+                {"error", std::string("Exception: ") + e.what()}
+            });
+        }
+    }
+    
+    return {
+        {"summary", {
+            {"documents_found", documents.size()},
+            {"documents_restored", successCount},
+            {"documents_failed", failureCount},
+            {"documents_skipped", skippedCount},
+            {"dry_run", dryRun}
+        }},
+        {"scope", scope},
+        {"output_directory", outputDir},
+        {"layout_template", layoutTemplate},
+        {"results", results}
+    };
+}
+
+std::string MCPServer::expandLayoutTemplate(const std::string& layoutTemplate,
+                                           const metadata::DocumentInfo& doc,
+                                           const std::unordered_map<std::string, metadata::MetadataValue>& metadata) {
+    std::string result = layoutTemplate;
+    
+    // Replace placeholders
+    size_t pos = 0;
+    while ((pos = result.find("{", pos)) != std::string::npos) {
+        size_t endPos = result.find("}", pos);
+        if (endPos == std::string::npos) break;
+        
+        std::string placeholder = result.substr(pos + 1, endPos - pos - 1);
+        std::string replacement;
+        
+        if (placeholder == "collection") {
+            auto it = metadata.find("collection");
+            replacement = (it != metadata.end()) ? it->second.asString() : "unknown";
+        } else if (placeholder == "snapshot_id") {
+            auto it = metadata.find("snapshot_id");
+            replacement = (it != metadata.end()) ? it->second.asString() : "unknown";
+        } else if (placeholder == "snapshot_label") {
+            auto it = metadata.find("snapshot_label");
+            replacement = (it != metadata.end()) ? it->second.asString() : "unknown";
+        } else if (placeholder == "path") {
+            auto it = metadata.find("path");
+            replacement = (it != metadata.end()) ? it->second.asString() : doc.fileName;
+        } else if (placeholder == "name") {
+            replacement = doc.fileName;
+        } else if (placeholder == "hash") {
+            replacement = doc.sha256Hash.substr(0, 12);
+        } else {
+            // Unknown placeholder, leave as is
+            pos = endPos + 1;
+            continue;
+        }
+        
+        result.replace(pos, endPos - pos + 1, replacement);
+        pos += replacement.length();
+    }
+    
+    return result;
 }
 
 } // namespace yams::mcp

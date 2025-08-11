@@ -133,9 +133,8 @@ bool AuthFilter::hasWritePermission(const drogon::HttpRequestPtr& req) {
     auto attrs = req->getAttributes();
     
     // Check if using read-only API key
-    auto apiKeyIt = attrs->find("api_key");
-    if (apiKeyIt != attrs->end()) {
-        const auto& apiKey = std::any_cast<std::string>(apiKeyIt->second);
+    if (attrs && attrs->find("api_key")) {
+        const auto& apiKey = std::any_cast<std::string>((*attrs)["api_key"]);
         return config_.readOnlyApiKeys.find(apiKey) == config_.readOnlyApiKeys.end();
     }
     
@@ -216,9 +215,8 @@ void RateLimitFilter::doFilter(const drogon::HttpRequestPtr& req,
 std::string RateLimitFilter::getClientId(const drogon::HttpRequestPtr& req) {
     // Try to get authenticated user ID
     auto attrs = req->getAttributes();
-    auto apiKeyIt = attrs->find("api_key");
-    if (apiKeyIt != attrs->end()) {
-        return std::any_cast<std::string>(apiKeyIt->second);
+    if (attrs && attrs->find("api_key")) {
+        return std::any_cast<std::string>((*attrs)["api_key"]);
     }
     
     // Fall back to IP address
@@ -277,70 +275,10 @@ void CorsFilter::doFilter(const drogon::HttpRequestPtr& req,
                          drogon::FilterCallback&& fcb,
                          drogon::FilterChainCallback&& fccb) {
     
-    auto origin = req->getHeader("Origin");
-    
-    // Handle preflight requests
-    if (req->getMethod() == drogon::Options) {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k204NoContent);
-        
-        // Set CORS headers
-        if (config_.allowedOrigins.count("*") > 0 || config_.allowedOrigins.count(origin) > 0) {
-            resp->addHeader("Access-Control-Allow-Origin", origin.empty() ? "*" : origin);
-            
-            if (config_.allowCredentials) {
-                resp->addHeader("Access-Control-Allow-Credentials", "true");
-            }
-            
-            // Allowed methods
-            std::stringstream methods;
-            for (auto it = config_.allowedMethods.begin(); it != config_.allowedMethods.end(); ++it) {
-                if (it != config_.allowedMethods.begin()) methods << ", ";
-                methods << *it;
-            }
-            resp->addHeader("Access-Control-Allow-Methods", methods.str());
-            
-            // Allowed headers
-            std::stringstream headers;
-            for (auto it = config_.allowedHeaders.begin(); it != config_.allowedHeaders.end(); ++it) {
-                if (it != config_.allowedHeaders.begin()) headers << ", ";
-                headers << *it;
-            }
-            resp->addHeader("Access-Control-Allow-Headers", headers.str());
-            
-            resp->addHeader("Access-Control-Max-Age", std::to_string(config_.maxAge));
-        }
-        
-        fcb(resp);
-        return;
-    }
-    
-    // Add CORS headers to response
-    auto oldCallback = fccb;
-    fccb = [origin, this, fcb = std::move(fcb)]() {
-        fcb = [origin, this, fcb = std::move(fcb)](const drogon::HttpResponsePtr& resp) {
-            if (config_.allowedOrigins.count("*") > 0 || config_.allowedOrigins.count(origin) > 0) {
-                resp->addHeader("Access-Control-Allow-Origin", origin.empty() ? "*" : origin);
-                
-                if (config_.allowCredentials) {
-                    resp->addHeader("Access-Control-Allow-Credentials", "true");
-                }
-                
-                // Exposed headers
-                if (!config_.exposedHeaders.empty()) {
-                    std::stringstream exposed;
-                    for (auto it = config_.exposedHeaders.begin(); it != config_.exposedHeaders.end(); ++it) {
-                        if (it != config_.exposedHeaders.begin()) exposed << ", ";
-                        exposed << *it;
-                    }
-                    resp->addHeader("Access-Control-Expose-Headers", exposed.str());
-                }
-            }
-            fcb(resp);
-        };
-    };
-    
-    oldCallback();
+    // For regular requests (not OPTIONS), just continue to next filter
+    // CORS headers for regular responses will be added by the middleware
+    // OPTIONS preflight requests are handled by pre-routing advice
+    fccb();
 }
 
 // LoggingFilter implementation
@@ -374,7 +312,7 @@ void LoggingFilter::doFilter(const drogon::HttpRequestPtr& req,
             spdlog::info("Response: {} {} {} {}ms",
                         requestId,
                         static_cast<int>(resp->getStatusCode()),
-                        drogon::statusCodeToString(resp->getStatusCode()),
+                        "HTTP_" + std::to_string(static_cast<int>(resp->getStatusCode())),
                         duration.count());
             
             oldCallback(resp);
@@ -391,7 +329,7 @@ std::string LoggingFilter::generateRequestId() {
 void LoggingFilter::logRequest(const drogon::HttpRequestPtr& req, const std::string& requestId) {
     spdlog::info("Request: {} {} {} from {}",
                 requestId,
-                drogon::to_string(req->getMethod()),
+                req->getMethodString(),
                 req->getPath(),
                 req->getPeerAddr().toIpPort());
     

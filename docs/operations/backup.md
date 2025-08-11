@@ -1,6 +1,6 @@
 # YAMS Backup & Recovery (Operations)
 
-A guide to back up and restore YAMS safely. Copy/paste first, refine later.
+Back up and restore YAMS safely. Follow the steps below.
 
 ## TL;DR
 
@@ -63,13 +63,13 @@ A guide to back up and restore YAMS safely. Copy/paste first, refine later.
   - Includes keys under `keys/` (private key should be 0600)
 - Optional: logs, operational scripts, deployment/unit files
 
-Rule of thumb: If you restore `yams.db`, `storage/`, and the config/keys, you’re back.
+Restoring `yams.db`, `storage/`, and config/keys is sufficient to recover.
 
 ---
 
 ## Backup strategies
 
-Choose one:
+Options:
 
 1) Online (no downtime)
 - Use `sqlite3 .backup` for a transactionally consistent DB snapshot
@@ -85,4 +85,3 @@ Choose one:
 
 ---
 
-## Online (hot) backup – practical script

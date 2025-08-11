@@ -1,6 +1,6 @@
 # YAMS Deployment (Operations)
 
-A guide to deploy YAMS for real use. Copy/paste first, refine later.
+Deploy YAMS with the steps below.
 
 ## TL;DR (Linux + systemd, MCP over WebSocket)
 
@@ -64,7 +64,7 @@ Notes
 - macOS (launchd): use a LaunchDaemon/LaunchAgent with a plist.
 - Container: run `yams serve` within a container; mount persistent storage and config.
 
-Pick the smallest thing that works for you, then automate.
+Choose a model appropriate for your environment.
 
 ---
 
@@ -113,11 +113,11 @@ Tighten incrementally; test before rolling to prod.
 - Load: `sudo launchctl load -w /Library/LaunchDaemons/com.yams.mcp.plist`
 - Logs via `log stream --predicate 'process == "yams"'`
 
-Keep it simple; convert your working systemd flags to plist arrays.
+Convert the working systemd flags to plist arrays.
 
 ---
 
-## Container sketch (build-your-own)
+## Container (example)
 
 Dockerfile (minimal)
 ```dockerfile
@@ -141,7 +141,7 @@ docker run -d --name yams -p 8080:8080 -v yams_data:/var/lib/yams yams:local
 
 ---
 
-## Security quick wins
+## Security recommendations
 
 - Run as a dedicated non‑login user (yams)
 - Limit scope: bind `--host 127.0.0.1` and put a reverse proxy in front if needed

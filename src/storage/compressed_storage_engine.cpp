@@ -378,7 +378,9 @@ private:
             reinterpret_cast<const std::byte*>(result.value().data.data()),
             result.value().data.size()
         });
-        header.timestamp = std::chrono::system_clock::now().time_since_epoch().count();
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        header.timestamp = now_ns < 0 ? 0ULL : static_cast<uint64_t>(now_ns);
         header.flags = 0;
         header.reserved1 = 0;
         std::memset(header.reserved2, 0, sizeof(header.reserved2));

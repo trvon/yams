@@ -159,6 +159,9 @@ private:
     
     // Version 5: Add search history and saved queries
     static Migration createSearchTables();
+    
+    // Version 6: Add collection and snapshot indexes
+    static Migration createCollectionIndexes();
 };
 
 /**

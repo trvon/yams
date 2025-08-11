@@ -103,7 +103,20 @@ public:
             
             auto& response = result.value();
             
-            // Output results
+            // Output results using helper
+            outputSearchResults(response);
+            
+            return Result<void>();
+            
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+        }
+    }
+    
+private:
+    void outputSearchResults(const search::SearchResults& response) {
+        // Output in JSON if --json flag is set, or if --verbose is set
+        if (cli_->getJsonOutput() || cli_->getVerbose()) {
             json output;
             output["query"] = response.getStatistics().originalQuery;
             output["total_results"] = response.getStatistics().totalResults;
@@ -142,73 +155,144 @@ public:
             output["metrics"] = metrics;
             
             std::cout << output.dump(2) << std::endl;
-            
-            return Result<void>();
-            
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+        } else {
+            // Simple, concise output by default
+            const auto& items = response.getItems();
+            if (items.empty()) {
+                std::cout << "No results found for: " << response.getStatistics().originalQuery << std::endl;
+            } else {
+                std::cout << "Found " << response.getStatistics().totalResults << " result(s) for: " << response.getStatistics().originalQuery << std::endl;
+                std::cout << std::endl;
+                
+                for (size_t i = 0; i < items.size(); i++) {
+                    const auto& item = items[i];
+                    std::cout << (i + 1) << ". " << item.title;
+                    if (!item.path.empty()) {
+                        std::cout << " (" << item.path << ")";
+                    }
+                    std::cout << std::endl;
+                    
+                    if (!item.contentPreview.empty()) {
+                        std::cout << "   " << item.contentPreview << std::endl;
+                    }
+                    std::cout << std::endl;
+                }
+            }
         }
     }
     
-private:
     void outputFuzzyResults(const metadata::SearchResults& results) {
-        json output;
-        output["query"] = results.query;
-        output["type"] = "fuzzy";
-        output["total_results"] = results.totalCount;
-        output["returned"] = results.results.size();
-        output["execution_time_ms"] = results.executionTimeMs;
-        
+        // Handle error case
         if (!results.errorMessage.empty()) {
-            output["error"] = results.errorMessage;
+            std::cerr << "Fuzzy search error: " << results.errorMessage << std::endl;
+            return;
         }
         
-        json items = json::array();
-        for (const auto& result : results.results) {
-            json item;
-            item["id"] = result.document.id;
-            item["hash"] = result.document.sha256Hash;
-            item["file_name"] = result.document.fileName;
-            item["file_path"] = result.document.filePath;
-            item["size"] = result.document.fileSize;
-            item["mime_type"] = result.document.mimeType;
-            item["score"] = result.score;
-            item["snippet"] = result.snippet;
-            items.push_back(item);
+        // Output in JSON if --json flag is set, or if --verbose is set
+        if (cli_->getJsonOutput() || cli_->getVerbose()) {
+            json output;
+            output["query"] = results.query;
+            output["type"] = "fuzzy";
+            output["total_results"] = results.totalCount;
+            output["returned"] = results.results.size();
+            output["execution_time_ms"] = results.executionTimeMs;
+            
+            json items = json::array();
+            for (const auto& result : results.results) {
+                json item;
+                item["id"] = result.document.id;
+                item["hash"] = result.document.sha256Hash;
+                item["file_name"] = result.document.fileName;
+                item["file_path"] = result.document.filePath;
+                item["size"] = result.document.fileSize;
+                item["mime_type"] = result.document.mimeType;
+                item["score"] = result.score;
+                item["snippet"] = result.snippet;
+                items.push_back(item);
+            }
+            output["results"] = items;
+            
+            std::cout << output.dump(2) << std::endl;
+        } else {
+            // Simple, concise output by default
+            if (results.results.empty()) {
+                std::cout << "No fuzzy matches found for: " << results.query << std::endl;
+            } else {
+                std::cout << "Found " << results.totalCount << " fuzzy match(es) for: " << results.query << std::endl;
+                std::cout << std::endl;
+                
+                for (size_t i = 0; i < results.results.size(); i++) {
+                    const auto& result = results.results[i];
+                    std::cout << (i + 1) << ". " << result.document.fileName;
+                    if (result.document.filePath != "stdin") {
+                        std::cout << " (" << result.document.filePath << ")";
+                    }
+                    std::cout << " [score: " << result.score << "]" << std::endl;
+                    
+                    if (!result.snippet.empty()) {
+                        std::cout << "   " << result.snippet << std::endl;
+                    }
+                    std::cout << std::endl;
+                }
+            }
         }
-        output["results"] = items;
-        
-        std::cout << output.dump(2) << std::endl;
     }
     
     void outputMetadataResults(const metadata::SearchResults& results) {
-        json output;
-        output["query"] = results.query;
-        output["type"] = "full-text";
-        output["total_results"] = results.totalCount;
-        output["returned"] = results.results.size();
-        output["execution_time_ms"] = results.executionTimeMs;
-        
+        // Handle error case
         if (!results.errorMessage.empty()) {
-            output["error"] = results.errorMessage;
+            std::cerr << "Search error: " << results.errorMessage << std::endl;
+            return;
         }
         
-        json items = json::array();
-        for (const auto& result : results.results) {
-            json item;
-            item["id"] = result.document.id;
-            item["hash"] = result.document.sha256Hash;
-            item["file_name"] = result.document.fileName;
-            item["file_path"] = result.document.filePath;
-            item["size"] = result.document.fileSize;
-            item["mime_type"] = result.document.mimeType;
-            item["score"] = result.score;
-            item["snippet"] = result.snippet;
-            items.push_back(item);
+        // Output in JSON if --json flag is set, or if --verbose is set
+        if (cli_->getJsonOutput() || cli_->getVerbose()) {
+            json output;
+            output["query"] = results.query;
+            output["type"] = "full-text";
+            output["total_results"] = results.totalCount;
+            output["returned"] = results.results.size();
+            output["execution_time_ms"] = results.executionTimeMs;
+            
+            json items = json::array();
+            for (const auto& result : results.results) {
+                json item;
+                item["id"] = result.document.id;
+                item["hash"] = result.document.sha256Hash;
+                item["file_name"] = result.document.fileName;
+                item["file_path"] = result.document.filePath;
+                item["size"] = result.document.fileSize;
+                item["mime_type"] = result.document.mimeType;
+                item["score"] = result.score;
+                item["snippet"] = result.snippet;
+                items.push_back(item);
+            }
+            output["results"] = items;
+            
+            std::cout << output.dump(2) << std::endl;
+        } else {
+            // Simple, concise output by default
+            if (results.results.empty()) {
+                std::cout << "No results found for: " << results.query << std::endl;
+            } else {
+                std::cout << "Found " << results.totalCount << " result(s) for: " << results.query << std::endl;
+                std::cout << std::endl;
+                
+                for (size_t i = 0; i < results.results.size(); i++) {
+                    const auto& result = results.results[i];
+                    std::cout << (i + 1) << ". " << result.document.fileName;
+                    if (result.document.filePath != "stdin") {
+                        std::cout << " (" << result.document.filePath << ")";
+                    }
+                    std::cout << std::endl;
+                    
+                    if (!result.snippet.empty()) {
+                        std::cout << "   " << result.snippet << std::endl;
+                    }
+                    std::cout << std::endl;
+                }
+            }
         }
-        output["results"] = items;
-        
-        std::cout << output.dump(2) << std::endl;
     }
 
 private:

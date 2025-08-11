@@ -26,6 +26,8 @@ namespace yams::api::http {
  */
 class ContentController : public drogon::HttpController<ContentController> {
 public:
+    static constexpr bool isAutoCreation = false;
+    
     METHOD_LIST_BEGIN
     
     // Content operations

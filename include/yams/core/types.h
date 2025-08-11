@@ -5,6 +5,7 @@
 #include <chrono>
 #include <variant>
 #include <vector>
+#include <cstddef>
 #include <span>
 
 namespace yams {
@@ -194,7 +195,9 @@ private:
 } // namespace yams
 
 // Format support for ErrorCode (guarded for environments without <format>)
-#if __has_include(<format>)
+#if defined(__has_include) && __has_include(<format>)
+#include <version>
+#if defined(__cpp_lib_format)
 #include <format>
 template<>
 struct std::formatter<yams::ErrorCode> {
@@ -206,6 +209,7 @@ struct std::formatter<yams::ErrorCode> {
         return std::format_to(ctx.out(), "{}", yams::errorToString(error));
     }
 };
+#endif
 #endif
 
 // fmt library support for ErrorCode (for spdlog)

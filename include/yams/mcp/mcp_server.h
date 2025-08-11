@@ -4,6 +4,7 @@
 #include <yams/api/content_store.h>
 #include <yams/search/search_executor.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/version.hpp>
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <string>
@@ -127,6 +128,13 @@ private:
     json catDocument(const json& args);
     json listDocuments(const json& args);
     
+    // New v0.0.4 directory and collection tools
+    json addDirectory(const json& args);
+    json restoreCollection(const json& args);
+    json restoreSnapshot(const json& args);
+    json listCollections(const json& args);
+    json listSnapshots(const json& args);
+    
     // Helper methods
     json createResponse(const json& id, const json& result);
     json createError(const json& id, int code, const std::string& message);
@@ -136,6 +144,18 @@ private:
     Result<std::vector<std::pair<std::string, std::string>>> resolveNameToHashes(const std::string& name);
     Result<std::vector<std::pair<std::string, std::string>>> resolveNamesToHashes(const std::vector<std::string>& names);
     Result<std::vector<std::pair<std::string, std::string>>> resolvePatternToHashes(const std::string& pattern);
+    
+    // Collection and snapshot helpers
+    json performRestore(const std::vector<metadata::DocumentInfo>& documents,
+                       const std::string& outputDir,
+                       const std::string& layoutTemplate,
+                       bool overwrite,
+                       bool createDirs,
+                       bool dryRun,
+                       const std::string& scope);
+    std::string expandLayoutTemplate(const std::string& layoutTemplate,
+                                   const metadata::DocumentInfo& doc,
+                                   const std::unordered_map<std::string, metadata::MetadataValue>& metadata);
     
 private:
     std::shared_ptr<api::IContentStore> store_;
@@ -149,7 +169,7 @@ private:
     // Server info
     struct {
         std::string name = "kronos-mcp";
-        std::string version = "1.0.0";
+        std::string version = YAMS_VERSION_STRING;
     } serverInfo_;
     
     // Client info (set during initialize)

@@ -34,8 +34,8 @@ inline Json::Value retrieveResultToJson(const RetrieveResult& result) {
 inline Json::Value contentMetadataToJson(const ContentMetadata& metadata) {
     Json::Value json;
     json["mimeType"] = metadata.mimeType;
-    json["originalName"] = metadata.originalName;
-    json["description"] = metadata.description;
+    json["originalName"] = metadata.name;  // Map name -> originalName
+    json["description"] = "";  // Not available in current ContentMetadata
     
     // Convert timestamps to ISO8601
     auto timeToString = [](const auto& tp) {
@@ -49,26 +49,23 @@ inline Json::Value contentMetadataToJson(const ContentMetadata& metadata) {
     json["modifiedAt"] = timeToString(metadata.modifiedAt);
     json["accessedAt"] = timeToString(metadata.accessedAt);
     
-    // Tags
+    // Tags (ContentMetadata.tags is unordered_map<string, string>, not vector)
     Json::Value tags(Json::arrayValue);
-    for (const auto& tag : metadata.tags) {
+    for (const auto& [key, value] : metadata.tags) {
+        Json::Value tag;
+        tag[key] = value;
         tags.append(tag);
     }
     json["tags"] = tags;
     
-    // Custom fields
-    Json::Value customFields;
-    for (const auto& [key, value] : metadata.customFields) {
-        customFields[key] = value;
-    }
-    json["customFields"] = customFields;
-    
-    json["encoding"] = metadata.encoding;
-    json["language"] = metadata.language;
-    json["version"] = metadata.version;
-    json["owner"] = metadata.owner;
-    json["permissions"] = metadata.permissions;
-    json["checksum"] = metadata.checksum;
+    // These fields don't exist in current ContentMetadata - provide defaults
+    json["customFields"] = Json::Value(Json::objectValue);
+    json["encoding"] = "";
+    json["language"] = "";
+    json["version"] = 0;
+    json["owner"] = "";
+    json["permissions"] = "";
+    json["checksum"] = metadata.contentHash;  // Use contentHash as checksum
     
     return json;
 }
@@ -81,14 +78,12 @@ inline ContentMetadata jsonToContentMetadata(const Json::Value& json) {
         metadata.mimeType = json["mimeType"].asString();
     }
     if (json.isMember("originalName")) {
-        metadata.originalName = json["originalName"].asString();
+        metadata.name = json["originalName"].asString();  // Map originalName -> name
     }
-    if (json.isMember("description")) {
-        metadata.description = json["description"].asString();
-    }
+    // Skip description - not in ContentMetadata
     
     // Parse timestamps (simplified - would use proper date parsing in production)
-    auto parseTime = [](const std::string& str) {
+    auto parseTime = [](const std::string& /*str*/) {
         // For now, just use current time
         return std::chrono::system_clock::now();
     };
@@ -103,38 +98,21 @@ inline ContentMetadata jsonToContentMetadata(const Json::Value& json) {
         metadata.accessedAt = parseTime(json["accessedAt"].asString());
     }
     
-    // Tags
+    // Tags (ContentMetadata.tags is unordered_map<string, string>)
     if (json.isMember("tags") && json["tags"].isArray()) {
         for (const auto& tag : json["tags"]) {
-            metadata.tags.push_back(tag.asString());
+            if (tag.isObject() && !tag.getMemberNames().empty()) {
+                for (const auto& key : tag.getMemberNames()) {
+                    metadata.tags[key] = tag[key].asString();
+                }
+            }
         }
     }
     
-    // Custom fields
-    if (json.isMember("customFields") && json["customFields"].isObject()) {
-        const auto& fields = json["customFields"];
-        for (const auto& key : fields.getMemberNames()) {
-            metadata.customFields[key] = fields[key].asString();
-        }
-    }
+    // Skip customFields, encoding, language, version, owner, permissions - not in ContentMetadata
     
-    if (json.isMember("encoding")) {
-        metadata.encoding = json["encoding"].asString();
-    }
-    if (json.isMember("language")) {
-        metadata.language = json["language"].asString();
-    }
-    if (json.isMember("version")) {
-        metadata.version = json["version"].asUInt();
-    }
-    if (json.isMember("owner")) {
-        metadata.owner = json["owner"].asString();
-    }
-    if (json.isMember("permissions")) {
-        metadata.permissions = json["permissions"].asString();
-    }
     if (json.isMember("checksum")) {
-        metadata.checksum = json["checksum"].asString();
+        metadata.contentHash = json["checksum"].asString();  // Map checksum -> contentHash
     }
     
     return metadata;

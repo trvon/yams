@@ -18,6 +18,8 @@ class AuthFilter : public drogon::HttpFilter<AuthFilter> {
 public:
     AuthFilter() = default;
     
+    static constexpr bool isAutoCreation = false;
+    
     void doFilter(const drogon::HttpRequestPtr& req,
                  drogon::FilterCallback&& fcb,
                  drogon::FilterChainCallback&& fccb) override;
@@ -69,6 +71,8 @@ class RateLimitFilter : public drogon::HttpFilter<RateLimitFilter> {
 public:
     RateLimitFilter() = default;
     
+    static constexpr bool isAutoCreation = false;
+    
     void doFilter(const drogon::HttpRequestPtr& req,
                  drogon::FilterCallback&& fcb,
                  drogon::FilterChainCallback&& fccb) override;
@@ -108,6 +112,8 @@ class CorsFilter : public drogon::HttpFilter<CorsFilter> {
 public:
     CorsFilter() = default;
     
+    static constexpr bool isAutoCreation = false;
+    
     void doFilter(const drogon::HttpRequestPtr& req,
                  drogon::FilterCallback&& fcb,
                  drogon::FilterChainCallback&& fccb) override;
@@ -133,6 +139,8 @@ private:
 class LoggingFilter : public drogon::HttpFilter<LoggingFilter> {
 public:
     LoggingFilter() = default;
+    
+    static constexpr bool isAutoCreation = false;
     
     void doFilter(const drogon::HttpRequestPtr& req,
                  drogon::FilterCallback&& fcb,

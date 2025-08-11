@@ -116,7 +116,8 @@ public:
                 }
                 
                 // Get content snippet if requested
-                if ((showSnippets_ && !noSnippets_) || verbose_) {
+                bool isVerbose = verbose_ || cli_->getVerbose();
+                if ((showSnippets_ && !noSnippets_) || isVerbose) {
                     auto contentResult = metadataRepo->getContent(docInfo.id);
                     if (contentResult && contentResult.value()) {
                         const auto& content = contentResult.value().value();
@@ -169,12 +170,17 @@ public:
                 documents.resize(static_cast<size_t>(limit_));
             }
             
-            // Output results
-            if (format_ == "json") {
+            // Output results - respect global --json flag
+            std::string effectiveFormat = format_;
+            if (effectiveFormat == "table" && cli_->getJsonOutput()) {
+                effectiveFormat = "json";
+            }
+            
+            if (effectiveFormat == "json") {
                 outputJson(documents);
-            } else if (format_ == "csv") {
+            } else if (effectiveFormat == "csv") {
                 outputCsv(documents);
-            } else if (format_ == "minimal") {
+            } else if (effectiveFormat == "minimal") {
                 outputMinimal(documents);
             } else {
                 outputTable(documents);
@@ -278,7 +284,8 @@ private:
         size_t sizeWidth = 8;
         size_t snippetWidth = showSnippets_ && !noSnippets_ ? 36 : 0;
         size_t tagsWidth = showTags_ ? 12 : 0;
-        size_t dateWidth = verbose_ ? 19 : 12;
+        bool isVerbose = verbose_ || cli_->getVerbose();
+        size_t dateWidth = isVerbose ? 19 : 12;
         
         // Header
         std::cout << std::left;
@@ -294,7 +301,7 @@ private:
             std::cout << std::setw(static_cast<int>(tagsWidth)) << "TAGS" << "  ";
         }
         
-        std::cout << std::setw(static_cast<int>(dateWidth)) << (verbose_ ? "INDEXED" : "WHEN") << "\n";
+        std::cout << std::setw(static_cast<int>(dateWidth)) << (isVerbose ? "INDEXED" : "WHEN") << "\n";
         
         // Separator
         std::cout << std::string(nameWidth, '-') << "  ";
@@ -345,9 +352,9 @@ private:
                 std::cout << std::setw(static_cast<int>(tagsWidth)) << tagsDisplay << "  ";
             }
             
-            std::cout << std::setw(static_cast<int>(dateWidth)) << (verbose_ ? doc.getFormattedDate() : doc.getRelativeTime()) << "\n";
+            std::cout << std::setw(static_cast<int>(dateWidth)) << (isVerbose ? doc.getFormattedDate() : doc.getRelativeTime()) << "\n";
             
-            if (verbose_) {
+            if (isVerbose) {
                 std::cout << "    Hash: " << doc.info.sha256Hash << "\n";
                 std::cout << "    Path: " << doc.info.filePath << "\n";
                 std::cout << "    MIME: " << doc.info.mimeType << "\n";
@@ -472,7 +479,7 @@ private:
     
     Result<void> fallbackToFilesystemScanning() {
         // Minimal fallback - just show that metadata repo is not available
-        if (format_ == "json") {
+        if (format_ == "json" || cli_->getJsonOutput()) {
             json output;
             output["error"] = "Metadata repository not available";
             output["fallback"] = true;

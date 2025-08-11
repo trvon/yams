@@ -35,6 +35,11 @@ public:
     static std::unique_ptr<ICommand> createGetCommand();
     
     /**
+     * Create restore command
+     */
+    static std::unique_ptr<ICommand> createRestoreCommand();
+    
+    /**
      * Create cat command
      */
     static std::unique_ptr<ICommand> createCatCommand();
