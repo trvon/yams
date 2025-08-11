@@ -1,0 +1,248 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    name: Build, Test, and Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    env:
+      BUILD_DIR: build
+      INSTALL_PREFIX: prefix
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libssl-dev \
+            libsqlite3-dev \
+            protobuf-compiler
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          brew update
+          brew install cmake openssl@3 sqlite3 protobuf
+          # Make OpenSSL discoverable by CMake on macOS
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+
+      - name: Configure (CMake)
+        shell: bash
+        run: |
+          CMAKE_ARGS="-DYAMS_BUILD_PROFILE=dev -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
+
+          # Enable coverage on Linux builds
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DYAMS_ENABLE_COVERAGE=ON"
+          fi
+
+          cmake -S . -B "$BUILD_DIR" $CMAKE_ARGS
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build "$BUILD_DIR" --parallel
+
+      - name: Run tests
+        shell: bash
+        run: |
+          ctest --test-dir "$BUILD_DIR" --output-on-failure
+          ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^consumer_'
+
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          mkdir -p "$BUILD_DIR/bench_results"
+          # Find all benchmark executables (named *_bench or *_bench.exe)
+          mapfile -t benches < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" \) 2>/dev/null | sort)
+          if [ ${#benches[@]} -eq 0 ]; then
+            echo "No benchmark executables found."
+          else
+            for exe in "${benches[@]}"; do
+              name=$(basename "$exe")
+              out="$BUILD_DIR/bench_results/${name%.exe}.json"
+              echo "Running $exe -> $out"
+              "$exe" --benchmark_min_time=0.1 --benchmark_format=json --benchmark_out="$out" || true
+            done
+          fi
+
+      - name: Generate coverage report (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          # Install gcovr if not present
+          pip install gcovr || true
+
+          # Generate coverage reports
+          if command -v gcovr &> /dev/null; then
+            gcovr --root . \
+              --exclude '_deps/*' \
+              --exclude 'tests/*' \
+              --exclude 'src/**/benchmarks/*' \
+              --exclude 'tools/*' \
+              --html --html-details \
+              --output "$BUILD_DIR/coverage.html"
+
+            gcovr --root . \
+              --exclude '_deps/*' \
+              --exclude 'tests/*' \
+              --exclude 'src/**/benchmarks/*' \
+              --exclude 'tools/*' \
+              --xml \
+              --output "$BUILD_DIR/coverage.xml"
+
+            # Display summary
+            gcovr --root . \
+              --exclude '_deps/*' \
+              --exclude 'tests/*' \
+              --exclude 'src/**/benchmarks/*' \
+              --exclude 'tools/*'
+          fi
+
+      - name: Install
+        shell: bash
+        run: |
+          cmake --install "$BUILD_DIR" --config Release
+
+      - name: Upload installed prefix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yams-install-${{ matrix.os }}
+          path: ${{ env.INSTALL_PREFIX }}
+          if-no-files-found: error
+
+      - name: Package (CPack)
+        shell: bash
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          # Generate default TGZ/ZIP packages if configured
+          cpack -G TGZ || true
+          cpack -G ZIP || true
+          # List generated packages (if any)
+          ls -la || true
+
+      - name: Upload packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yams-packages-${{ matrix.os }}
+          path: |
+            ${{ env.BUILD_DIR }}/*.tar.gz
+            ${{ env.BUILD_DIR }}/*.tgz
+            ${{ env.BUILD_DIR }}/*.zip
+          if-no-files-found: ignore
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.os }}
+          path: ${{ env.BUILD_DIR }}/bench_results
+          if-no-files-found: ignore
+
+      - name: Upload coverage report
+        if: matrix.os == 'ubuntu-latest' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            ${{ env.BUILD_DIR }}/coverage.html
+            ${{ env.BUILD_DIR }}/coverage.xml
+          if-no-files-found: ignore
+
+      - name: Upload CLI binary (if present)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yams-cli-${{ matrix.os }}
+          path: |
+            ${{ env.BUILD_DIR }}/tools/yams-cli/yams
+            ${{ env.BUILD_DIR }}/tools/yams-cli/Debug/yams
+            ${{ env.BUILD_DIR }}/tools/yams-cli/Release/yams
+          if-no-files-found: ignore
+
+  consumer-test:
+    name: Downstream Consumer Test (${{ matrix.os }})
+    needs: build-test-package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libssl-dev \
+            libsqlite3-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          brew update
+          brew install cmake openssl@3 sqlite3
+          # Make OpenSSL discoverable by CMake on macOS
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+
+      - name: Download installed Yams
+        uses: actions/download-artifact@v4
+        with:
+          name: yams-install-${{ matrix.os }}
+          path: installed
+
+      - name: Build consumer against installed package
+        shell: bash
+        run: |
+          mkdir -p consumer
+          cat > consumer/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.20)
+          project(yams_consumer CXX)
+          find_package(Yams CONFIG REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE yams::storage)
+          EOF
+          cat > consumer/main.cpp <<'EOF'
+          #include <iostream>
+          int main() {
+            std::cout << "consumer ok\n";
+            return 0;
+          }
+          EOF
+
+          cmake -S consumer -B consumer/build \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/installed"
+          cmake --build consumer/build -j 2

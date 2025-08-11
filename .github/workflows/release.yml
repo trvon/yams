@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build, Test, Install, and Release (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            packaging: tgz
+            cmake_args: ""
+            suffix: linux-x86_64
+          - os: macos-latest
+            packaging: zip
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
+            suffix: macos-x86_64
+          - os: macos-latest
+            packaging: zip
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
+            suffix: macos-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      BUILD_DIR: build
+      STAGE_DIR: stage
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Ensure tags are available for git describe and version derivation
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: v
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libssl-dev \
+            libsqlite3-dev \
+            protobuf-compiler
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          brew update
+          brew install cmake openssl@3 sqlite3 protobuf
+          # Help CMake find OpenSSL on macOS
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Configure (CMake)
+        shell: bash
+        run: |
+          cmake -S . -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYAMS_BUILD_PROFILE=custom \
+            -DYAMS_BUILD_TESTS=ON \
+            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
+            ${{ matrix.cmake_args }}
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build "$BUILD_DIR" --config Release --parallel
+
+      - name: Run tests
+        shell: bash
+        run: |
+          ctest --test-dir "$BUILD_DIR" --output-on-failure --build-config Release
+
+      - name: Install
+        shell: bash
+        run: |
+          cmake --install "$BUILD_DIR" --config Release
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}"
+          VERSION="${{ steps.v.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
+          OUTDIR="$GITHUB_WORKSPACE"
+          if [ "${{ matrix.packaging }}" = "zip" ]; then
+            ASSET="yams-${VERSION}-${SUFFIX}.zip"
+            zip -r "$OUTDIR/$ASSET" .
+          else
+            ASSET="yams-${VERSION}-${SUFFIX}.tar.gz"
+            tar czf "$OUTDIR/$ASSET" .
+          fi
+          echo "asset_path=$OUTDIR/$ASSET" >> "$GITHUB_OUTPUT"
+          echo "Created asset: $OUTDIR/$ASSET"
+
+      - name: Create GitHub Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ steps.pkg.outputs.asset_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

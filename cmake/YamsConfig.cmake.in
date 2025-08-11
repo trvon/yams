@@ -1,0 +1,68 @@
+@PACKAGE_INIT@
+
+# YamsConfig.cmake - CMake package configuration for YAMS
+# This file is generated at configure time. Do not edit in-place.
+
+include(CMakeFindDependencyMacro)
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+# Required third-party dependencies that consumers of YAMS must also have.
+find_dependency(OpenSSL REQUIRED)
+find_dependency(SQLite3 REQUIRED)
+find_dependency(Threads REQUIRED)
+find_dependency(spdlog REQUIRED)
+
+# ---------------------------------------------------------------------------
+# Exported Targets
+# ---------------------------------------------------------------------------
+# Import the targets exported during install. These define the yams:: namespace
+# (e.g., yams::api, yams::storage_engine, etc.).
+include("${CMAKE_CURRENT_LIST_DIR}/YamsTargets.cmake")
+
+# ---------------------------------------------------------------------------
+# Friendly imported target aliases (map concise names to exported targets)
+# This creates IMPORTED INTERFACE targets like yams::storage that forward to
+# the exported names like yams::yams_storage if present.
+# ---------------------------------------------------------------------------
+function(_yams_define_alias nice imported_base)
+  if(NOT TARGET yams::${nice} AND TARGET yams::${imported_base})
+    add_library(yams::${nice} INTERFACE IMPORTED)
+    set_target_properties(yams::${nice} PROPERTIES
+      INTERFACE_LINK_LIBRARIES yams::${imported_base}
+    )
+  endif()
+endfunction()
+
+# Core components
+_yams_define_alias(core            yams_core)
+_yams_define_alias(storage_engine  yams_storage_engine)
+_yams_define_alias(reference_counter yams_reference_counter)
+_yams_define_alias(chunking        yams_chunking)
+_yams_define_alias(compression     yams_compression)
+_yams_define_alias(crypto          yams_crypto)
+_yams_define_alias(manifest        yams_manifest)
+_yams_define_alias(integrity       yams_integrity)
+_yams_define_alias(wal             yams_wal)
+
+# Higher-level modules
+_yams_define_alias(api             yams_api)
+_yams_define_alias(metadata        yams_metadata)
+_yams_define_alias(extraction      yams_extraction)
+_yams_define_alias(indexing        yams_indexing)
+_yams_define_alias(search          yams_search)
+_yams_define_alias(vector          yams_vector)
+
+# Aggregates and optional components
+_yams_define_alias(storage         yams_storage)
+_yams_define_alias(mcp             yams_mcp) # only if exported
+
+# ---------------------------------------------------------------------------
+# Package Version
+# ---------------------------------------------------------------------------
+# Provide version info for find_package(Yams VERSION x.y.z)
+set(Yams_VERSION @PROJECT_VERSION@)
+
+# Validate any requested components (if the consumer used find_package with COMPONENTS)
+check_required_components(Yams)

@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package yams.manifest;
+
+// Individual chunk reference within a file
+message ChunkReference {
+    string hash = 1;        // SHA-256 hash of chunk (64 hex characters)
+    uint64 offset = 2;      // Byte offset in original file
+    uint32 size = 3;        // Size of chunk in bytes
+    uint32 flags = 4;       // Reserved for future use (compression, etc.)
+}
+
+// Complete file manifest mapping file to chunks
+message FileManifest {
+    // Manifest metadata
+    uint32 version = 1;             // Manifest format version (current = 1)
+    string file_hash = 2;           // SHA-256 hash of complete file
+    uint64 file_size = 3;           // Total file size in bytes
+    string original_name = 4;       // Original filename (optional)
+    string mime_type = 5;           // MIME type (e.g. text/plain, image/jpeg)
+    int64 created_at = 6;           // Unix timestamp (seconds since epoch)
+    int64 modified_at = 7;          // Last modification timestamp
+    
+    // Chunk mapping
+    repeated ChunkReference chunks = 8;
+    
+    // Extensible metadata for future features
+    map<string, string> metadata = 9;
+    
+    // Integrity and compression
+    uint32 checksum = 10;           // CRC32 of manifest data (excluding this field)
+    string compression = 11;        // Compression algorithm used ("none", "zstd", "lz4")
+    uint32 uncompressed_size = 12;  // Size before compression
+}
+
+// Batch of manifests for efficient storage/transfer
+message ManifestBatch {
+    repeated FileManifest manifests = 1;
+    uint32 batch_version = 2;       // Batch format version
+    int64 created_at = 3;           // Batch creation timestamp
+    uint32 manifest_count = 4;      // Number of manifests in batch
+}

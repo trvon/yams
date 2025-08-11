@@ -1,0 +1,95 @@
+#include <yams/cli/command_registry.h>
+#include <yams/cli/yams_cli.h>
+
+namespace yams::cli {
+
+// External factory functions from command implementations (in this namespace)
+std::unique_ptr<ICommand> createInitCommand();
+std::unique_ptr<ICommand> createAddCommand();
+std::unique_ptr<ICommand> createGetCommand();
+std::unique_ptr<ICommand> createDeleteCommand();
+std::unique_ptr<ICommand> createListCommand();
+std::unique_ptr<ICommand> createSearchCommand();
+std::unique_ptr<ICommand> createConfigCommand();
+std::unique_ptr<ICommand> createAuthCommand();
+std::unique_ptr<ICommand> createStatsCommand();
+std::unique_ptr<ICommand> createUninstallCommand();
+std::unique_ptr<ICommand> createMigrateCommand();
+std::unique_ptr<ICommand> createBrowseCommand();
+#ifdef YAMS_BUILD_MCP_SERVER
+std::unique_ptr<ICommand> createServeCommand();
+#endif
+
+void CommandRegistry::registerAllCommands(YamsCLI* cli) {
+    cli->registerCommand(CommandRegistry::createInitCommand());
+    cli->registerCommand(CommandRegistry::createAddCommand());
+    cli->registerCommand(CommandRegistry::createGetCommand());
+    cli->registerCommand(CommandRegistry::createDeleteCommand());
+    cli->registerCommand(CommandRegistry::createListCommand());
+    cli->registerCommand(CommandRegistry::createSearchCommand());
+    cli->registerCommand(CommandRegistry::createConfigCommand());
+    cli->registerCommand(CommandRegistry::createAuthCommand());
+    cli->registerCommand(CommandRegistry::createStatsCommand());
+    cli->registerCommand(CommandRegistry::createUninstallCommand());
+    cli->registerCommand(CommandRegistry::createMigrateCommand());
+    cli->registerCommand(CommandRegistry::createBrowseCommand());
+#ifdef YAMS_BUILD_MCP_SERVER
+    cli->registerCommand(CommandRegistry::createServeCommand());
+#endif
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createInitCommand() {
+    return ::yams::cli::createInitCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createAddCommand() {
+    return ::yams::cli::createAddCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createGetCommand() {
+    return ::yams::cli::createGetCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createDeleteCommand() {
+    return ::yams::cli::createDeleteCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createListCommand() {
+    return ::yams::cli::createListCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createSearchCommand() {
+    return ::yams::cli::createSearchCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createConfigCommand() {
+    return ::yams::cli::createConfigCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createAuthCommand() {
+    return ::yams::cli::createAuthCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createStatsCommand() {
+    return ::yams::cli::createStatsCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createUninstallCommand() {
+    return ::yams::cli::createUninstallCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createMigrateCommand() {
+    return ::yams::cli::createMigrateCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createBrowseCommand() {
+    return ::yams::cli::createBrowseCommand();
+}
+
+#ifdef YAMS_BUILD_MCP_SERVER
+std::unique_ptr<ICommand> CommandRegistry::createServeCommand() {
+    return ::yams::cli::createServeCommand();
+}
+#endif
+
+} // namespace yams::cli

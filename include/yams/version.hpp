@@ -1,0 +1,43 @@
+/*
+ * Fallback version header for YAMS
+ *
+ * This header provides default version macros so the codebase compiles even
+ * when the generated header (typically located in the build directory under
+ * generated/yams/version.hpp) is not present. The build system is expected to
+ * generate and prefer that header; include directory ordering should ensure
+ * the generated header takes precedence over this fallback.
+ *
+ * Macros mirror those in the generated header to avoid conditional code paths.
+ */
+
+#pragma once
+
+// Semantic version components (fallback to 0.0.0)
+#ifndef YAMS_VERSION_MAJOR
+#define YAMS_VERSION_MAJOR 0
+#endif
+
+#ifndef YAMS_VERSION_MINOR
+#define YAMS_VERSION_MINOR 0
+#endif
+
+#ifndef YAMS_VERSION_PATCH
+#define YAMS_VERSION_PATCH 0
+#endif
+
+// Combined version string (fallback)
+#ifndef YAMS_VERSION_STRING
+#define YAMS_VERSION_STRING "0.0.0+dev"
+#endif
+
+// Optional C++ convenience constants (do not rely on these in C code)
+#if defined(__cplusplus)
+namespace yams {
+namespace version {
+constexpr int major_v = YAMS_VERSION_MAJOR;
+constexpr int minor_v = YAMS_VERSION_MINOR;
+constexpr int patch_v = YAMS_VERSION_PATCH;
+constexpr const char* string_v = YAMS_VERSION_STRING;
+} // namespace version
+} // namespace yams
+#endif
