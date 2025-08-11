@@ -559,13 +559,13 @@ if(NOT YAMS_USE_CONAN)
             GIT_TAG v3.11.3
         )
         FetchContent_MakeAvailable(nlohmann_json)
-        
+
         # Export nlohmann_json with YamsTargets for downstream consumers
         install(TARGETS nlohmann_json
             EXPORT YamsTargets
         )
     endif()
-    
+
     # Install nlohmann_json headers (it's header-only)
     install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
@@ -588,14 +588,14 @@ if(YAMS_BUILD_TOOLS)
         if(YAMS_USE_CONAN)
             # When using Conan, we need to use ExternalProject_Add to pass ncurses paths
             include(ExternalProject)
-            
+
             # Find Curses package to get Conan-provided paths
             find_package(Curses REQUIRED)
-            
+
             # Build the full library paths from Conan variables
             set(NCURSES_LIB_PATH "${ncurses_LIB_DIRS_RELEASE}/libncursesw.a")
             set(TINFO_LIB_PATH "${ncurses_LIB_DIRS_RELEASE}/libtinfow.a")
-            
+
             # Use ExternalProject_Add to build ImTUI with system ncurses
             # Use system ncurses for ImTUI to get compatible versioned symbols
             # while keeping Conan for all other dependencies
@@ -611,29 +611,31 @@ if(YAMS_BUILD_TOOLS)
                 BUILD_ALWAYS OFF
                 INSTALL_COMMAND ""
             )
-            
+
             # Create interface library for ImTUI that our code can link to
             add_library(imtui-ncurses INTERFACE)
             add_dependencies(imtui-ncurses imtui_external)
-            
+
             # Add include directories - ImTUI needs to find imgui/imgui.h
             # The ImTUI header does #include "imgui/imgui.h" so we need to add the dir that contains imgui/
             # Our code does #include <imgui.h> so we need to add the imgui dir itself too
-            target_include_directories(imtui-ncurses INTERFACE 
+            target_include_directories(imtui-ncurses INTERFACE
                 ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/include
                 ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/third-party/imgui
                 ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/third-party/imgui/imgui
             )
-            
+
             # Link to the built ImTUI library and system ncurses for compatibility
             target_link_libraries(imtui-ncurses INTERFACE
                 ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/src/libimtui-ncurses.a
                 ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/src/libimtui.a
                 ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/third-party/libimgui-for-imtui.a
                 # Use system ncurses for ImTUI to match versioned symbols
-                "-framework System"
                 curses
             )
+            if(APPLE)
+                target_link_libraries(imtui-ncurses INTERFACE "-framework System")
+            endif()
         else()
             # Use FetchContent for non-Conan builds
             FetchContent_Declare(
@@ -800,7 +802,7 @@ add_subdirectory(src)
 
 if(YAMS_BUILD_TESTS)
     enable_testing()
-    
+
     # Use FetchContent for GTest due to Conan config issues
     if(YAMS_USE_FETCHCONTENT_FOR_TESTS OR NOT YAMS_USE_CONAN)
         include(FetchContent)
@@ -814,7 +816,7 @@ if(YAMS_BUILD_TESTS)
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googletest)
     endif()
-    
+
     add_subdirectory(tests)
 endif()
 

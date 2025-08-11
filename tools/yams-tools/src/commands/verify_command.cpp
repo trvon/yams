@@ -217,7 +217,7 @@ private:
         
         std::cout << "  Duration:        " << duration.count() << "s\n";
         std::cout << "  Rate:            " << (blocksToVerify.size() / 
-                                              std::max(duration.count(), 1L)) 
+                                              (duration.count() > 0 ? duration.count() : 1L))
                  << " blocks/s\n";
         
         double successRate = blocksToVerify.size() > 0 ?

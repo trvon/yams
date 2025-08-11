@@ -87,7 +87,8 @@ public:
         
         while (stream.good()) {
             stream.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE);
-            size_t bytesRead = static_cast<size_t>(std::max(stream.gcount(), static_cast<std::streamsize>(0)));
+            const std::streamsize readCount = stream.gcount();
+            size_t bytesRead = readCount > 0 ? static_cast<size_t>(readCount) : 0u;
             
             if (bytesRead == 0) break;
             
