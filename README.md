@@ -2,7 +2,7 @@
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
 
-My base prompt is [docs/PROMPT.md](PROMPT.md)
+My base prompt is [PROMPT.md](docs/PROMPT.md)
 
 ## Features
 
@@ -16,65 +16,50 @@ My base prompt is [docs/PROMPT.md](PROMPT.md)
 ## Build
 
 ### Requirements
-- C++20 compiler (GCC 11+, Clang 14+)
+- C++20 compiler (GCC 11+, Clang 14+, AppleClang 14+)
 - CMake 3.20+
-- OpenSSL 3.0+
-- SQLite3
-- Protocol Buffers 3.0+
+- Python 3.8+ (for Conan)
 
-### Dependencies
+### Quick Start
 
-#### macOS
 ```bash
-brew install cmake openssl@3 protobuf sqlite3
-export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
-```
+# Install build tools
+brew install cmake conan             # macOS
+apt install cmake python3-pip && pip3 install conan  # Ubuntu/Debian
 
-#### Linux
-```bash
-# Ubuntu/Debian
-apt install build-essential cmake libssl-dev libsqlite3-dev protobuf-compiler
+# Build with Conan (recommended - handles all dependencies)
+conan install . --build=missing --profile=default
+cmake --preset conan-release
+cmake --build --preset conan-release
 
-# Fedora/RHEL
-dnf install cmake openssl-devel sqlite-devel protobuf-compiler
-```
-
-### Build Profiles
-
-#### Quick Start - Release Build
-For end users who just want the CLI and MCP server:
-```bash
-cmake -B build -DYAMS_BUILD_PROFILE=release
-make -j$(nproc)
-sudo make install
-# Installs: yams, yams-mcp-server
-```
-
-**Note**: If you encounter WebSocket compilation errors, build without MCP server:
-```bash
-cmake -DYAMS_BUILD_PROFILE=custom -DYAMS_BUILD_MCP_SERVER=OFF ..
-```
-
-#### Development Build
-For developers who need everything including tests:
-```bash
-mkdir build && cd build
-cmake -DYAMS_BUILD_PROFILE=dev ..
-make -j$(nproc)
-ctest --output-on-failure
+# Traditional build (fallback - uses FetchContent)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
 
 ### Build Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `YAMS_BUILD_PROFILE` | custom | Preset: `release`, `dev`, or `custom` |
-| `YAMS_BUILD_CLI` | ON | Build command-line interface |
-| `YAMS_BUILD_MCP_SERVER` | ON | Build MCP server  |
-| `YAMS_BUILD_MAINTENANCE_TOOLS` | OFF | Build gc and stats tools |
-| `YAMS_BUILD_TESTS` | OFF | Build unit tests |
-| `YAMS_BUILD_BENCHMARKS` | OFF | Build performance benchmarks |
-| `CMAKE_BUILD_TYPE` | Release | Build type: `Debug`, `Release`, `RelWithDebInfo` |
+| `YAMS_USE_CONAN` | OFF | Use Conan package manager |
+| `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
+| `YAMS_BUILD_MCP_SERVER` | ON | MCP server with HTTP API |
+| `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
+| `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
+
+### Dependencies
+
+**Automatic with Conan**: spdlog, CLI11, nlohmann_json, SQLite3, zstd, lz4, OpenSSL, protobuf, ncurses, Drogon
+
+**Manual installation** (only if not using Conan):
+```bash
+# macOS
+brew install openssl@3 protobuf sqlite3 ncurses
+export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+
+# Linux
+apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
+```
 
 ## Setup
 

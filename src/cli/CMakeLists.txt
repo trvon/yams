@@ -17,6 +17,9 @@ set(CLI_SOURCES
     commands/list_command.cpp
     commands/stats_command.cpp
     commands/browse_command.cpp
+    tui/browse_state.cpp
+    tui/browse_services.cpp
+    tui/browse_commands.cpp
 )
 
 # Add serve command only if MCP is enabled
@@ -37,9 +40,7 @@ target_link_libraries(yams_cli
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::Crypto
-        ftxui::screen
-        ftxui::dom
-        ftxui::component
+        imtui-ncurses
 )
 
 # Link MCP library only if enabled
@@ -55,6 +56,9 @@ target_include_directories(yams_cli
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_BINARY_DIR}/_deps/imtui-src/include
+        ${CMAKE_BINARY_DIR}/_deps/imtui-src/third-party/imgui/imgui
 )
 
 # Ensure generated help/man assets are built before CLI when docs target exists

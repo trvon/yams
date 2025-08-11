@@ -56,6 +56,7 @@ public:
             
             auto store = cli_->getContentStore();
             auto searchExecutor = cli_->getSearchExecutor();
+            auto metadataRepo = cli_->getMetadataRepository();
             
             if (!store || !searchExecutor) {
                 return Error{ErrorCode::NotInitialized, "Storage not initialized"};
@@ -87,7 +88,7 @@ public:
             
             // Create and start MCP server
             auto server = std::make_unique<mcp::MCPServer>(
-                store, searchExecutor, std::move(transport));
+                store, searchExecutor, metadataRepo, std::move(transport));
             
             // Run server until shutdown signal
             server->start();

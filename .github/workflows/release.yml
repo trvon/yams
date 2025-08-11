@@ -47,6 +47,12 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
 
+      - name: Extract release notes from CHANGELOG.md
+        id: changelog
+        uses: ffurrer2/extract-release-notes@v2
+        with:
+          changelog_file: CHANGELOG.md
+
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -117,6 +123,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.release_notes }}
           files: ${{ steps.pkg.outputs.asset_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

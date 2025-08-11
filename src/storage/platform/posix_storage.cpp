@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <cstring>
 
 namespace yams::storage::platform {
@@ -22,7 +23,7 @@ Result<void> atomicRename(const std::filesystem::path& from,
     
     // Handle specific error cases
     switch (err) {
-        case EEXIST:
+        case EEXIST: {
             // Target already exists - for content-addressed storage this is OK
             // Verify the content matches
             std::error_code ec;
@@ -32,6 +33,7 @@ Result<void> atomicRename(const std::filesystem::path& from,
                 return {};
             }
             return Result<void>(ErrorCode::HashMismatch);
+        }
             
         case EACCES:
         case EPERM:

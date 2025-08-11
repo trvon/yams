@@ -202,16 +202,19 @@ public:
         // Create metadata for policy
         api::ContentMetadata metadata{
             .id = std::string(hash),
+            .name = "",
             .size = data.size(),
             .mimeType = "application/octet-stream",
-            .name = "",
+            .contentHash = std::string(hash),
             .createdAt = std::chrono::system_clock::now(),
-            .modifiedAt = std::chrono::system_clock::now()
+            .modifiedAt = std::chrono::system_clock::now(),
+            .accessedAt = std::chrono::system_clock::now(),
+            .tags = {}
         };
         
         compression::AccessPattern pattern{
-            .created = metadata.createdAt,
             .lastAccessed = metadata.createdAt,
+            .created = metadata.createdAt,
             .accessCount = 1,
             .readCount = 0,
             .writeCount = 0

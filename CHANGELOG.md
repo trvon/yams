@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3] - 2025-08-11
+
+### Added
+- **MCP Tools**: New Model Context Protocol tools supporting v0.0.2 CLI enhancements
+  - `delete_by_name`: Delete documents by name, multiple names, or glob patterns with dry-run support
+  - `get_by_name`: Retrieve document content by name instead of hash
+  - `cat_document`: Display document content directly (similar to CLI cat command)
+  - `list_documents`: List stored documents with filtering by pattern and tags
+- **TUI Browser migrated to ImTUI**: Complete rewrite from FTXUI to ImTUI for better compatibility
+  - Full-screen document viewer with hex mode toggle (Enter to open, x to toggle)
+  - External pager integration (o key) with proper terminal suspend/resume
+  - Preview pane scrolling when focused (Tab to switch columns, j/k to scroll)
+  - Extended command mode (:hex, :open, :refresh, :help, :q)
+
+### Changed
+- Browse command refactored to use modular TUI components and improved UX
+
+### Fixed
+- Safer preview of binary content and better CRLF handling
+- **Build System**: Resolved multiple compilation issues preventing CI/CD success
+  - Fixed switch statement scope error in `posix_storage.cpp` by adding proper braces
+  - Added missing `#include <sys/resource.h>` for POSIX resource limits
+  - Added missing `#include <cmath>` in embedding tests for `std::isfinite` and `std::sqrt`  
+  - Added missing `#include <algorithm>` for `std::all_of` in manifest manager
+  - Fixed designated initializer field ordering in `compressed_storage_engine.cpp`
+  - Fixed type conversion from `std::string_view` to `Hash` type
+  - Replaced `std::ranges::all_of` with `std::all_of` for broader compiler compatibility
+
+### Developer Notes
+- All compilation fixes tested locally with successful build completion
+- Prepared for GitHub Actions CI/CD pipeline success
+- Build now completes without errors on macOS (AppleClang 17.0.0)
+
 ## [0.0.2] - 2025-08-11
 
 ### Added

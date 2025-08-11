@@ -393,10 +393,104 @@ yams migrate
 
 ## browse {#cmd-browse}
 
-Interactive terminal UI (FTXUI) to browse and search your knowledge base with real-time fuzzy search.
+Interactive terminal UI (FTXUI) to browse and search, view, and manage documents with ergonomic, Vim-inspired keybindings. Features include a three-pane layout, fuzzy/exact search, a full-screen viewer, hex/text preview modes, and external pager integration.
 
 Synopsis:
 - yams browse
+
+### Modes
+
+- Normal mode (default)
+  - Navigate collections, documents, and the preview pane.
+  - Enter opens the full-screen viewer; : enters command mode; / enters search mode.
+  - Tab cycles focus across columns (Collections → Documents → Preview).
+- Search mode (/)
+  - Incremental filter; Ctrl-f toggles fuzzy/exact; Enter applies; Esc cancels.
+- Command mode (: or p)
+  - Execute commands like :q, :open, :help, :hex, :text, :refresh; Enter runs; Esc cancels.
+- Viewer mode (full-screen)
+  - View the selected document’s content with robust scrolling; q/Esc closes.
+
+### Keybindings (Normal mode)
+
+- Navigation
+  - j / k or ArrowDown / ArrowUp: Move selection up/down in the active column
+  - g / G: Jump to top/bottom
+  - PageDown / PageUp: Page movement (documents or preview, depending on focus)
+  - Ctrl-d / Ctrl-u: Half-page down/up
+  - h / l or ArrowLeft / ArrowRight: Move column focus left/right
+  - Tab: Cycle focus (Collections → Documents → Preview → Collections)
+- Actions
+  - Enter: Open full-screen viewer for the selected document
+  - o: Open selected document in external pager ($PAGER or less -R)
+  - x: Toggle preview mode between hex and text (Auto mode available via :auto)
+  - r: Refresh the lists
+  - d then D: Delete selected (confirmation)
+  - ?: Toggle help
+  - q / Esc: Quit TUI (or close viewer if open)
+
+### Search (incremental)
+
+- /: Enter search mode
+- Typing filters results immediately
+- Ctrl-f: Toggle fuzzy vs exact search
+- Enter: Apply filter and exit search mode
+- Esc: Cancel search mode and clear query
+
+### Command prompt (vi-like)
+
+Enter command mode with : or p. Supported commands:
+- :q, :quit, :wq
+  - Exit the TUI
+- :help
+  - Show help overlay
+- :open or :pager
+  - Open the selected document in external pager ($PAGER or less -R)
+- :hex
+  - Switch preview mode to hex
+- :text
+  - Switch preview mode to text
+- :auto
+  - Switch preview mode to auto (try text, fallback to “binary” notice)
+- :refresh
+  - Refresh documents/collections
+
+Notes:
+- Unknown commands show a status message with the command name.
+- Commands can be chained across sessions; state persists while the TUI is running.
+
+### Viewer mode (full-screen)
+
+- j / k or ArrowDown / ArrowUp: Line scroll
+- PageDown / PageUp: Page scroll
+- Ctrl-d / Ctrl-u: Half-page scroll
+- g / G: Jump to top/bottom
+- x: Toggle hex/text (viewer content rebuilt accordingly)
+- q / Esc: Close viewer and return to browse
+
+### Preview modes
+
+- Auto (default): Prefer text from metadata; fallback to bytes (if it looks like text). If content looks binary, shows a “Binary content. Preview unavailable.” notice.
+- Text: Force text-only; binary-looking content shows a notice.
+- Hex: Hex dump with ASCII gutter for safe inspection of binary data.
+
+Switching modes
+- Global toggle:
+  - x switches between hex and text
+- Explicit via command mode:
+  - :hex, :text, :auto
+
+### External pager integration
+
+- o or :open uses $PAGER if set; otherwise falls back to less -R
+- The TUI temporarily exits, runs the pager, then resumes with state intact and a status message
+- Pager receives either extracted text (preferred) or raw bytes (cap applied)
+
+### Tips
+
+- Keep your hands on the home row with j/k/g/G for navigation and : for commands
+- Use fuzzy search (Ctrl-f) to quickly locate documents by approximate name
+- Use hex mode (x) when previewing binary files
 
 Features:
 - Real-time document browsing with metadata integration

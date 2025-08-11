@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Option to use Conan for dependency management
+option(YAMS_USE_CONAN "Use Conan package manager for dependencies" OFF)
+
 # Derive version from git tags or allow override via -DYAMS_VERSION=MAJOR.MINOR.PATCH
 set(YAMS_VERSION "" CACHE STRING "Override Yams version (semver: MAJOR.MINOR.PATCH)")
 
@@ -499,29 +503,56 @@ if(YAMS_BUILD_BENCHMARKS)
     endif()
 endif()
 
-# spdlog for logging
-FetchContent_Declare(
-    spdlog
-    GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG v1.12.0
-)
-set(SPDLOG_INSTALL ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(spdlog)
-
-# nlohmann_json for JSON parsing
-find_package(nlohmann_json 3.11 QUIET)
-if(NOT nlohmann_json_FOUND)
+# Dependency management
+if(YAMS_USE_CONAN)
+    # When using Conan, dependencies are provided via find_package
+    find_package(spdlog REQUIRED)
+    find_package(nlohmann_json REQUIRED)
+    find_package(CLI11 REQUIRED)
+    find_package(ZLIB REQUIRED)
+    find_package(zstd REQUIRED)
+    find_package(lz4 REQUIRED)
+    find_package(SQLite3 REQUIRED)
+    find_package(Protobuf REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    if(YAMS_BUILD_CLI)
+        find_package(Curses REQUIRED)
+    endif()
+    if(YAMS_BUILD_MCP_SERVER)
+        find_package(Drogon REQUIRED)
+    endif()
+    if(YAMS_BUILD_TESTS)
+        find_package(GTest REQUIRED)
+    endif()
+    if(YAMS_BUILD_BENCHMARKS)
+        find_package(benchmark REQUIRED)
+    endif()
+else()
+    # Use FetchContent as fallback
+    # spdlog for logging
     FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.11.3
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.12.0
     )
-    FetchContent_MakeAvailable(nlohmann_json)
-    
-    # Export nlohmann_json with YamsTargets for downstream consumers
-    install(TARGETS nlohmann_json
-        EXPORT YamsTargets
-    )
+    set(SPDLOG_INSTALL ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(spdlog)
+
+    # nlohmann_json for JSON parsing
+    find_package(nlohmann_json 3.11 QUIET)
+    if(NOT nlohmann_json_FOUND)
+        FetchContent_Declare(
+            nlohmann_json
+            GIT_REPOSITORY https://github.com/nlohmann/json.git
+            GIT_TAG v3.11.3
+        )
+        FetchContent_MakeAvailable(nlohmann_json)
+        
+        # Export nlohmann_json with YamsTargets for downstream consumers
+        install(TARGETS nlohmann_json
+            EXPORT YamsTargets
+        )
+    endif()
     
     # Install nlohmann_json headers (it's header-only)
     install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/
@@ -538,18 +569,16 @@ if(YAMS_BUILD_TOOLS)
     )
     FetchContent_MakeAvailable(CLI11)
 
-    # FTXUI for Terminal User Interface
+    # ImTUI for Terminal User Interface (Immediate Mode TUI)
     FetchContent_Declare(
-        ftxui
-        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
-        GIT_TAG v5.0.0
+        imtui
+        GIT_REPOSITORY https://github.com/ggerganov/imtui.git
+        GIT_TAG master
+        GIT_SHALLOW TRUE
+        GIT_SUBMODULES_RECURSE TRUE
     )
-    set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(FTXUI_BUILD_TESTS_FUZZER OFF CACHE BOOL "" FORCE)
-    set(FTXUI_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(ftxui)
+    set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(imtui)
 endif()
 
 # Boost.Beast is part of Boost and will be available automatically
@@ -619,8 +648,6 @@ if(NOT lzma_POPULATED)
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
 endif()
-
-# Use built-in CRC32 from zstd instead of separate library
 
 # SQLite3 with FTS5
 FetchContent_Declare(

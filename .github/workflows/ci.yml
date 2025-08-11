@@ -14,12 +14,17 @@ permissions:
 
 jobs:
   build-test-package:
-    name: Build, Test, and Package (${{ matrix.os }})
+    name: Build, Test, and Package (${{ matrix.os }}, ${{ matrix.build_type }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        build_type: [conan, traditional]
+        exclude:
+          # Keep traditional as fallback on all platforms
+          - os: ubuntu-latest
+            build_type: traditional
 
     env:
       BUILD_DIR: build
@@ -29,6 +34,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python (for Conan)
+        if: matrix.build_type == 'conan'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -37,21 +48,52 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             cmake \
-            pkg-config \
-            libssl-dev \
-            libsqlite3-dev \
-            protobuf-compiler
+            pkg-config
+          
+          # Only install system deps for traditional build
+          if [[ "${{ matrix.build_type }}" == "traditional" ]]; then
+            sudo apt-get install -y \
+              libssl-dev \
+              libsqlite3-dev \
+              protobuf-compiler
+          fi
 
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
           brew update
-          brew install cmake openssl@3 sqlite3 protobuf
-          # Make OpenSSL discoverable by CMake on macOS
-          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+          brew install cmake
+          
+          # Only install system deps for traditional build
+          if [[ "${{ matrix.build_type }}" == "traditional" ]]; then
+            brew install openssl@3 sqlite3 protobuf
+            # Make OpenSSL discoverable by CMake on macOS
+            echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+          fi
 
-      - name: Configure (CMake)
+      - name: Install Conan
+        if: matrix.build_type == 'conan'
+        shell: bash
+        run: |
+          pip install conan
+          conan --version
+          
+      - name: Configure with Conan
+        if: matrix.build_type == 'conan'
+        shell: bash
+        run: |
+          # Create default profile
+          conan profile detect --force
+          
+          # Install dependencies
+          conan install . --build=missing --profile=default
+          
+          # Configure with CMake using Conan presets
+          cmake --preset conan-release
+
+      - name: Configure (Traditional CMake)
+        if: matrix.build_type == 'traditional'
         shell: bash
         run: |
           CMAKE_ARGS="-DYAMS_BUILD_PROFILE=dev -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
@@ -63,7 +105,14 @@ jobs:
 
           cmake -S . -B "$BUILD_DIR" $CMAKE_ARGS
 
-      - name: Build
+      - name: Build with Conan
+        if: matrix.build_type == 'conan'
+        shell: bash
+        run: |
+          cmake --build --preset conan-release
+
+      - name: Build (Traditional)
+        if: matrix.build_type == 'traditional'
         shell: bash
         run: |
           cmake --build "$BUILD_DIR" --parallel
@@ -71,8 +120,12 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          ctest --test-dir "$BUILD_DIR" --output-on-failure
-          ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^consumer_'
+          if [[ "${{ matrix.build_type }}" == "conan" ]]; then
+            ctest --preset conan-release --output-on-failure
+          else
+            ctest --test-dir "$BUILD_DIR" --output-on-failure
+            ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^consumer_'
+          fi
 
       - name: Run benchmarks
         shell: bash
@@ -133,7 +186,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: yams-install-${{ matrix.os }}
+          name: yams-install-${{ matrix.os }}-${{ matrix.build_type }}
           path: ${{ env.INSTALL_PREFIX }}
           if-no-files-found: error
 
@@ -151,18 +204,21 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: yams-packages-${{ matrix.os }}
+          name: yams-packages-${{ matrix.os }}-${{ matrix.build_type }}
           path: |
             ${{ env.BUILD_DIR }}/*.tar.gz
             ${{ env.BUILD_DIR }}/*.tgz
             ${{ env.BUILD_DIR }}/*.zip
+            build/Release/*.tar.gz
+            build/Release/*.tgz
+            build/Release/*.zip
           if-no-files-found: ignore
 
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-${{ matrix.os }}
+          name: benchmark-results-${{ matrix.os }}-${{ matrix.build_type }}
           path: ${{ env.BUILD_DIR }}/bench_results
           if-no-files-found: ignore
 
@@ -180,11 +236,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: yams-cli-${{ matrix.os }}
+          name: yams-cli-${{ matrix.os }}-${{ matrix.build_type }}
           path: |
             ${{ env.BUILD_DIR }}/tools/yams-cli/yams
             ${{ env.BUILD_DIR }}/tools/yams-cli/Debug/yams
             ${{ env.BUILD_DIR }}/tools/yams-cli/Release/yams
+            build/Release/tools/yams-cli/yams
           if-no-files-found: ignore
 
   consumer-test:
@@ -221,7 +278,7 @@ jobs:
       - name: Download installed Yams
         uses: actions/download-artifact@v4
         with:
-          name: yams-install-${{ matrix.os }}
+          name: yams-install-${{ matrix.os }}-traditional
           path: installed
 
       - name: Build consumer against installed package

@@ -4,6 +4,7 @@
 #include <yams/core/types.h>
 #include <yams/chunking/chunker.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -102,7 +103,7 @@ struct Manifest {
                fileHash.length() == HASH_STRING_SIZE &&
                !chunks.empty() &&
                fileSize > 0 &&
-               std::ranges::all_of(chunks, [](const auto& chunk) {
+               std::all_of(chunks.begin(), chunks.end(), [](const auto& chunk) {
                    return chunk.isValid();
                });
     }

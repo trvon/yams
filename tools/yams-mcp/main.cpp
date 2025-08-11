@@ -103,6 +103,7 @@ int main(int argc, char* argv[]) {
         // For now, create a basic MCP server with StdioTransport
         auto store = std::shared_ptr<yams::api::IContentStore>{nullptr}; // TODO: Initialize
         auto searchExecutor = std::shared_ptr<yams::search::SearchExecutor>{nullptr}; // TODO: Initialize
+        auto metadataRepo = std::shared_ptr<yams::metadata::MetadataRepository>{nullptr}; // TODO: Initialize
         
         // Create WebSocket transport if using WebSocket mode
         std::unique_ptr<yams::mcp::ITransport> transport;
@@ -116,7 +117,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Create MCP server
-        auto server = std::make_unique<yams::mcp::MCPServer>(store, searchExecutor, std::move(transport));
+        auto server = std::make_unique<yams::mcp::MCPServer>(store, searchExecutor, metadataRepo, std::move(transport));
         
         // Start server in background thread
         std::thread server_thread([&server]() {

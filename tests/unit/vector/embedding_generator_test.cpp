@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <cmath>
 
 using namespace yams::vector;
 

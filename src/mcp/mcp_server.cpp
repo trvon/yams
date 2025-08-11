@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/ssl.hpp>
@@ -175,11 +176,9 @@ public:
             std::lock_guard<std::mutex> lock(connectionMutex_);
             
             if (config_.useSSL && sslStream_) {
-                auto buffer = net::buffer(messageStr.c_str(), messageStr.size());
-                sslStream_->write(buffer, ec);
+                sslStream_->write(net::buffer(messageStr), ec);
             } else if (plainStream_) {
-                auto buffer = net::buffer(messageStr.c_str(), messageStr.size());
-                plainStream_->write(buffer, ec);
+                plainStream_->write(net::buffer(messageStr), ec);
             } else {
                 throw std::runtime_error("WebSocket stream not initialized");
             }
@@ -384,9 +383,11 @@ bool WebSocketTransport::waitForConnection(std::chrono::milliseconds timeout) {
 // MCPServer implementation
 MCPServer::MCPServer(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<search::SearchExecutor> searchExecutor,
+                     std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                      std::unique_ptr<ITransport> transport)
     : store_(std::move(store))
     , searchExecutor_(std::move(searchExecutor))
+    , metadataRepo_(std::move(metadataRepo))
     , transport_(std::move(transport)) {
 }
 
@@ -542,6 +543,71 @@ json MCPServer::listTools() {
         }}
     });
     
+    // Delete by name tool
+    tools.push_back({
+        {"name", "delete_by_name"},
+        {"description", "Delete documents by name or pattern"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"name", {{"type", "string"}, {"description", "Document name to delete"}}},
+                {"names", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Multiple document names"}}},
+                {"pattern", {{"type", "string"}, {"description", "Glob pattern (e.g., '*.log')"}}},
+                {"dry_run", {{"type", "boolean"}, {"default", false}, {"description", "Preview without deleting"}}}
+            }},
+            {"oneOf", json::array({
+                {{"required", json::array({"name"})}},
+                {{"required", json::array({"names"})}},
+                {{"required", json::array({"pattern"})}}
+            })}
+        }}
+    });
+    
+    // Get by name tool
+    tools.push_back({
+        {"name", "get_by_name"},
+        {"description", "Retrieve document content by name"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"name", {{"type", "string"}, {"description", "Document name"}}},
+                {"output_path", {{"type", "string"}, {"description", "Optional output file path"}}}
+            }},
+            {"required", json::array({"name"})}
+        }}
+    });
+    
+    // Cat document tool
+    tools.push_back({
+        {"name", "cat_document"},
+        {"description", "Display document content directly (like cat command)"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"hash", {{"type", "string"}, {"description", "Document hash"}}},
+                {"name", {{"type", "string"}, {"description", "Document name"}}}
+            }},
+            {"oneOf", json::array({
+                {{"required", json::array({"hash"})}},
+                {{"required", json::array({"name"})}}
+            })}
+        }}
+    });
+    
+    // List documents tool
+    tools.push_back({
+        {"name", "list_documents"},
+        {"description", "List stored documents with metadata"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"limit", {{"type", "integer"}, {"default", 50}, {"description", "Maximum number of results"}}},
+                {"pattern", {{"type", "string"}, {"description", "Filter by name pattern"}}},
+                {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Filter by tags"}}}
+            }}
+        }}
+    });
+    
     return {{"tools", tools}};
 }
 
@@ -574,6 +640,14 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return retrieveDocument(arguments);
     } else if (name == "get_stats") {
         return getStats(arguments);
+    } else if (name == "delete_by_name") {
+        return deleteByName(arguments);
+    } else if (name == "get_by_name") {
+        return getByName(arguments);
+    } else if (name == "cat_document") {
+        return catDocument(arguments);
+    } else if (name == "list_documents") {
+        return listDocuments(arguments);
     } else {
         return {{"error", "Unknown tool: " + name}};
     }
@@ -681,6 +755,288 @@ json MCPServer::getStats(const json& args) {
     }
 }
 
+json MCPServer::deleteByName(const json& args) {
+    try {
+        bool dry_run = args.value("dry_run", false);
+        json result = json::object();
+        result["dry_run"] = dry_run;
+        
+        std::vector<std::pair<std::string, std::string>> toDelete;
+        
+        if (args.contains("name")) {
+            std::string name = args["name"];
+            auto resolveResult = resolveNameToHashes(name);
+            if (!resolveResult) {
+                return {{"error", resolveResult.error().message}};
+            }
+            toDelete = resolveResult.value();
+            
+        } else if (args.contains("names")) {
+            auto names = args["names"].get<std::vector<std::string>>();
+            auto resolveResult = resolveNamesToHashes(names);
+            if (!resolveResult) {
+                return {{"error", resolveResult.error().message}};
+            }
+            toDelete = resolveResult.value();
+            
+        } else if (args.contains("pattern")) {
+            std::string pattern = args["pattern"];
+            auto resolveResult = resolvePatternToHashes(pattern);
+            if (!resolveResult) {
+                return {{"error", resolveResult.error().message}};
+            }
+            toDelete = resolveResult.value();
+            result["pattern"] = pattern;
+        }
+        
+        // Build result with actual matches found
+        json deleted_items = json::array();
+        int successful_deletions = 0;
+        json errors = json::array();
+        
+        for (const auto& [name, hash] : toDelete) {
+            if (!dry_run) {
+                // Actually delete the document
+                auto deleteResult = store_->remove(hash);
+                if (deleteResult) {
+                    successful_deletions++;
+                    deleted_items.push_back({{"name", name}, {"hash", hash}});
+                } else {
+                    errors.push_back({{"name", name}, {"hash", hash}, {"error", deleteResult.error().message}});
+                }
+            } else {
+                // Dry run - just record what would be deleted
+                deleted_items.push_back({{"name", name}, {"hash", hash}});
+            }
+        }
+        
+        result["deleted"] = deleted_items;
+        result["count"] = dry_run ? toDelete.size() : successful_deletions;
+        
+        if (!errors.empty()) {
+            result["errors"] = errors;
+        }
+        
+        std::string action = dry_run ? "Would delete" : "Deleted";
+        result["message"] = action + " " + std::to_string(result["count"].get<int>()) + " document(s)";
+        
+        return result;
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Delete failed: ") + e.what()}};
+    }
+}
+
+json MCPServer::getByName(const json& args) {
+    try {
+        std::string name = args["name"];
+        std::string output_path = args.value("output_path", "");
+        
+        // Resolve name to hash using existing CLI logic
+        auto resolveResult = resolveNameToHash(name);
+        if (!resolveResult) {
+            return {{"error", resolveResult.error().message}};
+        }
+        
+        std::string hash = resolveResult.value();
+        
+        // Check if document exists
+        auto existsResult = store_->exists(hash);
+        if (!existsResult) {
+            return {{"error", existsResult.error().message}};
+        }
+        
+        if (!existsResult.value()) {
+            return {{"error", "Document not found: " + hash}};
+        }
+        
+        json result;
+        result["name"] = name;
+        result["hash"] = hash;
+        
+        if (!output_path.empty()) {
+            // Retrieve to specified file path
+            auto retrieveResult = store_->retrieve(hash, output_path);
+            if (!retrieveResult) {
+                return {{"error", retrieveResult.error().message}};
+            }
+            
+            result["output_path"] = output_path;
+            result["size"] = retrieveResult.value().size;
+            result["message"] = "Document retrieved to: " + output_path;
+        } else {
+            // Get content directly (similar to cat functionality)
+            std::ostringstream oss;
+            auto streamResult = store_->retrieveStream(hash, oss, nullptr);
+            if (!streamResult) {
+                return {{"error", streamResult.error().message}};
+            }
+            
+            result["content"] = oss.str();
+            result["size"] = oss.str().size();
+            result["message"] = "Document content retrieved";
+        }
+        
+        return result;
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Get by name failed: ") + e.what()}};
+    }
+}
+
+json MCPServer::catDocument(const json& args) {
+    try {
+        std::string hashToDisplay;
+        json result = json::object();
+        
+        if (args.contains("hash")) {
+            std::string hash = args["hash"];
+            hashToDisplay = hash;
+            result["hash"] = hash;
+        } else if (args.contains("name")) {
+            std::string name = args["name"];
+            // Resolve name to hash using existing CLI logic
+            auto resolveResult = resolveNameToHash(name);
+            if (!resolveResult) {
+                return {{"error", resolveResult.error().message}};
+            }
+            hashToDisplay = resolveResult.value();
+            result["name"] = name;
+            result["hash"] = hashToDisplay;
+        } else {
+            return {{"error", "No document specified (hash or name required)"}};
+        }
+        
+        // Check if document exists
+        auto existsResult = store_->exists(hashToDisplay);
+        if (!existsResult) {
+            return {{"error", existsResult.error().message}};
+        }
+        
+        if (!existsResult.value()) {
+            return {{"error", "Document not found: " + hashToDisplay}};
+        }
+        
+        // Get content using stream interface (same as CLI cat command)
+        std::ostringstream oss;
+        auto streamResult = store_->retrieveStream(hashToDisplay, oss, nullptr);
+        if (!streamResult) {
+            return {{"error", streamResult.error().message}};
+        }
+        
+        result["content"] = oss.str();
+        result["size"] = oss.str().size();
+        
+        return result;
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Cat document failed: ") + e.what()}};
+    }
+}
+
+json MCPServer::listDocuments(const json& args) {
+    try {
+        int limit = args.value("limit", 50);
+        std::string pattern = args.value("pattern", "");
+        auto tags = args.value("tags", std::vector<std::string>{});
+        
+        if (!metadataRepo_) {
+            return {{"error", "Metadata repository not available"}};
+        }
+        
+        json result = json::object();
+        result["limit"] = limit;
+        
+        // Use existing CLI logic - get all documents from metadata repository
+        std::string searchPattern = pattern.empty() ? "%" : pattern;
+        
+        // Convert glob pattern to SQL LIKE pattern if needed
+        if (!pattern.empty()) {
+            std::replace(searchPattern.begin(), searchPattern.end(), '*', '%');
+            std::replace(searchPattern.begin(), searchPattern.end(), '?', '_');
+            if (searchPattern.front() != '%') {
+                searchPattern = "%/" + searchPattern;
+            }
+        }
+        
+        auto documentsResult = metadataRepo_->findDocumentsByPath(searchPattern);
+        if (!documentsResult) {
+            return {{"error", "Failed to query documents: " + documentsResult.error().message}};
+        }
+        
+        json documents = json::array();
+        
+        // Process each document (similar to CLI list command)
+        for (const auto& docInfo : documentsResult.value()) {
+            if (documents.size() >= static_cast<size_t>(limit)) {
+                break;
+            }
+            
+            json doc;
+            doc["name"] = docInfo.fileName;
+            doc["hash"] = docInfo.sha256Hash;
+            doc["path"] = docInfo.filePath;
+            doc["extension"] = docInfo.fileExtension;
+            doc["size"] = docInfo.fileSize;
+            doc["mime_type"] = docInfo.mimeType;
+            doc["created"] = std::chrono::duration_cast<std::chrono::seconds>(docInfo.createdTime.time_since_epoch()).count();
+            doc["modified"] = std::chrono::duration_cast<std::chrono::seconds>(docInfo.modifiedTime.time_since_epoch()).count();
+            doc["indexed"] = std::chrono::duration_cast<std::chrono::seconds>(docInfo.indexedTime.time_since_epoch()).count();
+            
+            // Get metadata including tags if requested
+            if (!tags.empty()) {
+                auto metadataResult = metadataRepo_->getAllMetadata(docInfo.id);
+                if (metadataResult) {
+                    const auto& metadata = metadataResult.value();
+                    json docTags = json::array();
+                    
+                    // Extract tags from metadata
+                    for (const auto& [key, value] : metadata) {
+                        if (key == "tag" || key.starts_with("tag:")) {
+                            docTags.push_back(value.value.empty() ? key : value.value);
+                        }
+                    }
+                    
+                    // Filter by tags if specified
+                    bool hasMatchingTag = tags.empty();
+                    if (!tags.empty()) {
+                        for (const auto& requiredTag : tags) {
+                            for (const auto& docTag : docTags) {
+                                if (docTag.get<std::string>() == requiredTag) {
+                                    hasMatchingTag = true;
+                                    break;
+                                }
+                            }
+                            if (hasMatchingTag) break;
+                        }
+                    }
+                    
+                    if (!hasMatchingTag) {
+                        continue; // Skip this document
+                    }
+                    
+                    doc["tags"] = docTags;
+                }
+            }
+            
+            documents.push_back(doc);
+        }
+        
+        result["documents"] = documents;
+        result["count"] = documents.size();
+        result["total_found"] = documentsResult.value().size();
+        
+        if (!pattern.empty()) {
+            result["pattern"] = pattern;
+        }
+        
+        if (!tags.empty()) {
+            result["filtered_by_tags"] = tags;
+        }
+        
+        return result;
+    } catch (const std::exception& e) {
+        return {{"error", std::string("List documents failed: ") + e.what()}};
+    }
+}
+
 json MCPServer::readResource(const std::string& uri) {
     // Could implement reading document content by URI
     return {{"content", "Resource reading not implemented"}};
@@ -707,6 +1063,115 @@ json MCPServer::createError(const json& id, int code, const std::string& message
         {"message", message}
     };
     return response;
+}
+
+// Name resolution helper methods (similar to CLI commands)
+Result<std::string> MCPServer::resolveNameToHash(const std::string& name) {
+    if (!metadataRepo_) {
+        return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+    }
+    
+    // Search for documents with matching fileName
+    auto documentsResult = metadataRepo_->findDocumentsByPath("%/" + name);
+    if (!documentsResult) {
+        // Try exact match
+        documentsResult = metadataRepo_->findDocumentsByPath(name);
+        if (!documentsResult) {
+            return Error{ErrorCode::NotFound, "Document not found: " + name};
+        }
+    }
+    
+    const auto& documents = documentsResult.value();
+    if (documents.empty()) {
+        return Error{ErrorCode::NotFound, "Document not found: " + name};
+    }
+    
+    if (documents.size() > 1) {
+        return Error{ErrorCode::InvalidOperation, "Ambiguous name: multiple documents match '" + name + "'"};
+    }
+    
+    return documents[0].sha256Hash;
+}
+
+Result<std::vector<std::pair<std::string, std::string>>> MCPServer::resolveNameToHashes(const std::string& name) {
+    if (!metadataRepo_) {
+        return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+    }
+    
+    // Search for documents with matching fileName
+    auto documentsResult = metadataRepo_->findDocumentsByPath("%/" + name);
+    if (!documentsResult) {
+        // Try exact match
+        documentsResult = metadataRepo_->findDocumentsByPath(name);
+        if (!documentsResult) {
+            return Error{ErrorCode::NotFound, "Failed to query documents: " + documentsResult.error().message};
+        }
+    }
+    
+    const auto& documents = documentsResult.value();
+    if (documents.empty()) {
+        return Error{ErrorCode::NotFound, "No documents found with name: " + name};
+    }
+    
+    std::vector<std::pair<std::string, std::string>> results;
+    for (const auto& doc : documents) {
+        results.emplace_back(doc.fileName, doc.sha256Hash);
+    }
+    
+    return results;
+}
+
+Result<std::vector<std::pair<std::string, std::string>>> MCPServer::resolveNamesToHashes(const std::vector<std::string>& names) {
+    std::vector<std::pair<std::string, std::string>> allResults;
+    
+    // Resolve each name
+    for (const auto& name : names) {
+        auto result = resolveNameToHashes(name);
+        if (result) {
+            for (const auto& pair : result.value()) {
+                allResults.push_back(pair);
+            }
+        } else if (result.error().code != ErrorCode::NotFound) {
+            // Return early on non-NotFound errors
+            return result;
+        }
+        // Skip NotFound errors for individual names
+    }
+    
+    if (allResults.empty()) {
+        return Error{ErrorCode::NotFound, "No documents found for the specified names"};
+    }
+    
+    return allResults;
+}
+
+Result<std::vector<std::pair<std::string, std::string>>> MCPServer::resolvePatternToHashes(const std::string& pattern) {
+    if (!metadataRepo_) {
+        return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+    }
+    
+    // Convert glob pattern to SQL LIKE pattern
+    std::string sqlPattern = pattern;
+    // Replace glob wildcards with SQL wildcards
+    std::replace(sqlPattern.begin(), sqlPattern.end(), '*', '%');
+    std::replace(sqlPattern.begin(), sqlPattern.end(), '?', '_');
+    
+    // Ensure it matches the end of the path (filename)
+    if (sqlPattern.front() != '%') {
+        sqlPattern = "%/" + sqlPattern;
+    }
+    
+    auto documentsResult = metadataRepo_->findDocumentsByPath(sqlPattern);
+    if (!documentsResult) {
+        return Error{ErrorCode::NotFound, "Failed to query documents: " + documentsResult.error().message};
+    }
+    
+    std::vector<std::pair<std::string, std::string>> results;
+    for (const auto& doc : documentsResult.value()) {
+        results.emplace_back(doc.fileName, doc.sha256Hash);
+    }
+    
+    return results;
 }
 
 } // namespace yams::mcp

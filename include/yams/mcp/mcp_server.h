@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <yams/api/content_store.h>
 #include <yams/search/search_executor.h>
+#include <yams/metadata/metadata_repository.h>
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <string>
@@ -83,6 +84,7 @@ class MCPServer {
 public:
     MCPServer(std::shared_ptr<api::IContentStore> store,
               std::shared_ptr<search::SearchExecutor> searchExecutor,
+              std::shared_ptr<metadata::MetadataRepository> metadataRepo,
               std::unique_ptr<ITransport> transport = std::make_unique<StdioTransport>());
     ~MCPServer();
     
@@ -119,13 +121,26 @@ private:
     json updateMetadata(const json& args);
     json getStats(const json& args);
     
+    // New v0.0.2 CLI integration tools
+    json deleteByName(const json& args);
+    json getByName(const json& args);
+    json catDocument(const json& args);
+    json listDocuments(const json& args);
+    
     // Helper methods
     json createResponse(const json& id, const json& result);
     json createError(const json& id, int code, const std::string& message);
     
+    // Name resolution helpers (similar to CLI commands)
+    Result<std::string> resolveNameToHash(const std::string& name);
+    Result<std::vector<std::pair<std::string, std::string>>> resolveNameToHashes(const std::string& name);
+    Result<std::vector<std::pair<std::string, std::string>>> resolveNamesToHashes(const std::vector<std::string>& names);
+    Result<std::vector<std::pair<std::string, std::string>>> resolvePatternToHashes(const std::string& pattern);
+    
 private:
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
+    std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::unique_ptr<ITransport> transport_;
     
     std::atomic<bool> running_{false};

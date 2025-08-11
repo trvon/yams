@@ -59,3 +59,5 @@ coverage/
 
 # Git lock files (shouldn't be committed)
 .git/index.lock
+
+docs/delivery
