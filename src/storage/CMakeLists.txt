@@ -23,7 +23,6 @@ target_link_libraries(yams_storage_engine
     PRIVATE
         spdlog::spdlog
         Threads::Threads
-        libzstd_static
 )
 
 target_include_directories(yams_storage_engine

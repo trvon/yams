@@ -20,12 +20,12 @@ class YamsConan(ConanFile):
     }
     default_options = {
         "build_cli": True,
-        "build_mcp_server": True,
+        "build_mcp_server": False,  # Disabled by default to avoid boost/beast issues
         "build_tests": False,
         "build_benchmarks": False,
     }
     
-    generators = "CMakeDeps", "CMakeToolchain"
+    generators = "CMakeDeps"  # CMakeToolchain is handled in generate()
     
     def requirements(self):
         # Core dependencies
@@ -46,6 +46,7 @@ class YamsConan(ConanFile):
         # For HTTP API (if Drogon is used)
         if self.options.build_mcp_server:
             self.requires("drogon/1.9.1")
+            self.requires("boost/1.83.0")
     
     def build_requirements(self):
         if self.options.build_tests:
@@ -68,16 +69,17 @@ class YamsConan(ConanFile):
         cmake_layout(self)
     
     def generate(self):
-        tc = CMakeToolchain(self)
-        tc.variables["YAMS_USE_CONAN"] = True
-        tc.variables["YAMS_BUILD_CLI"] = self.options.build_cli
-        tc.variables["YAMS_BUILD_MCP_SERVER"] = self.options.build_mcp_server
-        tc.variables["YAMS_BUILD_TESTS"] = self.options.build_tests
-        tc.variables["YAMS_BUILD_BENCHMARKS"] = self.options.build_benchmarks
+        # The toolchain is auto-generated, but we can configure cache variables
+        # by creating a toolchain_file.cmake in the generators folder
+        from conan.tools.cmake import CMakeToolchain
+        tc = CMakeToolchain(self, generator="Unix Makefiles")
+        tc.variables["YAMS_USE_CONAN"] = "ON"  # Must be string "ON" for CMake
+        # Convert Conan boolean options to CMake ON/OFF strings
+        tc.variables["YAMS_BUILD_CLI"] = "ON" if self.options.build_cli else "OFF"
+        tc.variables["YAMS_BUILD_MCP_SERVER"] = "ON" if self.options.build_mcp_server else "OFF"
+        tc.variables["YAMS_BUILD_TESTS"] = "ON" if self.options.build_tests else "OFF"
+        tc.variables["YAMS_BUILD_BENCHMARKS"] = "ON" if self.options.build_benchmarks else "OFF"
         tc.generate()
-        
-        deps = CMakeDeps(self)
-        deps.generate()
     
     def build(self):
         cmake = CMake(self)

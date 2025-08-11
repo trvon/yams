@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Option to use Conan for dependency management
-option(YAMS_USE_CONAN "Use Conan package manager for dependencies" OFF)
+# Check if we're running with a Conan preset (the toolchain file will be in generators/)
+if(CMAKE_TOOLCHAIN_FILE MATCHES "conan_toolchain\\.cmake$")
+    set(YAMS_USE_CONAN ON CACHE BOOL "Using Conan package manager" FORCE)
+else()
+    option(YAMS_USE_CONAN "Use Conan package manager for dependencies" OFF)
+endif()
 
 # Derive version from git tags or allow override via -DYAMS_VERSION=MAJOR.MINOR.PATCH
 set(YAMS_VERSION "" CACHE STRING "Override Yams version (semver: MAJOR.MINOR.PATCH)")
@@ -520,6 +525,7 @@ if(YAMS_USE_CONAN)
     endif()
     if(YAMS_BUILD_MCP_SERVER)
         find_package(Drogon REQUIRED)
+        find_package(Boost REQUIRED)
     endif()
     if(YAMS_BUILD_TESTS)
         find_package(GTest REQUIRED)
@@ -527,8 +533,12 @@ if(YAMS_USE_CONAN)
     if(YAMS_BUILD_BENCHMARKS)
         find_package(benchmark REQUIRED)
     endif()
-else()
-    # Use FetchContent as fallback
+endif()
+
+# When not using Conan, use FetchContent for dependencies
+message(STATUS "YAMS_USE_CONAN is: ${YAMS_USE_CONAN}")
+if(NOT YAMS_USE_CONAN)
+    message(STATUS "Using FetchContent for dependencies (non-Conan mode)")
     # spdlog for logging
     FetchContent_Declare(
         spdlog
@@ -562,145 +572,193 @@ endif()
 
 # CLI11 for command line parsing
 if(YAMS_BUILD_TOOLS)
-    FetchContent_Declare(
-        CLI11
-        GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-        GIT_TAG v2.4.1
-    )
-    FetchContent_MakeAvailable(CLI11)
+    if(NOT YAMS_USE_CONAN)
+        FetchContent_Declare(
+            CLI11
+            GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+            GIT_TAG v2.4.1
+        )
+        FetchContent_MakeAvailable(CLI11)
+    endif()
 
     # ImTUI for Terminal User Interface (Immediate Mode TUI)
-    FetchContent_Declare(
-        imtui
-        GIT_REPOSITORY https://github.com/ggerganov/imtui.git
-        GIT_TAG master
-        GIT_SHALLOW TRUE
-        GIT_SUBMODULES_RECURSE TRUE
-    )
-    set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(imtui)
+    if(YAMS_BUILD_CLI)
+        if(YAMS_USE_CONAN)
+            # When using Conan, we need to use ExternalProject_Add to pass ncurses paths
+            include(ExternalProject)
+            
+            # Find Curses package to get Conan-provided paths
+            find_package(Curses REQUIRED)
+            
+            # Build the full library paths from Conan variables
+            set(NCURSES_LIB_PATH "${ncurses_LIB_DIRS_RELEASE}/libncursesw.a")
+            set(TINFO_LIB_PATH "${ncurses_LIB_DIRS_RELEASE}/libtinfow.a")
+            
+            # Use ExternalProject_Add to build ImTUI with system ncurses
+            # Use system ncurses for ImTUI to get compatible versioned symbols
+            # while keeping Conan for all other dependencies
+            ExternalProject_Add(
+                imtui_external
+                GIT_REPOSITORY https://github.com/ggerganov/imtui.git
+                GIT_TAG        master
+                CMAKE_ARGS
+                    -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                    -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/imtui_install
+                    -DIMTUI_BUILD_EXAMPLES=OFF
+                    # Let ImTUI find system ncurses naturally for compatibility
+                BUILD_ALWAYS OFF
+                INSTALL_COMMAND ""
+            )
+            
+            # Create interface library for ImTUI that our code can link to
+            add_library(imtui-ncurses INTERFACE)
+            add_dependencies(imtui-ncurses imtui_external)
+            
+            # Add include directories - ImTUI needs to find imgui/imgui.h
+            # The ImTUI header does #include "imgui/imgui.h" so we need to add the dir that contains imgui/
+            # Our code does #include <imgui.h> so we need to add the imgui dir itself too
+            target_include_directories(imtui-ncurses INTERFACE 
+                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/include
+                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/third-party/imgui
+                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/third-party/imgui/imgui
+            )
+            
+            # Link to the built ImTUI library and system ncurses for compatibility
+            target_link_libraries(imtui-ncurses INTERFACE
+                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/src/libimtui-ncurses.a
+                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/src/libimtui.a
+                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/third-party/libimgui-for-imtui.a
+                # Use system ncurses for ImTUI to match versioned symbols
+                "-framework System"
+                curses
+            )
+        else()
+            # Use FetchContent for non-Conan builds
+            FetchContent_Declare(
+                imtui
+                GIT_REPOSITORY https://github.com/ggerganov/imtui.git
+                GIT_TAG master
+                GIT_SHALLOW TRUE
+                GIT_SUBMODULES_RECURSE TRUE
+            )
+            set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+            FetchContent_MakeAvailable(imtui)
+        endif()
+    endif()
 endif()
 
 # Boost.Beast is part of Boost and will be available automatically
 # No separate dependency needed for WebSocket transport
 
-# Zstandard for compression
-FetchContent_Declare(
-    zstd
-    URL https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
-    URL_HASH SHA256=8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1
-    SOURCE_SUBDIR build/cmake
-)
-set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(zstd)
-
-# LZMA SDK for compression
-FetchContent_Declare(
-    lzma
-    URL https://github.com/ip7z/7zip/releases/download/24.08/7z2408-src.tar.xz
-    URL_HASH SHA256=aa04aac906a04df59e7301f4c69e9f48808e6c8ecae4eb697703a47bfb0ac042
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_GetProperties(lzma)
-if(NOT lzma_POPULATED)
-    FetchContent_Populate(lzma)
-
-    # Create LZMA library from SDK sources
-    add_library(lzma_sdk STATIC
-        ${lzma_SOURCE_DIR}/C/LzmaEnc.c
-        ${lzma_SOURCE_DIR}/C/LzmaDec.c
-        ${lzma_SOURCE_DIR}/C/LzFind.c
-        ${lzma_SOURCE_DIR}/C/Lzma2Enc.c
-        ${lzma_SOURCE_DIR}/C/Lzma2Dec.c
-        ${lzma_SOURCE_DIR}/C/Lzma86Enc.c
-        ${lzma_SOURCE_DIR}/C/Lzma86Dec.c
-        ${lzma_SOURCE_DIR}/C/CpuArch.c
-        ${lzma_SOURCE_DIR}/C/Alloc.c
-        ${lzma_SOURCE_DIR}/C/LzFindMt.c
-        ${lzma_SOURCE_DIR}/C/Threads.c
-        ${lzma_SOURCE_DIR}/C/MtCoder.c
-        ${lzma_SOURCE_DIR}/C/MtDec.c
-        ${lzma_SOURCE_DIR}/C/Lzma2DecMt.c
-        ${lzma_SOURCE_DIR}/C/LzFindOpt.c
-        ${lzma_SOURCE_DIR}/C/7zStream.c
+# Zstandard for compression - only if not using Conan
+if(NOT YAMS_USE_CONAN)
+    FetchContent_Declare(
+        zstd
+        URL https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
+        URL_HASH SHA256=8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1
+        SOURCE_SUBDIR build/cmake
     )
-
-    target_include_directories(lzma_sdk PUBLIC
-        $<BUILD_INTERFACE:${lzma_SOURCE_DIR}/C>
-        $<INSTALL_INTERFACE:include/lzma>
-    )
-    # Enable multi-threaded support for LZMA SDK
-
-    # Disable warnings for third-party code
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(lzma_sdk PRIVATE -w)
-    elseif(MSVC)
-        target_compile_options(lzma_sdk PRIVATE /w)
-    endif()
-
-    # Install lzma_sdk
-    install(TARGETS lzma_sdk
-        EXPORT YamsTargets
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    )
+    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(zstd)
 endif()
 
-# SQLite3 with FTS5
-FetchContent_Declare(
-    sqlite3
-    URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
-    URL_HASH SHA256=77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_GetProperties(sqlite3)
-if(NOT sqlite3_POPULATED)
-    FetchContent_Populate(sqlite3)
-
-    # Create SQLite library with FTS5 enabled
-    add_library(sqlite3 STATIC
-        ${sqlite3_SOURCE_DIR}/sqlite3.c
+# LZMA SDK for compression - always needed since no good Conan package exists
+# if(NOT YAMS_USE_CONAN)
+    FetchContent_Declare(
+        lzma
+        URL https://github.com/ip7z/7zip/releases/download/24.08/7z2408-src.tar.xz
+        URL_HASH SHA256=aa04aac906a04df59e7301f4c69e9f48808e6c8ecae4eb697703a47bfb0ac042
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
+    FetchContent_GetProperties(lzma)
+    if(NOT lzma_POPULATED)
+        FetchContent_Populate(lzma)
 
-    target_include_directories(sqlite3 PUBLIC
-        $<BUILD_INTERFACE:${sqlite3_SOURCE_DIR}>
-        $<INSTALL_INTERFACE:include/sqlite3>
-    )
+        # Create LZMA library from SDK sources
+        add_library(lzma_sdk STATIC
+            ${lzma_SOURCE_DIR}/C/LzmaEnc.c
+            ${lzma_SOURCE_DIR}/C/LzmaDec.c
+            ${lzma_SOURCE_DIR}/C/LzFind.c
+            ${lzma_SOURCE_DIR}/C/Lzma2Enc.c
+            ${lzma_SOURCE_DIR}/C/Lzma2Dec.c
+            ${lzma_SOURCE_DIR}/C/Lzma86Enc.c
+            ${lzma_SOURCE_DIR}/C/Lzma86Dec.c
+            ${lzma_SOURCE_DIR}/C/CpuArch.c
+            ${lzma_SOURCE_DIR}/C/Alloc.c
+            ${lzma_SOURCE_DIR}/C/LzFindMt.c
+            ${lzma_SOURCE_DIR}/C/Threads.c
+            ${lzma_SOURCE_DIR}/C/MtCoder.c
+            ${lzma_SOURCE_DIR}/C/MtDec.c
+            ${lzma_SOURCE_DIR}/C/Lzma2DecMt.c
+            ${lzma_SOURCE_DIR}/C/LzFindOpt.c
+            ${lzma_SOURCE_DIR}/C/7zStream.c
+        )
 
-    # Enable FTS5 and other useful extensions
-    target_compile_definitions(sqlite3 PRIVATE
-        SQLITE_ENABLE_FTS5=1
-        SQLITE_ENABLE_RTREE=1
-        SQLITE_ENABLE_JSON1=1
-        SQLITE_ENABLE_STAT4=1
-        SQLITE_ENABLE_UPDATE_DELETE_LIMIT=1
-        SQLITE_ENABLE_COLUMN_METADATA=1
-        SQLITE_DEFAULT_MEMSTATUS=0
-        SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
-        SQLITE_LIKE_DOESNT_MATCH_BLOBS=1
-        SQLITE_MAX_EXPR_DEPTH=0
-        SQLITE_OMIT_DEPRECATED=1
-        SQLITE_OMIT_SHARED_CACHE=1
-        SQLITE_USE_ALLOCA=1
-        SQLITE_THREADSAFE=2
-    )
+        target_include_directories(lzma_sdk PUBLIC
+            $<BUILD_INTERFACE:${lzma_SOURCE_DIR}/C>
+            $<INSTALL_INTERFACE:include/lzma>
+        )
+        # Enable multi-threaded support for LZMA SDK
 
-    # Disable warnings for third-party code
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(sqlite3 PRIVATE -w)
-    elseif(MSVC)
-        target_compile_options(sqlite3 PRIVATE /w)
+        # Disable warnings for third-party code
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(lzma_sdk PRIVATE -w)
+        elseif(MSVC)
+            target_compile_options(lzma_sdk PRIVATE /w)
+        endif()
     endif()
+# endif()
 
-    # Install sqlite3
-    install(TARGETS sqlite3
-        EXPORT YamsTargets
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+# SQLite3 with FTS5 - only if not using Conan
+if(NOT YAMS_USE_CONAN)
+    FetchContent_Declare(
+        sqlite3
+        URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+        URL_HASH SHA256=77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
+    FetchContent_GetProperties(sqlite3)
+    if(NOT sqlite3_POPULATED)
+        FetchContent_Populate(sqlite3)
+
+        # Create SQLite library with FTS5 enabled
+        add_library(sqlite3 STATIC
+            ${sqlite3_SOURCE_DIR}/sqlite3.c
+        )
+
+        target_include_directories(sqlite3 PUBLIC
+            $<BUILD_INTERFACE:${sqlite3_SOURCE_DIR}>
+            $<INSTALL_INTERFACE:include/sqlite3>
+        )
+
+        # Enable FTS5 and other useful extensions
+        target_compile_definitions(sqlite3 PRIVATE
+            SQLITE_ENABLE_FTS5=1
+            SQLITE_ENABLE_RTREE=1
+            SQLITE_ENABLE_JSON1=1
+            SQLITE_ENABLE_STAT4=1
+            SQLITE_ENABLE_UPDATE_DELETE_LIMIT=1
+            SQLITE_ENABLE_COLUMN_METADATA=1
+            SQLITE_DEFAULT_MEMSTATUS=0
+            SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+            SQLITE_LIKE_DOESNT_MATCH_BLOBS=1
+            SQLITE_MAX_EXPR_DEPTH=0
+            SQLITE_OMIT_DEPRECATED=1
+            SQLITE_OMIT_SHARED_CACHE=1
+            SQLITE_USE_ALLOCA=1
+            SQLITE_THREADSAFE=2
+        )
+
+        # Disable warnings for third-party code
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(sqlite3 PRIVATE -w)
+        elseif(MSVC)
+            target_compile_options(sqlite3 PRIVATE /w)
+        endif()
+    endif()
 endif()
 
 # Protocol Buffers (optional, for manifest serialization)
@@ -794,7 +852,21 @@ endif()
 
 
 # Export targets
-install(TARGETS yams_core yams_indexing
+set(YAMS_EXPORT_TARGETS yams_core yams_indexing)
+
+# Always export lzma_sdk since we always build it
+if(TARGET lzma_sdk)
+    list(APPEND YAMS_EXPORT_TARGETS lzma_sdk)
+endif()
+
+# Only export sqlite3 if we built it (non-Conan)
+if(NOT YAMS_USE_CONAN)
+    if(TARGET sqlite3)
+        list(APPEND YAMS_EXPORT_TARGETS sqlite3)
+    endif()
+endif()
+
+install(TARGETS ${YAMS_EXPORT_TARGETS}
     EXPORT YamsTargets
 )
 

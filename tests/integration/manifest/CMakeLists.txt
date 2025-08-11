@@ -12,6 +12,7 @@ target_link_libraries(manifest_integration_tests
         yams::storage_engine
         yams::chunking
         yams::crypto
+        spdlog::spdlog
 )
 
 target_include_directories(manifest_integration_tests

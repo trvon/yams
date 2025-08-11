@@ -23,18 +23,14 @@ My base prompt is [PROMPT.md](docs/PROMPT.md)
 ### Quick Start
 
 ```bash
-# Install build tools
-brew install cmake conan             # macOS
-apt install cmake python3-pip && pip3 install conan  # Ubuntu/Debian
+# Install Conan
+pip install conan
 
-# Build with Conan (recommended - handles all dependencies)
-conan install . --build=missing --profile=default
+# Build and Install
+conan install . --build=missing --settings=compiler.cppstd=20
 cmake --preset conan-release
 cmake --build --preset conan-release
-
-# Traditional build (fallback - uses FetchContent)
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+sudo cmake --install build/Release
 ```
 
 ### Build Options
@@ -43,7 +39,7 @@ cmake --build build -j$(nproc)
 |--------|---------|-------------|
 | `YAMS_USE_CONAN` | OFF | Use Conan package manager |
 | `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
-| `YAMS_BUILD_MCP_SERVER` | ON | MCP server with HTTP API |
+| `YAMS_BUILD_MCP_SERVER` | OFF | MCP server (requires Boost) |
 | `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 

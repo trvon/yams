@@ -20,15 +20,27 @@ target_include_directories(yams_compression
         $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(yams_compression
-    PUBLIC
-        yams::core
-        libzstd_static
-        lzma_sdk
-        OpenSSL::Crypto  # For CRC32
-    PRIVATE
-        spdlog::spdlog
-)
+if(YAMS_USE_CONAN)
+    target_link_libraries(yams_compression
+        PUBLIC
+            yams::core
+            zstd::libzstd_static
+            lzma_sdk  # Always use our custom LZMA SDK build
+            OpenSSL::Crypto  # For CRC32
+        PRIVATE
+            spdlog::spdlog
+    )
+else()
+    target_link_libraries(yams_compression
+        PUBLIC
+            yams::core
+            libzstd_static
+            lzma_sdk
+            OpenSSL::Crypto  # For CRC32
+        PRIVATE
+            spdlog::spdlog
+    )
+endif()
 
 target_compile_features(yams_compression PUBLIC cxx_std_20)
 

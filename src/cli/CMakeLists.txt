@@ -56,9 +56,6 @@ target_include_directories(yams_cli
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-    PRIVATE
-        ${CMAKE_BINARY_DIR}/_deps/imtui-src/include
-        ${CMAKE_BINARY_DIR}/_deps/imtui-src/third-party/imgui/imgui
 )
 
 # Ensure generated help/man assets are built before CLI when docs target exists
