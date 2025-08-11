@@ -517,6 +517,16 @@ if(NOT nlohmann_json_FOUND)
         GIT_TAG v3.11.3
     )
     FetchContent_MakeAvailable(nlohmann_json)
+    
+    # Export nlohmann_json with YamsTargets for downstream consumers
+    install(TARGETS nlohmann_json
+        EXPORT YamsTargets
+    )
+    
+    # Install nlohmann_json headers (it's header-only)
+    install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
 endif()
 
 # CLI11 for command line parsing

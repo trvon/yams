@@ -1,3 +1,4 @@
+#if __has_include(<benchmark/benchmark.h>)
 #include <benchmark/benchmark.h>
 #include <algorithm>
 #include <random>
@@ -147,3 +148,10 @@ BENCHMARK(BM_ResultRanker_PartialSort)
     ->UseRealTime();
 
 BENCHMARK_MAIN();
+#else
+#include <iostream>
+int main(int, char**) {
+    std::cerr << "Benchmarks are disabled: Google Benchmark not available.\n";
+    return 0;
+}
+#endif

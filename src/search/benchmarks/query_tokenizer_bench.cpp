@@ -1,3 +1,4 @@
+#if __has_include(<benchmark/benchmark.h>)
 #include <benchmark/benchmark.h>
 #include <yams/search/query_tokenizer.h>
 #include <string>
@@ -263,5 +264,12 @@ BENCHMARK(BM_QueryTokenizer_PathologicalOps)
     ->UseRealTime();
 
 BENCHMARK_MAIN();
+#else
+#include <iostream>
+int main(int, char**) {
+    std::cerr << "Benchmarks are disabled: Google Benchmark not available.\n";
+    return 0;
+}
+#endif
 
 // NOLINTEND(readability-identifier-naming)

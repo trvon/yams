@@ -193,7 +193,8 @@ private:
 
 } // namespace yams
 
-// Format support for ErrorCode
+// Format support for ErrorCode (guarded for environments without <format>)
+#if __has_include(<format>)
 #include <format>
 template<>
 struct std::formatter<yams::ErrorCode> {
@@ -205,6 +206,7 @@ struct std::formatter<yams::ErrorCode> {
         return std::format_to(ctx.out(), "{}", yams::errorToString(error));
     }
 };
+#endif
 
 // fmt library support for ErrorCode (for spdlog)
 #if defined(SPDLOG_FMT_EXTERNAL) || defined(FMT_VERSION)

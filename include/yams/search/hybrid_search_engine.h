@@ -9,7 +9,7 @@
 #include <optional>
 #include <chrono>
 #include <map>
-#include <functional>
+
 
 namespace yams::search {
 

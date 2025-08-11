@@ -5,8 +5,13 @@
 #include <cmath>
 #include <fstream>
 #include <random>
-#include <thread>
+
+#if __has_include(<format>)
 #include <format>
+#define YAMS_HAVE_STD_FORMAT 1
+#else
+#define YAMS_HAVE_STD_FORMAT 0
+#endif
 
 namespace yams::benchmarks {
 
@@ -410,6 +415,7 @@ void saveResults(const std::vector<BenchmarkResult>& results, const std::string&
 }
 
 std::string formatTime(double microseconds) {
+#if YAMS_HAVE_STD_FORMAT
     if (microseconds < 1000) {
         return std::format("{:.2f} μs", microseconds);
     } else if (microseconds < 1000000) {
@@ -417,9 +423,27 @@ std::string formatTime(double microseconds) {
     } else {
         return std::format("{:.2f} s", microseconds / 1000000);
     }
+#else
+    auto to_fixed = [](double v, const char* unit) {
+        std::string s = std::to_string(v);
+        auto dot = s.find('.');
+        if (dot != std::string::npos && dot + 3 < s.size()) {
+            s = s.substr(0, dot + 3);
+        }
+        return s + " " + unit;
+    };
+    if (microseconds < 1000) {
+        return to_fixed(microseconds, "μs");
+    } else if (microseconds < 1000000) {
+        return to_fixed(microseconds / 1000.0, "ms");
+    } else {
+        return to_fixed(microseconds / 1000000.0, "s");
+    }
+#endif
 }
 
 std::string formatMemory(size_t bytes) {
+#if YAMS_HAVE_STD_FORMAT
     if (bytes < 1024) {
         return std::format("{} B", bytes);
     } else if (bytes < 1024 * 1024) {
@@ -429,6 +453,25 @@ std::string formatMemory(size_t bytes) {
     } else {
         return std::format("{:.2f} GB", bytes / (1024.0 * 1024 * 1024));
     }
+#else
+    auto to_fixed = [](double v, const char* unit) {
+        std::string s = std::to_string(v);
+        auto dot = s.find('.');
+        if (dot != std::string::npos && dot + 3 < s.size()) {
+            s = s.substr(0, dot + 3);
+        }
+        return s + " " + unit;
+    };
+    if (bytes < 1024) {
+        return std::to_string(bytes) + " B";
+    } else if (bytes < 1024 * 1024) {
+        return to_fixed(static_cast<double>(bytes) / 1024.0, " KB");
+    } else if (bytes < 1024 * 1024 * 1024) {
+        return to_fixed(static_cast<double>(bytes) / (1024.0 * 1024), " MB");
+    } else {
+        return to_fixed(static_cast<double>(bytes) / (1024.0 * 1024 * 1024), " GB");
+    }
+#endif
 }
 
 void printResultsTable(const std::vector<BenchmarkResult>& results) {

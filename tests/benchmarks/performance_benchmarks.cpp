@@ -1,3 +1,4 @@
+#if __has_include(<benchmark/benchmark.h>)
 #include <benchmark/benchmark.h>
 #include <yams/crypto/hasher.h>
 #include <yams/chunking/chunker.h>
@@ -433,3 +434,10 @@ int main(int argc, char** argv) {
     
     return 0;
 }
+#else
+#include <iostream>
+int main(int, char**) {
+    std::cerr << "Benchmarks are disabled: Google Benchmark not available.\n";
+    return 0;
+}
+#endif
