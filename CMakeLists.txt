@@ -50,13 +50,13 @@ configure_file(
     @ONLY
 )
 
+# Ensure default CMake package dir uses 'Yams' casing for consumers
+include(GNUInstallDirs)
+
 # Install generated version header
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/yams/version.hpp"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/yams"
         COMPONENT development)
-
-# Ensure default CMake package dir uses 'Yams' casing for consumers
-include(GNUInstallDirs)
 set(YAMS_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/Yams"
     CACHE PATH "Install dir for YAMS CMake package files")
 

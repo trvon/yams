@@ -2,9 +2,9 @@
 #include <yams/search/search_executor.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/connection_pool.h>
-#include <yams/metadata/connection_pool.h>
 #include <string>
 #include <memory>
+#include <filesystem>
 
 using namespace yams::search;
 using namespace yams::metadata;
@@ -33,14 +33,28 @@ static void BM_SearchExecutor_QueryLen_Limit(benchmark::State& state) {
     const size_t limit = static_cast<size_t>(state.range(1));
 
     // Prepare repository and executor (outside timing)
-    auto pool = std::make_shared<ConnectionPool>(":memory:");
+    namespace fs = std::filesystem;
+    fs::path dbPath = fs::temp_directory_path() / "yams_bench_search.sqlite";
+
+    // Create and open database at on-disk path
+    auto db = std::make_shared<metadata::Database>();
+    auto openResult = db->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
+    if (!openResult) {
+        state.SkipWithError("Failed to open database");
+        return;
+    }
+
+    // Initialize connection pool pointing to the same path
+    auto pool = std::make_shared<ConnectionPool>(dbPath.string());
     auto initResult = pool->initialize();
     if (!initResult) {
         state.SkipWithError("Failed to initialize metadata pool");
         return;
     }
+
+    // Create repository and search executor
     auto metadataRepo = std::make_shared<MetadataRepository>(*pool);
-    SearchExecutor executor(metadataRepo);
+    SearchExecutor executor(db, metadataRepo);
 
     // NOTE: Repository is currently unseeded (no public seeding API used here).
     // This still exercises parsing/planning and integration layers.
@@ -72,14 +86,22 @@ static void BM_SearchExecutor_QueryLen_Limit(benchmark::State& state) {
         state.counters["throughput_Bps"] = benchmark::Counter(
             static_cast<double>(total_query_bytes), benchmark::Counter::kIsRate);
     }
-}
-BENCHMARK(BM_SearchExecutor_QueryLen_Limit)
-    ->Args({16, 10})
-    ->Args({64, 10})
-    ->Args({128, 10})
-    ->Args({16, 20})
-    ->Args({64, 20})
-    ->Args({128, 20})
-    ->UseRealTime();
+
+    // Cleanup on-disk DB files (outside timing)
+    state.PauseTiming();
+    std::error_code ec;
+    fs::remove(dbPath, ec);
+    fs::remove(fs::path(dbPath.string() + "-wal"), ec);
+    fs::remove(fs::path(dbPath.string() + "-shm"), ec);
+    state.ResumeTiming();
+    }
+    BENCHMARK(BM_SearchExecutor_QueryLen_Limit)
+        ->Args({16, 10})
+        ->Args({64, 10})
+        ->Args({128, 10})
+        ->Args({16, 20})
+        ->Args({64, 20})
+        ->Args({128, 20})
+        ->UseRealTime();
 
 BENCHMARK_MAIN();

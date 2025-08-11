@@ -42,8 +42,7 @@ dnf install cmake openssl-devel sqlite-devel protobuf-compiler
 #### Quick Start - Release Build
 For end users who just want the CLI and MCP server:
 ```bash
-mkdir build && cd build
-cmake -DYAMS_BUILD_PROFILE=release ..
+cmake -B build -DYAMS_BUILD_PROFILE=release
 make -j$(nproc)
 sudo make install
 # Installs: yams, yams-mcp-server
