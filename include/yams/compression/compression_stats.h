@@ -93,7 +93,7 @@ struct AlgorithmStats {
         filesCompressed++;
         bytesInput += result.originalSize;
         bytesOutput += result.compressedSize;
-        compressionTimeMs += static_cast<uint64_t>(std::max(result.duration.count(), 0LL));
+        compressionTimeMs += static_cast<uint64_t>((result.duration.count() < 0) ? 0L : result.duration.count());
     }
     
     /**
@@ -105,7 +105,7 @@ struct AlgorithmStats {
     void recordDecompression(size_t /*inputSize*/, size_t /*outputSize*/, 
                            std::chrono::milliseconds duration) {
         filesDecompressed++;
-        decompressionTimeMs += static_cast<uint64_t>(std::max(duration.count(), 0LL));
+        decompressionTimeMs += static_cast<uint64_t>((duration.count() < 0) ? 0L : duration.count());
     }
 };
 
