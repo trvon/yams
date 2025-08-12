@@ -585,7 +585,7 @@ if(YAMS_USE_CONAN)
     endif()
     if(YAMS_BUILD_MCP_SERVER)
         find_package(Drogon REQUIRED)
-        find_package(Boost REQUIRED)
+        # Boost will be handled via FetchContent below for non-Conan builds
     endif()
     if(YAMS_BUILD_TESTS)
         # Note: Conan's GTest config has issues with alias targets
@@ -630,6 +630,32 @@ if(NOT YAMS_USE_CONAN)
     install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
+    
+    # Boost for MCP server (Beast/ASIO for WebSocket support)
+    if(YAMS_BUILD_MCP_SERVER)
+        message(STATUS "Fetching Boost headers for MCP server")
+        FetchContent_Declare(
+            Boost
+            URL https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz
+            URL_HASH SHA256=2e64e5d79a738d0fa6fb546c6e5c2bd28f88d268a2a080546f74e5ff98f29d0e
+            DOWNLOAD_EXTRACT_TIMESTAMP ON
+        )
+        FetchContent_MakeAvailable(Boost)
+        
+        # Boost automatically creates boost_headers target, just need to make it available
+        # The Boost::headers alias should already exist from the Boost CMake configuration
+        if(NOT TARGET Boost::headers)
+            # Only create alias if it doesn't exist
+            if(TARGET boost_headers)
+                add_library(Boost::headers ALIAS boost_headers)
+            else()
+                # Fallback: create our own interface library
+                add_library(yams_boost_headers INTERFACE)
+                target_include_directories(yams_boost_headers INTERFACE ${boost_SOURCE_DIR})
+                add_library(Boost::headers ALIAS yams_boost_headers)
+            endif()
+        endif()
+    endif()
 endif()
 
 # CLI11 for command line parsing
