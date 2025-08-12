@@ -3,6 +3,13 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/document_metadata.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <iostream>
@@ -201,6 +208,7 @@ private:
         std::string language;
         std::string extractionMethod;
         bool hasContent = false;
+
         
         std::string getFormattedSize() const {
             auto size = static_cast<size_t>(info.fileSize);
@@ -209,9 +217,9 @@ private:
             } else if (size < 1024 * 1024) {
                 return std::to_string(size / 1024) + " KB";
             } else if (size < 1024 * 1024 * 1024) {
-                return std::format("{:.1f} MB", size / (1024.0 * 1024.0));
+                return yamsfmt::format("{:.1f} MB", size / (1024.0 * 1024.0));
             } else {
-                return std::format("{:.1f} GB", size / (1024.0 * 1024.0 * 1024.0));
+                return yamsfmt::format("{:.1f} GB", size / (1024.0 * 1024.0 * 1024.0));
             }
         }
         

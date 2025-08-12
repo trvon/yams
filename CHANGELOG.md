@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Intelligent result aggregation with boost for documents matching all query words
   - Edit distance-based scoring (closer matches score higher)
   - Automatic fallback to fuzzy search when FTS5 fails
+  - **Hash search capability**: Search documents by SHA256 hash (full or partial, minimum 8 characters)
+  - **Verbosity control**: Concise output by default, detailed output with --verbose flag
+  - Auto-detection of hash format in queries (8-64 hexadecimal characters automatically trigger hash search)
+- **MCP Server Enhancements**:
+  - Updated to use metadata repository path with all v0.0.5 search improvements
+  - Added fuzzy search support to MCP server tools with configurable similarity threshold
+  - Enhanced search_documents tool with fuzzy and similarity parameters
 
 ### Fixed
   - Proper handling of hyphens in queries like "PBI-6", "task-4", "feature-123"

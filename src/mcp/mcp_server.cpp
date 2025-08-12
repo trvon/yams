@@ -491,12 +491,16 @@ json MCPServer::listTools() {
     // Search documents tool
     tools.push_back({
         {"name", "search_documents"},
-        {"description", "Search documents by query"},
+        {"description", "Search documents by query with support for fuzzy matching and hash search"},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
                 {"query", {{"type", "string"}, {"description", "Search query"}}},
-                {"limit", {{"type", "integer"}, {"description", "Maximum results"}, {"default", 10}}}
+                {"limit", {{"type", "integer"}, {"description", "Maximum results"}, {"default", 10}}},
+                {"fuzzy", {{"type", "boolean"}, {"description", "Enable fuzzy search"}, {"default", false}}},
+                {"similarity", {{"type", "number"}, {"description", "Minimum similarity for fuzzy search (0.0-1.0)"}, {"default", 0.7}}},
+                {"hash", {{"type", "string"}, {"description", "Search by file hash (full or partial, minimum 8 characters)"}}},
+                {"type", {{"type", "string"}, {"description", "Search type: keyword, semantic, hybrid"}, {"default", "keyword"}}}
             }},
             {"required", json::array({"query"})}
         }}
@@ -750,36 +754,173 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
     }
 }
 
+// Helper function to detect if a string is a SHA256 hash
+bool MCPServer::isValidHash(const std::string& str) {
+    // Must be 8-64 hex characters
+    if (str.length() < 8 || str.length() > 64) {
+        return false;
+    }
+    
+    // Check if all characters are hex
+    for (char c : str) {
+        if (!std::isxdigit(c)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Helper function to search by hash with support for partial matching
+json MCPServer::searchByHash(const std::string& hash, size_t limit) {
+    try {
+        // If it's a full 64-character hash, do exact lookup
+        if (hash.length() == 64) {
+            auto docResult = metadataRepo_->getDocumentByHash(hash);
+            if (!docResult) {
+                return {{"error", docResult.error().message}};
+            }
+            
+            if (!docResult.value()) {
+                return {
+                    {"total", 0},
+                    {"type", "hash"},
+                    {"results", json::array()}
+                };
+            }
+            
+            // Return the single result
+            const auto& doc = docResult.value().value();
+            json results = json::array();
+            results.push_back({
+                {"id", doc.id},
+                {"hash", doc.sha256Hash},
+                {"title", doc.fileName},
+                {"path", doc.filePath},
+                {"size", doc.fileSize},
+                {"mime_type", doc.mimeType}
+            });
+            
+            return {
+                {"total", 1},
+                {"type", "hash"},
+                {"results", results}
+            };
+        } else {
+            // Partial hash search - need to search all documents
+            auto queryResult = metadataRepo_->findDocumentsByPath("%");
+            if (!queryResult) {
+                return {{"error", queryResult.error().message}};
+            }
+            
+            json results = json::array();
+            size_t count = 0;
+            for (const auto& doc : queryResult.value()) {
+                if (doc.sha256Hash.substr(0, hash.length()) == hash) {
+                    results.push_back({
+                        {"id", doc.id},
+                        {"hash", doc.sha256Hash},
+                        {"title", doc.fileName},
+                        {"path", doc.filePath},
+                        {"size", doc.fileSize},
+                        {"mime_type", doc.mimeType}
+                    });
+                    count++;
+                    if (count >= limit) break; // Respect limit
+                }
+            }
+            
+            return {
+                {"total", count},
+                {"type", "hash"},
+                {"results", results}
+            };
+        }
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Hash search failed: ") + e.what()}};
+    }
+}
+
 json MCPServer::searchDocuments(const json& args) {
     try {
         std::string query = args["query"];
         size_t limit = args.value("limit", 10);
+        bool fuzzy = args.value("fuzzy", false);
+        float minSimilarity = args.value("similarity", 0.7f);
+        std::string hashQuery = args.value("hash", "");
+        std::string searchType = args.value("type", "keyword");
         
-        search::SearchRequest request;
-        request.query = query;
-        request.limit = limit;
-        
-        auto result = searchExecutor_->search(request);
-        if (!result) {
-            return {{"error", result.error().message}};
+        // Handle explicit hash search if --hash parameter is provided
+        if (!hashQuery.empty()) {
+            if (!isValidHash(hashQuery)) {
+                return {{"error", "Invalid hash format. Must be 8-64 hexadecimal characters."}};
+            }
+            return searchByHash(hashQuery, limit);
         }
         
-        json response;
-        response["total"] = result.value().getStatistics().totalResults;
-        
-        json results = json::array();
-        for (const auto& item : result.value().getItems()) {
-            results.push_back({
-                {"id", item.documentId},
-                {"title", item.title},
-                {"path", item.path},
-                {"score", item.relevanceScore},
-                {"snippet", item.contentPreview}
-            });
+        // Auto-detect hash format in query for backward compatibility
+        if (query.length() >= 8 && query.length() <= 64 && isValidHash(query)) {
+            return searchByHash(query, limit);
         }
-        response["results"] = results;
         
-        return response;
+        // Use metadata repository for search (includes v0.0.5 improvements)
+        if (fuzzy) {
+            // Use fuzzy search
+            auto result = metadataRepo_->fuzzySearch(query, minSimilarity, static_cast<int>(limit));
+            if (!result) {
+                return {{"error", result.error().message}};
+            }
+            
+            const auto& searchResults = result.value();
+            
+            json response;
+            response["total"] = searchResults.totalCount;
+            response["type"] = "fuzzy";
+            response["execution_time_ms"] = searchResults.executionTimeMs;
+            
+            json results = json::array();
+            for (const auto& item : searchResults.results) {
+                results.push_back({
+                    {"id", item.document.id},
+                    {"hash", item.document.sha256Hash},
+                    {"title", item.document.fileName},
+                    {"path", item.document.filePath},
+                    {"score", item.score},
+                    {"snippet", item.snippet}
+                });
+            }
+            response["results"] = results;
+            
+            return response;
+        } else {
+            // Use regular FTS search with v0.0.5 improvements
+            auto result = metadataRepo_->search(query, static_cast<int>(limit), 0);
+            if (!result) {
+                return {{"error", result.error().message}};
+            }
+            
+            const auto& searchResults = result.value();
+            
+            json response;
+            response["total"] = searchResults.totalCount;
+            response["type"] = "full-text";
+            response["execution_time_ms"] = searchResults.executionTimeMs;
+            
+            json results = json::array();
+            for (const auto& item : searchResults.results) {
+                results.push_back({
+                    {"id", item.document.id},
+                    {"hash", item.document.sha256Hash},
+                    {"title", item.document.fileName},
+                    {"path", item.document.filePath},
+                    {"score", item.score},
+                    {"snippet", item.snippet}
+                });
+            }
+            response["results"] = results;
+            
+            return response;
+        }
         
     } catch (const std::exception& e) {
         return {{"error", std::string("Search failed: ") + e.what()}};

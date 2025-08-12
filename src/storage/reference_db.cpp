@@ -1,5 +1,12 @@
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 #include <yams/core/types.h>
 
 #include <filesystem>
@@ -20,7 +27,7 @@ public:
         int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt_, nullptr);
         if (rc != SQLITE_OK) {
             throw std::runtime_error(
-                std::format("Failed to prepare statement: {}", sqlite3_errmsg(db)));
+                yamsfmt::format("Failed to prepare statement: {}", sqlite3_errmsg(db)));
         }
     }
     
@@ -91,7 +98,7 @@ public:
             return false;
         } else {
             throw std::runtime_error(
-                std::format("Statement execution failed: {}", sqlite3_errmsg(db_)));
+                yamsfmt::format("Statement execution failed: {}", sqlite3_errmsg(db_)));
         }
     }
     
@@ -144,7 +151,7 @@ public:
         int rc = sqlite3_open_v2(path.string().c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
             throw std::runtime_error(
-                std::format("Failed to open database: {}", sqlite3_errmsg(db_)));
+                yamsfmt::format("Failed to open database: {}", sqlite3_errmsg(db_)));
         }
         
         // Enable foreign keys
@@ -171,7 +178,7 @@ public:
         if (rc != SQLITE_OK) {
             std::string error = errMsg ? errMsg : "Unknown error";
             sqlite3_free(errMsg);
-            throw std::runtime_error(std::format("SQL execution failed: {}", error));
+            throw std::runtime_error(yamsfmt::format("SQL execution failed: {}", error));
         }
     }
     

@@ -1,6 +1,13 @@
 #include <yams/manifest/manifest_manager.h>
 #include <yams/crypto/hasher.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -537,7 +544,7 @@ Result<void> ManifestManager::reconstructFile(
         if (!chunkResult.has_value()) {
             return Result<void>(Error{
                 ErrorCode::NotFound,
-                std::format("Failed to retrieve chunk {}: {}", 
+                yamsfmt::format("Failed to retrieve chunk {}: {}", 
                           chunkRef.hash.substr(0, 8), 
                           chunkResult.error().message)
             });
@@ -549,7 +556,7 @@ Result<void> ManifestManager::reconstructFile(
         if (chunkData.size() != chunkRef.size) {
             return Result<void>(Error{
                 ErrorCode::ValidationError,
-                std::format("Chunk {} size mismatch: expected {}, got {}", 
+                yamsfmt::format("Chunk {} size mismatch: expected {}, got {}", 
                           chunkRef.hash.substr(0, 8), 
                           chunkRef.size, chunkData.size())
             });
@@ -562,7 +569,7 @@ Result<void> ManifestManager::reconstructFile(
             if (actualHash != chunkRef.hash) {
                 return Result<void>(Error{
                     ErrorCode::ValidationError,
-                    std::format("Chunk {} hash mismatch at offset {}", 
+                    yamsfmt::format("Chunk {} hash mismatch at offset {}", 
                               chunkRef.hash.substr(0, 8), chunkRef.offset)
                 });
             }
@@ -573,7 +580,7 @@ Result<void> ManifestManager::reconstructFile(
         if (!file) {
             return Result<void>(Error{
                 ErrorCode::WriteError,
-                std::format("Failed to write chunk at offset {}", chunkRef.offset)
+                yamsfmt::format("Failed to write chunk at offset {}", chunkRef.offset)
             });
         }
         
@@ -586,7 +593,7 @@ Result<void> ManifestManager::reconstructFile(
     if (totalWritten != manifest.fileSize) {
         return Result<void>(Error{
             ErrorCode::ValidationError,
-            std::format("File size mismatch: expected {}, wrote {}", 
+            yamsfmt::format("File size mismatch: expected {}, wrote {}", 
                       manifest.fileSize, totalWritten)
         });
     }

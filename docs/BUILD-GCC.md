@@ -108,7 +108,7 @@ sudo pacman -S \
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/yams.git
+git clone https://github.com/trvon/yams.git
 cd yams
 
 # Create build directory

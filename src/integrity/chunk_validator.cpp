@@ -1,6 +1,13 @@
 #include <yams/integrity/chunk_validator.h>
 #include <yams/crypto/hasher.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 
 #include <algorithm>
 #include <execution>
@@ -88,7 +95,7 @@ ValidationReport ChunkValidator::validateManifest(
             ChunkValidationResult result{
                 .chunkHash = chunkRef.hash,
                 .isValid = false,
-                .errorMessage = std::format("Size mismatch: expected {}, got {}", 
+                .errorMessage = yamsfmt::format("Size mismatch: expected {}, got {}", 
                                           chunkRef.size, chunkData.size()),
                 .chunkOffset = chunkRef.offset,
                 .chunkSize = chunkRef.size,
@@ -164,7 +171,7 @@ Result<void> ChunkValidator::validateDuringReconstruction(
     if (!result.isValid) {
         return Result<void>(Error{
             ErrorCode::ValidationError,
-            std::format("Chunk validation failed at offset {}: {}", 
+            yamsfmt::format("Chunk validation failed at offset {}: {}", 
                        chunkRef.offset, result.errorMessage)
         });
     }
@@ -242,12 +249,12 @@ ChunkValidationResult ChunkValidator::validateChunkInternal(
         if (actualHash == expectedHash) {
             result.isValid = true;
         } else {
-            result.errorMessage = std::format(
+            result.errorMessage = yamsfmt::format(
                 "Hash mismatch: expected {}, got {}", 
                 expectedHash.substr(0, 8), actualHash.substr(0, 8));
         }
     } catch (const std::exception& e) {
-        result.errorMessage = std::format("Hash calculation failed: {}", e.what());
+        result.errorMessage = yamsfmt::format("Hash calculation failed: {}", e.what());
     }
     
     auto endTime = std::chrono::high_resolution_clock::now();

@@ -1,5 +1,12 @@
 #include <yams/storage/storage_engine.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 
 #include <algorithm>
 #include <array>
@@ -48,13 +55,13 @@ struct StorageEngine::Impl {
         std::filesystem::create_directories(config.basePath / "objects", ec);
         if (ec) {
             throw std::runtime_error(
-                std::format("Failed to create storage directory: {}", ec.message()));
+                yamsfmt::format("Failed to create storage directory: {}", ec.message()));
         }
         
         std::filesystem::create_directories(config.basePath / "temp", ec);
         if (ec) {
             throw std::runtime_error(
-                std::format("Failed to create temp directory: {}", ec.message()));
+                yamsfmt::format("Failed to create temp directory: {}", ec.message()));
         }
     }
 };
@@ -105,7 +112,7 @@ std::filesystem::path StorageEngine::getTempPath() const {
     tempName.reserve(TEMP_NAME_LENGTH);
     
     for (size_t i = 0; i < TEMP_NAME_LENGTH; ++i) {
-        tempName += std::format("{:x}", dis(gen));
+        tempName += yamsfmt::format("{:x}", dis(gen));
     }
     
     return pImpl->config.basePath / "temp" / tempName;
@@ -448,7 +455,7 @@ std::filesystem::path AtomicFileWriter::generateTempName(
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(1000, 9999);
     return std::filesystem::path(
-        std::format("{}.tmp.{}.{}", target.string(), timestamp, dis(gen)));
+        yamsfmt::format("{}.tmp.{}.{}", target.string(), timestamp, dis(gen)));
 }
 
 Result<void> AtomicFileWriter::writeImpl(

@@ -286,20 +286,37 @@ Options:
   - Enable fuzzy search for approximate matching
 - --similarity <value>
   - Minimum similarity for fuzzy search, 0.0-1.0 (default: 0.7)
+- --hash <hash>
+  - Search by file hash (full or partial, minimum 8 characters)
 
 Description:
 - Supports both exact keyword searches and fuzzy approximate matching.
 - Fuzzy search uses BK-tree indexing for efficient similarity matching with configurable thresholds.
-- Full-text search with FTS5 indexing provides fast document content queries.
+- Full-text search with FTS5 indexing provides fast document content queries with robust special character handling.
+- Hash search allows finding documents by their SHA256 hash (full 64-character hash or partial prefix).
+- Automatic fallback: if FTS5 query fails (due to special characters), automatically falls back to fuzzy search.
+- Robust query sanitization handles special characters like hyphens, quotes, and operators (e.g., "PBI-6", "task 4-").
 - JSON output includes relevance scores, execution times, and content snippets.
 - Searches document names, content, tags, and metadata fields.
+- Auto-detects hash format: if query looks like a hash (8-64 hex chars), automatically searches by hash.
+- Verbosity control: concise output by default, detailed output with --verbose flag.
 
 Examples:
 ```
+# Text search
 yams search "database performance"
 yams search "config file" --fuzzy --similarity 0.6
 yams search "meeting notes" --limit 10 --type keyword
 yams search "project roadmap" --json
+
+# Hash search
+yams search --hash abcd1234ef567890  # Partial hash (minimum 8 chars)
+yams search --hash abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890  # Full hash
+yams search abcd1234ef567890  # Auto-detected hash search
+
+# Verbose output for detailed information
+yams search "query" --verbose
+yams search --hash abcd1234 --verbose
 ```
 
 ---

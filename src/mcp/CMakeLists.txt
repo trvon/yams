@@ -20,13 +20,23 @@ target_link_libraries(yams_mcp
         Threads::Threads
 )
 
-# Link Boost if using Conan
+# Find and link Boost
 if(YAMS_USE_CONAN AND TARGET boost::boost)
     target_link_libraries(yams_mcp PUBLIC boost::boost)
 elseif(YAMS_USE_CONAN)
     # Fallback to manual include if target doesn't exist
     message(STATUS "Using manual Boost include path")
     target_include_directories(yams_mcp PUBLIC /Users/trevon/.conan2/p/b/boostf44bdc852762a/p/include)
+else()
+    # Traditional build - find Boost using FindBoost
+    find_package(Boost REQUIRED)
+    if(Boost_FOUND)
+        target_include_directories(yams_mcp PUBLIC ${Boost_INCLUDE_DIRS})
+        target_link_libraries(yams_mcp PUBLIC ${Boost_LIBRARIES})
+        message(STATUS "Found Boost: ${Boost_VERSION}")
+    else()
+        message(FATAL_ERROR "Boost is required for MCP server but was not found")
+    endif()
 endif()
 
 # Include directories

@@ -1,7 +1,13 @@
 #include <yams/crypto/hasher.h>
 #include <openssl/evp.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 #include <fstream>
 #include <array>
 
@@ -78,7 +84,7 @@ std::string SHA256Hasher::finalize() {
     result.reserve(hashLen * 2);
     
     for (unsigned int i = 0; i < hashLen; ++i) {
-        result += std::format("{:02x}", hash[i]);
+        result += yamsfmt::format("{:02x}", hash[i]);
     }
     
     // Reset for potential reuse
@@ -90,7 +96,7 @@ std::string SHA256Hasher::finalize() {
 std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
-        throw std::runtime_error(std::format("Failed to open file: {}", path.string()));
+        throw std::runtime_error(yamsfmt::format("Failed to open file: {}", path.string()));
     }
     
     init();

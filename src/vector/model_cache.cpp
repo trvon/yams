@@ -187,7 +187,11 @@ private:
         auto start = std::chrono::high_resolution_clock::now();
         
         // Load model (simplified - would get path from registry)
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
         std::string model_path = std::format("models/{}.onnx", model_id);
+#else
+        std::string model_path = std::string("models/") + model_id + ".onnx";
+#endif
         auto load_result = loader_->loadModel(model_path);
         
         if (!load_result.has_value()) {

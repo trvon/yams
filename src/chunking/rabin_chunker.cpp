@@ -1,6 +1,13 @@
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 
 #include <algorithm>
 #include <fstream>
@@ -146,7 +153,7 @@ std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
 std::vector<Chunk> RabinChunker::chunkFile(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
-        throw std::runtime_error(std::format("Failed to open file: {}", path.string()));
+        throw std::runtime_error(yamsfmt::format("Failed to open file: {}", path.string()));
     }
     
     // Get file size

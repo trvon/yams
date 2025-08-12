@@ -157,6 +157,10 @@ private:
                                    const metadata::DocumentInfo& doc,
                                    const std::unordered_map<std::string, metadata::MetadataValue>& metadata);
     
+    // Helper methods for hash search
+    bool isValidHash(const std::string& str);
+    json searchByHash(const std::string& hash, size_t limit);
+    
 private:
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;

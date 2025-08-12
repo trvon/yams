@@ -53,7 +53,8 @@ jobs:
               libssl-dev \
               libsqlite3-dev \
               libncurses-dev \
-              protobuf-compiler
+              protobuf-compiler \
+              libboost-all-dev
           fi
 
       - name: Install dependencies (macOS)
@@ -65,7 +66,7 @@ jobs:
           
           # Only install system deps for traditional build
           if [[ "${{ matrix.build_type }}" == "traditional" ]]; then
-            brew install openssl@3 sqlite3 protobuf
+            brew install openssl@3 sqlite3 protobuf boost
             # Make OpenSSL discoverable by CMake on macOS
             echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
           fi

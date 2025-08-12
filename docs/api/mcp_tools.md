@@ -17,7 +17,7 @@ yams serve --transport websocket --host 127.0.0.1 --port 8080
 
 ### search_documents
 
-Search for documents using keyword or semantic search.
+Search for documents using keyword search, fuzzy matching, or hash lookup with full CLI parity.
 
 **Input Schema:**
 ```json
@@ -32,6 +32,25 @@ Search for documents using keyword or semantic search.
       "type": "integer",
       "description": "Maximum results",
       "default": 10
+    },
+    "fuzzy": {
+      "type": "boolean",
+      "description": "Enable fuzzy search for approximate matching",
+      "default": false
+    },
+    "similarity": {
+      "type": "number",
+      "description": "Minimum similarity for fuzzy search (0.0-1.0)",
+      "default": 0.7
+    },
+    "hash": {
+      "type": "string",
+      "description": "Search by file hash (full or partial, minimum 8 characters)"
+    },
+    "type": {
+      "type": "string",
+      "description": "Search type: keyword, semantic, hybrid",
+      "default": "keyword"
     }
   },
   "required": ["query"]
@@ -42,9 +61,12 @@ Search for documents using keyword or semantic search.
 ```json
 {
   "total": 42,
+  "type": "full-text",
+  "execution_time_ms": 25,
   "results": [
     {
       "id": 123,
+      "hash": "abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890",
       "title": "Document Title",
       "path": "/path/to/document",
       "score": 0.95,
@@ -54,13 +76,48 @@ Search for documents using keyword or semantic search.
 }
 ```
 
-**Example:**
+**Examples:**
+
+Text search:
 ```json
 {
   "tool": "search_documents",
   "arguments": {
     "query": "database optimization",
     "limit": 5
+  }
+}
+```
+
+Fuzzy search:
+```json
+{
+  "tool": "search_documents",
+  "arguments": {
+    "query": "databse optimizaton",
+    "fuzzy": true,
+    "similarity": 0.6
+  }
+}
+```
+
+Hash search:
+```json
+{
+  "tool": "search_documents",
+  "arguments": {
+    "query": "placeholder",
+    "hash": "abcd1234ef567890"
+  }
+}
+```
+
+Auto-detected hash search:
+```json
+{
+  "tool": "search_documents",
+  "arguments": {
+    "query": "abcd1234ef567890"
   }
 }
 ```

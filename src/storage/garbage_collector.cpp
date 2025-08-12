@@ -2,6 +2,13 @@
 #include <yams/storage/storage_engine.h>
 
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 #include <thread>
 #include <condition_variable>
 #include <atomic>
@@ -110,7 +117,7 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
                 auto deleteResult = pImpl->storageEngine.remove(blockHash);
                 if (!deleteResult) {
                     stats.errors.push_back(
-                        std::format("Failed to delete block {}: {}", 
+                        yamsfmt::format("Failed to delete block {}: {}", 
                                   blockHash, deleteResult.error().message));
                     continue;
                 }
@@ -144,7 +151,7 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
         }
         
     } catch (const std::exception& e) {
-        stats.errors.push_back(std::format("Exception during collection: {}", e.what()));
+        stats.errors.push_back(yamsfmt::format("Exception during collection: {}", e.what()));
         spdlog::error("Garbage collection failed: {}", e.what());
     }
     

@@ -4,6 +4,13 @@
 #include "reference_db.cpp"  // Include DB wrappers
 
 #include <spdlog/spdlog.h>
+#if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
+#include <format>
+namespace yamsfmt = std;
+#else
+#include <spdlog/fmt/fmt.h>
+namespace yamsfmt = fmt;
+#endif
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -64,8 +71,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
             pImpl->db->execute("PRAGMA journal_mode = WAL");
         }
         
-        pImpl->db->execute(std::format("PRAGMA cache_size = {}", pImpl->config.cacheSize));
-        pImpl->db->execute(std::format("PRAGMA busy_timeout = {}", pImpl->config.busyTimeout));
+        pImpl->db->execute(yamsfmt::format("PRAGMA cache_size = {}", pImpl->config.cacheSize));
+        pImpl->db->execute(yamsfmt::format("PRAGMA busy_timeout = {}", pImpl->config.busyTimeout));
         pImpl->db->execute("PRAGMA synchronous = NORMAL");
         pImpl->db->execute("PRAGMA temp_store = MEMORY");
         
@@ -301,7 +308,7 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
         spdlog::debug("Started reference counting transaction {}", transactionId_);
     } catch (const std::exception& e) {
         active_ = false;
-        throw std::runtime_error(std::format("Failed to start transaction: {}", e.what()));
+        throw std::runtime_error(yamsfmt::format("Failed to start transaction: {}", e.what()));
     }
 }
 
@@ -372,7 +379,7 @@ void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t
         stmt.bind(3, static_cast<int64_t>(blockSize));
         stmt.execute();
     } catch (const std::exception& e) {
-        throw std::runtime_error(std::format("Failed to record increment operation: {}", e.what()));
+        throw std::runtime_error(yamsfmt::format("Failed to record increment operation: {}", e.what()));
     }
 }
 
@@ -400,7 +407,7 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
         stmt.bind(2, blockHash);
         stmt.execute();
     } catch (const std::exception& e) {
-        throw std::runtime_error(std::format("Failed to record decrement operation: {}", e.what()));
+        throw std::runtime_error(yamsfmt::format("Failed to record decrement operation: {}", e.what()));
     }
 }
 
