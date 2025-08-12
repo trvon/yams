@@ -3,6 +3,9 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <sstream>
+#include <algorithm>
+#include <cctype>
+#include <iostream>
 
 namespace yams::metadata {
 
@@ -639,6 +642,60 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
     });
 }
 
+// Helper function to sanitize FTS5 query strings
+std::string sanitizeFTS5Query(const std::string& query) {
+    // Trim whitespace from both ends
+    std::string trimmed = query;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
+    trimmed.erase(trimmed.find_last_not_of(" \t\n\r") + 1);
+    
+    // If empty after trimming, return empty phrase
+    if (trimmed.empty()) {
+        return "\"\"";
+    }
+    
+    // Check if the query might be using advanced FTS5 operators
+    // (AND, OR, NOT, NEAR) - if so, leave it as-is for power users
+    bool hasAdvancedOperators = false;
+    if (trimmed.find(" AND ") != std::string::npos ||
+        trimmed.find(" OR ") != std::string::npos ||
+        trimmed.find(" NOT ") != std::string::npos ||
+        trimmed.find("NEAR(") != std::string::npos) {
+        hasAdvancedOperators = true;
+    }
+    
+    // If using advanced operators, do minimal sanitization
+    if (hasAdvancedOperators) {
+        // Just remove trailing operators that would cause syntax errors
+        while (!trimmed.empty()) {
+            char lastChar = trimmed.back();
+            if (lastChar == '-' || lastChar == '+' || lastChar == '*' || 
+                lastChar == '(' || lastChar == ')') {
+                trimmed.pop_back();
+            } else {
+                break;
+            }
+        }
+        return trimmed.empty() ? "\"\"" : trimmed;
+    }
+    
+    // For regular queries, wrap in quotes to treat as literal phrase
+    // This handles all special characters safely
+    std::string escaped;
+    for (char c : trimmed) {
+        if (c == '"') {
+            // Escape quotes by doubling them (FTS5 syntax)
+            escaped += "\"\"";
+        } else {
+            escaped += c;
+        }
+    }
+    
+    // Wrap in quotes to make it a phrase search
+    // This prevents FTS5 from interpreting special characters as operators
+    return "\"" + escaped + "\"";
+}
+
 Result<SearchResults> MetadataRepository::search(const std::string& query, int limit, int offset) {
     return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         SearchResults results;
@@ -658,7 +715,11 @@ Result<SearchResults> MetadataRepository::search(const std::string& query, int l
             return results;
         }
         
-        // Perform FTS search
+        // Sanitize the query to prevent FTS5 syntax errors
+        std::string sanitizedQuery = sanitizeFTS5Query(query);
+        
+        // Try FTS search first
+        bool ftsSearchSucceeded = false;
         auto stmtResult = db.prepare(R"(
             SELECT 
                 fts.rowid,
@@ -676,63 +737,87 @@ Result<SearchResults> MetadataRepository::search(const std::string& query, int l
             LIMIT ? OFFSET ?
         )");
         
-        if (!stmtResult) {
-            results.errorMessage = stmtResult.error().message;
-            return results;
-        }
-        
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(query, limit, offset);
-        if (!bindResult) {
-            results.errorMessage = bindResult.error().message;
-            return results;
-        }
-        
-        while (true) {
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                results.errorMessage = stepResult.error().message;
-                return results;
-            }
-            if (!stepResult.value()) break;
-            
-            SearchResult result;
-            
-            // Map document info
-            result.document.id = stmt.getInt64(0);
-            result.document.filePath = stmt.getString(4);
-            result.document.fileName = stmt.getString(5);
-            result.document.fileExtension = stmt.getString(6);
-            result.document.fileSize = stmt.getInt64(7);
-            result.document.sha256Hash = stmt.getString(8);
-            result.document.mimeType = stmt.getString(9);
-            result.document.setCreatedTime(stmt.getInt64(10));
-            result.document.setModifiedTime(stmt.getInt64(11));
-            result.document.setIndexedTime(stmt.getInt64(12));
-            result.document.contentExtracted = stmt.getInt(13) != 0;
-            result.document.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(14));
-            result.document.extractionError = stmt.getString(15);
-            
-            // Search-specific fields
-            result.snippet = stmt.getString(2);
-            result.score = stmt.getDouble(3);
-            
-            results.results.push_back(result);
-        }
-        
-        // Get total count
-        auto countStmtResult = db.prepare(R"(
-            SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?
-        )");
-        
-        if (countStmtResult) {
-            Statement countStmt = std::move(countStmtResult).value();
-            auto bindRes = countStmt.bind(1, query);
-            if (bindRes.has_value()) {
-                auto stepRes = countStmt.step();
-                if (stepRes.has_value() && stepRes.value()) {
-                    results.totalCount = countStmt.getInt64(0);
+        if (stmtResult) {
+            Statement stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bindAll(sanitizedQuery, limit, offset);
+            if (bindResult) {
+                // Try to execute the FTS5 search
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult) {
+                        // FTS5 search failed - log and break to fall back to fuzzy search
+                        spdlog::debug("FTS5 search execution failed: {}, will fall back to fuzzy search", 
+                                     stepResult.error().message);
+                        break;
+                    }
+                    if (!stepResult.value()) {
+                        // Successfully completed FTS5 search
+                        ftsSearchSucceeded = true;
+                        break;
+                    }
+                    
+                    SearchResult result;
+                    
+                    // Map document info
+                    result.document.id = stmt.getInt64(0);
+                    result.document.filePath = stmt.getString(4);
+                    result.document.fileName = stmt.getString(5);
+                    result.document.fileExtension = stmt.getString(6);
+                    result.document.fileSize = stmt.getInt64(7);
+                    result.document.sha256Hash = stmt.getString(8);
+                    result.document.mimeType = stmt.getString(9);
+                    result.document.setCreatedTime(stmt.getInt64(10));
+                    result.document.setModifiedTime(stmt.getInt64(11));
+                    result.document.setIndexedTime(stmt.getInt64(12));
+                    result.document.contentExtracted = stmt.getInt(13) != 0;
+                    result.document.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(14));
+                    result.document.extractionError = stmt.getString(15);
+                    
+                    // Search-specific fields
+                    result.snippet = stmt.getString(2);
+                    result.score = stmt.getDouble(3);
+                    
+                    results.results.push_back(result);
+                    ftsSearchSucceeded = true;
                 }
+                
+                // Get total count for FTS5 results
+                if (ftsSearchSucceeded) {
+                    auto countStmtResult = db.prepare(R"(
+                        SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?
+                    )");
+                    
+                    if (countStmtResult) {
+                        Statement countStmt = std::move(countStmtResult).value();
+                        auto bindRes = countStmt.bind(1, sanitizedQuery);
+                        if (bindRes.has_value()) {
+                            auto stepRes = countStmt.step();
+                            if (stepRes.has_value() && stepRes.value()) {
+                                results.totalCount = countStmt.getInt64(0);
+                            }
+                        }
+                    }
+                }
+            } else {
+                spdlog::debug("FTS5 search bind failed: {}", bindResult.error().message);
+            }
+        } else {
+            spdlog::debug("FTS5 search prepare failed: {}", stmtResult.error().message);
+        }
+        
+        // If FTS5 search failed, fall back to fuzzy search
+        if (!ftsSearchSucceeded) {
+            spdlog::info("FTS5 search failed for query '{}', falling back to fuzzy search", query);
+            
+            // Use fuzzy search as fallback (note: fuzzy search doesn't support offset)
+            auto fuzzyResults = fuzzySearch(query, 0.3, limit);
+            if (fuzzyResults) {
+                results = fuzzyResults.value();
+                // Add a note in the error message that we fell back to fuzzy search
+                // but don't treat it as a failure since we have results
+                spdlog::debug("Successfully fell back to fuzzy search for query '{}'", query);
+            } else {
+                results.errorMessage = "Both FTS5 and fuzzy search failed: " + fuzzyResults.error().message;
             }
         }
         
@@ -1186,6 +1271,9 @@ Result<SearchResults> MetadataRepository::fuzzySearch(const std::string& query,
         
         auto fuzzyResults = fuzzySearchIndex_->search(query, static_cast<size_t>(limit), options);
         
+        // Debug output (disabled)
+        // std::cerr << "[DEBUG] Fuzzy search returned " << fuzzyResults.size() << " results" << std::endl;
+        
         // Convert fuzzy results to SearchResults
         for (const auto& fuzzyResult : fuzzyResults) {
             // Parse document ID from fuzzy result ID
@@ -1267,20 +1355,53 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
             // Add document to fuzzy index with both filename and content
             // First add with filename as title
             fuzzySearchIndex_->addDocument(std::to_string(id), fileName, keywords);
+            // std::cerr << "[DEBUG] Added doc " << id << " with title '" << fileName << "' and " << keywords.size() << " keywords" << std::endl;
             
             // Also get and index document content for fuzzy search
             auto contentResult = getContent(id);
             if (contentResult && contentResult.value().has_value()) {
                 auto content = contentResult.value().value();
-                // Extract some keywords from content (first 500 chars, split by space)
-                std::istringstream iss(content.contentText.substr(0, std::min(size_t(500), content.contentText.length())));
-                std::string word;
+                
+                // Extract more comprehensive keywords from content
                 std::vector<std::string> contentKeywords;
-                while (iss >> word && contentKeywords.size() < 20) {
-                    contentKeywords.push_back(word);
+                
+                // Process larger portion of content (up to 5000 chars instead of 500)
+                size_t maxContentLength = std::min(size_t(5000), content.contentText.length());
+                std::string contentToIndex = content.contentText.substr(0, maxContentLength);
+                
+                // Convert to lowercase for better matching
+                std::transform(contentToIndex.begin(), contentToIndex.end(), contentToIndex.begin(), ::tolower);
+                
+                // Extract words and multi-word phrases
+                std::istringstream iss(contentToIndex);
+                std::string word;
+                std::string previousWord;
+                
+                while (iss >> word) {
+                    // Clean up word - remove common punctuation
+                    word.erase(std::remove_if(word.begin(), word.end(), 
+                        [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; }), word.end());
+                    
+                    if (!word.empty() && word.length() > 2) {  // Skip very short words
+                        contentKeywords.push_back(word);
+                        
+                        // Also add two-word phrases for better phrase matching
+                        if (!previousWord.empty()) {
+                            std::string phrase = previousWord + " " + word;
+                            contentKeywords.push_back(phrase);
+                        }
+                        
+                        previousWord = word;
+                    }
+                    
+                    // Limit total keywords to prevent memory issues
+                    if (contentKeywords.size() >= 100) {
+                        break;
+                    }
                 }
-                // Add content-based entry with preview of content
-                std::string contentPreview = content.contentText.substr(0, std::min(size_t(100), content.contentText.length()));
+                
+                // Add content-based entry with more content preview
+                std::string contentPreview = content.contentText.substr(0, std::min(size_t(200), content.contentText.length()));
                 fuzzySearchIndex_->addDocument(std::to_string(id) + "_content", 
                                               contentPreview, 
                                               contentKeywords);

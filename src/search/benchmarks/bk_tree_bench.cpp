@@ -18,7 +18,7 @@ static void BM_BKTree_Construction(benchmark::State& state) {
     for (auto _ : state) {
         BKTree tree;
         for (int i = 0; i < vocab; ++i) {
-            tree.insert("w" + std::to_string(i));
+            tree.add("w" + std::to_string(i));
         }
         benchmark::DoNotOptimize(tree);
     }
@@ -42,7 +42,7 @@ static void BM_BKTree_Search(benchmark::State& state) {
     // Pre-build tree
     BKTree tree;
     for (int i = 0; i < vocab; ++i) {
-        tree.insert("w" + std::to_string(i));
+        tree.add("w" + std::to_string(i));
     }
 
     const std::string query = "w0"; // deterministic query
@@ -78,7 +78,7 @@ BENCHMARK(BM_BKTree_Search)
 static void BM_BKTree_SearchVarious(benchmark::State& state) {
     BKTree tree;
     for (const auto& word : sampleWords) {
-        tree.insert(word);
+        tree.add(word);
     }
     
     size_t queryIndex = 0;

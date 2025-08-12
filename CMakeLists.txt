@@ -85,6 +85,37 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Compiler version checks for GCC
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
+        message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 11+ is required for C++20 support.")
+    endif()
+    message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+
+# Check for std::format availability
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+    #include <version>
+    #ifdef __cpp_lib_format
+    #include <format>
+    int main() { 
+        auto s = std::format(\"{}\", 42);
+        return 0; 
+    }
+    #else
+    #error No format support
+    #endif
+" YAMS_HAS_STD_FORMAT)
+
+if(YAMS_HAS_STD_FORMAT)
+    add_compile_definitions(YAMS_HAS_STD_FORMAT=1)
+    message(STATUS "std::format is available")
+else()
+    add_compile_definitions(YAMS_HAS_STD_FORMAT=0)
+    message(STATUS "std::format is NOT available - using fallbacks")
+endif()
+
 # Export compile commands for tooling
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -458,6 +489,35 @@ message(STATUS "OpenSSL crypto library: ${OPENSSL_CRYPTO_LIBRARY}")
 
 # Threads (required for websocketpp)
 find_package(Threads REQUIRED)
+
+# Ncurses detection for Linux builds
+if(YAMS_BUILD_CLI AND NOT YAMS_USE_CONAN)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Look for ncurses with wide character support first
+        find_package(Curses)
+        if(NOT CURSES_FOUND)
+            # Try pkg-config as fallback
+            find_package(PkgConfig)
+            if(PKG_CONFIG_FOUND)
+                pkg_check_modules(NCURSES ncursesw)
+                if(NOT NCURSES_FOUND)
+                    pkg_check_modules(NCURSES ncurses)
+                endif()
+            endif()
+            
+            if(NOT NCURSES_FOUND)
+                message(FATAL_ERROR 
+                    "ncurses library not found. Please install it:\n"
+                    "  Ubuntu/Debian: sudo apt-get install libncurses-dev\n"
+                    "  RHEL/CentOS: sudo yum install ncurses-devel\n"
+                    "  Fedora: sudo dnf install ncurses-devel\n"
+                    "  Arch: sudo pacman -S ncurses")
+            endif()
+        else()
+            message(STATUS "Found Curses: ${CURSES_LIBRARIES}")
+        endif()
+    endif()
+endif()
 
 # Google Test
 if(YAMS_BUILD_TESTS)

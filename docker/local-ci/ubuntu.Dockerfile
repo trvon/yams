@@ -38,6 +38,7 @@ RUN apt-get update && \
     ca-certificates \
     libssl-dev \
     libsqlite3-dev \
+    libncurses-dev \
     protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 

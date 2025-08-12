@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <queue>
 #include <set>
+#include <iostream>
+#include <sstream>
+#include <cctype>
+#include <cmath>
 #include <spdlog/spdlog.h>
 
 namespace yams::search {
@@ -270,6 +274,9 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(
     std::transform(lowerQuery.begin(), lowerQuery.end(), lowerQuery.begin(), ::tolower);
     
     auto queryTrigrams = extractTrigrams(lowerQuery);
+    // std::cerr << "[DEBUG] TrigramIndex::search query='" << query << "' trigrams=" << queryTrigrams.size() 
+    //           << " threshold=" << threshold << std::endl;
+    // std::cerr << "[DEBUG] Total trigrams in index: " << trigramToStrings_.size() << std::endl;
     
     // Collect candidate strings that share trigrams with query
     std::unordered_map<std::string, int> candidateCounts;
@@ -282,6 +289,8 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(
         }
     }
     
+    // std::cerr << "[DEBUG] Found " << candidateCounts.size() << " candidate documents" << std::endl;
+    
     // Calculate similarity scores
     std::vector<std::pair<std::string, float>> results;
     
@@ -289,6 +298,34 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(
         auto it = stringToTrigrams_.find(id);
         if (it != stringToTrigrams_.end()) {
             float similarity = jaccardSimilarity(queryTrigrams, it->second);
+            
+            // For short queries, also check substring matching
+            auto strIt = idToString_.find(id);
+            if (strIt != idToString_.end() && query.length() <= 10) {
+                std::string lowerStr = strIt->second;
+                std::transform(lowerStr.begin(), lowerStr.end(), lowerStr.begin(), ::tolower);
+                
+                // Check if query is a substring (case-insensitive)
+                if (lowerStr.find(lowerQuery) != std::string::npos) {
+                    // Boost similarity for substring matches
+                    similarity = std::max(similarity, 0.7f);
+                } else {
+                    // Check for fuzzy substring match (allowing 1-2 char difference)
+                    // This is a simple approximation
+                    size_t matchCount = 0;
+                    for (const auto& trigram : queryTrigrams) {
+                        if (lowerStr.find(trigram.substr(1, 2)) != std::string::npos) {
+                            matchCount++;
+                        }
+                    }
+                    if (matchCount >= queryTrigrams.size() * 0.6) {
+                        similarity = std::max(similarity, 0.5f);
+                    }
+                }
+            }
+            
+            // Debug: Show similarity scores
+            // std::cerr << "[DEBUG] ID=" << id << " similarity=" << similarity << " (threshold=" << threshold << ")" << std::endl;
             
             if (similarity >= threshold) {
                 results.emplace_back(id, similarity);
@@ -330,10 +367,28 @@ void HybridFuzzySearch::addDocument(const std::string& id,
         keywordTree_.add(keyword);
     }
     
-    // Add to trigram indices
+    // Add to trigram indices - index each word separately for better matching
+    // Split title into words and index each word
+    std::istringstream titleStream(title);
+    std::string word;
+    int wordIndex = 0;
+    while (titleStream >> word) {
+        // Clean word - remove punctuation
+        word.erase(std::remove_if(word.begin(), word.end(), 
+            [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; }), word.end());
+        
+        if (!word.empty() && word.length() > 2) {
+            // Index each word with document ID
+            titleTrigrams_.add(id + "_w" + std::to_string(wordIndex++), word);
+        }
+    }
+    
+    // Also index the full title for exact/near-exact matches
     titleTrigrams_.add(id, title);
-    for (const auto& keyword : keywords) {
-        keywordTrigrams_.add(id + "_kw_" + keyword, keyword);
+    
+    // Index keywords individually
+    for (size_t i = 0; i < keywords.size(); ++i) {
+        keywordTrigrams_.add(id + "_kw" + std::to_string(i), keywords[i]);
     }
 }
 
@@ -344,15 +399,185 @@ std::vector<HybridFuzzySearch::SearchResult> HybridFuzzySearch::search(
     
     std::unordered_map<std::string, SearchResult> resultMap;
     
-    // Trigram pre-filtering
-    if (options.useTrigramPrefilter) {
-        auto trigramResults = titleTrigrams_.search(query, options.minSimilarity);
+    // Debug: Log search parameters (disabled)
+    // std::cerr << "[DEBUG] Fuzzy search for: '" << query << "' with minSimilarity=" 
+    //           << options.minSimilarity << ", maxEditDistance=" << options.maxEditDistance << std::endl;
+    // std::cerr << "[DEBUG] Index has " << idToTitle_.size() << " documents" << std::endl;
+    
+    // Split query into words for multi-word handling (industry standard approach)
+    std::vector<std::string> queryWords;
+    std::istringstream queryStream(query);
+    std::string word;
+    while (queryStream >> word) {
+        // Clean word - remove punctuation
+        word.erase(std::remove_if(word.begin(), word.end(), 
+            [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; }), word.end());
+        
+        // Convert to lowercase
+        std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+        
+        if (!word.empty() && word.length() > 2) {
+            queryWords.push_back(word);
+        }
+    }
+    
+    // If multi-word query, handle differently
+    if (queryWords.size() > 1) {
+        // std::cerr << "[DEBUG] Multi-word query detected with " << queryWords.size() << " words" << std::endl;
+        
+        // Track which documents match which words
+        std::unordered_map<std::string, std::set<std::string>> docWordMatches;
+        std::unordered_map<std::string, float> docMaxScores;
+        
+        // Search for each word independently
+        for (const auto& queryWord : queryWords) {
+            // std::cerr << "[DEBUG] Searching for word: '" << queryWord << "'" << std::endl;
+            
+            // Use lower similarity threshold for individual words
+            float wordSimilarity = options.minSimilarity * 0.7f;
+            
+            // Search using trigrams
+            if (options.useTrigramPrefilter) {
+                auto trigramResults = titleTrigrams_.search(queryWord, wordSimilarity);
+                auto keywordResults = keywordTrigrams_.search(queryWord, wordSimilarity);
+                
+                // Process results
+                for (const auto& [id, score] : trigramResults) {
+                    // Extract base document ID
+                    std::string baseId = id;
+                    size_t pos = id.find("_");
+                    if (pos != std::string::npos) {
+                        baseId = id.substr(0, pos);
+                    }
+                    
+                    docWordMatches[baseId].insert(queryWord);
+                    docMaxScores[baseId] = std::max(docMaxScores[baseId], score);
+                }
+                
+                for (const auto& [id, score] : keywordResults) {
+                    // Extract base document ID
+                    std::string baseId = id;
+                    size_t pos = id.find("_");
+                    if (pos != std::string::npos) {
+                        baseId = id.substr(0, pos);
+                    }
+                    
+                    docWordMatches[baseId].insert(queryWord);
+                    docMaxScores[baseId] = std::max(docMaxScores[baseId], score * 0.9f);
+                }
+            }
+            
+            // BK-tree search for exact/close matches
+            if (options.useBKTree) {
+                // Limit edit distance to 2 for performance (industry standard)
+                size_t maxDist = std::min(options.maxEditDistance, size_t(2));
+                auto bkResults = titleTree_.search(queryWord, maxDist);
+                
+                for (const auto& [title, distance] : bkResults) {
+                    // Find documents with this word in title
+                    for (const auto& [id, docTitle] : idToTitle_) {
+                        std::string lowerTitle = docTitle;
+                        std::transform(lowerTitle.begin(), lowerTitle.end(), lowerTitle.begin(), ::tolower);
+                        
+                        if (lowerTitle.find(queryWord) != std::string::npos || 
+                            distance <= 2) {  // Allow up to 2 edits
+                            float score = 1.0f - (float(distance) / float(maxDist + 1));
+                            docWordMatches[id].insert(queryWord);
+                            docMaxScores[id] = std::max(docMaxScores[id], score);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Calculate final scores based on matched words (industry standard)
+        float minShouldMatch = 0.5f;  // At least 50% of words should match
+        int requiredMatches = std::max(1, (int)std::ceil(queryWords.size() * minShouldMatch));
+        
+        for (const auto& [docId, matchedWords] : docWordMatches) {
+            if ((int)matchedWords.size() >= requiredMatches) {
+                SearchResult result;
+                result.id = docId;
+                
+                // Get document title
+                auto titleIt = idToTitle_.find(docId);
+                if (titleIt != idToTitle_.end()) {
+                    result.title = titleIt->second;
+                } else {
+                    result.title = "Document " + docId;
+                }
+                
+                // Score based on proportion of words matched and individual scores
+                float matchRatio = (float)matchedWords.size() / (float)queryWords.size();
+                float avgScore = docMaxScores[docId];
+                result.score = matchRatio * avgScore;
+                
+                // Boost if all words matched
+                if (matchedWords.size() == queryWords.size()) {
+                    result.score = std::min(1.0f, result.score * 1.2f);
+                }
+                
+                result.matchType = "multi-word";
+                resultMap[docId] = result;
+                
+                // std::cerr << "[DEBUG] Doc " << docId << " matched " << matchedWords.size() 
+                //           << "/" << queryWords.size() << " words, score=" << result.score << std::endl;
+            }
+        }
+        
+    } else {
+        // Single word query - use original logic
+        
+        // Trigram pre-filtering
+        if (options.useTrigramPrefilter) {
+            // Search in both title and keyword trigrams
+            auto trigramResults = titleTrigrams_.search(query, options.minSimilarity);
+        auto keywordTrigramResults = keywordTrigrams_.search(query, options.minSimilarity);
+        
+        // Debug: Log trigram search results (disabled)
+        // std::cerr << "[DEBUG] Title trigram results: " << trigramResults.size() << std::endl;
+        // std::cerr << "[DEBUG] Keyword trigram results: " << keywordTrigramResults.size() << std::endl;
+        
+        // Combine results from both searches
+        for (const auto& [id, score] : keywordTrigramResults) {
+            trigramResults.push_back({id, score * 0.9f}); // Slightly lower weight for keyword matches
+        }
         
         for (const auto& [id, score] : trigramResults) {
             if (resultMap.find(id) == resultMap.end()) {
                 SearchResult result;
                 result.id = id;
-                result.title = idToTitle_.at(id);
+                
+                // Handle regular IDs, content IDs, word IDs, and keyword IDs
+                auto titleIt = idToTitle_.find(id);
+                if (titleIt != idToTitle_.end()) {
+                    result.title = titleIt->second;
+                } else {
+                    // Extract base document ID from special IDs
+                    std::string baseId = id;
+                    size_t contentPos = id.find("_content");
+                    size_t wordPos = id.find("_w");
+                    size_t kwPos = id.find("_kw");
+                    
+                    if (contentPos != std::string::npos) {
+                        baseId = id.substr(0, contentPos);
+                    } else if (wordPos != std::string::npos) {
+                        baseId = id.substr(0, wordPos);
+                    } else if (kwPos != std::string::npos) {
+                        baseId = id.substr(0, kwPos);
+                    }
+                    
+                    auto baseTitleIt = idToTitle_.find(baseId);
+                    if (baseTitleIt != idToTitle_.end()) {
+                        result.title = baseTitleIt->second;
+                    } else {
+                        result.title = "Document " + baseId;
+                    }
+                    
+                    // Normalize ID to base document ID for result aggregation
+                    result.id = baseId;
+                }
+                
                 result.score = score;
                 result.matchType = "trigram";
                 resultMap[id] = result;
@@ -394,6 +619,7 @@ std::vector<HybridFuzzySearch::SearchResult> HybridFuzzySearch::search(
             }
         }
     }
+    } // End of else block for single-word query
     
     // Convert map to vector and sort
     std::vector<SearchResult> results;

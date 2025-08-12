@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5] - 2025-08-11
+
+### Added
+- **Build System Enhancements**:
+  - Automatic std::format detection with fallback to fmt library for older compilers
+  - Improved ncurses detection for Linux builds with clear error messages
+  - BUILD-GCC.md documentation for building with GNU toolchain
+- **Search Improvements**:
+  - Word-by-word processing for multi-word queries (e.g., "chain event ingestion" searches each word independently)
+  - Minimum-should-match scoring (50% of query words must match by default)
+  - Intelligent result aggregation with boost for documents matching all query words
+  - Edit distance-based scoring (closer matches score higher)
+  - Automatic fallback to fuzzy search when FTS5 fails
+
+### Fixed
+  - Proper handling of hyphens in queries like "PBI-6", "task-4", "feature-123"
+  - Special characters (@, #, ?, :, /, \, [], {}, ()) no longer cause SQL errors
+  - Advanced FTS5 operators (AND, OR, NOT, NEAR) still available for power users
+- **Fuzzy search matching**: Completely rewrote trigram similarity calculation
+- **CI/CD Pipeline**:
+  - Added install step verification to ensure artifacts are created
+  - Added libncurses-dev to Ubuntu dependencies
+  - Enabled Ubuntu traditional (non-Conan) builds in CI matrix
+
+### Changed
+- **Search indexing strategy**: Enhanced to support both single and multi-word queries effectively
+  - Documents now indexed at word level in addition to full content
+  - Keywords extracted more comprehensively with 2-word phrases
+  - Improved tokenization with punctuation handling
+- **Error handling**: FTS5 failures now gracefully fall back to fuzzy search instead of returning errors
+
 ## [0.0.4] - 2025-08-11
 
 ### Added
@@ -20,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP Server Tools** for directory operations with full CLI parity
   - `add_directory`: Add directory contents with collection/snapshot support
   - `restore_collection`: Restore documents from a collection to filesystem
-  - `restore_snapshot`: Restore documents from a snapshot to filesystem  
+  - `restore_snapshot`: Restore documents from a snapshot to filesystem
   - `list_collections`: List available collections
   - `list_snapshots`: List available snapshots
 - **CLI verbosity control**: All CLI commands now have concise output by default
@@ -35,10 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI output standardized** to be concise by default, verbose on request
 - **Build system updated** to enable MCP server by default in Conan builds
 
-### Fixed  
+### Fixed
 - **Version consistency**: MCP server now uses same version system as CLI (was hardcoded "1.0.0")
 - **ImTUI integration**: Resolved ncurses symbol versioning conflicts using ExternalProject_Add
-- **FTS5 support**: Enabled SQLite full-text search in Conan configuration  
+- **FTS5 support**: Enabled SQLite full-text search in Conan configuration
 - **Conan 2.0 compatibility**: Fixed all C++20 build issues with external dependencies
 - **Test suite improvements**: Comprehensive fixes for CI/CD reliability
   - Fixed GMock header compilation errors in MCP tests (missing `GTest::gmock` dependency)
@@ -75,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Build System**: Resolved multiple compilation issues preventing CI/CD success
   - Fixed switch statement scope error in `posix_storage.cpp` by adding proper braces
   - Added missing `#include <sys/resource.h>` for POSIX resource limits
-  - Added missing `#include <cmath>` in embedding tests for `std::isfinite` and `std::sqrt`  
+  - Added missing `#include <cmath>` in embedding tests for `std::isfinite` and `std::sqrt`
   - Added missing `#include <algorithm>` for `std::all_of` in manifest manager
   - Fixed designated initializer field ordering in `compressed_storage_engine.cpp`
   - Fixed type conversion from `std::string_view` to `Hash` type

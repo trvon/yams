@@ -21,10 +21,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         build_type: [conan, traditional]
-        exclude:
-          # Keep traditional as fallback on all platforms
-          - os: ubuntu-latest
-            build_type: traditional
+        # No exclusions - enable all combinations
 
     env:
       BUILD_DIR: build
@@ -55,6 +52,7 @@ jobs:
             sudo apt-get install -y \
               libssl-dev \
               libsqlite3-dev \
+              libncurses-dev \
               protobuf-compiler
           fi
 
@@ -163,7 +161,7 @@ jobs:
             gcovr --root . \
               --exclude '_deps/*' \
               --exclude 'tests/*' \
-              --exclude 'src/**/benchmarks/*' \
+              --exclude '.*src/.*/benchmarks/.*' \
               --exclude 'tools/*' \
               --html --html-details \
               --output "$BUILD_DIR/coverage.html"
@@ -171,7 +169,7 @@ jobs:
             gcovr --root . \
               --exclude '_deps/*' \
               --exclude 'tests/*' \
-              --exclude 'src/**/benchmarks/*' \
+              --exclude '.*src/.*/benchmarks/.*' \
               --exclude 'tools/*' \
               --xml \
               --output "$BUILD_DIR/coverage.xml"
@@ -188,10 +186,17 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            cmake --install build/Release --config Release
+            cmake --install build/Release --config Release --prefix "$INSTALL_PREFIX"
           else
-            cmake --install "$BUILD_DIR" --config Release
+            cmake --install "$BUILD_DIR" --config Release --prefix "$INSTALL_PREFIX"
           fi
+          # Verify installation succeeded
+          if [ ! -d "$INSTALL_PREFIX" ]; then
+            echo "ERROR: Install prefix directory does not exist!"
+            exit 1
+          fi
+          echo "Installation contents:"
+          ls -la "$INSTALL_PREFIX" || true
 
       - name: Upload installed prefix
         if: always()

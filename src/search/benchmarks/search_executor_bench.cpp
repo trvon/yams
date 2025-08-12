@@ -37,8 +37,8 @@ static void BM_SearchExecutor_QueryLen_Limit(benchmark::State& state) {
     fs::path dbPath = fs::temp_directory_path() / "yams_bench_search.sqlite";
 
     // Create and open database at on-disk path
-    auto db = std::make_shared<metadata::Database>();
-    auto openResult = db->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
+    auto db = std::make_shared<Database>();
+    auto openResult = db->open(dbPath.string(), ConnectionMode::ReadWrite);
     if (!openResult) {
         state.SkipWithError("Failed to open database");
         return;
@@ -69,8 +69,13 @@ static void BM_SearchExecutor_QueryLen_Limit(benchmark::State& state) {
         total_query_bytes += query.size();
 
         auto results = executor.search(query, limit);
-        total_hits += results.size();
-        benchmark::DoNotOptimize(results);
+        if (!results) {
+            // Skip counting on failure to avoid throwing inside the benchmark loop
+            continue;
+        }
+        const auto& search_results = results.value();
+        total_hits += search_results.size();
+        benchmark::DoNotOptimize(search_results);
     }
 
     // Items == queries executed
