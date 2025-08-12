@@ -50,7 +50,7 @@ static void BM_QueryParser_Simple(benchmark::State& state) {
         auto result = parser.parse(query);
         total_bytes += query.size();
         if (result.has_value()) {
-            auto ast = std::move(result).value();
+            auto ast = std::move(*result);
             // Simple traversal to ensure work is done
             std::string astString = ast->toString();
             total_ast_chars += astString.size();
@@ -77,7 +77,7 @@ static void BM_QueryParser_Complex(benchmark::State& state) {
         auto result = parser.parse(query);
         total_bytes += query.size();
         if (result.has_value()) {
-            auto ast = std::move(result).value();
+            auto ast = std::move(*result);
             // Simple traversal to ensure work is done
             std::string astString = ast->toString();
             total_ast_chars += astString.size();
@@ -108,7 +108,7 @@ static void BM_QueryParser_LenNesting(benchmark::State& state) {
         total_bytes += query.size();
         auto result = parser.parse(query);
         if (result.has_value()) {
-            auto ast = std::move(result).value();
+            auto ast = std::move(*result);
             std::string astString = ast->toString();
             total_ast_chars += astString.size();
             benchmark::DoNotOptimize(astString);

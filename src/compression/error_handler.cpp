@@ -329,7 +329,7 @@ private:
                 
                 // Exponential backoff
                 delay = std::min(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(delay * cfg.retryBackoffMultiplier),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(delay * static_cast<int64_t>(cfg.retryBackoffMultiplier)),
                     cfg.maxRetryDelay
                 );
             }
