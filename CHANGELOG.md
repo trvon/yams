@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6] - 2025-08-11
+
+### Added
+  - TUI Browser Improvements
+
+### Fixed
+  - Fixed unique_ptr copy errors in query parser benchmarks
+  - Resolved compression error handler warnings on Ubuntu 22.04
+  - Improved error handling and warning cleanup for better compiler compatibility
+  - Removed hardcoded widget dimensions that broke small terminal displays
+  - Fixed non-functional scrolling in document lists
+  - Improved loading state management and race condition handling
+  - Enhanced document preview formatting and metadata display
+
 ## [0.0.5] - 2025-08-11
 
 ### Added

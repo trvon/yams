@@ -7,7 +7,7 @@
 #include <string>
 #include <memory>
 
-namespace kronos::tools {
+namespace yams::tools {
 
 /**
  * Base class for all CLI commands
@@ -98,4 +98,4 @@ private:
     CommonOptions options_;
 };
 
-} // namespace kronos::tools
+} // namespace yams::tools

@@ -8,7 +8,7 @@
 #include <chrono>
 #include <iomanip>
 
-namespace kronos::tools {
+namespace yams::tools {
 
 class GCCommand : public Command {
 public:
@@ -185,4 +185,4 @@ static bool registered = []() {
     return true;
 }();
 
-} // namespace kronos::tools
+} // namespace yams::tools

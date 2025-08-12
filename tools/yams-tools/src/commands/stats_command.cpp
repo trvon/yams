@@ -12,7 +12,7 @@
 #include <map>
 #include <vector>
 
-namespace kronos::tools {
+namespace yams::tools {
 
 class StatsCommand : public Command {
 public:
@@ -28,6 +28,9 @@ public:
         
         stats->add_flag("-d,--detailed", detailed_,
                        "Show detailed statistics including distribution");
+        
+        stats->add_flag("-h,--human-readable", humanReadable_,
+                       "Display sizes in human readable format (like df -h)");
         
         stats->add_option("--top", topCount_,
                          "Number of top items to show")
@@ -197,15 +200,15 @@ private:
     }
     
     void printHumanReadable(const Stats& stats) {
-        std::cout << "\n=== Kronos Storage Statistics ===\n\n";
+        std::cout << "\n=== YAMS Storage Statistics ===\n\n";
         
         // Storage overview
         std::cout << "Storage Overview:\n";
         std::cout << "  Total blocks:        " << std::setw(12) << stats.totalBlocks << "\n";
         std::cout << "  Unique blocks:       " << std::setw(12) << stats.uniqueBlocks << "\n";
-        std::cout << "  Total size:          " << std::setw(12) << formatBytes(stats.totalSize) << "\n";
+        std::cout << "  Total size:          " << std::setw(12) << formatSize(stats.totalSize) << "\n";
         std::cout << "  Unreferenced blocks: " << std::setw(12) << stats.unreferencedBlocks;
-        std::cout << " (" << formatBytes(stats.unreferencedSize) << ")\n\n";
+        std::cout << " (" << formatSize(stats.unreferencedSize) << ")\n\n";
         
         // Deduplication metrics
         std::cout << "Deduplication Metrics:\n";
@@ -213,7 +216,7 @@ private:
                  << stats.deduplicationRatio << ":1\n";
         std::cout << "  Space savings:       " << std::fixed << std::setprecision(1) 
                  << (stats.spacesSavings * 100) << "%\n";
-        std::cout << "  Logical size:        " << formatBytes(stats.deduplicatedSize) << "\n";
+        std::cout << "  Logical size:        " << formatSize(stats.deduplicatedSize) << "\n";
         std::cout << "  Average references:  " << std::fixed << std::setprecision(2) 
                  << stats.averageReferences << "\n";
         std::cout << "  Max references:      " << stats.maxReferences << "\n\n";
@@ -351,10 +354,19 @@ private:
         return oss.str();
     }
     
+    std::string formatSize(uint64_t bytes) const {
+        if (humanReadable_) {
+            return formatBytes(bytes);
+        } else {
+            return std::to_string(bytes);
+        }
+    }
+    
     bool shouldExecute_ = false;
     std::string outputFormat_ = "human";
     bool detailed_ = false;
+    bool humanReadable_ = false;
     int topCount_ = 10;
 };
 
-} // namespace kronos::tools
+} // namespace yams::tools

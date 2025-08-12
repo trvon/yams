@@ -25,7 +25,7 @@ namespace {
     /**
      * @brief Get string representation of recovery strategy
      */
-    const char* strategyToString(RecoveryStrategy strategy) noexcept {
+    [[maybe_unused]] const char* strategyToString(RecoveryStrategy strategy) noexcept {
         switch (strategy) {
             case RecoveryStrategy::None: return "None";
             case RecoveryStrategy::Retry: return "Retry";
@@ -310,7 +310,7 @@ private:
     }
     
     RecoveryResult executeRetryStrategy(
-        const CompressionError& error,
+        [[maybe_unused]] const CompressionError& error,
         std::function<Result<void>()> retryFunction) {
         
         RecoveryResult result;
@@ -329,9 +329,7 @@ private:
                 
                 // Exponential backoff
                 delay = std::min(
-                    std::chrono::milliseconds(
-                        static_cast<long>(delay.count() * cfg.retryBackoffMultiplier)
-                    ),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(delay * cfg.retryBackoffMultiplier),
                     cfg.maxRetryDelay
                 );
             }

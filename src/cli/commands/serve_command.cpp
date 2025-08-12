@@ -38,7 +38,7 @@ public:
             auto result = execute();
             if (!result) {
                 spdlog::error("Command failed: {}", result.error().message);
-                exit(1);
+                throw CLI::RuntimeError(1);
             }
         });
     }

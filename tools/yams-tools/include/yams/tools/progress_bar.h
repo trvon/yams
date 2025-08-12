@@ -6,7 +6,7 @@
 #include <mutex>
 #include <string>
 
-namespace kronos::tools {
+namespace yams::tools {
 
 /**
  * Simple progress bar for CLI tools
@@ -126,4 +126,4 @@ private:
     bool isQuiet_ = false;
 };
 
-} // namespace kronos::tools
+} // namespace yams::tools

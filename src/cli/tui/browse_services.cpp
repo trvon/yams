@@ -4,6 +4,8 @@
 #include <yams/api/content_store.h>
 #include <yams/metadata/metadata_repository.h>
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -50,16 +52,21 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
     std::string status;
 
     if (!_cli) {
+        spdlog::error("TUI Services: CLI not available");
         if (status_message) *status_message = "Internal error: CLI not available";
         return all;
     }
+    
+    spdlog::debug("TUI Services: Starting document load");
     
     auto startTime = std::chrono::steady_clock::now();
 
     auto metadataRepo = _cli->getMetadataRepository();
     if (metadataRepo) {
+        spdlog::debug("TUI Services: Got metadata repository, checking document count");
         auto countResult = metadataRepo->getDocumentCount();
         int64_t count = (countResult.has_value() ? countResult.value() : 0);
+        spdlog::info("TUI Services: Metadata repository reports {} documents", count);
 
         if (count > 0) {
             // Limit initial query to prevent UI freezing on large databases
@@ -67,6 +74,7 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
             
             auto docsRes = metadataRepo->findDocumentsByPath("%");
             if (docsRes.has_value()) {
+                spdlog::debug("TUI Services: Query returned {} document results", docsRes.value().size());
                 int loaded = 0;
                 for (const auto& di : docsRes.value()) {
                     // Check timeout every 100 documents
@@ -97,13 +105,17 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
                 if (status.empty()) {
                     status = std::to_string(all.size()) + " documents loaded";
                 }
+                spdlog::info("TUI Services: Successfully loaded {} documents", all.size());
             } else {
                 status = "Failed to query documents";
+                spdlog::warn("TUI Services: Query failed - no document results");
             }
         } else {
             status = std::to_string(count) + " documents in metadata DB";
+            spdlog::warn("TUI Services: No documents available (count: {})", count);
         }
     } else {
+        spdlog::warn("TUI Services: No metadata repository available, falling back to content store");
         // Fallback to content store stats with synthetic entries
         auto store = _cli->getContentStore();
         if (store) {

@@ -8,7 +8,7 @@
 #include <random>
 #include <thread>
 
-namespace kronos::tools {
+namespace yams::tools {
 
 class VerifyCommand : public Command {
 public:
@@ -322,4 +322,4 @@ private:
     int reportIntervalHours_ = 1;
 };
 
-} // namespace kronos::tools
+} // namespace yams::tools

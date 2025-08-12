@@ -6,7 +6,14 @@
 
 namespace yams::cli::tui {
 
-// Column focus in the 3-pane layout
+// Layout modes for different screen sizes
+enum class LayoutMode {
+    MultiPane,    // 3-column layout for wide screens (>=100 cols)
+    SinglePane,   // Single pane with navigation for medium screens (60-99 cols)
+    Compact       // Minimal list-only view for small screens (<60 cols)
+};
+
+// Column focus in the multi-pane layout
 enum class Column {
     Collections = 0,
     Documents = 1,
@@ -37,6 +44,11 @@ struct BrowseState {
     std::vector<DocEntry> documents;
     std::vector<std::string> collections;
 
+    // Layout and display
+    LayoutMode layoutMode = LayoutMode::MultiPane;
+    int terminalWidth = 120;
+    int terminalHeight = 30;
+
     // Selection and focus
     int selected = 0;
     int selectedCollection = 0;
@@ -60,6 +72,12 @@ struct BrowseState {
     std::vector<std::string> previewLines;
     int previewScrollOffset = 0;
     PreviewMode previewMode = PreviewMode::Auto;
+
+    // Virtual scrolling and pagination
+    int documentScrollOffset = 0;    // For virtual scrolling in document list
+    int documentsPerPage = 100;      // Number of documents to load per page
+    int currentPage = 0;             // Current page for pagination
+    bool hasMoreDocuments = false;   // Whether more documents are available
 
     // Viewer overlay
     bool viewerOpen = false;

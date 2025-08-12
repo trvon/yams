@@ -1,5 +1,5 @@
 /**
- * Simple garbage collection tool for Kronos storage
+ * Simple garbage collection tool for YAMS storage
  * 
  * Direct implementation without GarbageCollector class
  */
@@ -14,7 +14,7 @@
 #include <chrono>
 #include <vector>
 
-using namespace kronos;
+using namespace yams;
 
 std::string formatBytes(uint64_t bytes) {
     const char* units[] = {"B", "KB", "MB", "GB", "TB"};
@@ -36,7 +36,7 @@ void printUsage(const char* program) {
     std::cout << "\nOptions:\n";
     std::cout << "  --dry-run    Perform a trial run with no changes made\n";
     std::cout << "  --force      Skip confirmation prompt\n";
-    std::cout << "\nRemove unreferenced blocks from Kronos storage.\n";
+    std::cout << "\nRemove unreferenced blocks from YAMS storage.\n";
 }
 
 int main(int argc, char** argv) {

@@ -7,7 +7,7 @@
 #include <iostream>
 #include <csignal>
 
-namespace kronos::tools {
+namespace yams::tools {
 
 // Forward declare command classes
 class GCCommand;
@@ -19,9 +19,9 @@ std::unique_ptr<Command> createGCCommand();
 std::unique_ptr<Command> createStatsCommand();
 std::unique_ptr<Command> createVerifyCommand();
 
-class KronosTools {
+class YamsTools {
 public:
-    KronosTools() : app_("kronos-tools", "Kronos Storage Maintenance Tools") {
+    YamsTools() : app_("yams-tools", "YAMS Storage Maintenance Tools") {
         setupApp();
         registerCommands();
     }
@@ -103,7 +103,7 @@ std::unique_ptr<Command> createVerifyCommand() {
     return std::make_unique<VerifyCommandImpl>();
 }
 
-} // namespace kronos::tools
+} // namespace yams::tools
 
 // Signal handling
 std::atomic<bool> g_interrupted{false};
@@ -124,6 +124,6 @@ int main(int argc, char** argv) {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
     
     // Run the application
-    kronos::tools::KronosTools app;
+    yams::tools::YamsTools app;
     return app.run(argc, argv);
 }

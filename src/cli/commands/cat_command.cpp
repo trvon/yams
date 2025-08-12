@@ -31,7 +31,7 @@ public:
             auto result = execute();
             if (!result) {
                 spdlog::error("Cat failed: {}", result.error().message);
-                std::exit(1);
+                throw CLI::RuntimeError(1);
             }
         });
     }

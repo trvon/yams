@@ -1,5 +1,5 @@
 /**
- * Simple statistics tool for Kronos storage
+ * Simple statistics tool for YAMS storage
  * 
  * This is a simplified version that doesn't require external dependencies
  */
@@ -31,7 +31,7 @@ std::string formatBytes(uint64_t bytes) {
 
 void printUsage(const char* program) {
     std::cout << "Usage: " << program << " <storage-path>\n";
-    std::cout << "\nDisplay statistics for Kronos storage at the specified path.\n";
+    std::cout << "\nDisplay statistics for YAMS storage at the specified path.\n";
 }
 
 int main(int argc, char** argv) {
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
             (1.0 - static_cast<double>(storageStats.totalBytes) / deduplicatedSize) * 100.0 : 0.0;
         
         // Display statistics
-        std::cout << "\n=== Kronos Storage Statistics ===\n\n";
+        std::cout << "\n=== YAMS Storage Statistics ===\n\n";
         
         std::cout << "Storage Path: " << storagePath << "\n\n";
         
