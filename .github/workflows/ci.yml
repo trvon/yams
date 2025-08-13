@@ -233,6 +233,10 @@ jobs:
           ABSOLUTE_PREFIX="$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
           echo "Installing to: $ABSOLUTE_PREFIX"
           
+          # Debug: Check CMake install variables
+          echo "Debug: Checking CMake cache for install paths..."
+          grep -E "CMAKE_INSTALL|SPDLOG" "$BUILD_DIR/CMakeCache.txt" | head -20 || true
+          
           cmake --install "$BUILD_DIR" --config Release --prefix "$ABSOLUTE_PREFIX"
           
           # Verify installation succeeded
