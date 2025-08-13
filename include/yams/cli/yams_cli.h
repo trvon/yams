@@ -87,6 +87,11 @@ public:
      */
     void registerCommand(std::unique_ptr<ICommand> command);
     
+    /**
+     * Find the magic_numbers.json file in standard locations
+     */
+    static std::filesystem::path findMagicNumbersFile();
+    
 private:
     /**
      * Initialize the storage system

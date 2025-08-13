@@ -1,7 +1,9 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/cli/time_parser.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/document_metadata.h>
+#include <yams/detection/file_type_detector.h>
 #include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -66,6 +68,21 @@ public:
             ->default_val(50);
         cmd->add_flag("--no-snippets", noSnippets_, "Disable content previews");
         
+        // File type filters
+        cmd->add_option("--type", fileType_, "Filter by file type (image, document, archive, audio, video, text, executable, binary)");
+        cmd->add_option("--mime", mimeType_, "Filter by MIME type (e.g., image/jpeg, application/pdf)");
+        cmd->add_option("--extension", extensions_, "Filter by file extension(s), comma-separated (e.g., .jpg,.png)");
+        cmd->add_flag("--binary", binaryOnly_, "Show only binary files");
+        cmd->add_flag("--text", textOnly_, "Show only text files");
+        
+        // Time filters
+        cmd->add_option("--created-after", createdAfter_, "Show files created after this time (ISO 8601, relative like '7d', or natural like 'yesterday')");
+        cmd->add_option("--created-before", createdBefore_, "Show files created before this time");
+        cmd->add_option("--modified-after", modifiedAfter_, "Show files modified after this time");
+        cmd->add_option("--modified-before", modifiedBefore_, "Show files modified before this time");
+        cmd->add_option("--indexed-after", indexedAfter_, "Show files indexed after this time");
+        cmd->add_option("--indexed-before", indexedBefore_, "Show files indexed before this time");
+        
         cmd->callback([this]() { 
             // Handle snippet flag logic
             if (noSnippets_) {
@@ -110,8 +127,27 @@ public:
             
             std::vector<EnhancedDocumentInfo> documents;
             
+            // Initialize file type detector if needed for filtering
+            bool needFileTypeDetection = !fileType_.empty() || !mimeType_.empty() || binaryOnly_ || textOnly_;
+            if (needFileTypeDetection) {
+                detection::FileTypeDetectorConfig config;
+                config.patternsFile = YamsCLI::findMagicNumbersFile();
+                config.useCustomPatterns = !config.patternsFile.empty();
+                detection::FileTypeDetector::instance().initialize(config);
+            }
+            
             // Process each document and enrich with metadata and content
             for (const auto& docInfo : documentsResult.value()) {
+                // Apply time filters
+                if (!applyTimeFilters(docInfo)) {
+                    continue;
+                }
+                
+                // Apply file type filters
+                if (!applyFileTypeFilters(docInfo)) {
+                    continue;
+                }
+                
                 EnhancedDocumentInfo doc;
                 doc.info = docInfo;
                 
@@ -543,6 +579,187 @@ private:
     }
     
 private:
+    bool applyTimeFilters(const metadata::DocumentInfo& doc) {
+        // Parse and apply created time filters
+        if (!createdAfter_.empty()) {
+            auto afterTime = TimeParser::parse(createdAfter_);
+            if (!afterTime) {
+                spdlog::warn("Invalid created-after time: {}", createdAfter_);
+                return true; // Don't filter on invalid input
+            }
+            if (doc.createdTime < afterTime.value()) {
+                return false;
+            }
+        }
+        
+        if (!createdBefore_.empty()) {
+            auto beforeTime = TimeParser::parse(createdBefore_);
+            if (!beforeTime) {
+                spdlog::warn("Invalid created-before time: {}", createdBefore_);
+                return true;
+            }
+            if (doc.createdTime > beforeTime.value()) {
+                return false;
+            }
+        }
+        
+        // Parse and apply modified time filters
+        if (!modifiedAfter_.empty()) {
+            auto afterTime = TimeParser::parse(modifiedAfter_);
+            if (!afterTime) {
+                spdlog::warn("Invalid modified-after time: {}", modifiedAfter_);
+                return true;
+            }
+            if (doc.modifiedTime < afterTime.value()) {
+                return false;
+            }
+        }
+        
+        if (!modifiedBefore_.empty()) {
+            auto beforeTime = TimeParser::parse(modifiedBefore_);
+            if (!beforeTime) {
+                spdlog::warn("Invalid modified-before time: {}", modifiedBefore_);
+                return true;
+            }
+            if (doc.modifiedTime > beforeTime.value()) {
+                return false;
+            }
+        }
+        
+        // Parse and apply indexed time filters
+        if (!indexedAfter_.empty()) {
+            auto afterTime = TimeParser::parse(indexedAfter_);
+            if (!afterTime) {
+                spdlog::warn("Invalid indexed-after time: {}", indexedAfter_);
+                return true;
+            }
+            if (doc.indexedTime < afterTime.value()) {
+                return false;
+            }
+        }
+        
+        if (!indexedBefore_.empty()) {
+            auto beforeTime = TimeParser::parse(indexedBefore_);
+            if (!beforeTime) {
+                spdlog::warn("Invalid indexed-before time: {}", indexedBefore_);
+                return true;
+            }
+            if (doc.indexedTime > beforeTime.value()) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    bool applyFileTypeFilters(const metadata::DocumentInfo& doc) {
+        // Extension filter
+        if (!extensions_.empty()) {
+            std::string ext = doc.fileExtension;
+            if (ext.empty() && !doc.fileName.empty()) {
+                auto pos = doc.fileName.rfind('.');
+                if (pos != std::string::npos) {
+                    ext = doc.fileName.substr(pos);
+                }
+            }
+            
+            // Parse comma-separated extensions
+            std::istringstream ss(extensions_);
+            std::string token;
+            bool found = false;
+            while (std::getline(ss, token, ',')) {
+                // Trim whitespace
+                token.erase(0, token.find_first_not_of(" \t"));
+                token.erase(token.find_last_not_of(" \t") + 1);
+                
+                // Add dot if not present
+                if (!token.empty() && token[0] != '.') {
+                    token = "." + token;
+                }
+                
+                if (ext == token) {
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) {
+                return false;
+            }
+        }
+        
+        // MIME type filter
+        if (!mimeType_.empty()) {
+            if (doc.mimeType != mimeType_) {
+                // Also check if it's a wildcard match (e.g., "image/*")
+                if (mimeType_.back() == '*' && mimeType_.size() > 1) {
+                    std::string prefix = mimeType_.substr(0, mimeType_.size() - 1);
+                    if (doc.mimeType.find(prefix) != 0) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+        }
+        
+        // File type category filter or binary/text filter
+        if (!fileType_.empty() || binaryOnly_ || textOnly_) {
+            // Detect file type if not already in metadata
+            detection::FileSignature sig;
+            
+            if (!doc.mimeType.empty()) {
+                sig.mimeType = doc.mimeType;
+                sig.fileType = detection::FileTypeDetector::instance().getFileTypeCategory(doc.mimeType);
+                sig.isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(doc.mimeType);
+            } else {
+                // Try to detect from file path if available
+                fs::path filePath = doc.filePath;
+                if (fs::exists(filePath)) {
+                    auto detectResult = detection::FileTypeDetector::instance().detectFromFile(filePath);
+                    if (detectResult) {
+                        sig = detectResult.value();
+                    } else {
+                        // Fall back to extension-based detection
+                        std::string ext = filePath.extension().string();
+                        sig.mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(ext);
+                        sig.fileType = detection::FileTypeDetector::instance().getFileTypeCategory(sig.mimeType);
+                        sig.isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(sig.mimeType);
+                    }
+                } else {
+                    // Use extension only
+                    std::string ext = doc.fileExtension;
+                    if (ext.empty() && !doc.fileName.empty()) {
+                        auto pos = doc.fileName.rfind('.');
+                        if (pos != std::string::npos) {
+                            ext = doc.fileName.substr(pos);
+                        }
+                    }
+                    sig.mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(ext);
+                    sig.fileType = detection::FileTypeDetector::instance().getFileTypeCategory(sig.mimeType);
+                    sig.isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(sig.mimeType);
+                }
+            }
+            
+            // Apply file type category filter
+            if (!fileType_.empty()) {
+                if (sig.fileType != fileType_) {
+                    return false;
+                }
+            }
+            
+            // Apply binary/text filter
+            if (binaryOnly_ && !sig.isBinary) {
+                return false;
+            }
+            if (textOnly_ && sig.isBinary) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
     YamsCLI* cli_ = nullptr;
     std::string format_;
     std::string sortBy_;
@@ -559,6 +776,21 @@ private:
     bool groupBySession_ = false;
     int snippetLength_ = 50;
     bool noSnippets_ = false;
+    
+    // File type filters
+    std::string fileType_;
+    std::string mimeType_;
+    std::string extensions_;
+    bool binaryOnly_ = false;
+    bool textOnly_ = false;
+    
+    // Time filters
+    std::string createdAfter_;
+    std::string createdBefore_;
+    std::string modifiedAfter_;
+    std::string modifiedBefore_;
+    std::string indexedAfter_;
+    std::string indexedBefore_;
 };
 
 // Factory function

@@ -9,6 +9,7 @@ add_subdirectory(wal)
 add_subdirectory(integrity)
 add_subdirectory(api)
 add_subdirectory(metadata)
+add_subdirectory(detection)
 add_subdirectory(extraction)
 add_subdirectory(indexing)
 add_subdirectory(search)
@@ -39,6 +40,7 @@ target_link_libraries(yams_storage
         yams::integrity
         yams::api
         yams::metadata
+        yams::detection
         yams::extraction
         yams::indexing
         yams::search

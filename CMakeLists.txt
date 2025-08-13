@@ -328,7 +328,12 @@ endif()
     include(GNUInstallDirs)
     install(FILES "${MAN_DIR}/yams.1" DESTINATION "${CMAKE_INSTALL_MANDIR}/man1" COMPONENT runtime)
 
-    # 9) Global compile definition to indicate embedded help is available
+    # 9) Install data files (magic_numbers.json)
+    install(FILES "${CMAKE_SOURCE_DIR}/data/magic_numbers.json" 
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/yams/data" 
+            COMPONENT runtime)
+
+    # 10) Global compile definition to indicate embedded help is available
     add_compile_definitions(YAMS_EMBEDDED_VERBOSE_HELP=1)
 
 else()
@@ -705,7 +710,7 @@ if(NOT YAMS_USE_CONAN)
             else()
                 # Fallback: create our own interface library
                 add_library(yams_boost_headers INTERFACE)
-                target_include_directories(yams_boost_headers INTERFACE ${boost_SOURCE_DIR})
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${boost_SOURCE_DIR})
                 add_library(Boost::headers ALIAS yams_boost_headers)
             endif()
         endif()
@@ -989,10 +994,23 @@ if(YAMS_ENABLE_PDF)
         # Create alias for consistent naming
         add_library(pdfium::pdfium ALIAS pdfium)
 
-        # Install the prebuilt PDFium dylib and adjust its install_name on macOS
-        install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
-                DESTINATION ${CMAKE_INSTALL_LIBDIR}
-                COMPONENT runtime)
+        # Install the prebuilt PDFium library based on platform
+        if(APPLE)
+            install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
+                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    COMPONENT runtime)
+        elseif(UNIX)
+            install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.so"
+                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    COMPONENT runtime)
+        elseif(WIN32)
+            install(FILES "${pdfium_SOURCE_DIR}/bin/pdfium.dll"
+                    DESTINATION ${CMAKE_INSTALL_BINDIR}
+                    COMPONENT runtime)
+            install(FILES "${pdfium_SOURCE_DIR}/lib/pdfium.lib"
+                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    COMPONENT development)
+        endif()
 
         if(APPLE)
             # Ensure consumers load PDFium via @rpath; installed binaries use @loader_path/../lib

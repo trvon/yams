@@ -1,0 +1,26 @@
+{
+  "version": "1.0",
+  "patterns": [
+    {
+      "hex": "FFD8FF",
+      "type": "image",
+      "mime": "image/jpeg",
+      "description": "JPEG image",
+      "confidence": 1.0,
+      "offset": 0
+    },
+    {
+      "hex": "INVALID_HEX_VALUE",
+      "type": "broken", 
+      "mime": "invalid/type",
+      "description": "This should fail",
+      "confidence": 1.0,
+      "offset": 0
+    },
+    {
+      "missing_hex": "value",
+      "type": "text",
+      "description": "Missing hex field"
+    }
+  ]
+}

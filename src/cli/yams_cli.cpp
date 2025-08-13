@@ -8,6 +8,13 @@
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <yams/version.hpp>
+
+#ifdef __linux__
+#include <unistd.h>
+#include <linux/limits.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #if defined(YAMS_EMBEDDED_VERBOSE_HELP)
   #if defined(__has_include)
     #if __has_include(<generated/cli_help.hpp>) && \
@@ -333,6 +340,69 @@ void YamsCLI::registerBuiltinCommands() {
 void YamsCLI::registerCommand(std::unique_ptr<ICommand> command) {
     command->registerCommand(*app_, this);
     commands_.push_back(std::move(command));
+}
+
+std::filesystem::path YamsCLI::findMagicNumbersFile() {
+    namespace fs = std::filesystem;
+    
+    std::vector<fs::path> searchPaths;
+    
+    // 1. Check environment variable
+    if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
+        searchPaths.push_back(fs::path(dataDir) / "magic_numbers.json");
+    }
+    
+    // 2. Check relative to executable location (for installed binaries)
+    try {
+        // Get the path to the current executable
+        #ifdef __linux__
+            char result[PATH_MAX];
+            ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
+            if (count != -1) {
+                fs::path exePath(std::string(result, count));
+                // Check ../share/yams/data relative to binary
+                searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "data" / "magic_numbers.json");
+            }
+        #elif defined(__APPLE__)
+            char path[1024];
+            uint32_t size = sizeof(path);
+            if (_NSGetExecutablePath(path, &size) == 0) {
+                fs::path exePath(path);
+                // Check ../share/yams/data relative to binary
+                searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "data" / "magic_numbers.json");
+            }
+        #endif
+    } catch (...) {
+        // Ignore errors in getting executable path
+    }
+    
+    // 3. Check common installation paths
+    searchPaths.push_back("/usr/local/share/yams/data/magic_numbers.json");
+    searchPaths.push_back("/usr/share/yams/data/magic_numbers.json");
+    searchPaths.push_back("/opt/yams/share/data/magic_numbers.json");
+    
+    // 4. Check relative to current working directory (for development)
+    searchPaths.push_back("data/magic_numbers.json");
+    searchPaths.push_back("../data/magic_numbers.json");
+    searchPaths.push_back("../../data/magic_numbers.json");
+    searchPaths.push_back("../../../data/magic_numbers.json");
+    searchPaths.push_back("../../../../data/magic_numbers.json");
+    
+    // 5. Check in home directory
+    if (const char* home = std::getenv("HOME")) {
+        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "data" / "magic_numbers.json");
+    }
+    
+    // Find the first existing file
+    for (const auto& path : searchPaths) {
+        if (fs::exists(path) && fs::is_regular_file(path)) {
+            spdlog::debug("Found magic_numbers.json at: {}", path.string());
+            return path;
+        }
+    }
+    
+    spdlog::warn("magic_numbers.json not found in any standard location");
+    return fs::path(); // Return empty path if not found
 }
 
 } // namespace yams::cli

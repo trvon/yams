@@ -1,15 +1,22 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/detection/file_type_detector.h>
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
 #include <map>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
 
 namespace yams::cli {
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 class StatsCommand : public ICommand {
 public:
@@ -32,6 +39,8 @@ public:
         cmd->add_flag("--health", includeHealth_, "Include health check results");
         cmd->add_flag("--compression", showCompression_, "Show compression statistics");
         cmd->add_flag("--performance", showPerformance_, "Show performance metrics");
+        cmd->add_flag("--file-types", showFileTypes_, "Show file type breakdown");
+        cmd->add_flag("--duplicates", showDuplicates_, "Show duplicate file analysis");
         
         cmd->callback([this]() { 
             auto result = execute();
@@ -81,6 +90,88 @@ public:
                 health = store->checkHealth();
             }
             
+            // Get metadata repository for enhanced stats
+            auto metadataRepo = cli_->getMetadataRepository();
+            
+            // File type statistics
+            struct FileTypeStats {
+                int count = 0;
+                uint64_t totalSize = 0;
+                uint64_t avgSize = 0;
+                std::vector<std::string> topExtensions;
+            };
+            std::map<std::string, FileTypeStats> fileTypeStats;
+            std::map<std::string, int> extensionCounts;
+            std::map<std::string, int> mimeTypeCounts;
+            
+            // Duplicate analysis
+            std::map<std::string, std::vector<std::string>> duplicatesByHash;
+            uint64_t duplicateBytes = 0;
+            int uniqueDocuments = 0;
+            
+            if (metadataRepo && (showFileTypes_ || showDuplicates_ || detailed_)) {
+                auto documentsResult = metadataRepo->findDocumentsByPath("%");
+                if (documentsResult) {
+                    // Initialize file type detector for analysis
+                    if (showFileTypes_) {
+                        detection::FileTypeDetectorConfig config;
+                        config.patternsFile = YamsCLI::findMagicNumbersFile();
+                        config.useCustomPatterns = !config.patternsFile.empty();
+                        detection::FileTypeDetector::instance().initialize(config);
+                    }
+                    
+                    for (const auto& doc : documentsResult.value()) {
+                        // Track duplicates
+                        duplicatesByHash[doc.sha256Hash].push_back(doc.fileName);
+                        
+                        // File type analysis
+                        if (showFileTypes_) {
+                            std::string fileType = getFileTypeFromDoc(doc);
+                            fileTypeStats[fileType].count++;
+                            fileTypeStats[fileType].totalSize += doc.fileSize;
+                            
+                            // Track extensions
+                            if (!doc.fileExtension.empty()) {
+                                extensionCounts[doc.fileExtension]++;
+                                auto& topExts = fileTypeStats[fileType].topExtensions;
+                                if (std::find(topExts.begin(), topExts.end(), doc.fileExtension) == topExts.end()) {
+                                    topExts.push_back(doc.fileExtension);
+                                }
+                            }
+                            
+                            // Track MIME types
+                            if (!doc.mimeType.empty()) {
+                                mimeTypeCounts[doc.mimeType]++;
+                            }
+                        }
+                    }
+                    
+                    // Calculate duplicate stats
+                    for (const auto& [hash, files] : duplicatesByHash) {
+                        if (files.size() > 1) {
+                            // Get size of one instance (they're all the same)
+                            auto docResult = metadataRepo->getDocumentByHash(hash);
+                            if (docResult && docResult.value()) {
+                                duplicateBytes += docResult.value()->fileSize * (files.size() - 1);
+                            }
+                        } else {
+                            uniqueDocuments++;
+                        }
+                    }
+                    
+                    // Calculate averages for file types
+                    for (auto& [type, stats] : fileTypeStats) {
+                        if (stats.count > 0) {
+                            stats.avgSize = stats.totalSize / stats.count;
+                        }
+                        // Keep only top 3 extensions
+                        if (stats.topExtensions.size() > 3) {
+                            stats.topExtensions.resize(3);
+                        }
+                    }
+                }
+            }
+            
             // Get compression stats from metadata if requested
             std::map<std::string, int> compressionStats;
             if (showCompression_) {
@@ -103,40 +194,78 @@ public:
             
             // Output statistics
             if (format_ == "json") {
-                std::cout << "{\n";
-                std::cout << "  \"storage\": {\n";
-                std::cout << "    \"path\": \"" << storagePath.string() << "\",\n";
-                std::cout << "    \"totalDiskUsage\": " << totalDiskUsage << ",\n";
-                std::cout << "    \"objectCount\": " << objectCount << "\n";
-                std::cout << "  },\n";
-                std::cout << "  \"objects\": {\n";
-                std::cout << "    \"total\": " << stats.totalObjects << ",\n";
-                std::cout << "    \"totalSize\": " << stats.totalBytes << ",\n";
-                std::cout << "    \"uniqueBlocks\": " << stats.uniqueBlocks << ",\n";
-                std::cout << "    \"deduplicationRatio\": " 
-                         << stats.dedupRatio() << "\n";
-                std::cout << "  }";
+                json output;
+                
+                json storage;
+                storage["path"] = storagePath.string();
+                storage["totalDiskUsage"] = totalDiskUsage;
+                storage["objectCount"] = objectCount;
+                output["storage"] = storage;
+                
+                json objects;
+                objects["total"] = stats.totalObjects;
+                objects["totalSize"] = stats.totalBytes;
+                objects["uniqueBlocks"] = stats.uniqueBlocks;
+                objects["deduplicationRatio"] = stats.dedupRatio();
+                objects["uniqueDocuments"] = uniqueDocuments;
+                output["objects"] = objects;
+                
+                if (showFileTypes_ && !fileTypeStats.empty()) {
+                    json fileTypes;
+                    for (const auto& [type, stats] : fileTypeStats) {
+                        json typeInfo;
+                        typeInfo["count"] = stats.count;
+                        typeInfo["totalSize"] = stats.totalSize;
+                        typeInfo["avgSize"] = stats.avgSize;
+                        typeInfo["topExtensions"] = stats.topExtensions;
+                        fileTypes[type] = typeInfo;
+                    }
+                    output["fileTypes"] = fileTypes;
+                    
+                    // Top MIME types
+                    std::vector<std::pair<std::string, int>> topMimes;
+                    for (const auto& [mime, count] : mimeTypeCounts) {
+                        topMimes.push_back({mime, count});
+                    }
+                    std::sort(topMimes.begin(), topMimes.end(), 
+                              [](const auto& a, const auto& b) { return a.second > b.second; });
+                    if (topMimes.size() > 5) topMimes.resize(5);
+                    
+                    json mimes;
+                    for (const auto& [mime, count] : topMimes) {
+                        mimes[mime] = count;
+                    }
+                    output["topMimeTypes"] = mimes;
+                }
+                
+                if (showDuplicates_) {
+                    json duplicates;
+                    duplicates["duplicateFiles"] = duplicatesByHash.size() - uniqueDocuments;
+                    duplicates["duplicateBytes"] = duplicateBytes;
+                    duplicates["potentialSavings"] = formatSize(duplicateBytes);
+                    output["duplicates"] = duplicates;
+                }
                 
                 if (showCompression_ && !compressionStats.empty()) {
-                    std::cout << ",\n  \"compression\": {\n";
-                    bool first = true;
+                    json compression;
                     for (const auto& [type, count] : compressionStats) {
-                        if (!first) std::cout << ",\n";
-                        std::cout << "    \"" << type << "\": " << count;
-                        first = false;
+                        compression[type] = count;
                     }
-                    std::cout << "\n  }";
+                    output["compression"] = compression;
                 }
                 
                 if (includeHealth_) {
-                    std::cout << ",\n  \"health\": {\n";
-                    std::cout << "    \"isHealthy\": " << (health.isHealthy ? "true" : "false") << ",\n";
-                    std::cout << "    \"status\": \"" << health.status << "\",\n";
-                    std::cout << "    \"lastCheck\": \"" << health.lastCheck << "\"\n";
-                    std::cout << "  }";
+                    json healthJson;
+                    healthJson["isHealthy"] = health.isHealthy;
+                    healthJson["status"] = health.status;
+                    healthJson["lastCheck"] = std::chrono::duration_cast<std::chrono::seconds>(health.lastCheck.time_since_epoch()).count();
+                    if (!health.warnings.empty()) {
+                        healthJson["warnings"] = health.warnings;
+                    }
+                    output["health"] = healthJson;
                 }
                 
-                std::cout << "\n}\n";
+                std::cout << output.dump(2) << std::endl;
             } else {
                 // Text format
                 std::cout << "═══════════════════════════════════════════════════════════\n";
@@ -148,8 +277,9 @@ public:
                 std::cout << "  Disk Usage: " << formatSize(totalDiskUsage) << "\n";
                 std::cout << "  Object Files: " << objectCount << "\n\n";
                 
-                std::cout << "Objects:\n";
-                std::cout << "  Total Objects: " << stats.totalObjects << "\n";
+                std::cout << "Content Summary:\n";
+                std::cout << "  Total Documents: " << stats.totalObjects << "\n";
+                std::cout << "  Unique Documents: " << uniqueDocuments << "\n";
                 std::cout << "  Total Size: " << formatSize(stats.totalBytes) << "\n";
                 if (stats.totalObjects > 0) {
                     std::cout << "  Average Size: " 
@@ -157,13 +287,79 @@ public:
                 }
                 std::cout << "\n";
                 
-                std::cout << "Storage:\n";
+                std::cout << "Storage Efficiency:\n";
                 std::cout << "  Unique Blocks: " << stats.uniqueBlocks << "\n";
                 std::cout << "  Deduplicated Bytes: " << formatSize(stats.deduplicatedBytes) << "\n";
                 std::cout << "  Deduplication Ratio: " 
                          << std::fixed << std::setprecision(2) 
                          << stats.dedupRatio() << "\n";
+                
+                // Explain storage usage
+                if (totalDiskUsage > stats.totalBytes) {
+                    uint64_t overhead = totalDiskUsage - stats.totalBytes;
+                    std::cout << "  Storage Overhead: " << formatSize(overhead) 
+                             << " (metadata, indexes, etc.)\n";
+                }
                 std::cout << "\n";
+                
+                if (showFileTypes_ && !fileTypeStats.empty()) {
+                    std::cout << "File Type Breakdown:\n";
+                    
+                    // Sort by count
+                    std::vector<std::pair<std::string, FileTypeStats>> sortedTypes;
+                    for (const auto& [type, stats] : fileTypeStats) {
+                        sortedTypes.push_back({type, stats});
+                    }
+                    std::sort(sortedTypes.begin(), sortedTypes.end(),
+                              [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+                    
+                    for (const auto& [type, stats] : sortedTypes) {
+                        std::cout << "  " << std::left << std::setw(12) << type << ": ";
+                        std::cout << std::right << std::setw(6) << stats.count << " files, ";
+                        std::cout << std::setw(10) << formatSize(stats.totalSize);
+                        if (!stats.topExtensions.empty()) {
+                            std::cout << " (";
+                            for (size_t i = 0; i < stats.topExtensions.size(); ++i) {
+                                if (i > 0) std::cout << ", ";
+                                std::cout << stats.topExtensions[i];
+                            }
+                            std::cout << ")";
+                        }
+                        std::cout << "\n";
+                    }
+                    std::cout << "\n";
+                    
+                    // Show top MIME types
+                    if (!mimeTypeCounts.empty()) {
+                        std::cout << "Top MIME Types:\n";
+                        std::vector<std::pair<std::string, int>> topMimes;
+                        for (const auto& [mime, count] : mimeTypeCounts) {
+                            topMimes.push_back({mime, count});
+                        }
+                        std::sort(topMimes.begin(), topMimes.end(),
+                                  [](const auto& a, const auto& b) { return a.second > b.second; });
+                        
+                        for (size_t i = 0; i < std::min(size_t(5), topMimes.size()); ++i) {
+                            std::cout << "  " << std::left << std::setw(30) << topMimes[i].first 
+                                     << ": " << std::right << std::setw(6) << topMimes[i].second << " files\n";
+                        }
+                        std::cout << "\n";
+                    }
+                }
+                
+                if (showDuplicates_) {
+                    std::cout << "Duplicate Analysis:\n";
+                    int duplicateCount = duplicatesByHash.size() - uniqueDocuments;
+                    std::cout << "  Duplicate Files: " << duplicateCount << "\n";
+                    std::cout << "  Wasted Space: " << formatSize(duplicateBytes) << "\n";
+                    if (totalDiskUsage > 0) {
+                        double wastePercent = (duplicateBytes * 100.0) / totalDiskUsage;
+                        std::cout << "  Potential Savings: " 
+                                 << std::fixed << std::setprecision(1) 
+                                 << wastePercent << "%\n";
+                    }
+                    std::cout << "\n";
+                }
                 
                 if (showCompression_ && !compressionStats.empty()) {
                     std::cout << "Compression:\n";
@@ -222,6 +418,8 @@ private:
     bool includeHealth_ = false;
     bool showCompression_ = false;
     bool showPerformance_ = false;
+    bool showFileTypes_ = false;
+    bool showDuplicates_ = false;
     
     std::string formatSize(uint64_t bytes) const {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
@@ -240,6 +438,28 @@ private:
             oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
         }
         return oss.str();
+    }
+    
+    std::string getFileTypeFromDoc(const metadata::DocumentInfo& doc) const {
+        if (!doc.mimeType.empty()) {
+            return detection::FileTypeDetector::instance().getFileTypeCategory(doc.mimeType);
+        }
+        
+        // Fall back to extension-based detection
+        std::string ext = doc.fileExtension;
+        if (ext.empty() && !doc.fileName.empty()) {
+            auto pos = doc.fileName.rfind('.');
+            if (pos != std::string::npos) {
+                ext = doc.fileName.substr(pos);
+            }
+        }
+        
+        if (!ext.empty()) {
+            std::string mime = detection::FileTypeDetector::getMimeTypeFromExtension(ext);
+            return detection::FileTypeDetector::instance().getFileTypeCategory(mime);
+        }
+        
+        return "unknown";
     }
 };
 

@@ -5,6 +5,25 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2025-08-13
+
+### Added
+- **File Type and Time Filtering**: Enhanced list, get, and stats commands with comprehensive filtering
+  - File type filters: `--type`, `--mime`, `--extension`, `--binary`, `--text`
+  - Time filters: `--created-after/before`, `--modified-after/before`, `--indexed-after/before`
+  - Supports flexible time formats (ISO 8601, relative like "7d", natural like "yesterday")
+- **Stats Command File Type Breakdown**: New `--file-types` flag shows detailed file type analysis
+  - File type distribution with counts and sizes
+  - Top file extensions per type
+  - Top MIME types in the system
+- **Intelligent File Type Detection**: Uses magic_numbers.json as single source of truth
+  - Runtime detection of data files across multiple installation paths
+  - Graceful fallback to built-in patterns when JSON not found
+
+### Changed
+- **File Type Classification**: More accurate detection using magic numbers vs just extensions
+- **Data File Installation**: magic_numbers.json now properly installed to system paths
+
 ## [0.1.1] - 2025-08-13
 
 ### Fixed

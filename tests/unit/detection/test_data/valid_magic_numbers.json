@@ -1,0 +1,45 @@
+{
+  "version": "1.0",
+  "patterns": [
+    {
+      "hex": "FFD8FF",
+      "type": "image",
+      "mime": "image/jpeg",
+      "description": "JPEG image",
+      "confidence": 1.0,
+      "offset": 0
+    },
+    {
+      "hex": "89504E47",
+      "type": "image", 
+      "mime": "image/png",
+      "description": "PNG image",
+      "confidence": 1.0,
+      "offset": 0
+    },
+    {
+      "hex": "25504446",
+      "type": "document",
+      "mime": "application/pdf", 
+      "description": "PDF document",
+      "confidence": 1.0,
+      "offset": 0
+    },
+    {
+      "hex": "504B0304",
+      "type": "archive",
+      "mime": "application/zip",
+      "description": "ZIP archive",
+      "confidence": 0.9,
+      "offset": 0
+    },
+    {
+      "hex": "7B",
+      "type": "text",
+      "mime": "application/json",
+      "description": "JSON text",
+      "confidence": 0.5,
+      "offset": 0
+    }
+  ]
+}

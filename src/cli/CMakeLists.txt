@@ -4,6 +4,7 @@
 set(CLI_SOURCES
     yams_cli.cpp
     command_registry.cpp
+    time_parser.cpp
     commands/add_command.cpp
     commands/get_command.cpp
     commands/restore_command.cpp
@@ -38,6 +39,7 @@ target_link_libraries(yams_cli
         yams_api
         yams_search
         yams_metadata
+        yams_detection
         CLI11::CLI11
         nlohmann_json::nlohmann_json
         spdlog::spdlog

@@ -13,6 +13,7 @@ add_subdirectory(extraction)
 add_subdirectory(indexing)
 add_subdirectory(search)
 add_subdirectory(vector)
+add_subdirectory(detection)
 
 # Add MCP tests if tools are being built
 if(YAMS_BUILD_TOOLS)

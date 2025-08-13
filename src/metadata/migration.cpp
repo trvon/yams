@@ -293,7 +293,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
         createRelationshipTables(),
         createSearchTables(),
         createCollectionIndexes(),
-        createKnowledgeGraphSchema()
+        createKnowledgeGraphSchema(),
+        createBinarySignatureSchema()
     };
 }
 
@@ -833,6 +834,65 @@ Migration YamsMetadataMigrations::createKnowledgeGraphSchema() {
         DROP TABLE IF EXISTS kg_edges;
         DROP TABLE IF EXISTS kg_aliases;
         DROP TABLE IF EXISTS kg_nodes;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createBinarySignatureSchema() {
+    Migration m;
+    m.version = 8;
+    m.name = "Create binary signature schema";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        -- Table for storing binary file signatures/magic numbers
+        CREATE TABLE IF NOT EXISTS document_signatures (
+            document_id INTEGER PRIMARY KEY,
+            signature BLOB NOT NULL,           -- First 512 bytes of file
+            signature_length INTEGER NOT NULL, -- Actual length stored (may be less than 512)
+            mime_type_detected TEXT,           -- MIME type detected from signature
+            file_type TEXT,                    -- File type classification (e.g., 'executable', 'archive', 'image')
+            is_binary BOOLEAN DEFAULT 1,       -- Whether file is binary or text
+            magic_number TEXT,                 -- Hex representation of first few bytes (e.g., 'FFD8' for JPEG)
+            updated_time INTEGER,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        -- Index for fast pattern matching on signatures
+        CREATE INDEX IF NOT EXISTS idx_signatures_magic ON document_signatures(magic_number);
+        CREATE INDEX IF NOT EXISTS idx_signatures_type ON document_signatures(file_type);
+        CREATE INDEX IF NOT EXISTS idx_signatures_mime ON document_signatures(mime_type_detected);
+        
+        -- Common file patterns table for fast lookup
+        CREATE TABLE IF NOT EXISTS file_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern BLOB NOT NULL,             -- Binary pattern to match
+            pattern_hex TEXT NOT NULL,         -- Hex representation for easier querying
+            offset INTEGER DEFAULT 0,          -- Offset in file where pattern should appear
+            file_type TEXT NOT NULL,           -- File type this pattern indicates
+            mime_type TEXT,                    -- Associated MIME type
+            description TEXT,                  -- Human-readable description
+            confidence REAL DEFAULT 1.0,       -- Confidence level for this pattern match
+            UNIQUE(pattern_hex, offset)
+        );
+        
+        -- Version tracking for pattern database
+        CREATE TABLE IF NOT EXISTS file_patterns_version (
+            id INTEGER PRIMARY KEY,
+            version TEXT NOT NULL,
+            updated_time INTEGER NOT NULL,
+            source TEXT                        -- Source of patterns (e.g., 'libmagic', 'json', 'custom')
+        );
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_signatures_mime;
+        DROP INDEX IF EXISTS idx_signatures_type;
+        DROP INDEX IF EXISTS idx_signatures_magic;
+        DROP TABLE IF EXISTS file_patterns_version;
+        DROP TABLE IF EXISTS file_patterns;
+        DROP TABLE IF EXISTS document_signatures;
     )";
 
     return m;

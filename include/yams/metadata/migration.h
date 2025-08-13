@@ -165,6 +165,9 @@ private:
     
     // Version 7: Add knowledge graph core schema (nodes, edges, aliases, embeddings, doc_entities, stats)
     static Migration createKnowledgeGraphSchema();
+    
+    // Version 8: Add binary signature schema for pattern matching
+    static Migration createBinarySignatureSchema();
 };
 
 /**
