@@ -125,7 +125,7 @@ jobs:
 
           # Configure with CMake using Conan presets
           cmake --preset conan-release -DYAMS_BUILD_DOCS=OFF
-          echo "BUILD_DIR=build/conan-release" >> $GITHUB_ENV
+          echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 
       - name: Configure (Traditional CMake)
         if: matrix.build_type == 'traditional'
@@ -215,11 +215,7 @@ jobs:
       - name: Install
         shell: bash
         run: |
-          if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            cmake --install build/conan-release --prefix "$INSTALL_PREFIX"
-          else
-            cmake --install "$BUILD_DIR" --config Release --prefix "$INSTALL_PREFIX"
-          fi
+          cmake --install "$BUILD_DIR" --config Release --prefix "$INSTALL_PREFIX"
           # Verify installation succeeded
           if [ ! -d "$INSTALL_PREFIX" ]; then
             echo "ERROR: Install prefix directory does not exist!"
