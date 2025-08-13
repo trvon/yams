@@ -111,6 +111,7 @@ public:
     
 #ifdef YAMS_HAS_LIBMAGIC
     magic_t magicCookie = nullptr;
+    mutable std::mutex magicMutex;  // Protect libmagic operations (not thread-safe)
 #endif
     
     Impl() = default;
@@ -118,6 +119,7 @@ public:
     ~Impl() {
 #ifdef YAMS_HAS_LIBMAGIC
         if (magicCookie) {
+            std::lock_guard<std::mutex> lock(magicMutex);
             magic_close(magicCookie);
         }
 #endif
@@ -125,6 +127,8 @@ public:
     
     Result<void> initializeLibMagic() {
 #ifdef YAMS_HAS_LIBMAGIC
+        std::lock_guard<std::mutex> lock(magicMutex);  // Protect initialization
+        
         magicCookie = magic_open(MAGIC_MIME_TYPE | MAGIC_ERROR);
         if (!magicCookie) {
             return Error{ErrorCode::InternalError, "Failed to initialize libmagic"};
@@ -144,6 +148,8 @@ public:
     
     Result<FileSignature> detectWithLibMagic(std::span<const std::byte> data) {
 #ifdef YAMS_HAS_LIBMAGIC
+        std::lock_guard<std::mutex> lock(magicMutex);  // Protect libmagic calls
+        
         if (!magicCookie) {
             return Error{ErrorCode::NotInitialized, "libmagic not initialized"};
         }

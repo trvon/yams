@@ -517,8 +517,10 @@ TEST_F(DocumentChunkerTest, MergeSmallChunks) {
     EXPECT_LT(merged.size(), small_chunks.size());
     
     // All merged chunks should meet minimum size (except possibly the last)
-    for (size_t i = 0; i < merged.size() - 1; ++i) {
-        EXPECT_GE(merged[i].content.size(), config.min_chunk_size);
+    if (!merged.empty()) {
+        for (size_t i = 0; i < merged.size() - 1; ++i) {
+            EXPECT_GE(merged[i].content.size(), config.min_chunk_size);
+        }
     }
 }
 
