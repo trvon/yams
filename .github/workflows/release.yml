@@ -142,8 +142,8 @@ jobs:
                         items_per_sec = bench.get('items_per_second', 0)
                         memory = f'{bytes_per_sec/1024/1024:.1f}MB/s' if bytes_per_sec > 0 else f'   {items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
                         print(f'| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |')
-                        except: pass
-                        " >> "$SUMMARY_FILE" 2>/dev/null || true
+                except: pass
+                " >> "$SUMMARY_FILE" 2>/dev/null || true
               fi
             done
             echo "" >> "$SUMMARY_FILE"
