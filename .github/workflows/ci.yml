@@ -156,7 +156,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            ctest --preset test-conan-release --output-on-failure || true
+            ctest --preset conan-release --output-on-failure || true
           else
             ctest --test-dir "$BUILD_DIR" --output-on-failure
             ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^consumer_'
@@ -208,7 +208,7 @@ jobs:
             gcovr --root . \
               --exclude '_deps/*' \
               --exclude 'tests/*' \
-              --exclude 'src/**/benchmarks/*' \
+              --exclude '.*src/.*/benchmarks/.*' \
               --exclude 'tools/*'
           fi
 

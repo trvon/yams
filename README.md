@@ -34,8 +34,8 @@ conan profile detect --force
 conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
 
 cmake --preset conan-release
-cmake --build build/conan-release -j
-sudo cmake --install build/conan-release
+cmake --build --preset conan-release
+sudo cmake --install build/conan-release/build/Release
 ```
 
 ### Build Options

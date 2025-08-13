@@ -433,10 +433,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(
         -Wall -Wextra -Wpedantic
         -Wcast-align -Wcast-qual
-        -Wconversion -Wsign-conversion
         -Wdouble-promotion -Wformat=2
-        -Wnon-virtual-dtor -Wold-style-cast
-        -Woverloaded-virtual -Wshadow
+        -Wnon-virtual-dtor -Wshadow
         $<$<CONFIG:Debug>:-Og>
         $<$<CONFIG:Debug>:-g3>
         $<$<CONFIG:Release>:-O3>

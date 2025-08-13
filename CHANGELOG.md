@@ -5,6 +5,21 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2025-08-13
+
+### Fixed
+  - Corrected Conan preset names (use `conan-release` instead of `build-conan-release`)
+  - Fixed C++20 standard requirement in Conan profiles
+  - Removed overly strict compiler warnings that broke dependency builds
+  - Fixed gcovr regex patterns for coverage reports
+  - Removed `-Wold-style-cast`, `-Wconversion`, `-Wsign-conversion`, and `-Woverloaded-virtual`
+  - Keeps essential warnings while allowing third-party code to compile cleanly
+
+### Changed
+- **Build Instructions**: Standardized on `conan-release` preset across all platforms
+  - Simplified build commands in README and documentation
+  - Consistent build directory structure (`build/conan-release`)
+
 ## [0.1.0] - 2025-08-12
 
 ### Added
