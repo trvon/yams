@@ -60,6 +60,11 @@ public:
     static std::unique_ptr<ICommand> createSearchCommand();
     
     /**
+     * Create grep command
+     */
+    static std::unique_ptr<ICommand> createGrepCommand();
+    
+    /**
      * Create config command
      */
     static std::unique_ptr<ICommand> createConfigCommand();

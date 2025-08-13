@@ -12,6 +12,7 @@ std::unique_ptr<ICommand> createCatCommand();
 std::unique_ptr<ICommand> createDeleteCommand();
 std::unique_ptr<ICommand> createListCommand();
 std::unique_ptr<ICommand> createSearchCommand();
+std::unique_ptr<ICommand> createGrepCommand();
 std::unique_ptr<ICommand> createConfigCommand();
 std::unique_ptr<ICommand> createAuthCommand();
 std::unique_ptr<ICommand> createStatsCommand();
@@ -33,6 +34,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createDeleteCommand());
     cli->registerCommand(CommandRegistry::createListCommand());
     cli->registerCommand(CommandRegistry::createSearchCommand());
+    cli->registerCommand(CommandRegistry::createGrepCommand());
     cli->registerCommand(CommandRegistry::createConfigCommand());
     cli->registerCommand(CommandRegistry::createAuthCommand());
     cli->registerCommand(CommandRegistry::createStatsCommand());
@@ -76,6 +78,10 @@ std::unique_ptr<ICommand> CommandRegistry::createListCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createSearchCommand() {
     return ::yams::cli::createSearchCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createGrepCommand() {
+    return ::yams::cli::createGrepCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createConfigCommand() {

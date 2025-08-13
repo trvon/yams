@@ -157,8 +157,25 @@ Result<ExtractionResult> PdfExtractor::extractWithOptions(const std::filesystem:
 // Internal implementation
 Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte> data,
                                                    const PdfExtractOptions& options) {
-    if (!isPdfiumInitialized()) {
-        initializePdfium();
+    // Lock the entire extraction process to ensure thread safety
+    // PDFium is not thread-safe and requires global synchronization
+    std::lock_guard<std::mutex> lock(pdfiumMutex);
+    
+    if (!pdfiumInitialized) {
+        FPDF_LIBRARY_CONFIG config = {};
+        config.version = 3;
+        config.m_pUserFontPaths = nullptr;
+        config.m_pIsolate = nullptr;
+        config.m_v8EmbedderSlot = 0;
+        config.m_pPlatform = nullptr;
+        
+        FPDF_InitLibraryWithConfig(&config);
+        pdfiumInitialized = true;
+        
+        // Register cleanup at exit
+        std::atexit(cleanupPdfium);
+        
+        spdlog::debug("PDFium library initialized");
     }
     
     // Load PDF document
@@ -269,6 +286,7 @@ Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte
 }
 
 // Extract metadata from PDF
+// Note: This function is called from within extractInternal() which already holds the PDFium mutex
 void PdfExtractor::extractMetadata(FPDF_DOCUMENT doc, ExtractionResult& result) {
     // Helper to get metadata string
     auto getMetaString = [doc](const std::string& tag) -> std::string {

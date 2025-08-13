@@ -45,7 +45,23 @@ This document establishes a unified, machine-readable, and authoritative policy 
 - All new information should be immediately added/tagged into YAMS.
 - Retrievals in workflows/documents reference content by YAMS hash.
 
----
+- **Codebase Indexing:**
+  ```bash
+  # Index entire codebase with proper file type detection
+  yams add src/ --recursive --include="*.cpp,*.h" --tags="code,source"
+  yams add include/ --recursive --include="*.h,*.hpp" --tags="code,headers"
+  ```
+- **LLM-Friendly Search:**
+  ```bash
+  # Get only file paths for context efficiency
+  yams search "SearchCommand" --paths-only
+  yams search "#include" --paths-only | head -10
+
+  # Use fuzzy search for broader discovery
+  yams search "vector database" --fuzzy --similarity 0.7 --paths-only
+  ```
+- **Enhanced File Detection:** YAMS now automatically detects code files (C++, Python, JavaScript, Rust, Go, etc.) using magic number patterns
+- **Comma-Separated Patterns:** Use `--include="*.cpp,*.h,*.md"` for multiple file types
 
 ## 2. Fundamental Policies
 1. **Knowledge-First Development:** Always check YAMS before any external research; project knowledge is built up incrementally.

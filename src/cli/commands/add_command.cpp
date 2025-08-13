@@ -491,20 +491,41 @@ private:
     bool shouldIncludeFile(const std::filesystem::path& filePath) {
         std::string fileName = filePath.filename().string();
         
+        // Split comma-separated patterns
+        auto splitPatterns = [](const std::vector<std::string>& patterns) {
+            std::vector<std::string> result;
+            for (const auto& pattern : patterns) {
+                std::stringstream ss(pattern);
+                std::string item;
+                while (std::getline(ss, item, ',')) {
+                    // Trim whitespace
+                    item.erase(0, item.find_first_not_of(" \t"));
+                    item.erase(item.find_last_not_of(" \t") + 1);
+                    if (!item.empty()) {
+                        result.push_back(item);
+                    }
+                }
+            }
+            return result;
+        };
+        
+        auto expandedExcludePatterns = splitPatterns(excludePatterns_);
+        auto expandedIncludePatterns = splitPatterns(includePatterns_);
+        
         // Check exclude patterns first
-        for (const auto& pattern : excludePatterns_) {
+        for (const auto& pattern : expandedExcludePatterns) {
             if (matchesPattern(fileName, pattern)) {
                 return false;
             }
         }
         
         // If no include patterns specified, include all files (that weren't excluded)
-        if (includePatterns_.empty()) {
+        if (expandedIncludePatterns.empty()) {
             return true;
         }
         
         // Check include patterns
-        for (const auto& pattern : includePatterns_) {
+        for (const auto& pattern : expandedIncludePatterns) {
             if (matchesPattern(fileName, pattern)) {
                 return true;
             }

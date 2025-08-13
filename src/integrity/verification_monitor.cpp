@@ -108,7 +108,14 @@ struct VerificationMonitor::Impl {
     mutable std::mutex resultsMutex;
     static constexpr size_t MAX_RECENT_RESULTS = 1000;
     
+    // Global mutex for thread-safe operations
+    // Protects rate trackers and coordinate access between different operations
+    mutable std::mutex globalMutex;
+    
     void recordVerificationInternal(const VerificationResult& result) {
+        // Use global mutex to ensure thread-safe access to rate trackers
+        std::lock_guard globalLock(globalMutex);
+        
         totalVerifications++;
         verificationTracker.recordEvent();
         
@@ -117,7 +124,7 @@ struct VerificationMonitor::Impl {
             errorTracker.recordEvent();
         }
         
-        // Store recent result for analysis
+        // Store recent result for analysis (using separate mutex to avoid deadlock)
         {
             std::lock_guard lock(resultsMutex);
             recentResults.push_back(result);
@@ -142,7 +149,8 @@ struct VerificationMonitor::Impl {
     }
     
     bool shouldAlertInternal() const {
-        std::lock_guard lock(alertMutex);
+        std::lock_guard globalLock(globalMutex);
+        std::lock_guard alertLock(alertMutex);
         
         auto currentErrorRate = errorTracker.getRate();
         auto currentVerificationRate = verificationTracker.getRate();
@@ -172,6 +180,8 @@ struct VerificationMonitor::Impl {
     }
     
     Metrics getCurrentMetricsInternal() const {
+        std::lock_guard globalLock(globalMutex);
+        
         Metrics metrics;
         
         metrics.verificationsPerSecond = static_cast<uint64_t>(verificationTracker.getRate());

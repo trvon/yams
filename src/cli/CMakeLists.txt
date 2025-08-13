@@ -11,6 +11,7 @@ set(CLI_SOURCES
     commands/cat_command.cpp
     commands/init_command.cpp
     commands/search_command.cpp
+    commands/grep_command.cpp
     commands/config_command.cpp
     commands/auth_command.cpp
     commands/uninstall_command.cpp

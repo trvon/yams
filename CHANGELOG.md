@@ -5,6 +5,70 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.5] - 2025-08-13
+
+### Added
+- **LLM Ergonomics Enhancements**
+  - Added `--paths-only` flag to search command for LLM-friendly output (one file path per line)
+  - Enhanced codebase indexing workflows for AI agent integration
+  - Improved documentation in PROMPT-eng.md with LLM-optimized YAMS patterns
+  - Support for using YAMS as "memory layer for low context" in AI workflows
+  - Magic number patterns for `#include`, `import`, `function`, `class`, shebang lines, etc.
+  - Automatic programming language detection during recursive directory operations
+- **Grep Command**: Full-featured regex search within indexed file contents
+  - Standard grep options: `-A/--after`, `-B/--before`, `-C/--context` for context lines
+  - Pattern matching options: `-i` (case-insensitive), `-w` (whole word), `-v` (invert)
+  - Output options: `-n` (line numbers), `-H` (with filename), `-c` (count), `-l` (files with matches)
+  - Color highlighting support with `--color` option
+  - Supports searching all indexed files or specific paths
+- **Knowledge Graph Integration in Get Command**
+  - Added `--graph` flag to display related documents
+  - Added `--depth` option (1-5) to control graph traversal depth
+  - Shows documents in same directory and with similar extensions
+  - Displays document relationships and metadata
+- **Line-Level Search with Context**
+  - Enhanced search command with `-n/--line-numbers` flag
+  - Added context options: `-A/--after`, `-B/--before`, `-C/--context`
+  - Highlights matching lines with color
+  - Shows surrounding context lines for better understanding
+
+### Fixed
+- **Indexing Tests**: Updated for new API with proper factory function declarations
+- **Namespace Issues**: Fixed forward declarations in document_indexer.h
+- **CLI11 Conflicts**: Resolved `-h` flag conflict in grep command by using only `--no-filename`
+- **Test Suite Stabilization**
+  - Fixed SEGV crash in vector_database_tests (DocumentChunkerTest bounds checking)
+  - Fixed AddressSanitizer container overflow in detection_tests 
+  - Added thread safety to FixtureManager test infrastructure with proper mutex protection
+  - Added thread safety to FileTypeDetector for libmagic operations (not thread-safe by default)
+  - Fixed compilation errors in multiple test files (header includes, error codes, GMock dependencies)
+  - Fixed EXPECT_NO_THROW macro usage in detection tests
+- **Recursive Add Pattern Parsing**
+  - Fixed CLI11 comma-separated pattern handling in `--include` and `--exclude` options
+  - Now properly splits patterns like `"*.cpp,*.h,*.md"` into individual patterns
+  - Added proper whitespace trimming and empty pattern filtering
+- **CI/CD Pipeline Improvements**  
+  - Fixed Conan options quoting for proper test builds (`"yams/*:build_tests=True"`)
+  - Added explicit `YAMS_BUILD_TESTS=ON` to CMake configuration
+  - Added individual test target builds before running ctest
+  - Implemented graceful test failure handling (CI continues, reports detailed results)
+  - Added ASAN relaxation options for CI environment compatibility
+  - Fixed YAML syntax error in release.yml (Python script indentation)
+
+### Enhanced
+- **Get Command**: Now supports partial hash resolution and fuzzy path matching
+- **Search Command**: Improved output with line-level context display
+- **Test Coverage**: Enabled previously skipped indexing tests with proper initialization
+
+### Technical Details
+- **Grep Implementation**: Uses std::regex for pattern matching with full ECMAScript support
+- **Graph Display**: Leverages MetadataRepository for document relationship queries
+- **Line Context**: Integrated content retrieval with search results for contextual display
+- **File Type Detection**: Added 40+ new patterns covering major programming languages
+- **Pattern Matching**: Fixed splitPatterns() function in add_command.cpp for proper comma handling
+- **Search Output**: Added pathsOnly_ flag with conditional output logic in search_command.cpp
+- **Documentation**: Enhanced PROMPT-eng.md with v0.1.4 LLM workflow patterns
+
 ## [v0.1.3] - 2025-08-13
 
 ### Added

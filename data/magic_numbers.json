@@ -706,6 +706,302 @@
       "mime": "application/octet-stream",
       "description": "Debug/test pattern",
       "confidence": 0.5
+    },
+    {
+      "hex": "2F2A",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-c",
+      "description": "C/C++ source with comment",
+      "confidence": 0.6
+    },
+    {
+      "hex": "23696E636C756465",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-c",
+      "description": "C/C++ source with #include",
+      "confidence": 0.8
+    },
+    {
+      "hex": "23646566696E65",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-c",
+      "description": "C/C++ source with #define",
+      "confidence": 0.7
+    },
+    {
+      "hex": "696D706F7274",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/javascript",
+      "description": "JavaScript with import",
+      "confidence": 0.7
+    },
+    {
+      "hex": "636F6E737420",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/javascript",
+      "description": "JavaScript with const",
+      "confidence": 0.6
+    },
+    {
+      "hex": "66756E6374696F6E20",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/javascript",
+      "description": "JavaScript with function",
+      "confidence": 0.7
+    },
+    {
+      "hex": "696D706F727420",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-python",
+      "description": "Python with import",
+      "confidence": 0.7
+    },
+    {
+      "hex": "66726F6D20",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-python",
+      "description": "Python with from import",
+      "confidence": 0.6
+    },
+    {
+      "hex": "646566",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-python",
+      "description": "Python with def",
+      "confidence": 0.8
+    },
+    {
+      "hex": "636C617373",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-python",
+      "description": "Python with class",
+      "confidence": 0.7
+    },
+    {
+      "hex": "7075626C696320636C617373",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-java-source",
+      "description": "Java with public class",
+      "confidence": 0.9
+    },
+    {
+      "hex": "7061636B616765",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-java-source",
+      "description": "Java with package",
+      "confidence": 0.8
+    },
+    {
+      "hex": "696D706F7274206A617661",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-java-source",
+      "description": "Java with import java",
+      "confidence": 0.9
+    },
+    {
+      "hex": "666E",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-rust",
+      "description": "Rust with fn",
+      "confidence": 0.7
+    },
+    {
+      "hex": "75736520",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-rust",
+      "description": "Rust with use",
+      "confidence": 0.8
+    },
+    {
+      "hex": "6D6F6420",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-rust",
+      "description": "Rust with mod",
+      "confidence": 0.7
+    },
+    {
+      "hex": "7374727563742020",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-rust",
+      "description": "Rust with struct",
+      "confidence": 0.8
+    },
+    {
+      "hex": "7061636B616765206D61696E",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-go",
+      "description": "Go with package main",
+      "confidence": 0.9
+    },
+    {
+      "hex": "696D706F727420",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-go",
+      "description": "Go with import",
+      "confidence": 0.6
+    },
+    {
+      "hex": "66756E63",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-go",
+      "description": "Go with func",
+      "confidence": 0.7
+    },
+    {
+      "hex": "7661722020",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-go",
+      "description": "Go with var",
+      "confidence": 0.6
+    },
+    {
+      "hex": "3C3F706870",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-php",
+      "description": "PHP opening tag",
+      "confidence": 0.9
+    },
+    {
+      "hex": "24",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/x-php",
+      "description": "PHP variable",
+      "confidence": 0.4
+    },
+    {
+      "hex": "3C21444F435459504520",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/html",
+      "description": "HTML with DOCTYPE",
+      "confidence": 0.9
+    },
+    {
+      "hex": "3C68746D6C",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/html",
+      "description": "HTML opening tag",
+      "confidence": 0.8
+    },
+    {
+      "hex": "3C21402D2D20",
+      "offset": 0,
+      "type": "code",
+      "mime": "text/html",
+      "description": "HTML comment start",
+      "confidence": 0.7
+    },
+    {
+      "hex": "24736368656D61",
+      "offset": 0,
+      "type": "data",
+      "mime": "application/json",
+      "description": "JSON Schema",
+      "confidence": 0.8
+    },
+    {
+      "hex": "7B",
+      "offset": 0,
+      "type": "data",
+      "mime": "application/json",
+      "description": "JSON object start",
+      "confidence": 0.5
+    },
+    {
+      "hex": "5B",
+      "offset": 0,
+      "type": "data",
+      "mime": "application/json",
+      "description": "JSON array start",
+      "confidence": 0.4
+    },
+    {
+      "hex": "2D2D2D0A",
+      "offset": 0,
+      "type": "data",
+      "mime": "text/yaml",
+      "description": "YAML document start",
+      "confidence": 0.8
+    },
+    {
+      "hex": "6170692D76657273696F6E",
+      "offset": 0,
+      "type": "config",
+      "mime": "text/x-yaml",
+      "description": "Kubernetes YAML",
+      "confidence": 0.9
+    },
+    {
+      "hex": "5C646F63756D656E74636C617373",
+      "offset": 0,
+      "type": "document",
+      "mime": "text/x-tex",
+      "description": "LaTeX document",
+      "confidence": 0.9
+    },
+    {
+      "hex": "5C626567696E",
+      "offset": 0,
+      "type": "document",
+      "mime": "text/x-tex",
+      "description": "LaTeX with begin",
+      "confidence": 0.7
+    },
+    {
+      "hex": "23212F62696E2F",
+      "offset": 0,
+      "type": "script",
+      "mime": "text/x-shellscript",
+      "description": "Shell script shebang",
+      "confidence": 0.9
+    },
+    {
+      "hex": "23212F7573722F62696E2F",
+      "offset": 0,
+      "type": "script",
+      "mime": "text/x-shellscript",
+      "description": "Shell script shebang",
+      "confidence": 0.9
+    },
+    {
+      "hex": "23212F7573722F62696E2F707974686F6E",
+      "offset": 0,
+      "type": "script",
+      "mime": "text/x-python",
+      "description": "Python script shebang",
+      "confidence": 0.95
+    },
+    {
+      "hex": "23212F7573722F62696E2F656E76207079",
+      "offset": 0,
+      "type": "script",
+      "mime": "text/x-python",
+      "description": "Python script env shebang",
+      "confidence": 0.95
     }
   ]
 }

@@ -4,6 +4,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/connection_pool.h>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -25,8 +26,31 @@ protected:
     
     void SetUpWithDatabase() {
         // Create test directory
-        testDir_ = std::filesystem::temp_directory_path() / "kronos_indexing_test";
+        testDir_ = std::filesystem::temp_directory_path() / "yams_indexing_test";
         std::filesystem::create_directories(testDir_);
+        
+        // Initialize database
+        dbPath_ = testDir_ / "test.db";
+        database_ = std::make_unique<Database>();
+        auto openResult = database_->open(dbPath_.string());
+        if (!openResult) {
+            throw std::runtime_error("Failed to open database: " + openResult.error().message);
+        }
+        
+        // Initialize connection pool
+        ConnectionPoolConfig poolConfig;
+        poolConfig.maxConnections = 4;
+        pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), poolConfig);
+        
+        // Initialize metadata repository  
+        metadataRepo_ = std::make_shared<MetadataRepository>(*pool_);
+        
+        // Run migrations
+        Migration migration;
+        auto result = migration.migrate(*database_);
+        if (!result) {
+            throw std::runtime_error("Failed to initialize database: " + result.error().message);
+        }
         
         // Create some test files
         createTestFile("test1.txt", "This is a test document with some content.");
@@ -119,12 +143,9 @@ TEST_F(IndexingTest, ContentChunking) {
 }
 
 TEST_F(IndexingTest, SingleDocumentIndexing) {
-    // Create a document indexer
-    // For now, skip tests that require the factory function
-    GTEST_SKIP() << "Factory function not available in current build";
-    return;
+    SetUpWithDatabase();
     
-    /*auto indexer = createDocumentIndexer(metadataRepo_);
+    auto indexer = createDocumentIndexer(metadataRepo_);
     ASSERT_NE(indexer, nullptr);
     
     // Index a single document
@@ -147,14 +168,11 @@ TEST_F(IndexingTest, SingleDocumentIndexing) {
     
     auto& doc = docResult.value().value();
     EXPECT_EQ(doc.fileName, "test1.txt");
-    EXPECT_EQ(doc.fileExtension, ".txt");*/
+    EXPECT_EQ(doc.fileExtension, ".txt");
 }
 
 TEST_F(IndexingTest, BatchDocumentIndexing) {
-    GTEST_SKIP() << "Factory function not available in current build";
-    return;
-    /*extern std::unique_ptr<IDocumentIndexer> createDocumentIndexer(
-        std::shared_ptr<MetadataRepository> metadataRepo);
+    SetUpWithDatabase();
     
     auto indexer = createDocumentIndexer(metadataRepo_);
     
@@ -186,14 +204,11 @@ TEST_F(IndexingTest, BatchDocumentIndexing) {
     for (const auto& result : batchResults) {
         EXPECT_EQ(result.status, IndexingStatus::Completed);
         EXPECT_FALSE(result.documentId.empty());
-    }*/
+    }
 }
 
 TEST_F(IndexingTest, IncrementalIndexing) {
-    GTEST_SKIP() << "Factory function not available in current build";
-    return;
-    /*extern std::unique_ptr<IDocumentIndexer> createDocumentIndexer(
-        std::shared_ptr<MetadataRepository> metadataRepo);
+    SetUpWithDatabase();
     
     auto indexer = createDocumentIndexer(metadataRepo_);
     
@@ -220,14 +235,11 @@ TEST_F(IndexingTest, IncrementalIndexing) {
     // Re-index the document
     auto result2 = indexer->updateDocument(path, config);
     ASSERT_TRUE(result2.has_value());
-    EXPECT_EQ(result2.value().status, IndexingStatus::Completed);*/
+    EXPECT_EQ(result2.value().status, IndexingStatus::Completed);
 }
 
 TEST_F(IndexingTest, DocumentRemoval) {
-    GTEST_SKIP() << "Factory function not available in current build";
-    return;
-    /*extern std::unique_ptr<IDocumentIndexer> createDocumentIndexer(
-        std::shared_ptr<MetadataRepository> metadataRepo);
+    SetUpWithDatabase();
     
     auto indexer = createDocumentIndexer(metadataRepo_);
     
@@ -251,10 +263,12 @@ TEST_F(IndexingTest, DocumentRemoval) {
     // Verify document was removed
     docResult = metadataRepo_->getDocument(docId);
     ASSERT_TRUE(docResult.has_value());
-    EXPECT_FALSE(docResult.value().has_value());*/
+    EXPECT_FALSE(docResult.value().has_value());
 }
 
 TEST_F(IndexingTest, IndexingPipeline) {
+    SetUpWithDatabase();
+    
     // Create indexing pipeline
     IndexingPipeline pipeline(metadataRepo_, 2);
     
@@ -285,10 +299,7 @@ TEST_F(IndexingTest, IndexingPipeline) {
 }
 
 TEST_F(IndexingTest, ErrorHandling) {
-    GTEST_SKIP() << "Factory function not available in current build";
-    return;
-    /*extern std::unique_ptr<IDocumentIndexer> createDocumentIndexer(
-        std::shared_ptr<MetadataRepository> metadataRepo);
+    SetUpWithDatabase();
     
     auto indexer = createDocumentIndexer(metadataRepo_);
     
@@ -307,7 +318,7 @@ TEST_F(IndexingTest, ErrorHandling) {
     result = indexer->indexDocument(testDir_ / "large.txt", config);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result.value().status, IndexingStatus::Skipped);
-    EXPECT_TRUE(result.value().error.has_value());*/
+    EXPECT_TRUE(result.value().error.has_value());
 }
 
 TEST_F(IndexingTest, TextPreprocessing) {

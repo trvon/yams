@@ -166,7 +166,7 @@ public:
         }
         
         // Update statistics
-        updateStats(bytesStored, bytesDeduped, 0, 0, 1, 0, 0);
+        updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
         
         auto endTime = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -357,7 +357,7 @@ public:
                 metadataStore_[dataHash] = metadata;
             }
             
-            updateStats(data.size(), 0, 0, 0, 1, 0, 0);
+            updateStats(data.size(), 0, 0, 1, 1, 0, 0);
             
             auto endTime = std::chrono::steady_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(

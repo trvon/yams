@@ -46,6 +46,7 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 - delete
 - list
 - search
+- grep
 - config (subcommands: get, set, list, validate, export)
 - auth
 - stats
@@ -135,6 +136,10 @@ Options:
   - Write output to specified file instead of stdout
 - -v, --verbose
   - Enable verbose output
+- --graph
+  - Show related documents from knowledge graph
+- --depth <N>
+  - Depth of graph traversal, 1-5 (default: 1)
 
 Description:
 - Downloads content by hash or name.
@@ -311,6 +316,14 @@ Options:
   - Minimum similarity for fuzzy search, 0.0-1.0 (default: 0.7)
 - --hash <hash>
   - Search by file hash (full or partial, minimum 8 characters)
+- -n, --line-numbers
+  - Show line numbers with matches
+- -A, --after <N>
+  - Show N lines after match (default: 0)
+- -B, --before <N>
+  - Show N lines before match (default: 0)
+- -C, --context <N>
+  - Show N lines before and after match (default: 0)
 
 Description:
 - Supports both exact keyword searches and fuzzy approximate matching.
@@ -340,6 +353,71 @@ yams search abcd1234ef567890  # Auto-detected hash search
 # Verbose output for detailed information
 yams search "query" --verbose
 yams search --hash abcd1234 --verbose
+```
+
+---
+
+## grep {#cmd-grep}
+
+Search for regex patterns within file contents.
+
+Synopsis:
+- yams grep <pattern> [paths...] [options]
+
+Options:
+- -A, --after <N>
+  - Show N lines after match (default: 0)
+- -B, --before <N>
+  - Show N lines before match (default: 0)
+- -C, --context <N>
+  - Show N lines before and after match (default: 0)
+- -i, --ignore-case
+  - Case-insensitive search
+- -w, --word
+  - Match whole words only
+- -v, --invert
+  - Invert match (show non-matching lines)
+- -n, --line-numbers
+  - Show line numbers
+- -H, --with-filename
+  - Show filename with matches
+- --no-filename
+  - Never show filename
+- -c, --count
+  - Show only count of matching lines
+- -l, --files-with-matches
+  - Show only filenames with matches
+- -L, --files-without-match
+  - Show only filenames without matches
+- --color <mode>
+  - Color mode: always, never, auto (default: auto)
+- --max-count <N>
+  - Stop after N matches per file
+
+Description:
+- Searches through the content of all indexed files using regular expressions.
+- Supports standard grep-like options for context, case sensitivity, and output control.
+- Automatically highlights matches when outputting to a terminal.
+- Can search all indexed files or specific paths.
+- Uses ECMAScript regex syntax for pattern matching.
+
+Examples:
+```
+# Basic pattern search
+yams grep "TODO"
+yams grep "error.*failed" -i
+
+# With context
+yams grep "function" -C 2
+yams grep "class.*Repository" -A 5
+
+# File listing
+yams grep "deprecated" -l
+yams grep "test" src/ -c
+
+# Complex patterns
+yams grep "^import.*from" -n
+yams grep "\bclass\s+\w+Command\b" --color=always
 ```
 
 ---

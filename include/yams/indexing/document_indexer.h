@@ -166,3 +166,20 @@ public:
 };
 
 } // namespace yams::indexing
+
+// Forward declaration in the correct namespace
+namespace yams::metadata {
+    class MetadataRepository;
+}
+
+namespace yams::indexing {
+
+/**
+ * @brief Factory function to create DocumentIndexer
+ * @param metadataRepo Metadata repository for document storage
+ * @return Unique pointer to IDocumentIndexer implementation
+ */
+std::unique_ptr<IDocumentIndexer> createDocumentIndexer(
+    std::shared_ptr<metadata::MetadataRepository> metadataRepo);
+
+} // namespace yams::indexing

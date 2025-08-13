@@ -39,6 +39,20 @@ public:
         cmd->add_option("--similarity", minSimilarity_, "Minimum similarity for fuzzy search (0.0-1.0)")
             ->default_val(0.7f);
         
+        cmd->add_flag("--paths-only", pathsOnly_, "Output only file paths, one per line (useful for scripting)");
+        cmd->add_flag("--show-hash", showHash_, "Show document hashes in results");
+        cmd->add_flag("-v,--verbose", verbose_, "Show detailed information including full hashes");
+        cmd->add_flag("--json", jsonOutput_, "Output results in JSON format");
+        
+        // Line-level search options
+        cmd->add_flag("-n,--line-numbers", showLineNumbers_, "Show line numbers with matches");
+        cmd->add_option("-A,--after", afterContext_, "Show N lines after match")
+            ->default_val(0);
+        cmd->add_option("-B,--before", beforeContext_, "Show N lines before match")
+            ->default_val(0);
+        cmd->add_option("-C,--context", context_, "Show N lines before and after match")
+            ->default_val(0);
+        
         cmd->add_option("--hash", hashQuery_, "Search by file hash (full or partial, minimum 8 characters)");
         
         cmd->callback([this]() { 
@@ -80,6 +94,11 @@ public:
                     return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
                 }
                 
+                // Handle context options
+                if (context_ > 0) {
+                    beforeContext_ = afterContext_ = context_;
+                }
+                
                 // Execute fuzzy search
                 auto searchResult = metadataRepo->fuzzySearch(query_, minSimilarity_, limit_);
                 if (!searchResult) {
@@ -104,7 +123,7 @@ public:
                     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
                     opts.hybrid.final_top_k = static_cast<size_t>(limit_);
                     // Show method and score breakdown only when verbose/json requested
-                    opts.hybrid.generate_explanations = cli_->getVerbose() || cli_->getJsonOutput();
+                    opts.hybrid.generate_explanations = verbose_ || jsonOutput_;
         
                     auto engRes = builder.buildEmbedded(opts);
                     if (engRes) {
@@ -113,8 +132,21 @@ public:
                         if (hres) {
                             const auto& items = hres.value();
                 
+                            // Handle paths-only output first
+                            if (pathsOnly_) {
+                                for (const auto& r : items) {
+                                    auto itPath = r.metadata.find("path");
+                                    if (itPath != r.metadata.end()) {
+                                        std::cout << itPath->second << std::endl;
+                                    } else {
+                                        std::cout << r.id << std::endl;
+                                    }
+                                }
+                                return Result<void>();
+                            }
+                            
                             // Output in JSON if --json flag is set, or if --verbose is set
-                            if (cli_->getJsonOutput() || cli_->getVerbose()) {
+                            if (jsonOutput_ || verbose_) {
                                 json output;
                                 output["query"] = query_;
                                 output["method"] = "hybrid";
@@ -135,7 +167,7 @@ public:
                                     if (!r.content.empty()) {
                                         doc["snippet"] = truncateSnippet(r.content, 200);
                                     }
-                                    if (cli_->getVerbose()) {
+                                    if (verbose_) {
                                         json breakdown;
                                         breakdown["vector_score"] = r.vector_score;
                                         breakdown["keyword_score"] = r.keyword_score;
@@ -231,9 +263,71 @@ public:
     }
     
 private:
+    void displayLineContext(const metadata::DocumentInfo& doc) {
+        // Retrieve document content for line-level display
+        auto store = cli_->getContentStore();
+        if (!store) {
+            return;
+        }
+        
+        auto contentResult = store->retrieveBytes(doc.sha256Hash);
+        if (!contentResult) {
+            return;
+        }
+        
+        std::string content(
+            reinterpret_cast<const char*>(contentResult.value().data()),
+            contentResult.value().size()
+        );
+        
+        // Find matches and display with context
+        std::istringstream stream(content);
+        std::string line;
+        std::vector<std::string> lines;
+        
+        // Store all lines
+        while (std::getline(stream, line)) {
+            lines.push_back(line);
+        }
+        
+        // Find matching lines
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].find(query_) != std::string::npos) {
+                // Show context before
+                size_t startLine = (i > beforeContext_) ? i - beforeContext_ : 0;
+                size_t endLine = std::min(i + afterContext_ + 1, lines.size());
+                
+                for (size_t j = startLine; j < endLine; ++j) {
+                    if (showLineNumbers_) {
+                        std::cout << std::setw(6) << (j + 1) << ": ";
+                    }
+                    
+                    // Highlight matching line
+                    if (j == i) {
+                        std::cout << "\033[1;32m" << lines[j] << "\033[0m" << std::endl;
+                    } else {
+                        std::cout << lines[j] << std::endl;
+                    }
+                }
+                
+                if (endLine < lines.size() - 1 && i + afterContext_ + 1 < lines.size()) {
+                    std::cout << "--" << std::endl;
+                }
+            }
+        }
+    }
+    
     void outputSearchResults(const search::SearchResults& response) {
+        // Handle paths-only output first
+        if (pathsOnly_) {
+            for (const auto& item : response.getItems()) {
+                std::cout << (!item.path.empty() ? item.path : std::to_string(item.documentId)) << std::endl;
+            }
+            return;
+        }
+        
         // Output in JSON if --json flag is set, or if --verbose is set
-        if (cli_->getJsonOutput() || cli_->getVerbose()) {
+        if (jsonOutput_ || verbose_) {
             json output;
             output["query"] = response.getStatistics().originalQuery;
             output["total_results"] = response.getStatistics().totalResults;
@@ -358,10 +452,17 @@ private:
             
             // Display the single result
             const auto& doc = docResult.value().value();
+            
+            // Handle paths-only output
+            if (pathsOnly_) {
+                std::cout << (!doc.filePath.empty() && doc.filePath != "stdin" ? doc.filePath : doc.fileName) << std::endl;
+                return;
+            }
+            
             std::cout << "Found document for hash: " << hash.substr(0, 8) << "..." << std::endl;
             std::cout << std::endl;
             
-            if (cli_->getVerbose()) {
+            if (verbose_) {
                 std::cout << "1. " << doc.fileName << std::endl;
                 std::cout << "   Path: " << doc.filePath << std::endl;
                 std::cout << "   Hash: " << doc.sha256Hash << std::endl;
@@ -393,12 +494,20 @@ private:
                 return;
             }
             
+            // Handle paths-only output
+            if (pathsOnly_) {
+                for (const auto& doc : matches) {
+                    std::cout << (!doc.filePath.empty() && doc.filePath != "stdin" ? doc.filePath : doc.fileName) << std::endl;
+                }
+                return;
+            }
+            
             std::cout << "Found " << matches.size() << " document(s) with hash prefix: " << hash << std::endl;
             std::cout << std::endl;
             
             for (size_t i = 0; i < matches.size(); i++) {
                 const auto& doc = matches[i];
-                if (cli_->getVerbose()) {
+                if (verbose_) {
                     std::cout << (i + 1) << ". " << doc.fileName << std::endl;
                     std::cout << "   Path: " << doc.filePath << std::endl;
                     std::cout << "   Hash: " << doc.sha256Hash << std::endl;
@@ -473,8 +582,17 @@ private:
             return;
         }
         
+        // Handle paths-only output first
+        if (pathsOnly_) {
+            for (const auto& result : results.results) {
+                std::cout << (!result.document.filePath.empty() && result.document.filePath != "stdin" 
+                             ? result.document.filePath : result.document.fileName) << std::endl;
+            }
+            return;
+        }
+        
         // Output in JSON if --json flag is set
-        if (cli_->getJsonOutput()) {
+        if (jsonOutput_) {
             json output;
             output["query"] = results.query;
             output["type"] = "fuzzy";
@@ -498,7 +616,7 @@ private:
             output["results"] = items;
             
             std::cout << output.dump(2) << std::endl;
-        } else if (cli_->getVerbose()) {
+        } else if (verbose_ || showHash_) {
             // Verbose output with full details
             if (results.results.empty()) {
                 std::cout << "No fuzzy matches found for: " << results.query << std::endl;
@@ -511,23 +629,46 @@ private:
                     std::cout << (i + 1) << ". " << result.document.fileName;
                     std::cout << " [fuzzy score: " << std::fixed << std::setprecision(2) << result.score << "]" << std::endl;
                     
+                    // Show hash
+                    if (verbose_) {
+                        std::cout << "   Hash: " << result.document.sha256Hash << std::endl;
+                    } else {
+                        std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 12) << "..." << std::endl;
+                    }
+                    
                     // Show full path and metadata in verbose mode
                     if (result.document.filePath != "stdin") {
                         std::cout << "   Path: " << result.document.filePath << std::endl;
                     }
-                    std::cout << "   Size: " << formatSize(result.document.fileSize) 
-                              << " | Type: " << result.document.mimeType << std::endl;
+                    if (verbose_) {
+                        std::cout << "   Size: " << formatSize(result.document.fileSize) 
+                                  << " | Type: " << result.document.mimeType << std::endl;
+                    }
                     
                     // Show full snippet in verbose mode
                     if (!result.snippet.empty()) {
-                        std::cout << std::endl;
-                        std::cout << "   " << result.snippet << std::endl;
+                        if (verbose_) {
+                            std::cout << std::endl;
+                            std::cout << "   " << result.snippet << std::endl;
+                        } else {
+                            std::string truncated = truncateSnippet(result.snippet, 150);
+                            std::cout << "   " << truncated;
+                            if (truncated.length() < result.snippet.length()) {
+                                std::cout << "...";
+                            }
+                            std::cout << std::endl;
+                        }
                     }
+                    // Show line context if requested  
+                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
+                        displayLineContext(result.document);
+                    }
+                    
                     std::cout << std::endl;
                 }
             }
         } else {
-            // Default concise output with truncated snippets
+            // Default concise output with hash prefixes
             if (results.results.empty()) {
                 std::cout << "No fuzzy matches found for: " << results.query << std::endl;
             } else {
@@ -538,6 +679,9 @@ private:
                     const auto& result = results.results[i];
                     std::cout << (i + 1) << ". " << result.document.fileName << std::endl;
                     
+                    // Show hash prefix by default (first 8 chars)
+                    std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 8) << "..." << std::endl;
+                    
                     // Show truncated snippet (first 150 chars max, single line)
                     if (!result.snippet.empty()) {
                         std::string truncated = truncateSnippet(result.snippet, 150);
@@ -547,6 +691,11 @@ private:
                         }
                         std::cout << std::endl;
                     }
+                    // Show line context if requested  
+                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
+                        displayLineContext(result.document);
+                    }
+                    
                     std::cout << std::endl;
                 }
             }
@@ -560,8 +709,17 @@ private:
             return;
         }
         
+        // Handle paths-only output first
+        if (pathsOnly_) {
+            for (const auto& result : results.results) {
+                std::cout << (!result.document.filePath.empty() && result.document.filePath != "stdin" 
+                             ? result.document.filePath : result.document.fileName) << std::endl;
+            }
+            return;
+        }
+        
         // Output in JSON if --json flag is set
-        if (cli_->getJsonOutput()) {
+        if (jsonOutput_) {
             json output;
             output["query"] = results.query;
             output["type"] = "full-text";
@@ -585,7 +743,7 @@ private:
             output["results"] = items;
             
             std::cout << output.dump(2) << std::endl;
-        } else if (cli_->getVerbose()) {
+        } else if (verbose_ || showHash_) {
             // Verbose output with full details
             if (results.results.empty()) {
                 std::cout << "No results found for: " << results.query << std::endl;
@@ -598,23 +756,46 @@ private:
                     std::cout << (i + 1) << ". " << result.document.fileName;
                     std::cout << " [score: " << std::fixed << std::setprecision(2) << result.score << "]" << std::endl;
                     
+                    // Show hash
+                    if (verbose_) {
+                        std::cout << "   Hash: " << result.document.sha256Hash << std::endl;
+                    } else {
+                        std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 12) << "..." << std::endl;
+                    }
+                    
                     // Show full path and metadata in verbose mode
                     if (result.document.filePath != "stdin") {
                         std::cout << "   Path: " << result.document.filePath << std::endl;
                     }
-                    std::cout << "   Size: " << formatSize(result.document.fileSize) 
-                              << " | Type: " << result.document.mimeType << std::endl;
+                    if (verbose_) {
+                        std::cout << "   Size: " << formatSize(result.document.fileSize) 
+                                  << " | Type: " << result.document.mimeType << std::endl;
+                    }
                     
                     // Show full snippet in verbose mode
                     if (!result.snippet.empty()) {
-                        std::cout << std::endl;
-                        std::cout << "   " << result.snippet << std::endl;
+                        if (verbose_) {
+                            std::cout << std::endl;
+                            std::cout << "   " << result.snippet << std::endl;
+                        } else {
+                            std::string truncated = truncateSnippet(result.snippet, 150);
+                            std::cout << "   " << truncated;
+                            if (truncated.length() < result.snippet.length()) {
+                                std::cout << "...";
+                            }
+                            std::cout << std::endl;
+                        }
                     }
+                    // Show line context if requested  
+                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
+                        displayLineContext(result.document);
+                    }
+                    
                     std::cout << std::endl;
                 }
             }
         } else {
-            // Default concise output with truncated snippets
+            // Default concise output with hash prefixes
             if (results.results.empty()) {
                 std::cout << "No results found for: " << results.query << std::endl;
             } else {
@@ -625,6 +806,9 @@ private:
                     const auto& result = results.results[i];
                     std::cout << (i + 1) << ". " << result.document.fileName << std::endl;
                     
+                    // Show hash prefix by default (first 8 chars)
+                    std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 8) << "..." << std::endl;
+                    
                     // Show truncated snippet (first 150 chars max, single line)
                     if (!result.snippet.empty()) {
                         std::string truncated = truncateSnippet(result.snippet, 150);
@@ -634,6 +818,11 @@ private:
                         }
                         std::cout << std::endl;
                     }
+                    // Show line context if requested  
+                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
+                        displayLineContext(result.document);
+                    }
+                    
                     std::cout << std::endl;
                 }
             }
@@ -647,7 +836,17 @@ private:
     std::string searchType_ = "keyword";
     bool fuzzySearch_ = false;
     float minSimilarity_ = 0.7f;
+    bool pathsOnly_ = false;
+    bool showHash_ = false;
+    bool verbose_ = false;
+    bool jsonOutput_ = false;
     std::string hashQuery_;
+    
+    // Line-level search options
+    bool showLineNumbers_ = false;
+    size_t beforeContext_ = 0;
+    size_t afterContext_ = 0;
+    size_t context_ = 0;
 };
 
 // Factory function

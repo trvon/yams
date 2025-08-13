@@ -306,7 +306,24 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
     for (const auto& [ext, mime] : EXTENSION_MIME_MAP) {
         if (pImpl->mimeToFileType.find(mime) == pImpl->mimeToFileType.end()) {
             std::string fileType = "binary";
-            if (mime.find("text/") == 0) fileType = "text";
+            
+            // Check for code/programming file types
+            if (mime.find("text/x-c") == 0 ||
+                mime.find("text/x-python") == 0 ||
+                mime.find("text/x-java") == 0 ||
+                mime.find("text/x-rust") == 0 ||
+                mime.find("text/x-go") == 0 ||
+                mime.find("text/x-ruby") == 0 ||
+                mime.find("text/x-perl") == 0 ||
+                mime.find("text/x-php") == 0 ||
+                mime == "application/javascript" ||
+                mime == "application/x-sh" ||
+                mime == "application/x-perl" ||
+                mime == "application/x-python" ||
+                mime == "application/x-ruby") {
+                fileType = "code";
+            }
+            else if (mime.find("text/") == 0) fileType = "text";
             else if (mime.find("image/") == 0) fileType = "image";
             else if (mime.find("video/") == 0) fileType = "video";
             else if (mime.find("audio/") == 0) fileType = "audio";
@@ -319,13 +336,11 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
                      mime.find("archive") != std::string::npos) fileType = "archive";
             else if (mime == "application/json" || 
                      mime == "application/xml" ||
-                     mime == "application/javascript" ||
                      mime == "application/x-yaml" ||
-                     mime == "application/yaml" ||
-                     mime == "application/x-sh") fileType = "text";
+                     mime == "application/yaml") fileType = "text";
             
             pImpl->mimeToFileType[mime] = fileType;
-            pImpl->mimeToIsBinary[mime] = (fileType != "text");
+            pImpl->mimeToIsBinary[mime] = (fileType != "text" && fileType != "code");
         }
     }
     
@@ -497,7 +512,24 @@ Result<void> FileTypeDetector::loadPatternsFromFile(const std::filesystem::path&
             if (pImpl->mimeToFileType.find(mime) == pImpl->mimeToFileType.end()) {
                 // Determine file type from MIME
                 std::string fileType = "binary";
-                if (mime.find("text/") == 0) fileType = "text";
+                
+                // Check for code/programming file types
+                if (mime.find("text/x-c") == 0 ||
+                    mime.find("text/x-python") == 0 ||
+                    mime.find("text/x-java") == 0 ||
+                    mime.find("text/x-rust") == 0 ||
+                    mime.find("text/x-go") == 0 ||
+                    mime.find("text/x-ruby") == 0 ||
+                    mime.find("text/x-perl") == 0 ||
+                    mime.find("text/x-php") == 0 ||
+                    mime == "application/javascript" ||
+                    mime == "application/x-sh" ||
+                    mime == "application/x-perl" ||
+                    mime == "application/x-python" ||
+                    mime == "application/x-ruby") {
+                    fileType = "code";
+                }
+                else if (mime.find("text/") == 0) fileType = "text";
                 else if (mime.find("image/") == 0) fileType = "image";
                 else if (mime.find("video/") == 0) fileType = "video";
                 else if (mime.find("audio/") == 0) fileType = "audio";
@@ -510,13 +542,11 @@ Result<void> FileTypeDetector::loadPatternsFromFile(const std::filesystem::path&
                          mime.find("archive") != std::string::npos) fileType = "archive";
                 else if (mime == "application/json" || 
                          mime == "application/xml" ||
-                         mime == "application/javascript" ||
                          mime == "application/x-yaml" ||
-                         mime == "application/yaml" ||
-                         mime == "application/x-sh") fileType = "text";
+                         mime == "application/yaml") fileType = "text";
                 
                 pImpl->mimeToFileType[mime] = fileType;
-                pImpl->mimeToIsBinary[mime] = (fileType != "text");
+                pImpl->mimeToIsBinary[mime] = (fileType != "text" && fileType != "code");
             }
         }
         
@@ -697,6 +727,32 @@ std::string FileTypeDetector::getFileTypeCategory(const std::string& mimeType) c
         return it->second;
     }
     
+    // Check for code/programming file types
+    if (mimeType.find("text/x-c") == 0 ||         // C/C++ source
+        mimeType.find("text/x-python") == 0 ||     // Python
+        mimeType.find("text/x-java") == 0 ||       // Java
+        mimeType.find("text/x-rust") == 0 ||       // Rust
+        mimeType.find("text/x-go") == 0 ||         // Go
+        mimeType.find("text/x-ruby") == 0 ||       // Ruby
+        mimeType.find("text/x-perl") == 0 ||       // Perl
+        mimeType.find("text/x-php") == 0 ||        // PHP
+        mimeType.find("text/x-swift") == 0 ||      // Swift
+        mimeType.find("text/x-kotlin") == 0 ||     // Kotlin
+        mimeType.find("text/x-scala") == 0 ||      // Scala
+        mimeType.find("text/x-typescript") == 0 || // TypeScript
+        mimeType.find("text/x-csharp") == 0 ||     // C#
+        mimeType.find("text/x-objc") == 0 ||       // Objective-C
+        mimeType.find("text/x-asm") == 0 ||        // Assembly
+        mimeType.find("text/x-makefile") == 0 ||   // Makefile
+        mimeType.find("text/x-cmake") == 0 ||      // CMake
+        mimeType == "application/javascript" ||     // JavaScript
+        mimeType == "application/x-sh" ||          // Shell script
+        mimeType == "application/x-perl" ||        // Perl
+        mimeType == "application/x-python" ||      // Python
+        mimeType == "application/x-ruby") {        // Ruby
+        return "code";
+    }
+    
     // Fall back to MIME type analysis
     if (mimeType.find("text/") == 0) return "text";
     if (mimeType.find("image/") == 0) return "image";
@@ -711,10 +767,8 @@ std::string FileTypeDetector::getFileTypeCategory(const std::string& mimeType) c
         mimeType.find("archive") != std::string::npos) return "archive";
     if (mimeType == "application/json" ||
         mimeType == "application/xml" ||
-        mimeType == "application/javascript" ||
         mimeType == "application/x-yaml" ||
-        mimeType == "application/yaml" ||
-        mimeType == "application/x-sh") return "text";
+        mimeType == "application/yaml") return "text";
     
     return "binary";
 }

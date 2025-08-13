@@ -1,5 +1,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/document_metadata.h>
+#include <yams/metadata/migration.h>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <sstream>
@@ -10,6 +11,34 @@
 namespace yams::metadata {
 
 MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
+    // Ensure database schema is initialized
+    auto initResult = pool_.withConnection([](Database& db) -> Result<void> {
+        // Create migration manager and apply all migrations
+        MigrationManager manager(db);
+        auto initResult = manager.initialize();
+        if (!initResult) {
+            spdlog::error("Failed to initialize migration system: {}", initResult.error().message);
+            return initResult;
+        }
+        
+        // Register all YAMS metadata migrations
+        manager.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        
+        // Apply migrations
+        auto migrateResult = manager.migrate();
+        if (!migrateResult) {
+            spdlog::error("Failed to run database migrations: {}", migrateResult.error().message);
+            return Error{migrateResult.error()};
+        }
+        
+        spdlog::info("Database schema initialized successfully");
+        return Result<void>();
+    });
+    
+    if (!initResult.has_value()) {
+        spdlog::warn("Failed to initialize database schema: {}", initResult.error().message);
+        // Continue anyway - the error will be caught when operations are attempted
+    }
 }
 
 // Document operations
