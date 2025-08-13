@@ -8,6 +8,7 @@ target_link_libraries(indexing_tests
         yams_indexing
         yams_metadata
         yams_extraction
+        yams_search
         GTest::gtest
         GTest::gtest_main
         Threads::Threads

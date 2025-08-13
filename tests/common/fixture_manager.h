@@ -6,6 +6,7 @@
 #include <map>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include "test_data_generator.h"
 
 namespace yams::test {
@@ -64,7 +65,11 @@ public:
         // Calculate simple hash (for testing purposes)
         fixture.hash = calculateHash(content);
         
-        activeFixtures_.push_back(fixture);
+        // Thread-safe addition to activeFixtures_
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            activeFixtures_.push_back(fixture);
+        }
         return fixture;
     }
     
@@ -82,7 +87,11 @@ public:
         // Calculate hash
         fixture.hash = calculateHash(std::string(data.begin(), data.end()));
         
-        activeFixtures_.push_back(fixture);
+        // Thread-safe addition to activeFixtures_
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            activeFixtures_.push_back(fixture);
+        }
         return fixture;
     }
     
@@ -101,6 +110,7 @@ public:
     }
     
     void cleanupFixtures() {
+        std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& fixture : activeFixtures_) {
             if (fixture.exists()) {
                 std::filesystem::remove(fixture.path);
@@ -117,79 +127,75 @@ public:
     // Predefined fixtures
     static Fixture getSimplePDF() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             auto pdfData = gen.generatePDF(1);
             fixture = manager.createBinaryFixture("simple.pdf", pdfData);
             fixture.metadata["pages"] = "1";
             fixture.metadata["type"] = "pdf";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
     
     static Fixture getComplexPDF() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             auto pdfData = gen.generatePDF(10);
             fixture = manager.createBinaryFixture("complex.pdf", pdfData);
             fixture.metadata["pages"] = "10";
             fixture.metadata["type"] = "pdf";
             fixture.metadata["has_metadata"] = "true";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
     
     static Fixture getCorruptedPDF() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             auto pdfData = gen.generateCorruptedPDF();
             fixture = manager.createBinaryFixture("corrupted.pdf", pdfData);
             fixture.metadata["type"] = "pdf";
             fixture.metadata["corrupted"] = "true";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
     
     static Fixture getLargeTextFile() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             std::string content = gen.generateTextDocument(1024 * 1024); // 1MB
             fixture = manager.createFixture("large_text.txt", content);
             fixture.metadata["type"] = "text";
             fixture.metadata["size_mb"] = "1";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
     
     static Fixture getUnicodeDocument() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             std::string content = gen.generateUnicode({"emoji", "chinese", "arabic", 
                                                       "russian", "japanese", "korean"});
@@ -198,42 +204,39 @@ public:
             fixture.metadata["type"] = "text";
             fixture.metadata["encoding"] = "utf-8";
             fixture.metadata["has_unicode"] = "true";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
     
     static Fixture getMarkdownDocument() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             std::string content = gen.generateMarkdown(5);
             fixture = manager.createFixture("test.md", content);
             fixture.metadata["type"] = "markdown";
             fixture.metadata["sections"] = "5";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
     
     static Fixture getJSONDocument() {
         static FixtureManager manager;
-        static bool initialized = false;
         static Fixture fixture;
+        static std::once_flag initialized;
         
-        if (!initialized) {
+        std::call_once(initialized, []() {
             TestDataGenerator gen;
             std::string content = gen.generateJSON(3, 4);
             fixture = manager.createFixture("test.json", content);
             fixture.metadata["type"] = "json";
             fixture.metadata["depth"] = "3";
-            initialized = true;
-        }
+        });
         
         return fixture;
     }
@@ -245,6 +248,7 @@ public:
     
     // Create a temporary directory for test isolation
     std::filesystem::path createTempDirectory(const std::string& prefix = "test") {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto tempPath = fixtureDir_ / (prefix + "_" + std::to_string(tempDirCounter_++));
         std::filesystem::create_directories(tempPath);
         tempDirectories_.push_back(tempPath);
@@ -253,6 +257,7 @@ public:
     
     // Clean up temporary directories
     void cleanupTempDirectories() {
+        std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& dir : tempDirectories_) {
             if (std::filesystem::exists(dir)) {
                 std::filesystem::remove_all(dir);
@@ -270,7 +275,7 @@ public:
         for (const auto& doc : docs) {
             auto fixture = createFixture(doc.name, doc.content);
             for (const auto& [key, value] : doc.metadata) {
-                fixture.metadata[key] = value.toString();
+                fixture.metadata[key] = value.asString();
             }
             fixtures.push_back(fixture);
         }
@@ -283,6 +288,7 @@ private:
     std::vector<Fixture> activeFixtures_;
     std::vector<std::filesystem::path> tempDirectories_;
     std::unique_ptr<TestDataGenerator> generator_;
+    mutable std::mutex mutex_;  // Protects activeFixtures_ and tempDirectories_
     static inline size_t tempDirCounter_ = 0;
     
     std::string calculateHash(const std::string& content) {

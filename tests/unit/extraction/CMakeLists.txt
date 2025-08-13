@@ -7,6 +7,7 @@ add_executable(extraction_tests
 target_link_libraries(extraction_tests
     PRIVATE
         GTest::gtest_main
+        GTest::gmock
         yams::extraction
         yams::core
 )

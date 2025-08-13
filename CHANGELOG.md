@@ -5,6 +5,39 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.3] - 2025-08-13
+
+### Added
+- **Multi-Channel Package Distribution System**
+  - Universal install script with platform detection (Linux/macOS, x86_64/ARM64)
+  - One-line installation: `curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash`
+  - Checksum verification and retry logic for secure downloads
+  - Custom installation directory support and shell completion setup
+  - Environment variable customization (YAMS_VERSION, YAMS_INSTALL_DIR, etc.)
+- **Docker Container Support**
+  - Multi-stage Dockerfile with optimized Ubuntu-based runtime
+  - Multi-architecture builds (AMD64/ARM64) via GitHub Container Registry
+  - Automated publishing on tags and main branch pushes to `ghcr.io/trvon/yams`
+  - Non-root user configuration for security best practices
+
+### Enhanced
+- **GitHub Release Workflow with Performance Reporting**
+  - Comprehensive benchmark execution with JSON result collection
+  - Code coverage reports (HTML/XML) generated for Linux builds
+  - Performance metrics tables in release notes with timing and throughput data
+  - Coverage and benchmark files automatically uploaded as release assets
+  - Combined release notes with changelog and performance data
+- **CI/CD Pipeline Improvements**
+  - Migrated all workflows to self-hosted runners (`self-hosted`, `Linux/macOS`, `X64/ARM64`)
+  - Fixed compatibility issues (mapfile command, artifact upload paths)
+  - Enhanced artifact collection (coverage reports, benchmark results, binaries)
+  - Streamlined build process removing problematic Conan profile modifications
+
+### Notes
+- All packaging improvements implemented but not yet released pending verification
+- Release workflow enhanced to provide comprehensive performance and coverage data
+- Multi-platform distribution ready for production deployment
+
 ## [0.1.2] - 2025-08-13
 
 ### Added

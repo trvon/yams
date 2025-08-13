@@ -8,6 +8,7 @@ add_executable(detection_tests
 target_link_libraries(detection_tests
     PRIVATE
         GTest::gtest_main
+        GTest::gmock
         yams::detection
         yams_cli
         yams::metadata

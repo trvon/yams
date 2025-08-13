@@ -3,7 +3,7 @@
 #include <yams/cli/commands/update_command.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/api/content_store.h>
-#include <yams/core/result.h>
+#include <yams/core/types.h>
 #include <filesystem>
 #include <memory>
 #include <thread>

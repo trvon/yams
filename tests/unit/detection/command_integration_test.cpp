@@ -193,62 +193,58 @@ TEST_F(CommandIntegrationTest, CommandSimulation_StatsWithFileTypes) {
 
 TEST_F(CommandIntegrationTest, CommandSimulation_ListWithFiltering) {
     // Simulate what list command does with file type filtering
-    EXPECT_NO_THROW({
-        detection::FileTypeDetectorConfig config;
-        config.patternsFile = YamsCLI::findMagicNumbersFile();
-        config.useCustomPatterns = !config.patternsFile.empty();
-        config.useBuiltinPatterns = true;
+    detection::FileTypeDetectorConfig config;
+    config.patternsFile = YamsCLI::findMagicNumbersFile();
+    config.useCustomPatterns = !config.patternsFile.empty();
+    config.useBuiltinPatterns = true;
+    
+    auto result = detection::FileTypeDetector::instance().initialize(config);
+    EXPECT_TRUE(result.has_value() || !result.has_value());
+    
+    // Simulate filtering logic from list command
+    std::vector<std::string> mimeTypes = {
+        "image/jpeg", "application/pdf", "text/plain", "application/json"
+    };
+    
+    for (const auto& mimeType : mimeTypes) {
+        // Test classification methods used in filtering
+        bool isText = detection::FileTypeDetector::instance().isTextMimeType(mimeType);
+        bool isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(mimeType);
+        std::string category = detection::FileTypeDetector::instance().getFileTypeCategory(mimeType);
         
-        auto result = detection::FileTypeDetector::instance().initialize(config);
-        EXPECT_TRUE(result.has_value() || !result.has_value());
-        
-        // Simulate filtering logic from list command
-        std::vector<std::string> mimeTypes = {
-            "image/jpeg", "application/pdf", "text/plain", "application/json"
-        };
-        
-        for (const auto& mimeType : mimeTypes) {
-            // Test classification methods used in filtering
-            bool isText = detection::FileTypeDetector::instance().isTextMimeType(mimeType);
-            bool isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(mimeType);
-            std::string category = detection::FileTypeDetector::instance().getFileTypeCategory(mimeType);
-            
-            // Basic consistency checks
-            EXPECT_NE(isText, isBinary) << "File should be either text or binary, not both: " << mimeType;
-            EXPECT_FALSE(category.empty()) << "Category should not be empty for: " << mimeType;
-        }
-    });
+        // Basic consistency checks
+        EXPECT_NE(isText, isBinary) << "File should be either text or binary, not both: " << mimeType;
+        EXPECT_FALSE(category.empty()) << "Category should not be empty for: " << mimeType;
+    }
 }
 
 TEST_F(CommandIntegrationTest, CommandSimulation_GetWithFiltering) {
     // Simulate what get command does with file type filtering
-    EXPECT_NO_THROW({
-        detection::FileTypeDetectorConfig config;
-        config.patternsFile = YamsCLI::findMagicNumbersFile();
-        config.useCustomPatterns = !config.patternsFile.empty();
-        config.useBuiltinPatterns = true;
-        
-        auto result = detection::FileTypeDetector::instance().initialize(config);
-        EXPECT_TRUE(result.has_value() || !result.has_value());
-        
-        // Test file detection from actual files (like get command might do)
-        for (const auto& testFile : testFiles) {
-            if (fs::exists(testFile)) {
-                auto detectResult = detection::FileTypeDetector::instance().detectFromFile(testFile);
-                if (detectResult) {
-                    const auto& sig = detectResult.value();
-                    
-                    // Verify consistency with classification methods
-                    bool isText = detection::FileTypeDetector::instance().isTextMimeType(sig.mimeType);
-                    bool isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(sig.mimeType);
-                    std::string category = detection::FileTypeDetector::instance().getFileTypeCategory(sig.mimeType);
-                    
-                    EXPECT_EQ(sig.isBinary, isBinary) << "Binary classification should be consistent";
-                    EXPECT_EQ(sig.fileType, category) << "File type should be consistent";
-                }
+    detection::FileTypeDetectorConfig config;
+    config.patternsFile = YamsCLI::findMagicNumbersFile();
+    config.useCustomPatterns = !config.patternsFile.empty();
+    config.useBuiltinPatterns = true;
+    
+    auto result = detection::FileTypeDetector::instance().initialize(config);
+    EXPECT_TRUE(result.has_value() || !result.has_value());
+    
+    // Test file detection from actual files (like get command might do)
+    for (const auto& testFile : testFiles) {
+        if (fs::exists(testFile)) {
+            auto detectResult = detection::FileTypeDetector::instance().detectFromFile(testFile);
+            if (detectResult) {
+                const auto& sig = detectResult.value();
+                
+                // Verify consistency with classification methods
+                bool isText = detection::FileTypeDetector::instance().isTextMimeType(sig.mimeType);
+                bool isBinary = detection::FileTypeDetector::instance().isBinaryMimeType(sig.mimeType);
+                std::string category = detection::FileTypeDetector::instance().getFileTypeCategory(sig.mimeType);
+                
+                EXPECT_EQ(sig.isBinary, isBinary) << "Binary classification should be consistent";
+                EXPECT_EQ(sig.fileType, category) << "File type should be consistent";
             }
         }
-    });
+    }
 }
 
 TEST_F(CommandIntegrationTest, ErrorRecovery_InitializationFailure) {

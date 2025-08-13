@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <yams/extraction/pdf_extractor.h>
-#include <yams/core/result.h>
+#include <yams/core/types.h>
 #include "../../common/test_data_generator.h"
 #include "../../common/fixture_manager.h"
 #include <filesystem>
 #include <fstream>
+#include <thread>
+#include <chrono>
 
 using namespace yams;
 using namespace yams::extraction;
@@ -14,10 +16,10 @@ using ::testing::HasSubstr;
 using ::testing::Not;
 using ::testing::IsEmpty;
 
-class PDFExtractorTest : public ::testing::Test {
+class PdfExtractorTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        extractor_ = std::make_unique<PDFExtractor>();
+        extractor_ = std::make_unique<PdfExtractor>();
         fixtureManager_ = std::make_unique<FixtureManager>();
         testDir_ = fixtureManager_->createTempDirectory("pdf_test");
     }
@@ -33,14 +35,14 @@ protected:
         return fixtureManager_->createBinaryFixture(name, pdfData);
     }
     
-    std::unique_ptr<PDFExtractor> extractor_;
+    std::unique_ptr<PdfExtractor> extractor_;
     std::unique_ptr<FixtureManager> fixtureManager_;
     std::filesystem::path testDir_;
 };
 
 // Basic Functionality Tests
 
-TEST_F(PDFExtractorTest, ExtractTextFromSimplePDF) {
+TEST_F(PdfExtractorTest, ExtractTextFromSimplePDF) {
     // Arrange
     auto fixture = FixtureManager::getSimplePDF();
     
@@ -49,12 +51,12 @@ TEST_F(PDFExtractorTest, ExtractTextFromSimplePDF) {
     
     // Assert
     ASSERT_TRUE(result.has_value()) << "Failed to extract from simple PDF";
-    EXPECT_FALSE(result->text.empty()) << "Extracted text should not be empty";
-    EXPECT_TRUE(result->isSuccess()) << "Extraction should be successful";
-    EXPECT_EQ(result->extractionMethod, "pdfium");
+    EXPECT_FALSE(result.value().text.empty()) << "Extracted text should not be empty";
+    EXPECT_TRUE(result.value().isSuccess()) << "Extraction should be successful";
+    EXPECT_EQ(result.value().extractionMethod, "pdfium");
 }
 
-TEST_F(PDFExtractorTest, ExtractMetadataComplete) {
+TEST_F(PdfExtractorTest, ExtractMetadataComplete) {
     // Arrange
     auto fixture = createTestPDF("metadata_test.pdf", 1);
     
@@ -63,10 +65,10 @@ TEST_F(PDFExtractorTest, ExtractMetadataComplete) {
     
     // Assert
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Check for expected metadata fields
-    const auto& metadata = result->metadata;
+    const auto& metadata = result.value().metadata;
     
     // PDFium should extract these standard fields if present
     std::vector<std::string> expectedFields = {
@@ -80,7 +82,7 @@ TEST_F(PDFExtractorTest, ExtractMetadataComplete) {
     }
 }
 
-TEST_F(PDFExtractorTest, HandleMultiPageDocument) {
+TEST_F(PdfExtractorTest, HandleMultiPageDocument) {
     // Arrange
     auto fixture = createTestPDF("multipage.pdf", 10);
     
@@ -89,21 +91,21 @@ TEST_F(PDFExtractorTest, HandleMultiPageDocument) {
     
     // Assert
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Check page count in metadata
-    ASSERT_TRUE(result->metadata.find("page_count") != result->metadata.end());
-    EXPECT_EQ(result->metadata.at("page_count"), "10");
+    ASSERT_TRUE(result.value().metadata.find("page_count") != result.value().metadata.end());
+    EXPECT_EQ(result.value().metadata.at("page_count"), "10");
     
     // Text should contain content from multiple pages
-    EXPECT_THAT(result->text, HasSubstr("Page 1"));
-    EXPECT_THAT(result->text, HasSubstr("Page 5"));
-    EXPECT_THAT(result->text, HasSubstr("Page 10"));
+    EXPECT_THAT(result.value().text, HasSubstr("Page 1"));
+    EXPECT_THAT(result.value().text, HasSubstr("Page 5"));
+    EXPECT_THAT(result.value().text, HasSubstr("Page 10"));
 }
 
 // UTF-8 and Encoding Tests
 
-TEST_F(PDFExtractorTest, HandleUTF8Content) {
+TEST_F(PdfExtractorTest, HandleUTF8Content) {
     // Create a PDF with Unicode content
     // Note: This would need actual PDF creation with Unicode text
     // For now, we test that UTF-8 is properly handled
@@ -112,27 +114,27 @@ TEST_F(PDFExtractorTest, HandleUTF8Content) {
     auto result = extractor_->extract(fixture.path);
     
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Check that encoding is properly detected
-    ASSERT_TRUE(result->metadata.find("encoding") != result->metadata.end());
-    EXPECT_EQ(result->metadata.at("encoding"), "UTF-8");
+    ASSERT_TRUE(result.value().metadata.find("encoding") != result.value().metadata.end());
+    EXPECT_EQ(result.value().metadata.at("encoding"), "UTF-8");
 }
 
-TEST_F(PDFExtractorTest, HandleSpecialCharacters) {
+TEST_F(PdfExtractorTest, HandleSpecialCharacters) {
     auto fixture = createTestPDF("special_chars.pdf", 1);
     auto result = extractor_->extract(fixture.path);
     
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Ensure no corruption of text during extraction
-    EXPECT_THAT(result->text, Not(HasSubstr("\ufffd"))); // No replacement characters
+    EXPECT_THAT(result.value().text, Not(HasSubstr("\ufffd"))); // No replacement characters
 }
 
 // Error Handling Tests
 
-TEST_F(PDFExtractorTest, HandleCorruptedPDF) {
+TEST_F(PdfExtractorTest, HandleCorruptedPDF) {
     // Arrange
     auto fixture = FixtureManager::getCorruptedPDF();
     
@@ -141,11 +143,11 @@ TEST_F(PDFExtractorTest, HandleCorruptedPDF) {
     
     // Assert
     ASSERT_FALSE(result.has_value()) << "Should fail on corrupted PDF";
-    EXPECT_EQ(result.error().code, ErrorCode::InvalidFormat);
+    EXPECT_EQ(result.error().code, ErrorCode::InvalidData);
     EXPECT_THAT(result.error().message, HasSubstr("PDF"));
 }
 
-TEST_F(PDFExtractorTest, HandleNonExistentFile) {
+TEST_F(PdfExtractorTest, HandleNonExistentFile) {
     // Arrange
     std::filesystem::path nonExistent = testDir_ / "does_not_exist.pdf";
     
@@ -157,7 +159,7 @@ TEST_F(PDFExtractorTest, HandleNonExistentFile) {
     EXPECT_EQ(result.error().code, ErrorCode::FileNotFound);
 }
 
-TEST_F(PDFExtractorTest, HandleEmptyPDF) {
+TEST_F(PdfExtractorTest, HandleEmptyPDF) {
     // Create an empty file with PDF extension
     std::filesystem::path emptyPdf = testDir_ / "empty.pdf";
     std::ofstream(emptyPdf).close();
@@ -165,10 +167,10 @@ TEST_F(PDFExtractorTest, HandleEmptyPDF) {
     auto result = extractor_->extract(emptyPdf);
     
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, ErrorCode::InvalidFormat);
+    EXPECT_EQ(result.error().code, ErrorCode::InvalidData);
 }
 
-TEST_F(PDFExtractorTest, HandlePasswordProtectedPDF) {
+TEST_F(PdfExtractorTest, HandlePasswordProtectedPDF) {
     // Note: Would need actual password-protected PDF
     // For now, we simulate the expected behavior
     
@@ -177,7 +179,7 @@ TEST_F(PDFExtractorTest, HandlePasswordProtectedPDF) {
     GTEST_SKIP() << "Password-protected PDF test requires actual encrypted file";
 }
 
-TEST_F(PDFExtractorTest, HandleImageOnlyPDF) {
+TEST_F(PdfExtractorTest, HandleImageOnlyPDF) {
     // PDFs with only images (no text) should return empty text
     // but still be successful
     
@@ -188,7 +190,7 @@ TEST_F(PDFExtractorTest, HandleImageOnlyPDF) {
 
 // Memory and Resource Management Tests
 
-TEST_F(PDFExtractorTest, HandleLargePDF) {
+TEST_F(PdfExtractorTest, HandleLargePDF) {
     // Create a large PDF (100 pages)
     auto fixture = createTestPDF("large.pdf", 100);
     
@@ -198,14 +200,14 @@ TEST_F(PDFExtractorTest, HandleLargePDF) {
     auto result = extractor_->extract(fixture.path);
     
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Verify all pages were processed
-    ASSERT_TRUE(result->metadata.find("page_count") != result->metadata.end());
-    EXPECT_EQ(result->metadata.at("page_count"), "100");
+    ASSERT_TRUE(result.value().metadata.find("page_count") != result.value().metadata.end());
+    EXPECT_EQ(result.value().metadata.at("page_count"), "100");
 }
 
-TEST_F(PDFExtractorTest, NoMemoryLeaks) {
+TEST_F(PdfExtractorTest, NoMemoryLeaks) {
     // Extract from multiple PDFs in sequence
     for (int i = 0; i < 10; ++i) {
         auto fixture = createTestPDF("test_" + std::to_string(i) + ".pdf", 5);
@@ -219,7 +221,7 @@ TEST_F(PDFExtractorTest, NoMemoryLeaks) {
 
 // Buffer Extraction Tests
 
-TEST_F(PDFExtractorTest, ExtractFromBuffer) {
+TEST_F(PdfExtractorTest, ExtractFromBuffer) {
     // Generate PDF data
     TestDataGenerator generator;
     auto pdfData = generator.generatePDF(3);
@@ -235,23 +237,23 @@ TEST_F(PDFExtractorTest, ExtractFromBuffer) {
     auto result = extractor_->extractFromBuffer(buffer);
     
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
-    EXPECT_FALSE(result->text.empty());
-    EXPECT_EQ(result->extractionMethod, "pdfium_buffer");
+    EXPECT_TRUE(result.value().isSuccess());
+    EXPECT_FALSE(result.value().text.empty());
+    EXPECT_EQ(result.value().extractionMethod, "pdfium_buffer");
 }
 
-TEST_F(PDFExtractorTest, ExtractFromEmptyBuffer) {
+TEST_F(PdfExtractorTest, ExtractFromEmptyBuffer) {
     std::vector<std::byte> emptyBuffer;
     
     auto result = extractor_->extractFromBuffer(emptyBuffer);
     
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, ErrorCode::InvalidInput);
+    EXPECT_EQ(result.error().code, ErrorCode::InvalidArgument);
 }
 
 // Complex Layout Tests
 
-TEST_F(PDFExtractorTest, HandleComplexLayout) {
+TEST_F(PdfExtractorTest, HandleComplexLayout) {
     // Test extraction from PDFs with complex layouts
     // (columns, tables, mixed text orientations)
     
@@ -259,16 +261,16 @@ TEST_F(PDFExtractorTest, HandleComplexLayout) {
     auto result = extractor_->extract(fixture.path);
     
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Text should be extracted in reading order
     // Actual validation would depend on specific PDF content
-    EXPECT_FALSE(result->text.empty());
+    EXPECT_FALSE(result.value().text.empty());
 }
 
 // Performance Tests
 
-TEST_F(PDFExtractorTest, ExtractionPerformance) {
+TEST_F(PdfExtractorTest, ExtractionPerformance) {
     auto fixture = createTestPDF("perf_test.pdf", 10);
     
     auto start = std::chrono::high_resolution_clock::now();
@@ -285,13 +287,13 @@ TEST_F(PDFExtractorTest, ExtractionPerformance) {
 
 // Metadata Extraction Tests
 
-TEST_F(PDFExtractorTest, ExtractAllMetadataFields) {
+TEST_F(PdfExtractorTest, ExtractAllMetadataFields) {
     auto fixture = createTestPDF("full_metadata.pdf", 2);
     auto result = extractor_->extract(fixture.path);
     
     ASSERT_TRUE(result.has_value());
     
-    const auto& metadata = result->metadata;
+    const auto& metadata = result.value().metadata;
     
     // Check standard PDF metadata fields
     EXPECT_TRUE(metadata.find("title") != metadata.end());
@@ -308,7 +310,7 @@ TEST_F(PDFExtractorTest, ExtractAllMetadataFields) {
 
 // Configuration Tests
 
-TEST_F(PDFExtractorTest, RespectExtractionConfig) {
+TEST_F(PdfExtractorTest, RespectExtractionConfig) {
     auto fixture = createTestPDF("config_test.pdf", 3);
     
     ExtractionConfig config;
@@ -318,15 +320,15 @@ TEST_F(PDFExtractorTest, RespectExtractionConfig) {
     auto result = extractor_->extract(fixture.path, config);
     
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
+    EXPECT_TRUE(result.value().isSuccess());
     
     // Verify formatting was not preserved (no multiple spaces/newlines)
-    EXPECT_THAT(result->text, Not(HasSubstr("  "))); // No double spaces
+    EXPECT_THAT(result.value().text, Not(HasSubstr("  "))); // No double spaces
 }
 
 // Edge Cases
 
-TEST_F(PDFExtractorTest, HandlePDFWithNoText) {
+TEST_F(PdfExtractorTest, HandlePDFWithNoText) {
     // Create minimal PDF with no text content
     std::string minimalPdf = "%PDF-1.4\n"
                              "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
@@ -345,11 +347,11 @@ TEST_F(PDFExtractorTest, HandlePDFWithNoText) {
     
     // Should succeed but with empty text
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result->isSuccess());
-    EXPECT_TRUE(result->text.empty());
+    EXPECT_TRUE(result.value().isSuccess());
+    EXPECT_TRUE(result.value().text.empty());
 }
 
-TEST_F(PDFExtractorTest, HandleMalformedButRecoverablePDF) {
+TEST_F(PdfExtractorTest, HandleMalformedButRecoverablePDF) {
     // Some PDFs are malformed but still readable
     // PDFium should attempt to recover what it can
     
@@ -367,15 +369,15 @@ TEST_F(PDFExtractorTest, HandleMalformedButRecoverablePDF) {
     
     // May or may not succeed depending on PDFium's recovery capabilities
     if (result.has_value()) {
-        EXPECT_TRUE(result->isSuccess());
+        EXPECT_TRUE(result.value().isSuccess());
     } else {
-        EXPECT_EQ(result.error().code, ErrorCode::InvalidFormat);
+        EXPECT_EQ(result.error().code, ErrorCode::InvalidData);
     }
 }
 
 // Integration with Text Extractor Factory
 
-TEST_F(PDFExtractorTest, RegisteredWithFactory) {
+TEST_F(PdfExtractorTest, RegisteredWithFactory) {
     // PDF extractor should be registered for .pdf extension
     auto& factory = TextExtractorFactory::instance();
     
@@ -383,7 +385,7 @@ TEST_F(PDFExtractorTest, RegisteredWithFactory) {
     EXPECT_TRUE(factory.isSupported(".PDF")); // Case insensitive
     
     // Should create PDF extractor for PDF files
-    auto extractor = factory.createExtractor(".pdf");
+    auto extractor = factory.create(".pdf");
     ASSERT_NE(extractor, nullptr);
     
     // Should be able to extract
@@ -394,7 +396,7 @@ TEST_F(PDFExtractorTest, RegisteredWithFactory) {
 
 // Concurrent Extraction Tests
 
-TEST_F(PDFExtractorTest, ThreadSafeExtraction) {
+TEST_F(PdfExtractorTest, ThreadSafeExtraction) {
     // Multiple threads extracting from different PDFs
     const int numThreads = 4;
     std::vector<std::thread> threads;
@@ -403,9 +405,9 @@ TEST_F(PDFExtractorTest, ThreadSafeExtraction) {
     for (int i = 0; i < numThreads; ++i) {
         threads.emplace_back([this, i, &results]() {
             auto fixture = createTestPDF("thread_" + std::to_string(i) + ".pdf", 2);
-            PDFExtractor localExtractor;
+            PdfExtractor localExtractor;
             auto result = localExtractor.extract(fixture.path);
-            results[i] = result.has_value() && result->isSuccess();
+            results[i] = result.has_value() && result.value().isSuccess();
         });
     }
     
@@ -424,7 +426,7 @@ public:
     MOCK_METHOD(bool, loadDocument, (const std::string& path));
     MOCK_METHOD(int, getPageCount, ());
     MOCK_METHOD(std::string, extractText, (int pageNum));
-    MOCK_METHOD(std::map<std::string, std::string>, getMetadata, ());
+    MOCK_METHOD((std::map<std::string, std::string>), getMetadata, ());
 };
 
 // Test with mocked PDFium would go here for more isolated unit testing

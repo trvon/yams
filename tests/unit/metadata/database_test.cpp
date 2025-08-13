@@ -349,6 +349,5 @@ TEST_F(DatabaseTest, ConcurrentAccess) {
     });
     
     ASSERT_TRUE(result.has_value());
-    ASSERT_TRUE(result.value().has_value());
-    EXPECT_EQ(result.value().value(), numThreads * incrementsPerThread);
+    EXPECT_EQ(result.value(), numThreads * incrementsPerThread);
 }

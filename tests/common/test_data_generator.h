@@ -6,7 +6,7 @@
 #include <random>
 #include <chrono>
 #include <filesystem>
-#include <yams/metadata/metadata_value.h>
+#include <yams/metadata/document_metadata.h>
 
 namespace yams::test {
 

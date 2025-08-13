@@ -14,15 +14,58 @@ Persistent memory for LLMs and applications. Content-addressed storage with dedu
 
 My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
 
-## Build
+## Installation
 
-### Requirements
-- C++20 compiler (GCC 11+, Clang 14+, AppleClang 14+)
-- CMake 3.20+
-- Python 3.8+ (for Conan)
+### Quick Install (Recommended)
 
-### Quick Start
+```bash
+curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
+```
 
+This script downloads **pre-built binaries** and will:
+- Auto-detect your platform (Linux/macOS, x86_64/ARM64)
+- Download the appropriate binary from GitHub Releases
+- Install to `~/.local/bin` by default
+- Set up shell completions if available
+- Verify the installation
+
+> **Note:** This is the recommended installation method for all users. No build tools or dependencies required.
+
+**Custom installation options:**
+```bash
+# Install specific version
+curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash -s -- --version 0.1.2
+
+# Install to custom directory
+curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash -s -- --install-dir /usr/local/bin
+
+# Environment variables
+export YAMS_VERSION="0.1.2"
+export YAMS_INSTALL_DIR="/usr/local/bin"
+curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
+```
+
+**Supported platforms:**
+- Linux x86_64, ARM64
+- macOS x86_64 (Intel), ARM64 (Apple Silicon)
+
+### Package Managers
+
+**Docker:**
+```bash
+docker run --rm -it ghcr.io/trvon/yams:latest --version
+```
+
+**Homebrew (coming soon):**
+```bash
+brew tap trvon/yams && brew install yams
+```
+
+### Build from Source (For Developers)
+
+> **⚠️ Note:** Building from source is only needed for development. Most users should use the install script above.
+
+**Working Build Method (Conan):**
 ```bash
 # Install Conan
 pip install conan
@@ -30,13 +73,19 @@ pip install conan
 # One-time: create default Conan profile
 conan profile detect --force
 
-# Build with Conan
+# Build with Conan (recommended - this is what creates the release binaries)
 conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
-
 cmake --preset conan-release
 cmake --build --preset conan-release
 sudo cmake --install build/conan-release/build/Release
 ```
+
+**Requirements:**
+- C++20 compiler (GCC 11+, Clang 14+, AppleClang 14+)
+- CMake 3.20+
+- Python 3.8+ (for Conan)
+
+> **Known Issue:** Traditional CMake builds (without Conan) currently have dependency resolution issues. Use Conan builds for reliable compilation.
 
 ### Build Options
 
