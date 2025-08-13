@@ -61,3 +61,6 @@ coverage/
 .git/index.lock
 
 docs/delivery
+docs/operations
+.cache/
+paper

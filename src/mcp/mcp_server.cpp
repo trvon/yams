@@ -384,10 +384,12 @@ bool WebSocketTransport::waitForConnection(std::chrono::milliseconds timeout) {
 MCPServer::MCPServer(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<search::SearchExecutor> searchExecutor,
                      std::shared_ptr<metadata::MetadataRepository> metadataRepo,
+                     std::shared_ptr<search::HybridSearchEngine> hybridEngine,
                      std::unique_ptr<ITransport> transport)
     : store_(std::move(store))
     , searchExecutor_(std::move(searchExecutor))
     , metadataRepo_(std::move(metadataRepo))
+    , hybridEngine_(std::move(hybridEngine))
     , transport_(std::move(transport)) {
 }
 
@@ -500,7 +502,8 @@ json MCPServer::listTools() {
                 {"fuzzy", {{"type", "boolean"}, {"description", "Enable fuzzy search"}, {"default", false}}},
                 {"similarity", {{"type", "number"}, {"description", "Minimum similarity for fuzzy search (0.0-1.0)"}, {"default", 0.7}}},
                 {"hash", {{"type", "string"}, {"description", "Search by file hash (full or partial, minimum 8 characters)"}}},
-                {"type", {{"type", "string"}, {"description", "Search type: keyword, semantic, hybrid"}, {"default", "keyword"}}}
+                {"verbose", {{"type", "boolean"}, {"description", "Include method and score breakdown when true"}, {"default", false}}},
+                {"type", {{"type", "string"}, {"description", "Search type: keyword, semantic, hybrid"}, {"default", "hybrid"}}}
             }},
             {"required", json::array({"query"})}
         }}
@@ -848,7 +851,8 @@ json MCPServer::searchDocuments(const json& args) {
         bool fuzzy = args.value("fuzzy", false);
         float minSimilarity = args.value("similarity", 0.7f);
         std::string hashQuery = args.value("hash", "");
-        std::string searchType = args.value("type", "keyword");
+        bool verbose = args.value("verbose", false);
+        std::string searchType = args.value("type", "hybrid");
         
         // Handle explicit hash search if --hash parameter is provided
         if (!hashQuery.empty()) {
@@ -863,64 +867,104 @@ json MCPServer::searchDocuments(const json& args) {
             return searchByHash(query, limit);
         }
         
-        // Use metadata repository for search (includes v0.0.5 improvements)
-        if (fuzzy) {
-            // Use fuzzy search
-            auto result = metadataRepo_->fuzzySearch(query, minSimilarity, static_cast<int>(limit));
-            if (!result) {
-                return {{"error", result.error().message}};
-            }
+        // Prefer hybrid search by default when available; fail open to metadata search
+                if ((searchType == "hybrid" || searchType.empty()) && hybridEngine_) {
+                    auto hres = hybridEngine_->search(query, limit);
+                    if (hres) {
+                        const auto& items = hres.value();
+                        json response;
+                        response["total"] = items.size();
+                        response["type"] = "hybrid";
+                        if (verbose) {
+                            response["method"] = "hybrid";
+                            response["kg_enabled"] = hybridEngine_->getConfig().enable_kg;
+                        }
+                        json results = json::array();
+                        for (const auto& r : items) {
+                            json doc;
+                            doc["id"] = r.id;
+                            auto itTitle = r.metadata.find("title");
+                            if (itTitle != r.metadata.end()) doc["title"] = itTitle->second;
+                            auto itPath = r.metadata.find("path");
+                            if (itPath != r.metadata.end()) doc["path"] = itPath->second;
+                            doc["score"] = r.hybrid_score;
+                            if (!r.content.empty()) {
+                                doc["snippet"] = r.content;
+                            }
+                            if (verbose) {
+                                json breakdown;
+                                breakdown["vector_score"] = r.vector_score;
+                                breakdown["keyword_score"] = r.keyword_score;
+                                breakdown["kg_entity_score"] = r.kg_entity_score;
+                                breakdown["structural_score"] = r.structural_score;
+                                doc["score_breakdown"] = breakdown;
+                            }
+                            results.push_back(doc);
+                        }
+                        response["results"] = results;
+                        return response;
+                    }
+                    // If hybrid failed, fall through to metadata paths
+                }
+        
+                // Metadata repository search (fuzzy or regular) as fallback or when requested
+                if (fuzzy) {
+                    // Use fuzzy search
+                    auto result = metadataRepo_->fuzzySearch(query, minSimilarity, static_cast<int>(limit));
+                    if (!result) {
+                        return {{"error", result.error().message}};
+                    }
             
-            const auto& searchResults = result.value();
+                    const auto& searchResults = result.value();
             
-            json response;
-            response["total"] = searchResults.totalCount;
-            response["type"] = "fuzzy";
-            response["execution_time_ms"] = searchResults.executionTimeMs;
+                    json response;
+                    response["total"] = searchResults.totalCount;
+                    response["type"] = "fuzzy";
+                    response["execution_time_ms"] = searchResults.executionTimeMs;
             
-            json results = json::array();
-            for (const auto& item : searchResults.results) {
-                results.push_back({
-                    {"id", item.document.id},
-                    {"hash", item.document.sha256Hash},
-                    {"title", item.document.fileName},
-                    {"path", item.document.filePath},
-                    {"score", item.score},
-                    {"snippet", item.snippet}
-                });
-            }
-            response["results"] = results;
+                    json results = json::array();
+                    for (const auto& item : searchResults.results) {
+                        results.push_back({
+                            {"id", item.document.id},
+                            {"hash", item.document.sha256Hash},
+                            {"title", item.document.fileName},
+                            {"path", item.document.filePath},
+                            {"score", item.score},
+                            {"snippet", item.snippet}
+                        });
+                    }
+                    response["results"] = results;
             
-            return response;
-        } else {
-            // Use regular FTS search with v0.0.5 improvements
-            auto result = metadataRepo_->search(query, static_cast<int>(limit), 0);
-            if (!result) {
-                return {{"error", result.error().message}};
-            }
+                    return response;
+                } else {
+                    // Use regular FTS search with v0.0.5 improvements
+                    auto result = metadataRepo_->search(query, static_cast<int>(limit), 0);
+                    if (!result) {
+                        return {{"error", result.error().message}};
+                    }
             
-            const auto& searchResults = result.value();
+                    const auto& searchResults = result.value();
             
-            json response;
-            response["total"] = searchResults.totalCount;
-            response["type"] = "full-text";
-            response["execution_time_ms"] = searchResults.executionTimeMs;
+                    json response;
+                    response["total"] = searchResults.totalCount;
+                    response["type"] = "full-text";
+                    response["execution_time_ms"] = searchResults.executionTimeMs;
             
-            json results = json::array();
-            for (const auto& item : searchResults.results) {
-                results.push_back({
-                    {"id", item.document.id},
-                    {"hash", item.document.sha256Hash},
-                    {"title", item.document.fileName},
-                    {"path", item.document.filePath},
-                    {"score", item.score},
-                    {"snippet", item.snippet}
-                });
-            }
-            response["results"] = results;
+                    json results = json::array();
+                    for (const auto& item : searchResults.results) {
+                        results.push_back({
+                            {"id", item.document.id},
+                            {"hash", item.document.sha256Hash},
+                            {"title", item.document.fileName},
+                            {"path", item.document.filePath},
+                            {"score", item.score},
+                            {"snippet", item.snippet}
+                        });
+                    }
+                    response["results"] = results;
             
-            return response;
-        }
+                    return response;
+                }
         
     } catch (const std::exception& e) {
         return {{"error", std::string("Search failed: ") + e.what()}};

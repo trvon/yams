@@ -9,6 +9,10 @@ add_library(yams_search
     cache_key.cpp
     search_cache.cpp
     hybrid_search_engine.cpp
+    entity_linker.cpp
+    kg_scorer_simple.cpp
+    hybrid_search_factory.cpp
+    search_engine_builder.cpp
     bk_tree.cpp
 )
 
@@ -36,10 +40,7 @@ set_target_properties(yams_search PROPERTIES
 # Create alias for consistent naming
 add_library(yams::search ALIAS yams_search)
 
-# Build module-local benchmarks (when enabled)
-if(YAMS_BUILD_BENCHMARKS)
-    add_subdirectory(benchmarks)
-endif()
+# Benchmarks have been moved to tests/benchmarks for centralization
 
 
 # Install targets

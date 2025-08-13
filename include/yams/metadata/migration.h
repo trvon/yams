@@ -162,6 +162,9 @@ private:
     
     // Version 6: Add collection and snapshot indexes
     static Migration createCollectionIndexes();
+    
+    // Version 7: Add knowledge graph core schema (nodes, edges, aliases, embeddings, doc_entities, stats)
+    static Migration createKnowledgeGraphSchema();
 };
 
 /**

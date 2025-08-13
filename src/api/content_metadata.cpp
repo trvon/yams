@@ -345,9 +345,78 @@ std::string ContentMetadata::toJson() const {
 
 // JSON deserialization (simplified - would use a proper JSON parser in production)
 Result<ContentMetadata> ContentMetadata::fromJson(const std::string& json) {
-    // TODO: Implement proper JSON parsing
-    // For now, return an error
-    return Result<ContentMetadata>(ErrorCode::InvalidArgument);
+    try {
+        ContentMetadata metadata;
+        
+        // Simple regex-based parsing for test purposes
+        // In production, use a proper JSON library
+        
+        // Extract string fields
+        auto extractString = [&json](const std::string& key) -> std::string {
+            std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
+            std::smatch match;
+            if (std::regex_search(json, match, pattern)) {
+                return match[1];
+            }
+            return "";
+        };
+        
+        // Extract number fields
+        auto extractNumber = [&json](const std::string& key) -> uint64_t {
+            std::regex pattern("\"" + key + "\"\\s*:\\s*(\\d+)");
+            std::smatch match;
+            if (std::regex_search(json, match, pattern)) {
+                return std::stoull(match[1]);
+            }
+            return 0;
+        };
+        
+        // Extract basic fields
+        metadata.id = extractString("id");
+        metadata.name = extractString("name");
+        metadata.mimeType = extractString("mimeType");
+        metadata.contentHash = extractString("contentHash");
+        metadata.size = extractNumber("size");
+        
+        // Extract timestamps (parse ISO format)
+        auto parseTime = [&extractString](const std::string& key) {
+            auto timeStr = extractString(key);
+            if (timeStr.empty()) {
+                return std::chrono::system_clock::now();
+            }
+            // Simple parsing - assumes format "YYYY-MM-DDTHH:MM:SSZ"
+            std::tm tm = {};
+            std::istringstream ss(timeStr);
+            ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+            return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+        };
+        
+        metadata.createdAt = parseTime("createdAt");
+        metadata.modifiedAt = parseTime("modifiedAt");
+        metadata.accessedAt = parseTime("accessedAt");
+        
+        // Extract tags object
+        std::regex tagsPattern("\"tags\"\\s*:\\s*\\{([^}]*)\\}");
+        std::smatch tagsMatch;
+        if (std::regex_search(json, tagsMatch, tagsPattern)) {
+            std::string tagsContent = tagsMatch[1];
+            
+            // Parse individual tag key-value pairs
+            std::regex tagPattern("\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\"");
+            std::sregex_iterator it(tagsContent.begin(), tagsContent.end(), tagPattern);
+            std::sregex_iterator end;
+            
+            for (; it != end; ++it) {
+                metadata.tags[(*it)[1]] = (*it)[2];
+            }
+        }
+        
+        return metadata;
+        
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to parse JSON metadata: {}", e.what());
+        return Result<ContentMetadata>(ErrorCode::InvalidArgument);
+    }
 }
 
 // MetadataQuery implementation

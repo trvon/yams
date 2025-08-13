@@ -320,39 +320,62 @@ TEST_F(ReferenceCounterTest, ConcurrentOperations) {
 }
 
 TEST_F(ReferenceCounterTest, ConcurrentTransactions) {
+    // Original test complexity: 5 threads × 20 operations each
     const size_t numThreads = 5;
     const size_t hashesPerThread = 20;
     
     std::vector<std::thread> threads;
     std::atomic<size_t> commitCount{0};
+    std::atomic<size_t> threadStarted{0};
+    std::atomic<size_t> threadCompleted{0};
+    std::atomic<size_t> errorCount{0};
     
     for (size_t t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &commitCount, t, hashesPerThread]() {
-            auto txn = refCounter->beginTransaction();
-            ASSERT_NE(txn, nullptr);
+        threads.emplace_back([this, &commitCount, &threadStarted, &threadCompleted, &errorCount, t, hashesPerThread]() {
+            threadStarted++;
             
-            // Each thread works on its own set of hashes
-            for (size_t i = 0; i < hashesPerThread; ++i) {
-                auto hash = generateHash(800 + t * 100 + i);
-                txn->increment(hash, 2048);
+            try {
+                auto txn = refCounter->beginTransaction();
+                if (!txn) {
+                    errorCount++;
+                    threadCompleted++;
+                    return;
+                }
+                
+                // Each thread works on its own set of hashes
+                for (size_t i = 0; i < hashesPerThread; ++i) {
+                    auto hash = generateHash(800 + t * 100 + i);
+                    txn->increment(hash, 2048);
+                }
+                
+                auto result = txn->commit();
+                if (result.has_value()) {
+                    commitCount++;
+                } else {
+                    errorCount++;
+                }
+                
+            } catch (const std::exception& e) {
+                errorCount++;
+                // Don't use ASSERT in thread - it would abort the thread
             }
             
-            auto result = txn->commit();
-            if (result.has_value()) {
-                commitCount++;
-            }
+            threadCompleted++;
         });
     }
     
-    // Wait for all threads
+    // Wait for all threads to complete
     for (auto& t : threads) {
         t.join();
     }
     
-    // Verify all transactions committed
+    // Verify all threads completed without errors
+    EXPECT_EQ(threadStarted.load(), numThreads);
+    EXPECT_EQ(threadCompleted.load(), numThreads);
+    EXPECT_EQ(errorCount.load(), 0);
     EXPECT_EQ(commitCount.load(), numThreads);
     
-    // Verify all hashes were incremented
+    // Verify all hashes were incremented correctly
     for (size_t t = 0; t < numThreads; ++t) {
         for (size_t i = 0; i < hashesPerThread; ++i) {
             auto hash = generateHash(800 + t * 100 + i);
@@ -496,7 +519,7 @@ protected:
     }
     
     std::string generateHash(int i) {
-        return std::format("gc_test_hash_{:064}", i);
+        return std::format("{:064x}", i);  // Generate exactly 64 hex characters
     }
 };
 

@@ -3,25 +3,55 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/hybrid_search_factory.h>
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <yams/version.hpp>
-#ifdef YAMS_EMBEDDED_VERBOSE_HELP
-#include <generated/cli_help.hpp>
-#include <generated/cli_help_init.hpp>
-#include <generated/cli_help_add.hpp>
-#include <generated/cli_help_get.hpp>
-#include <generated/cli_help_delete.hpp>
-#include <generated/cli_help_list.hpp>
-#include <generated/cli_help_search.hpp>
-#include <generated/cli_help_config.hpp>
-#include <generated/cli_help_auth.hpp>
-#include <generated/cli_help_stats.hpp>
-#include <generated/cli_help_uninstall.hpp>
-#include <generated/cli_help_migrate.hpp>
-#include <generated/cli_help_browse.hpp>
-#include <generated/cli_help_serve.hpp>
+#if defined(YAMS_EMBEDDED_VERBOSE_HELP)
+  #if defined(__has_include)
+    #if __has_include(<generated/cli_help.hpp>) && \
+        __has_include(<generated/cli_help_init.hpp>) && \
+        __has_include(<generated/cli_help_add.hpp>) && \
+        __has_include(<generated/cli_help_get.hpp>) && \
+        __has_include(<generated/cli_help_delete.hpp>) && \
+        __has_include(<generated/cli_help_list.hpp>) && \
+        __has_include(<generated/cli_help_search.hpp>) && \
+        __has_include(<generated/cli_help_config.hpp>) && \
+        __has_include(<generated/cli_help_auth.hpp>) && \
+        __has_include(<generated/cli_help_stats.hpp>) && \
+        __has_include(<generated/cli_help_uninstall.hpp>) && \
+        __has_include(<generated/cli_help_migrate.hpp>) && \
+        __has_include(<generated/cli_help_browse.hpp>) && \
+        __has_include(<generated/cli_help_serve.hpp>)
+      #define YAMS_HAVE_GENERATED_CLI_HELP 1
+      #include <generated/cli_help.hpp>
+      #include <generated/cli_help_init.hpp>
+      #include <generated/cli_help_add.hpp>
+      #include <generated/cli_help_get.hpp>
+      #include <generated/cli_help_delete.hpp>
+      #include <generated/cli_help_list.hpp>
+      #include <generated/cli_help_search.hpp>
+      #include <generated/cli_help_config.hpp>
+      #include <generated/cli_help_auth.hpp>
+      #include <generated/cli_help_stats.hpp>
+      #include <generated/cli_help_uninstall.hpp>
+      #include <generated/cli_help_migrate.hpp>
+      #include <generated/cli_help_browse.hpp>
+      #include <generated/cli_help_serve.hpp>
+    #else
+      // Generated CLI help was requested but headers are not available.
+      // Disable embedded help to fall back to runtime message paths.
+      #undef YAMS_EMBEDDED_VERBOSE_HELP
+    #endif
+  #else
+    // Compiler does not support __has_include; disable embedded help fallback.
+    #undef YAMS_EMBEDDED_VERBOSE_HELP
+  #endif
 #endif
+#include <filesystem>
+#include <cstdlib>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,6 +59,7 @@
 #include <algorithm>
 
 namespace yams::cli {
+// NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
 
 YamsCLI::YamsCLI() {
     app_ = std::make_unique<CLI::App>("YAMS Document Management System", "yams");
@@ -64,7 +95,7 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init","add","get","delete","list","search","config","auth","stats","uninstall","migrate","browse","serve"
+            "init","add","get","delete","list","search","config","auth","stats","uninstall","migrate","update","browse","serve"
         };
 
         auto hasArg = [&](std::string_view needle) {
@@ -85,7 +116,7 @@ int YamsCLI::run(int argc, char* argv[]) {
         const bool helpFlag   = hasArg("--help") || hasArg("-h");
         const bool verboseOpt = hasArg("--verbose"); // do not treat -v as help-verbose
 
-#ifdef YAMS_EMBEDDED_VERBOSE_HELP
+#ifdef YAMS_HAVE_GENERATED_CLI_HELP
         auto printFullVerbose = [&]() {
             std::cout << yams::cli_help::VERBOSE << std::endl;
         };
@@ -135,7 +166,7 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Handle top-level verbose help
         if (helpAll || (helpFlag && verboseOpt && subcmd.empty())) {
-#ifdef YAMS_EMBEDDED_VERBOSE_HELP
+#ifdef YAMS_HAVE_GENERATED_CLI_HELP
             printFullVerbose();
 #else
             std::cout << "Verbose help not embedded. See docs/user_guide/cli.md or rebuild with docs.\n";
@@ -147,7 +178,7 @@ int YamsCLI::run(int argc, char* argv[]) {
         if (!subcmd.empty() && helpFlag && verboseOpt) {
             bool known = std::find(kCommands.begin(), kCommands.end(), subcmd) != kCommands.end();
             if (known) {
-#ifdef YAMS_EMBEDDED_VERBOSE_HELP
+#ifdef YAMS_HAVE_GENERATED_CLI_HELP
                 printCmdVerbose(subcmd);
 #else
                 std::cout << "Verbose help not embedded for command '" << subcmd << "'. See docs/user_guide/cli.md.\n";
@@ -262,6 +293,28 @@ Result<void> YamsCLI::initializeStorage() {
         // Initialize search executor
         searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
         
+        // Initialize Knowledge Graph store with defaults (local-first)
+        {
+            metadata::KnowledgeGraphStoreConfig kgCfg;
+            kgCfg.enable_alias_fts = true;  // use FTS5 if available, fallback is automatic
+            kgCfg.enable_wal = true;        // align with DB mode
+
+            auto kgStoreRes = metadata::makeSqliteKnowledgeGraphStore(dbPath.string(), kgCfg);
+            if (!kgStoreRes) {
+                spdlog::warn("KG store initialization failed: {}", kgStoreRes.error().message);
+            } else {
+                // Promote to shared_ptr for downstream composition in CLI
+                auto kgStoreUnique = std::move(kgStoreRes).value();
+                kgStore_ = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgStoreUnique));
+
+                // Best-effort health check; do not fail storage init on KG issues
+                auto hc = kgStore_->healthCheck();
+                if (!hc) {
+                    spdlog::warn("KG store health check failed: {}", hc.error().message);
+                }
+            }
+        }
+
         if (verbose_) {
             spdlog::info("Storage initialized at: {}", dataPath_.string());
         }

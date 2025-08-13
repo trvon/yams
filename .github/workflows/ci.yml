@@ -15,13 +15,27 @@ permissions:
 jobs:
   build-test-package:
     name: Build, Test, and Package (${{ matrix.os }}, ${{ matrix.build_type }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        build_type: [conan, traditional]
-        # No exclusions - enable all combinations
+        include:
+          - os: linux-self-hosted
+            platform: linux
+            runs_on: '["self-hosted","linux","X64"]'
+            build_type: conan
+          - os: linux-self-hosted
+            platform: linux
+            runs_on: '["self-hosted","linux","X64"]'
+            build_type: traditional
+          - os: macos-latest
+            platform: macos
+            runs_on: '["macos-latest"]'
+            build_type: conan
+          - os: macos-latest
+            platform: macos
+            runs_on: '["macos-latest"]'
+            build_type: traditional
 
     env:
       BUILD_DIR: build
@@ -35,35 +49,30 @@ jobs:
         if: matrix.build_type == 'conan'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Cache Conan packages
+        if: matrix.build_type == 'conan'
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ matrix.platform }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          restore-keys: |
+            conan-${{ runner.os }}-${{ matrix.platform }}-
+
+      - name: Install dependencies (Linux self-hosted)
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            pkg-config
-          
-          # Only install system deps for traditional build
-          if [[ "${{ matrix.build_type }}" == "traditional" ]]; then
-            sudo apt-get install -y \
-              libssl-dev \
-              libsqlite3-dev \
-              libncurses-dev \
-              protobuf-compiler \
-              libboost-all-dev
-          fi
+          echo "Using self-hosted Linux runner; assuming toolchain and build dependencies are pre-installed."
 
       - name: Install dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.platform == 'macos'
         shell: bash
         run: |
           brew update
           brew install cmake
-          
+
           # Only install system deps for traditional build
           if [[ "${{ matrix.build_type }}" == "traditional" ]]; then
             brew install openssl@3 sqlite3 protobuf boost
@@ -77,35 +86,43 @@ jobs:
         run: |
           pip install conan
           conan --version
-          
+
       - name: Configure with Conan
         if: matrix.build_type == 'conan'
         shell: bash
         run: |
           # Create default profile with C++20
           conan profile detect --force
-          
+
           # Fix C++ standard to 20 instead of gnu17
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
             sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
           else
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
           fi
-          
-          # Install dependencies
-          conan install . --build=missing --settings=compiler.cppstd=20
-          
+
+          # Create/refresh Release lockfile
+          conan lock create . -s build_type=Release --lockfile-out=conan.lock --build=missing
+
+          # Install dependencies to preset build folder using the lockfile
+          conan install . \
+            --output-folder=build/conan-ninja-release \
+            -s build_type=Release \
+            --lockfile=conan.lock \
+            --build=missing
+
           # Configure with CMake using Conan presets
-          cmake --preset conan-release
+          cmake --preset conan-ninja-release -DYAMS_BUILD_DOCS=OFF
+          echo "BUILD_DIR=build/conan-ninja-release" >> $GITHUB_ENV
 
       - name: Configure (Traditional CMake)
         if: matrix.build_type == 'traditional'
         shell: bash
         run: |
-          CMAKE_ARGS="-DYAMS_BUILD_PROFILE=dev -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
+          CMAKE_ARGS="-DYAMS_BUILD_PROFILE=dev -DYAMS_BUILD_DOCS=OFF -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
 
           # Enable coverage on Linux builds
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
             CMAKE_ARGS="$CMAKE_ARGS -DYAMS_ENABLE_COVERAGE=ON"
           fi
 
@@ -115,7 +132,7 @@ jobs:
         if: matrix.build_type == 'conan'
         shell: bash
         run: |
-          cmake --build --preset conan-release
+          cmake --build --preset build-conan-ninja-release
 
       - name: Build (Traditional)
         if: matrix.build_type == 'traditional'
@@ -127,7 +144,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            ctest --test-dir build/Release --output-on-failure || true
+            ctest --preset test-conan-ninja-release --output-on-failure || true
           else
             ctest --test-dir "$BUILD_DIR" --output-on-failure
             ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^consumer_'
@@ -137,8 +154,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
-          # Find all benchmark executables (named *_bench or *_bench.exe)
-          mapfile -t benches < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" \) 2>/dev/null | sort)
+          # Find all benchmark executables (named *_bench, *_bench.exe, or *_benchmark*)
+          mapfile -t benches < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" -o -name "*_benchmark*" \) 2>/dev/null | sort)
           if [ ${#benches[@]} -eq 0 ]; then
             echo "No benchmark executables found."
           else
@@ -151,7 +168,7 @@ jobs:
           fi
 
       - name: Generate coverage report (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           # Install gcovr if not present
@@ -187,7 +204,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            cmake --install build/Release --config Release --prefix "$INSTALL_PREFIX"
+            cmake --install build/conan-ninja-release --prefix "$INSTALL_PREFIX"
           else
             cmake --install "$BUILD_DIR" --config Release --prefix "$INSTALL_PREFIX"
           fi
@@ -198,6 +215,66 @@ jobs:
           fi
           echo "Installation contents:"
           ls -la "$INSTALL_PREFIX" || true
+
+      - name: Verify macOS packaging (PDFium @rpath and rpath)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Locate the installed CLI binary
+          BIN=""
+          if [ -x "$INSTALL_PREFIX/bin/yams" ]; then
+            BIN="$INSTALL_PREFIX/bin/yams"
+          elif [ -x "$GITHUB_WORKSPACE/${{ env.BUILD_DIR }}/tools/yams-cli/yams" ]; then
+            BIN="$GITHUB_WORKSPACE/${{ env.BUILD_DIR }}/tools/yams-cli/yams"
+          elif [ -x "build/Release/tools/yams-cli/yams" ]; then
+            BIN="build/Release/tools/yams-cli/yams"
+          else
+            echo "ERROR: yams binary not found in expected locations"
+            echo "INSTALL_PREFIX contents:"
+            ls -R "$INSTALL_PREFIX" || true
+            exit 1
+          fi
+
+          echo "Using yams binary: $BIN"
+          echo "otool -L output:"
+          otool -L "$BIN"
+
+          # Assert that the binary references @rpath/libpdfium.dylib
+          if ! otool -L "$BIN" | grep -q '@rpath/libpdfium.dylib'; then
+            echo "ERROR: @rpath/libpdfium.dylib not referenced by yams binary"
+            exit 1
+          fi
+
+          # Assert LC_RPATH contains @loader_path/../lib
+          if ! otool -l "$BIN" | awk '/LC_RPATH/{flag=1} flag&&/path/{print $2} /LC_/&&$0!~/LC_RPATH/{flag=0}' | grep -q '@loader_path/../lib'; then
+            echo "ERROR: @loader_path/../lib not present in LC_RPATH of yams binary"
+            exit 1
+          fi
+
+          # Verify libpdfium.dylib has install_name set to @rpath/libpdfium.dylib
+          PDF="$INSTALL_PREFIX/lib/libpdfium.dylib"
+          if [ -f "$PDF" ]; then
+            echo "otool -D for libpdfium.dylib:"
+            otool -D "$PDF" || true
+            if ! otool -D "$PDF" | grep -q '@rpath/libpdfium.dylib'; then
+              echo "ERROR: libpdfium.dylib install_name is not @rpath/libpdfium.dylib"
+              exit 1
+            fi
+          else
+            echo "libpdfium.dylib not found at $PDF, attempting discovery..."
+            PDF_ALT=$(find "$INSTALL_PREFIX" -maxdepth 2 -name 'libpdfium.dylib' -print -quit || true)
+            if [ -n "$PDF_ALT" ]; then
+              echo "Found libpdfium.dylib at: $PDF_ALT"
+              if ! otool -D "$PDF_ALT" | grep -q '@rpath/libpdfium.dylib'; then
+                echo "ERROR: libpdfium.dylib install_name is not @rpath/libpdfium.dylib (found at $PDF_ALT)"
+                exit 1
+              fi
+            else
+              echo "WARNING: libpdfium.dylib not present in install prefix; skipping install_name verification"
+            fi
+          fi
 
       - name: Upload installed prefix
         if: always()
@@ -239,8 +316,62 @@ jobs:
           path: ${{ env.BUILD_DIR }}/bench_results
           if-no-files-found: ignore
 
+      - name: Run retrieval evaluation (fixture)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Locate evaluator binary
+          if [ -x "build/Release/tools/eval/yams-eval" ]; then
+            EVAL_BIN="build/Release/tools/eval/yams-eval"
+          elif [ -x "$BUILD_DIR/tools/eval/yams-eval" ]; then
+            EVAL_BIN="$BUILD_DIR/tools/eval/yams-eval"
+          elif [ -x "$INSTALL_PREFIX/bin/yams-eval" ]; then
+            EVAL_BIN="$INSTALL_PREFIX/bin/yams-eval"
+          else
+            echo "yams-eval not found; skipping retrieval evaluation."
+            exit 0
+          fi
+
+          # Locate CLI binary
+          if [ -x "build/Release/tools/yams-cli/yams" ]; then
+            CLI_BIN="build/Release/tools/yams-cli/yams"
+          elif [ -x "$BUILD_DIR/tools/yams-cli/yams" ]; then
+            CLI_BIN="$BUILD_DIR/tools/yams-cli/yams"
+          elif [ -x "$INSTALL_PREFIX/bin/yams" ]; then
+            CLI_BIN="$INSTALL_PREFIX/bin/yams"
+          else
+            echo "yams CLI not found; skipping retrieval evaluation."
+            exit 0
+          fi
+
+          # Queries fixture
+          QUERIES="yams/paper/data/queries.jsonl"
+          if [ ! -f "$QUERIES" ]; then
+            echo "Queries fixture not found at $QUERIES; skipping."
+            exit 0
+          fi
+
+          # Output dir
+          OUT_DIR="$BUILD_DIR/eval_results"
+          mkdir -p "$OUT_DIR"
+
+          # Run hybrid evaluation
+          "$EVAL_BIN" --queries "$QUERIES" --cli "$CLI_BIN" --limit 20 --k 5,10,20 --mode hybrid --output "$OUT_DIR/retrieval_metrics.hybrid.json" || true
+
+          # Run fail-open KG evaluation
+          "$EVAL_BIN" --queries "$QUERIES" --cli "$CLI_BIN" --limit 20 --k 5,10,20 --mode fail-open-kg --output "$OUT_DIR/retrieval_metrics.failopen.json" || true
+
+      - name: Upload retrieval metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-metrics-${{ matrix.os }}-${{ matrix.build_type }}
+          path: ${{ env.BUILD_DIR }}/eval_results
+          if-no-files-found: ignore
+
       - name: Upload coverage report
-        if: matrix.os == 'ubuntu-latest' && always()
+        if: matrix.platform == 'linux' && always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report

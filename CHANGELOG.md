@@ -5,7 +5,70 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.7] - 2025-08-12
+
+### Added
+- **List Command Enhancement**: Added `--recent N` flag to show N most recent documents
+  - Filters to the N most recent documents before applying other sorting
+  - Works with all existing sort options (name, size, date, hash)
+  - Useful for quickly viewing recently added content
+- **PDF Text Extraction**: Full PDF text extraction support using PDFium library
+  - Extract text from all PDF pages with proper UTF-16 to UTF-8 conversion
+  - Extract PDF metadata (title, author, subject, keywords, creation date)
+  - Support for searching within PDFs with context lines
+  - Page-by-page extraction with configurable options
+  - Automatic section detection for academic papers
+- **Metadata Update Command**: New `update` command for modifying document metadata
+  - Update metadata by document hash or name  
+  - Support for multiple key-value pairs in single command
+  - Enables task tracking and status management workflows
+  - Works with both file and stdin documents
+- **Task Tracking System**: Comprehensive benchmark and test enhancement tracking
+  - PBI documentation structure for systematic improvement
+  - Task status tracking via metadata updates
+  - Progress monitoring capabilities
+- **KG Hybrid Scoring (default)**: Hybrid search integrates Keyword + Vector + Knowledge Graph
+  - Enabled by default in both CLI and MCP via a shared SearchEngineBuilder
+  - Fails open to metadata/keyword-only when KG is unavailable
+
+### Fixed
+- **Reference Counter Transaction IDs**: Fixed UNIQUE constraint violation in ref_transactions
+  - Removed manual transaction ID management
+  - Now uses SQLite AUTOINCREMENT for guaranteed unique IDs
+  - Prevents "UNIQUE constraint failed" errors when multiple ReferenceCounter instances exist
+- **Duplicate Document Handling**: Fixed metadata constraint errors when re-adding existing documents
+  - Detects high deduplication ratio (≥99%) and updates existing metadata instead of inserting
+  - Properly handles both new and existing documents
+  - Updates indexed timestamp for existing documents
+- **Name Resolution for Commands**: Fixed document lookup by name for stdin documents
+  - get, cat, and update commands now properly find stdin documents by name
+  - Uses search functionality as fallback when path-based search fails
+  - Supports both file-based and stdin documents uniformly
+  - Automatic platform detection (mac-arm64, mac-x64, linux-x64, linux-arm64, win-x64)
+  - FetchContent integration for non-Conan builds
+  - Conditional compilation with YAMS_HAS_PDF_SUPPORT flag
+  - Installs libpdfium.dylib into the install lib directory and sets its install_name to @rpath/libpdfium.dylib
+  - Patches installed executables to reference @rpath/libpdfium.dylib and adds rpath @loader_path/../lib
+  - Eliminates dyld errors like "Library not loaded: ./libpdfium.dylib"
+  - Created header file for UpdateCommand class
+  - Fixed compilation errors in update_command.cpp
+  - Resolved conflicts between Conan and FetchContent for Google Benchmark
+  - Fixed imgui.h include path for browse_command.cpp
+  - Fixed compilation issues with performance benchmarks
+  
+### Changed
+- **Extraction Module**: Enhanced to support multiple file formats
+  - Modular extractor registration system
+  - Extensible architecture for future format support
+- **Logging Verbosity**: Storage operations now use debug level instead of info
+  - "Stored file" messages only appear in verbose/debug mode
+  - Cleaner output for normal operations
+
+### Known Issues
+- **Performance Benchmarks**: Storage benchmarks cause segmentation fault after Rabin chunking tests
+  - SHA256 benchmarks work correctly (2.59 GB/s for large files)
+  - Rabin chunking benchmarks work correctly (178 MB/s)
+  - Storage fixture initialization causes crash - to be fixed in future update
 
 ## [0.0.6] - 2025-08-11
 

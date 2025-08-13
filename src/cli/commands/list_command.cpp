@@ -52,6 +52,7 @@ public:
             ->default_val(100);
         cmd->add_option("--offset", offset_, "Offset for pagination")
             ->default_val(0);
+        cmd->add_option("--recent", recentCount_, "Show N most recent documents");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
         
         // New options for enhanced metadata display
@@ -165,7 +166,44 @@ public:
                 std::reverse(documents.begin(), documents.end());
             }
             
-            // Apply offset then limit
+            // If --recent is specified, sort by date (most recent first) and take N most recent
+            if (recentCount_ > 0) {
+                // Sort by date descending (most recent first) regardless of original sort
+                std::sort(documents.begin(), documents.end(),
+                    [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
+                        return a.info.indexedTime > b.info.indexedTime;  // Note: > for descending
+                    });
+                
+                // Take only the N most recent
+                if (documents.size() > static_cast<size_t>(recentCount_)) {
+                    documents.resize(static_cast<size_t>(recentCount_));
+                }
+                
+                // Re-apply the original sort if it wasn't date
+                if (sortBy_ != "date") {
+                    if (sortBy_ == "name") {
+                        std::sort(documents.begin(), documents.end(),
+                            [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
+                                return a.info.fileName < b.info.fileName;
+                            });
+                    } else if (sortBy_ == "size") {
+                        std::sort(documents.begin(), documents.end(),
+                            [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
+                                return a.info.fileSize < b.info.fileSize;
+                            });
+                    } else if (sortBy_ == "hash") {
+                        std::sort(documents.begin(), documents.end(),
+                            [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
+                                return a.info.sha256Hash < b.info.sha256Hash;
+                            });
+                    }
+                    if (reverse_) {
+                        std::reverse(documents.begin(), documents.end());
+                    }
+                }
+            }
+            
+            // Apply offset then limit (but only if --recent wasn't used, or for additional limiting)
             if (offset_ > 0) {
                 if (documents.size() > static_cast<size_t>(offset_)) {
                     documents.erase(documents.begin(), documents.begin() + static_cast<size_t>(offset_));
@@ -173,7 +211,10 @@ public:
                     documents.clear();
                 }
             }
-            if (limit_ > 0 && documents.size() > static_cast<size_t>(limit_)) {
+            // Only apply limit if --recent wasn't specified, or if limit is smaller than recent
+            if (limit_ > 0 && recentCount_ == 0 && documents.size() > static_cast<size_t>(limit_)) {
+                documents.resize(static_cast<size_t>(limit_));
+            } else if (limit_ > 0 && recentCount_ > 0 && limit_ < recentCount_ && documents.size() > static_cast<size_t>(limit_)) {
                 documents.resize(static_cast<size_t>(limit_));
             }
             
@@ -509,6 +550,7 @@ private:
     int limit_ = 100;
     bool verbose_ = false;
     int offset_ = 0;
+    int recentCount_ = 0;  // 0 means not set, show all
     
     // New enhanced display options
     bool showSnippets_ = true;

@@ -1,4 +1,12 @@
 #include <yams/api/semantic_search_api.h>
+/*
+ TODO(yams): Composition point for KG-enabled HybridSearchEngine:
+ - Build or obtain vector and keyword engines
+ - Load HybridSearchConfig (with enable_kg, weights, kg_max_neighbors, kg_max_hops, kg_budget_ms)
+ - Create a KnowledgeGraphStore (SQLite) using the metadata DB path
+ - Create a SimpleKGScorer from the store and call engine.setKGScorer(...)
+ - Initialize engine and pass into SemanticSearchAPI
+*/
 
 #include <algorithm>
 #include <numeric>

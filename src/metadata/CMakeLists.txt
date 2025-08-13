@@ -4,6 +4,7 @@ add_library(yams_metadata STATIC
     connection_pool.cpp
     migration.cpp
     metadata_repository.cpp
+    knowledge_graph_store_sqlite.cpp
 )
 
 target_include_directories(yams_metadata PUBLIC

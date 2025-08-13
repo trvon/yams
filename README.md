@@ -11,7 +11,7 @@ Persistent memory for LLMs and applications. Content-addressed storage with dedu
 - **Crash Recovery** - Write-ahead logging for durability
 - **High Performance** - 100MB/s+ throughput, thread-safe
 
-My base prompt is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
+My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
 
 ## Build
 
@@ -22,18 +22,41 @@ My base prompt is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-en
 
 ### Quick Start
 
+#### macOS
 ```bash
 # Install Conan
 pip install conan
 
-# One-time: create default Conan profile (first-time users)
+# One-time: create default Conan profile
 conan profile detect --force
 
-# Build and Install
-conan install . --build=missing --settings=compiler.cppstd=20
+# Build with Conan
+conan install . --build=missing -s build_type=Release
+
 cmake --preset conan-release
-cmake --build --preset conan-release
+cmake --build --preset conan-release -j
 sudo cmake --install build/Release
+```
+
+#### Linux
+```bash
+# Install dependencies
+sudo apt-get update
+sudo apt-get install -y cmake ninja-build pkg-config git
+pip install conan
+
+# One-time: create default Conan profile
+conan profile detect --force
+
+# Build with Conan
+conan install . \
+  --output-folder=build/conan-ninja-release \
+  -s build_type=Release \
+  --build=missing
+
+cmake --preset conan-ninja-release
+cmake --build build/conan-ninja-release -j
+sudo cmake --install build/conan-ninja-release
 ```
 
 ### Build Options
@@ -44,17 +67,21 @@ sudo cmake --install build/Release
 | `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
 | `YAMS_BUILD_MCP_SERVER` | ON | MCP server (requires Boost) |
 | `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
+| `YAMS_BUILD_BENCHMARKS` | OFF | Performance benchmarks |
+| `YAMS_ENABLE_PDF` | ON | PDF text extraction support |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 
-### Dependencies
+### Dependencies (Optional - only if not using Conan)
+
+When using Conan (recommended), dependencies are managed automatically. If building without Conan:
 
 ```bash
 # macOS
 brew install openssl@3 protobuf sqlite3 ncurses
 export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
-# Linux
-apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
+# Linux (Ubuntu/Debian)
+sudo apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
 ```
 
 ## Setup
@@ -93,10 +120,37 @@ sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || 
 
 Then re-run:
 ```bash
-conan install . --build=missing --settings=compiler.cppstd=20
+# macOS
+conan install . --build=missing -s build_type=Release
 cmake --preset conan-release
-cmake --build --preset conan-release
+cmake --build --preset conan-release -j
+
+# Linux
+conan install . \
+  --output-folder=build/conan-ninja-release \
+  -s build_type=Release \
+  --build=missing
+cmake --preset conan-ninja-release
+cmake --build build/conan-ninja-release -j
 ```
+
+#### PDF Support Issues
+
+If PDF extraction fails or PDFium download fails:
+
+```bash
+# Disable PDF support temporarily
+cmake -B build -DYAMS_ENABLE_PDF=OFF
+
+# Or explicitly specify a different PDFium version if needed
+# (check https://github.com/bblanchon/pdfium-binaries/releases for available versions)
+```
+
+If you see network errors during PDFium download:
+- Check internet connectivity
+- Corporate firewalls may block GitHub releases
+- Consider using a VPN or different network
+- PDFium binaries are ~20MB per platform
 
 ### LLM Integration Guide
 

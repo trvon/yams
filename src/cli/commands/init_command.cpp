@@ -141,6 +141,26 @@ public:
                 oss << "private_key_path = \"" << escapeTomlString(privateKeyPath.string()) << "\"\n";
                 oss << "public_key_path = \"" << escapeTomlString(publicKeyPath.string()) << "\"\n";
                 oss << "api_keys = [\"" << escapeTomlString(maskApiKey(apiKeyHex)) << "\"]\n";
+                oss << "\n";
+                oss << "[search.hybrid]\n";
+                oss << "enable_kg = true\n";
+                oss << "vector_weight = 0.6\n";
+                oss << "keyword_weight = 0.35\n";
+                oss << "kg_entity_weight = 0.03\n";
+                oss << "structural_weight = 0.02\n";
+                oss << "kg_max_neighbors = 32\n";
+                oss << "kg_max_hops = 1\n";
+                oss << "kg_budget_ms = 20\n";
+                oss << "generate_explanations = true\n";
+                oss << "\n";
+                oss << "[knowledge_graph]\n";
+                oss << "db_path = \"" << escapeTomlString((dataPath / "yams.db").string()) << "\"\n";
+                oss << "enable_alias_fts = true\n";
+                oss << "enable_wal = true\n";
+                oss << "node_cache_capacity = 10000\n";
+                oss << "alias_cache_capacity = 50000\n";
+                oss << "embedding_cache_capacity = 10000\n";
+                oss << "neighbor_cache_capacity = 10000\n";
                 std::cout << oss.str();
             }
 
@@ -222,6 +242,26 @@ private:
                 oss << "\"" << escapeTomlString(apiKeys[i]) << "\"";
             }
             oss << "]\n";
+            oss << "\n";
+            oss << "[search.hybrid]\n";
+            oss << "enable_kg = true\n";
+            oss << "vector_weight = 0.6\n";
+            oss << "keyword_weight = 0.35\n";
+            oss << "kg_entity_weight = 0.03\n";
+            oss << "structural_weight = 0.02\n";
+            oss << "kg_max_neighbors = 32\n";
+            oss << "kg_max_hops = 1\n";
+            oss << "kg_budget_ms = 20\n";
+            oss << "generate_explanations = true\n";
+            oss << "\n";
+            oss << "[knowledge_graph]\n";
+            oss << "db_path = \"" << escapeTomlString((dataDir / "yams.db").string()) << "\"\n";
+            oss << "enable_alias_fts = true\n";
+            oss << "enable_wal = true\n";
+            oss << "node_cache_capacity = 10000\n";
+            oss << "alias_cache_capacity = 50000\n";
+            oss << "embedding_cache_capacity = 10000\n";
+            oss << "neighbor_cache_capacity = 10000\n";
 
             // Ensure parent directory exists
             if (configPath.has_parent_path()) {

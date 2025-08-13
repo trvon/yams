@@ -17,6 +17,7 @@ set(CLI_SOURCES
     commands/delete_command.cpp
     commands/list_command.cpp
     commands/stats_command.cpp
+    commands/update_command.cpp
     commands/browse_command.cpp
     tui/browse_state.cpp
     tui/browse_services.cpp
@@ -56,6 +57,8 @@ target_include_directories(yams_cli
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated>
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    PRIVATE
+        ${CMAKE_BINARY_DIR}/_deps/imtui-src/third-party/imgui/imgui
         $<INSTALL_INTERFACE:include>
 )
 

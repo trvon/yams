@@ -1,6 +1,8 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/mcp/mcp_server.h>
+#include <yams/search/search_engine_builder.h>
+#include <yams/vector/vector_index_manager.h>
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <csignal>
@@ -57,6 +59,27 @@ public:
             auto store = cli_->getContentStore();
             auto searchExecutor = cli_->getSearchExecutor();
             auto metadataRepo = cli_->getMetadataRepository();
+
+            // Prepare embedded HybridSearchEngine (not yet used; kept for future MCP integration)
+            std::shared_ptr<yams::search::HybridSearchEngine> hybridEngine;
+            try {
+                auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                yams::search::SearchEngineBuilder builder;
+                builder.withVectorIndex(vecMgr)
+                       .withMetadataRepo(metadataRepo)
+                       .withKGStore(cli_->getKnowledgeGraphStore());
+
+                auto buildRes = builder.buildEmbedded(yams::search::SearchEngineBuilder::BuildOptions::makeDefault());
+                if (buildRes) {
+                    hybridEngine = buildRes.value();
+                    spdlog::info("HybridSearchEngine initialized (embedded, KG {}abled)",
+                                 hybridEngine->getConfig().enable_kg ? "en" : "dis");
+                } else {
+                    spdlog::warn("HybridSearchEngine initialization failed: {}", buildRes.error().message);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("HybridSearchEngine bring-up error (ignored): {}", e.what());
+            }
             
             if (!store || !searchExecutor) {
                 return Error{ErrorCode::NotInitialized, "Storage not initialized"};
@@ -88,7 +111,7 @@ public:
             
             // Create and start MCP server
             auto server = std::make_unique<mcp::MCPServer>(
-                store, searchExecutor, metadataRepo, std::move(transport));
+                store, searchExecutor, metadataRepo, hybridEngine, std::move(transport));
             
             // Run server until shutdown signal
             server->start();

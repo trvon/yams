@@ -1,184 +1,280 @@
-# YAMS Build System (CMake)
-A concise guide to configuring, building, installing, and packaging YAMS.
+# Build System Guide: Conan 2 + CMake on Linux (Best Practices)
 
-## TL;DR
-```bash
-# Configure (Development profile + docs/manpages if pandoc is installed)
-cmake -S . -B build -DYAMS_BUILD_PROFILE=dev -DYAMS_BUILD_DOCS=ON
+This guide explains how to build YAMS robustly on Linux using Conan 2 with CMake, and how to fall back to a pure CMake + system/FETCHContent flow. It consolidates best practices for reproducibility, CI, and developer efficiency.
 
-# Build
-cmake --build build -j
+Goals
+- Reproducible and cacheable builds on Linux with Conan 2 and CMake
+- Portable configuration via CMakePresets.json and CMakeToolchain/CMakeDeps
+- Clear options mapping between Conan and CMake
+- Guidance for CI, lockfiles, and common troubleshooting
+- Optional API docs via Doxygen (YAMS_BUILD_API_DOCS); off by default; generate with the docs-api target
+- CI disables Pandoc-based docs by default (YAMS_BUILD_DOCS=OFF) to avoid extra dependencies on runners
 
-# (Optional) Install to a local prefix and put on PATH
-cmake --install build --prefix "$PWD/.local"
-export PATH="$PWD/.local/bin:$PATH"
+Prerequisites (Linux)
+- CMake 3.20+ and Ninja (recommended) or GNU Make
+- GCC 11+ or Clang 14+ with C++20
+- Conan 2.0+ (pipx or pip)
+- Git, pkg-config
+
+Install toolchain
+```/dev/null/setup.sh#L1-20
+# CMake + Ninja (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build pkg-config git curl
+
+# Conan 2
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+pipx install conan
 
 # Verify
-yams --version
-yams --help
-yams --help-all     # full verbose help if docs were built
+cmake --version
+ninja --version
+conan --version
 ```
 
-## Build Profiles
-Choose one:
-- release
-  - Lean runtime build; CLI and MCP server on; tests off
-- dev (recommended when developing)
-  - CLI, MCP, tests, (optionally) benchmarks; sanitizer support in Debug
-- custom
-  - Full manual control via options below
+Conan + CMake integration (project conventions)
+- The recipe `conanfile.py` uses:
+  - CMakeDeps to generate find_package config for dependencies
+  - CMakeToolchain to generate `conan_toolchain.cmake` (Do not hardcode a generator in the recipe; use presets)
+- Top-level `CMakeLists.txt`:
+  - Auto-detects Conan usage if `CMAKE_TOOLCHAIN_FILE` contains `conan_toolchain.cmake`
+  - Supports both dependency flows: Conan-backed and FetchContent/system
+- `CMakePresets.json`:
+  - Includes Ninja/Unix Makefiles presets for Debug/Release
+  - Dedicated “conan-” presets expect the Conan-generated toolchain file in the build directory
 
-Example:
-```bash
-cmake -S . -B build -DYAMS_BUILD_PROFILE=release
+Quick start: Conan-managed build
+1) Detect and initialize a profile
+```/dev/null/conan-profile.sh#L1-20
+# Create/refresh default profile and prefer GNU libstdc++11 ABI (Linux)
+conan profile detect --force
+
+# Optionally set default libc++ (GCC/Clang using libstdc++)
+conan profile path default
+# If needed: conan profile update 'settings.compiler.libcxx=libstdc++11' default
 ```
 
-## Common Options
-Set with `-D<NAME>=<VALUE>` at configure time.
+2) Install dependencies into a build dir that matches a CMake preset
+```/dev/null/conan-install.sh#L1-20
+# Debug (Ninja)
+conan install . \
+  --output-folder=build/conan-ninja-debug \
+  -s build_type=Debug \
+  --build=missing
 
-- YAMS_BUILD_CLI=ON|OFF
-  - Build CLI tools (default depends on profile)
-- YAMS_BUILD_MCP_SERVER=ON|OFF
-  - Build MCP server (stdio/websocket) (default depends on profile)
-- YAMS_BUILD_MAINTENANCE_TOOLS=ON|OFF
-  - Build maintenance tools like gc/stats (default OFF)
-- YAMS_BUILD_TESTS=ON|OFF
-  - Build unit/integration tests (default depends on profile)
-- YAMS_BUILD_BENCHMARKS=ON|OFF
-  - Build benchmark executables under `src/**/benchmarks` (default OFF)
-  - When ON, Google Benchmark is fetched and available as `benchmark::benchmark`
-- YAMS_ENABLE_SANITIZERS=ON|OFF
-  - Address/UB sanitizers in Debug (default ON)
-- YAMS_ENABLE_COVERAGE=ON|OFF
-  - Coverage instrumentation and helpers (default OFF)
-- YAMS_BUILD_DOCS=ON|OFF
-  - Generate manpages and embed verbose help into the CLI (default ON)
-  - Requires pandoc; otherwise build proceeds with a clear warning and no embedding
-- YAMS_USE_VCPKG=ON|OFF
-  - Opt into vcpkg if desired (default OFF)
-- YAMS_ENABLE_CONSUMER_TEST=ON|OFF
-  - Enable downstream “consumer” CTest that verifies `find_package(Yams)` against a staged install (default ON when BUILD_TESTING)
-- YAMS_VERSION=MAJOR.MINOR.PATCH
-  - Override version (semver); otherwise derived from git tags (see “Versioning”)
+# Release (Ninja)
+conan install . \
+  --output-folder=build/conan-ninja-release \
+  -s build_type=Release \
+  --build=missing
+```
 
-Generator‑agnostic invocation:
-```bash
-cmake -S . -B build -DYAMS_BUILD_PROFILE=dev -DYAMS_BUILD_DOCS=ON
+3) Configure, build, and test using CMake presets
+```/dev/null/cmake-with-presets.sh#L1-40
+# Debug
+cmake --preset conan-ninja-debug
+cmake --build --preset build-conan-ninja-debug -j
+ctest --preset test-conan-ninja-debug
+
+# Release
+cmake --preset conan-ninja-release
+cmake --build --preset build-conan-ninja-release -j
+ctest --preset test-conan-ninja-release
+```
+
+Notes
+- The “conan-” presets set `CMAKE_TOOLCHAIN_FILE` to `${buildDir}/conan_toolchain.cmake` and flip `YAMS_USE_CONAN=ON`.
+- Conan’s CMakeDeps + CMakeToolchain simplifies CMake to standard `find_package(...)` + `target_link_libraries(...)`.
+
+API Docs (Doxygen) and CI behavior
+- API docs (optional): enable with `-DYAMS_BUILD_API_DOCS=ON` (requires `doxygen` in PATH).
+- Build target: `docs-api` (HTML output under `build/docs/api/html`).
+- CI defaults: `-DYAMS_BUILD_DOCS=OFF` to skip Pandoc-based CLI/manpage generation on runners.
+- If you want CLI/manpage docs in CI, enable `YAMS_BUILD_DOCS=ON` and preinstall `pandoc`, or keep it OFF to reduce flakiness.
+
+Building without Conan (FetchContent/system)
+This path is intended for environments without Conan or for quick system-package builds.
+
+Install minimal system headers (Ubuntu/Debian)
+```/dev/null/system-deps.sh#L1-20
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake ninja-build pkg-config git \
+  libssl-dev libsqlite3-dev protobuf-compiler
+# ncurses is auto-detected when building the CLI on Linux:
+sudo apt-get install -y libncurses-dev
+```
+
+Configure, build, test
+```/dev/null/cmake-standalone.sh#L1-20
+# Ninja generator is faster and recommended
+cmake --preset ninja-release
+cmake --build --preset build-ninja-release -j
+ctest --preset test-ninja-release
+```
+
+Feature and options matrix
+The project accepts options via either Conan (preferred when using Conan flow) or CMake variables.
+
+- CMake options
+  - YAMS_BUILD_CLI: ON/OFF
+  - YAMS_BUILD_MCP_SERVER: ON/OFF
+  - YAMS_BUILD_TESTS: ON/OFF
+  - YAMS_BUILD_BENCHMARKS: ON/OFF
+  - YAMS_ENABLE_PDF: ON/OFF
+  - YAMS_USE_CONAN: ON/OFF (auto-set when a Conan toolchain is detected)
+
+- Conan options (examples)
+```/dev/null/conan-options.sh#L1-40
+# Enable tests and benchmarks for a Conan build
+conan install . \
+  --output-folder=build/conan-ninja-debug \
+  -s build_type=Debug \
+  -o yams/*:build_tests=True \
+  -o yams/*:build_benchmarks=True \
+  --build=missing
+
+# Disable CLI and enable MCP server
+conan install . \
+  --output-folder=build/conan-ninja-release \
+  -s build_type=Release \
+  -o yams/*:build_cli=False \
+  -o yams/*:build_mcp_server=True \
+  --build=missing
+```
+
+Packaging and installation
+- Install artifacts into a prefix
+```/dev/null/cmake-install.sh#L1-20
+cmake --build build/conan-ninja-release -j
+cmake --install build/conan-ninja-release --prefix ./prefix
+```
+- Consumers can find YAMS with:
+```/dev/null/consumer-config.sh#L1-10
+# In the consumer project
+cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=/path/to/yams/prefix
 cmake --build build -j
-ctest --test-dir build --output-on-failure
 ```
-
-## Dependencies (Quick)
-- C++20 toolchain (Clang 14+/GCC 11+/MSVC 2022)
-- CMake 3.20+
-- OpenSSL 3.x (headers/libs)
-- SQLite3 (amalgamation is bundled automatically if needed)
-- Optional: Protocol Buffers (if present)
-- Optional: pandoc (for docs/manpages + embedded verbose help)
-
-Platform tips:
-- macOS (Homebrew):
-  - `brew install cmake openssl@3 sqlite3 protobuf pandoc`
-  - `export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"`
-- Ubuntu/Debian:
-  - `sudo apt-get update && sudo apt-get install -y build-essential cmake git libssl-dev libsqlite3-dev protobuf-compiler pandoc`
-
-## Versioning (Tag‑Driven)
-- On configure, version is derived from `git describe --tags --match "v[0-9]*"`.
-  - Example: tag `v1.2.3` → `PROJECT_VERSION=1.2.3`
-- Override with `-DYAMS_VERSION=MAJOR.MINOR.PATCH` if building from a non‑tagged source or for custom builds.
-- A generated header `generated/yams/version.hpp` provides:
-  - `#define YAMS_VERSION_STRING "<MAJOR.MINOR.PATCH>"`
-  - Used by the CLI `--version` flag.
-
-## Docs & Manpages (Optional but Recommended)
-- Enabled with `-DYAMS_BUILD_DOCS=ON` when pandoc is available.
-- Effects:
-  - Generates `yams(1)` manpage from `docs/user_guide/cli.md` and installs into `man1`.
-  - Embeds a plain‑text copy of the full CLI reference and per‑command sections into the binary:
-    - `yams --help-all` → full CLI reference
-    - `yams --help --verbose` → full CLI reference
-    - `yams <command> --help --verbose` → command‑specific section
-- If pandoc is missing:
-  - Build continues; verbose help falls back with a clear note; manpages are not produced.
-
-## Targets & Layout (Orientation)
-- Public headers: `include/yams/...`
-- Core libraries: `src/{core,storage,compression,chunking,integrity,manifest,wal}`
-- Metadata and DB: `src/metadata`
-- Search/indexing/extraction: `src/{search,indexing,extraction}`
-- Vector: `src/vector`
-- Benchmarks:
-  - Reusable framework: `src/benchmarks` → target alias `yams::benchmarks`
-  - Module‑local executables: `src/<module>/benchmarks/*_bench.cpp`
-  - Only configured when `YAMS_BUILD_BENCHMARKS=ON`
-- CLI library: `src/cli` (linked to produce the `yams` tool)
-- MCP server & transports: `src/mcp`
-- Aggregating interface library: `yams_storage` (alias targets `YAMS::Storage`, `yams::storage`)
-
-## Build, Install, Run
-```bash
-# Configure and build
-cmake -S . -B build -DYAMS_BUILD_PROFILE=dev
-cmake --build build -j
-
-# Install to a prefix (staging)
-cmake --install build --prefix "$PWD/.local"
-export PATH="$PWD/.local/bin:$PATH"
-
-# Run
-yams --help
-yams init --non-interactive
-```
-
-## Consumer Test (Downstream find_package)
-When testing is enabled, CTest stages the current build to a temporary prefix and runs a minimal consumer project that uses:
-```cmake
-find_package(Yams)
-target_link_libraries(consumer PRIVATE yams::storage)
-```
-This verifies installability and CMake package correctness.
-
-Run:
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-## Packaging (CPack)
-CPack is configured to build redistributable packages:
-```bash
-# After building, from the build directory:
+- CPack is configured in the project; you can produce archives after building:
+```/dev/null/cpack.sh#L1-10
+# From the same build directory (e.g., build/conan-ninja-release)
 cpack
-# Or specify a generator:
-cpack -G ZIP
 ```
-Components (typical):
-- runtime: CLI/MCP and installed manpage(s)
-- development: headers, CMake package files
-- maintenance: optional tools (if enabled)
 
-## RPATH & Install Notes
-- Build and install RPATH are configured for macOS/Linux best practices.
-- Installed binaries should resolve linked libs without manual `LD_LIBRARY_PATH` tweaks in typical setups.
+Reproducibility with lockfiles (Conan)
+Commit lockfiles to stabilize dependency versions across CI and dev machines.
 
-## Troubleshooting (Fast)
-- OpenSSL not found (macOS):
-  - `export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"`
-- Pandoc missing warning:
-  - Install pandoc, re‑configure, and rebuild to embed verbose help and produce manpages.
-- Reconfigure clean:
-  - `rm -rf build && cmake -S . -B build ...`
-- Coverage tools not found:
-  - Install `gcovr` (preferred) or `lcov` + `genhtml` for coverage targets.
-- Windows:
-  - Use the Visual Studio generator or Ninja; prefer `cmake --build` over `make`.
+```/dev/null/locks.sh#L1-40
+# Create a lockfile per configuration
+conan lock create . -s build_type=Release --lockfile-out=conan.lock --build=missing
+# For Debug similarly:
+conan lock create . -s build_type=Debug --lockfile-out=conan-debug.lock --build=missing
 
-## See Also
-- Developer Quick Start: `docs/developer/setup.md`
-- CLI Reference (authoritative for help/manpages): `docs/user_guide/cli.md`
-- Installation (user‑focused): `docs/user_guide/installation.md`
-- API Docs: `docs/api/README.md`
-- Architecture Overview: `docs/developer/architecture/README.md`
+# Use the lockfile during installs
+conan install . \
+  --lockfile=conan.lock \
+  --output-folder=build/conan-ninja-release \
+  -s build_type=Release \
+  --build=missing
+```
 
----
-Keep this page short; rely on the CLI reference and per‑topic docs for exhaustive details and examples.
+CI recommendations (Linux)
+- Prefer Ninja generator for speed and consistency.
+- Cache Conan’s package cache directory (typically ~/.conan2/p) between CI runs.
+- Use presets end-to-end for configure/build/test.
+- Use lockfiles to pin versions per configuration.
+- Fail fast on missing packages except when explicitly allowing `--build=missing`.
+
+Example GH Actions steps (excerpt)
+```/dev/null/ci-example.yml#L1-60
+- name: Set up dependencies
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y cmake ninja-build pkg-config git
+    python3 -m pip install --user pipx
+    python3 -m pipx ensurepath
+    pipx install conan
+    conan profile detect --force
+
+- name: Conan install (Release)
+  run: |
+    conan install . \
+      --output-folder=build/conan-ninja-release \
+      -s build_type=Release \
+      --build=missing
+
+- name: Configure/Build/Test
+  run: |
+    cmake --preset conan-ninja-release
+    cmake --build --preset build-conan-ninja-release -j
+    ctest --preset test-conan-ninja-release --output-on-failure
+
+- name: Install + Package
+  run: |
+    cmake --install build/conan-ninja-release --prefix ./prefix
+    (cd build/conan-ninja-release && cpack)
+```
+
+Linux-specific notes and best practices
+- Compiler and standard library
+  - GCC 11+ is required (C++20); set profile `settings.compiler.libcxx=libstdc++11`.
+  - If using Clang on Linux and the project adds `-stdlib=libc++` for Clang, install libc++/libc++abi development packages or switch to libstdc++ by overriding flags in your toolchain/profile as needed.
+- RPATH and runtime
+  - The project sets sensible install RPATH on Linux; installed binaries should find libs under `lib/`. When running from the build tree, prefer `ctest` to avoid LD_LIBRARY_PATH issues.
+- PDF support
+  - When `YAMS_ENABLE_PDF=ON`, prebuilt PDFium binaries are fetched for your platform/arch. If network is restricted, disable PDF or pre-provision artifacts.
+- Ncurses (CLI)
+  - On Linux without Conan, the build will search `ncursesw` (or `ncurses`) and fail with a clear message if missing; install `libncurses-dev`.
+
+Dependency strategy
+- Prefer Conan on Linux for:
+  - Deterministic versions (lockfiles)
+  - Faster incremental builds via cache
+  - Avoiding system package drift
+- Non-Conan mode (FetchContent/system) is supported for:
+  - Rapid prototyping and minimal environments
+  - Air-gapped or policy-constrained environments (with local mirrors)
+
+Troubleshooting
+- CMake cannot find conan-generated packages
+  - Ensure you ran `conan install` to the same build directory used by the “conan-” preset so `conan_toolchain.cmake` exists.
+- Clang link errors about libc++/libstdc++
+  - Either install libc++/libc++abi or override the standard library flags for Clang to use libstdc++ consistently with your profile.
+- ncurses not found (Linux, non-Conan build)
+  - Install `libncurses-dev` (Ubuntu/Debian) or the equivalent for your distro.
+- OpenSSL not found
+  - Install `libssl-dev` (Ubuntu/Debian) or specify `OPENSSL_ROOT_DIR` if non-standard.
+
+Quality checklist (internal)
+- [ ] Use CMakePresets.json for local dev and CI
+- [ ] Use Conan 2 with CMakeDeps + CMakeToolchain
+- [ ] Commit lockfiles for each configuration used in CI
+- [ ] Avoid forcing CMake generator in recipe; use presets
+- [ ] Pin FetchContent tags for all external dependencies
+- [ ] Prefer Ninja on Linux for speed and reliable parallelism
+- [ ] Use `-DCMAKE_BUILD_TYPE=Release` for perf-sensitive targets
+- [ ] Enable sanitizers only in Debug; keep tooling flags out of Release
+- [ ] Ensure `compiler.libcxx=libstdc++11` on Linux (GCC/Clang)
+
+Appendix: Handy one-liners
+```/dev/null/one-liners.sh#L1-60
+# Full clean (local)
+rm -rf build prefix
+
+# Conan Release in one shot
+conan install . --output-folder=build/conan-ninja-release -s build_type=Release --build=missing && \
+cmake --preset conan-ninja-release && \
+cmake --build --preset build-conan-ninja-release -j && \
+ctest --preset test-conan-ninja-release --output-on-failure
+
+# Install to prefix and run a downstream consumer
+cmake --install build/conan-ninja-release --prefix ./prefix && \
+cmake -S test/consumer -B consumer_build -G Ninja -DCMAKE_PREFIX_PATH=$PWD/prefix && \
+cmake --build consumer_build -j && \
+ctest --test-dir consumer_build --output-on-failure
+```
+
+References
+- Conan 2: CMakeDeps and CMakeToolchain
+- CMake: CMAKE_TOOLCHAIN_FILE, Presets best practices

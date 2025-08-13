@@ -179,7 +179,7 @@ public:
             .duration = duration
         };
         
-        spdlog::info("Stored file {} with hash {}, dedup ratio: {:.2f}%", 
+        spdlog::debug("Stored file {} with hash {}, dedup ratio: {:.2f}%", 
                     path.string(), fileHash, result.dedupRatio() * 100);
         
         return result;
@@ -377,7 +377,7 @@ public:
         std::filesystem::create_directories(tempPath.parent_path());
         
         std::ofstream tempFile(tempPath, std::ios::binary);
-        tempFile.write(reinterpret_cast<const char*>(data.data()), data.size());
+        tempFile.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
         tempFile.close();
         
         auto result = store(tempPath, metadata, nullptr);
@@ -411,11 +411,11 @@ public:
             return Result<std::vector<std::byte>>(ErrorCode::Unknown);
         }
         
-        size_t size = file.tellg();
+        size_t size = static_cast<size_t>(file.tellg());
         file.seekg(0);
         
         std::vector<std::byte> data(size);
-        file.read(reinterpret_cast<char*>(data.data()), size);
+        file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
         file.close();
         
         std::filesystem::remove(tempPath);
@@ -558,7 +558,7 @@ public:
         status.lastCheck = std::chrono::system_clock::now();
         
         // Check storage engine
-        auto storageStats = storage_->getStats();
+        [[maybe_unused]] auto storageStats = storage_->getStats();
         
         // Check available space
         auto spaceInfo = std::filesystem::space(config_.storagePath);
@@ -590,7 +590,7 @@ public:
     }
     
     // Verify integrity
-    Result<void> verify(ProgressCallback progress) override {
+    Result<void> verify([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting content store verification");
         
         // TODO: Implement full verification
@@ -603,7 +603,7 @@ public:
     }
     
     // Compact storage
-    Result<void> compact(ProgressCallback progress) override {
+    Result<void> compact([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting content store compaction");
         
         // Delegate to storage engine (cast to concrete type)
@@ -615,7 +615,7 @@ public:
     }
     
     // Garbage collection
-    Result<void> garbageCollect(ProgressCallback progress) override {
+    Result<void> garbageCollect([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting garbage collection");
         
         // TODO: Implement garbage collection
@@ -645,7 +645,7 @@ private:
     
     // Update statistics
     void updateStats(uint64_t bytesStored, uint64_t bytesDeduped,
-                    uint64_t bytesRetrieved, uint64_t objectsAdded,
+                    [[maybe_unused]] uint64_t bytesRetrieved, uint64_t objectsAdded,
                     uint64_t storeOps, uint64_t retrieveOps,
                     uint64_t deleteOps) {
         std::unique_lock lock(statsMutex_);

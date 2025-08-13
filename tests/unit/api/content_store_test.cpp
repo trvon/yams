@@ -508,7 +508,7 @@ TEST(ContentMetadataTest, MetadataQuery) {
     // Query that matches
     MetadataQuery query1;
     query1.mimeType = "text/plain";
-    query1.requiredTags = {"important"};
+    query1.requiredTags = {"priority"};  // Check for tag key, not value
     EXPECT_TRUE(query1.matches(metadata));
     
     // Query that doesn't match
@@ -518,13 +518,13 @@ TEST(ContentMetadataTest, MetadataQuery) {
     
     // Tag query
     MetadataQuery query3;
-    query3.anyTags = {"urgent", "important"};
+    query3.anyTags = {"priority", "type"};  // Check for tag keys
     EXPECT_TRUE(query3.matches(metadata));
     
     query3.excludeTags = {"draft"};
     EXPECT_TRUE(query3.matches(metadata));
     
-    query3.excludeTags = {"important"};
+    query3.excludeTags = {"priority"};  // Exclude a tag key that exists
     EXPECT_FALSE(query3.matches(metadata));
 }
 

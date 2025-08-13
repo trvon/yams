@@ -24,7 +24,7 @@ struct ReferenceCounter::Impl {
     std::unique_ptr<Database> db;
     std::unique_ptr<StatementCache> stmtCache;
     mutable std::shared_mutex dbMutex;
-    std::atomic<int64_t> nextTransactionId{1};
+    // Transaction IDs now managed by database AUTOINCREMENT
     
     // Prepared statement keys
     static constexpr auto INCREMENT_STMT = "increment";
@@ -130,13 +130,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
             LIMIT ?
         )");
         
-        // Initialize nextTransactionId to be higher than any existing transaction
-        auto maxIdStmt = pImpl->db->prepare("SELECT COALESCE(MAX(transaction_id), 0) FROM ref_transactions");
-        if (maxIdStmt.step()) {
-            int64_t maxId = maxIdStmt.getInt64(0);
-            pImpl->nextTransactionId = maxId + 1;
-            spdlog::debug("Initialized nextTransactionId to {}", pImpl->nextTransactionId.load());
-        }
+        // Transaction IDs are now managed by SQLite AUTOINCREMENT
+        // No need to manually track nextTransactionId
         
         spdlog::debug("Reference counter database initialized at {}", 
                       pImpl->config.databasePath.string());
@@ -285,8 +280,8 @@ Result<std::vector<std::string>> ReferenceCounter::getUnreferencedBlocks(
 
 // Begin transaction
 std::unique_ptr<IReferenceCounter::ITransaction> ReferenceCounter::beginTransaction() {
-    int64_t txnId = pImpl->nextTransactionId.fetch_add(1);
-    return std::unique_ptr<ITransaction>(new Transaction(this, txnId));
+    // Transaction ID will be assigned by database AUTOINCREMENT
+    return std::unique_ptr<ITransaction>(new Transaction(this, -1));  // -1 indicates ID not yet assigned
 }
 
 // Transaction implementation
@@ -294,16 +289,19 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
     : counter_(counter), transactionId_(id), active_(true), committed_(false) {
     
     try {
-        // Start database transaction
-        counter_->pImpl->db->beginTransaction();
-        
-        // Record transaction start
-        auto stmt = counter_->pImpl->db->prepare(R"(
-            INSERT INTO ref_transactions (transaction_id, start_timestamp, state)
-            VALUES (?, strftime('%s', 'now'), 'PENDING')
-        )");
-        stmt.bind(1, transactionId_);
-        stmt.execute();
+        // Record transaction start - let database assign ID via AUTOINCREMENT
+        // Don't start SQLite transaction yet - operations will be batched and applied during commit
+        {
+            std::unique_lock lock(counter_->pImpl->dbMutex);
+            auto stmt = counter_->pImpl->db->prepare(R"(
+                INSERT INTO ref_transactions (start_timestamp, state)
+                VALUES (strftime('%s', 'now'), 'PENDING')
+            )");
+            stmt.execute();
+            
+            // Get the assigned transaction ID
+            transactionId_ = counter_->pImpl->db->lastInsertRowId();
+        }
         
         spdlog::debug("Started reference counting transaction {}", transactionId_);
     } catch (const std::exception& e) {
@@ -367,20 +365,8 @@ void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t
         .delta = 1
     });
     
-    // Record operation
-    try {
-        auto stmt = counter_->pImpl->db->prepare(R"(
-            INSERT INTO ref_transaction_ops 
-            (transaction_id, block_hash, operation, delta, block_size, timestamp)
-            VALUES (?, ?, 'INCREMENT', 1, ?, strftime('%s', 'now'))
-        )");
-        stmt.bind(1, transactionId_);
-        stmt.bind(2, blockHash);
-        stmt.bind(3, static_cast<int64_t>(blockSize));
-        stmt.execute();
-    } catch (const std::exception& e) {
-        throw std::runtime_error(yamsfmt::format("Failed to record increment operation: {}", e.what()));
-    }
+    // Operations are recorded only in-memory during queue phase
+    // Database writes will occur only during commit() for true atomic behavior
 }
 
 // Decrement in transaction
@@ -396,19 +382,8 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
         .delta = -1
     });
     
-    // Record operation
-    try {
-        auto stmt = counter_->pImpl->db->prepare(R"(
-            INSERT INTO ref_transaction_ops 
-            (transaction_id, block_hash, operation, delta, timestamp)
-            VALUES (?, ?, 'DECREMENT', 1, strftime('%s', 'now'))
-        )");
-        stmt.bind(1, transactionId_);
-        stmt.bind(2, blockHash);
-        stmt.execute();
-    } catch (const std::exception& e) {
-        throw std::runtime_error(yamsfmt::format("Failed to record decrement operation: {}", e.what()));
-    }
+    // Operations are recorded only in-memory during queue phase
+    // Database writes will occur only during commit() for true atomic behavior
 }
 
 // Commit transaction
@@ -420,45 +395,72 @@ Result<void> ReferenceCounter::Transaction::commit() {
     try {
         std::unique_lock lock(counter_->pImpl->dbMutex);
         
-        // Apply all operations
-        for (const auto& op : operations_) {
-            if (op.type == Operation::Type::Increment) {
-                auto& stmt = counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INCREMENT_STMT, "");
-                stmt.bind(1, op.blockHash);
-                stmt.bind(2, static_cast<int64_t>(op.blockSize));
-                stmt.execute();
-            } else {
-                auto& stmt = counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::DECREMENT_STMT, "");
-                stmt.bind(1, op.blockHash);
+        // Start SQLite transaction for atomic operation application
+        counter_->pImpl->db->beginTransaction();
+        
+        try {
+            // Apply all queued operations atomically
+            for (const auto& op : operations_) {
+                if (op.type == Operation::Type::Increment) {
+                    auto& stmt = counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INCREMENT_STMT, "");
+                    stmt.bind(1, op.blockHash);
+                    stmt.bind(2, static_cast<int64_t>(op.blockSize));
+                    stmt.execute();
+                } else {
+                    auto& stmt = counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::DECREMENT_STMT, "");
+                    stmt.bind(1, op.blockHash);
+                    stmt.execute();
+                }
+            }
+            
+            // Record all operations in audit log during commit
+            for (const auto& op : operations_) {
+                auto stmt = counter_->pImpl->db->prepare(R"(
+                    INSERT INTO ref_transaction_ops 
+                    (transaction_id, block_hash, operation, delta, block_size, timestamp)
+                    VALUES (?, ?, ?, ?, ?, strftime('%s', 'now'))
+                )");
+                stmt.bind(1, transactionId_);
+                stmt.bind(2, op.blockHash);
+                stmt.bind(3, std::string(op.type == Operation::Type::Increment ? "INCREMENT" : "DECREMENT"));
+                stmt.bind(4, 1); // Schema requires positive delta - operation type indicates direction
+                stmt.bind(5, static_cast<int64_t>(op.blockSize));
                 stmt.execute();
             }
+            
+            // Update transaction state
+            auto stmt = counter_->pImpl->db->prepare(R"(
+                UPDATE ref_transactions 
+                SET commit_timestamp = strftime('%s', 'now'), state = 'COMMITTED'
+                WHERE transaction_id = ?
+            )");
+            stmt.bind(1, transactionId_);
+            stmt.execute();
+            
+            // Update statistics
+            counter_->updateStatistics("transactions_completed", 1);
+            
+            // Commit SQLite transaction
+            counter_->pImpl->db->commit();
+            
+            active_ = false;
+            committed_ = true;
+            
+            spdlog::debug("Committed transaction {} with {} operations", 
+                          transactionId_, operations_.size());
+            
+            return {};
+            
+        } catch (const std::exception& e) {
+            // Rollback SQLite transaction on any error
+            counter_->pImpl->db->rollback();
+            throw;
         }
         
-        // Update transaction state
-        auto stmt = counter_->pImpl->db->prepare(R"(
-            UPDATE ref_transactions 
-            SET commit_timestamp = strftime('%s', 'now'), state = 'COMMITTED'
-            WHERE transaction_id = ?
-        )");
-        stmt.bind(1, transactionId_);
-        stmt.execute();
-        
-        // Update statistics
-        counter_->updateStatistics("transactions_completed", 1);
-        
-        // Commit database transaction
-        counter_->pImpl->db->commit();
-        
-        active_ = false;
-        committed_ = true;
-        
-        spdlog::debug("Committed transaction {} with {} operations", 
-                      transactionId_, operations_.size());
-        
-        return {};
     } catch (const std::exception& e) {
         spdlog::error("Failed to commit transaction {}: {}", transactionId_, e.what());
-        rollback();
+        // Mark logical transaction as failed
+        active_ = false;
         return Result<void>(ErrorCode::TransactionFailed);
     }
 }
@@ -472,7 +474,7 @@ void ReferenceCounter::Transaction::rollback() {
     try {
         std::unique_lock lock(counter_->pImpl->dbMutex);
         
-        // Update transaction state
+        // Update transaction state (no SQLite transaction to rollback since operations were queued)
         auto stmt = counter_->pImpl->db->prepare(R"(
             UPDATE ref_transactions 
             SET state = 'ROLLED_BACK'
@@ -484,14 +486,17 @@ void ReferenceCounter::Transaction::rollback() {
         // Update statistics
         counter_->updateStatistics("transactions_rolled_back", 1);
         
-        // Rollback database transaction
-        counter_->pImpl->db->rollback();
-        
+        // Log and clear queued operations, then mark as inactive
+        size_t operationCount = operations_.size();
+        operations_.clear();
         active_ = false;
         
-        spdlog::debug("Rolled back transaction {}", transactionId_);
+        spdlog::debug("Rolled back transaction {} (cleared {} queued operations)", 
+                      transactionId_, operationCount);
     } catch (const std::exception& e) {
         spdlog::error("Error during rollback of transaction {}: {}", transactionId_, e.what());
+        // Force inactive state even if update failed
+        active_ = false;
     }
 }
 

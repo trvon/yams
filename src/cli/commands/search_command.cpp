@@ -2,6 +2,8 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/search/search_executor.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_engine_builder.h>
+#include <yams/vector/vector_index_manager.h>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -88,25 +90,120 @@ public:
                 return Result<void>();
             }
             
-            // Use metadata repository for regular search if available
+            // Prefer hybrid engine with KG enabled by default; fail open to metadata/FTS.
             auto metadataRepo = cli_->getMetadataRepository();
             if (metadataRepo) {
-                // Execute metadata-based search
+                // Build embedded HybridSearchEngine (keyword via MetadataRepository; KG if available)
+                try {
+                    auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                    yams::search::SearchEngineBuilder builder;
+                    builder.withVectorIndex(vecMgr)
+                           .withMetadataRepo(metadataRepo)
+                           .withKGStore(cli_->getKnowledgeGraphStore());
+        
+                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                    opts.hybrid.final_top_k = static_cast<size_t>(limit_);
+                    // Show method and score breakdown only when verbose/json requested
+                    opts.hybrid.generate_explanations = cli_->getVerbose() || cli_->getJsonOutput();
+        
+                    auto engRes = builder.buildEmbedded(opts);
+                    if (engRes) {
+                        auto eng = engRes.value();
+                        auto hres = eng->search(query_, opts.hybrid.final_top_k);
+                        if (hres) {
+                            const auto& items = hres.value();
+                
+                            // Output in JSON if --json flag is set, or if --verbose is set
+                            if (cli_->getJsonOutput() || cli_->getVerbose()) {
+                                json output;
+                                output["query"] = query_;
+                                output["method"] = "hybrid";
+                                output["kg_enabled"] = eng->getConfig().enable_kg;
+                                output["total_results"] = items.size();
+                                output["returned"] = items.size();
+                    
+                                json results = json::array();
+                                for (const auto& r : items) {
+                                    json doc;
+                                    doc["id"] = r.id;
+                                    // Prefer adapter-provided metadata
+                                    auto itTitle = r.metadata.find("title");
+                                    if (itTitle != r.metadata.end()) doc["title"] = itTitle->second;
+                                    auto itPath = r.metadata.find("path");
+                                    if (itPath != r.metadata.end()) doc["path"] = itPath->second;
+                                    doc["score"] = r.hybrid_score;
+                                    if (!r.content.empty()) {
+                                        doc["snippet"] = truncateSnippet(r.content, 200);
+                                    }
+                                    if (cli_->getVerbose()) {
+                                        json breakdown;
+                                        breakdown["vector_score"] = r.vector_score;
+                                        breakdown["keyword_score"] = r.keyword_score;
+                                        breakdown["kg_entity_score"] = r.kg_entity_score;
+                                        breakdown["structural_score"] = r.structural_score;
+                                        doc["score_breakdown"] = breakdown;
+                                    }
+                                    results.push_back(doc);
+                                }
+                                output["results"] = results;
+                                std::cout << output.dump(2) << std::endl;
+                            } else {
+                                // Simple, concise output by default
+                                if (items.empty()) {
+                                    std::cout << "No results found for: " << query_ << std::endl;
+                                } else {
+                                    std::cout << "Found " << items.size() << " result(s) for: " << query_ << std::endl;
+                                    std::cout << std::endl;
+                        
+                                    for (size_t i = 0; i < items.size(); i++) {
+                                        const auto& r = items[i];
+                                        std::cout << (i + 1) << ". ";
+                                        auto itTitle = r.metadata.find("title");
+                                        if (itTitle != r.metadata.end()) {
+                                            std::cout << itTitle->second;
+                                        } else {
+                                            std::cout << r.id;
+                                        }
+                                        auto itPath = r.metadata.find("path");
+                                        if (itPath != r.metadata.end()) {
+                                            std::cout << " (" << itPath->second << ")";
+                                        }
+                                        std::cout << std::endl;
+                            
+                                        if (!r.content.empty()) {
+                                            std::cout << "   " << truncateSnippet(r.content, 200) << std::endl;
+                                        }
+                                        std::cout << std::endl;
+                                    }
+                                }
+                            }
+                
+                            return Result<void>();
+                        } else {
+                            spdlog::warn("Hybrid search failed: {}", hres.error().message);
+                        }
+                    } else {
+                        spdlog::warn("Hybrid engine initialization failed: {}", engRes.error().message);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Hybrid engine error (fallback to metadata): {}", e.what());
+                }
+    
+                // Fallback: Execute metadata-based search
                 auto searchResult = metadataRepo->search(query_, limit_, 0);
                 if (!searchResult) {
                     return Error{searchResult.error().code, searchResult.error().message};
                 }
-                
                 outputMetadataResults(searchResult.value());
                 return Result<void>();
             }
-            
-            // Fall back to search executor if metadata repo not available
+
+            // Final fallback to SearchExecutor if metadata repo not available
             auto searchExecutor = cli_->getSearchExecutor();
             if (!searchExecutor) {
                 return Error{ErrorCode::NotInitialized, "Search executor not initialized"};
             }
-            
+
             // Build search request
             search::SearchRequest request;
             request.query = query_;
@@ -114,18 +211,18 @@ public:
             request.offset = 0;
             request.includeHighlights = true;
             request.includeSnippets = true;
-            
+
             // Execute search
             auto result = searchExecutor->search(request);
             if (!result) {
                 return Error{result.error().code, result.error().message};
             }
-            
+
             auto& response = result.value();
-            
+
             // Output results using helper
             outputSearchResults(response);
-            
+
             return Result<void>();
             
         } catch (const std::exception& e) {

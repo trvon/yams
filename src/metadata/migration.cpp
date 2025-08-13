@@ -292,7 +292,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
         createMetadataIndexes(),
         createRelationshipTables(),
         createSearchTables(),
-        createCollectionIndexes()
+        createCollectionIndexes(),
+        createKnowledgeGraphSchema()
     };
 }
 
@@ -667,6 +668,173 @@ Migration YamsMetadataMigrations::createCollectionIndexes() {
         DROP INDEX IF EXISTS idx_metadata_collection_snapshot;
     )";
     
+    return m;
+}
+
+Migration YamsMetadataMigrations::createKnowledgeGraphSchema() {
+    Migration m;
+    m.version = 7;
+    m.name = "Create knowledge graph schema";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        // Base KG schema (tables + btree indexes)
+        auto base = db.execute(R"(
+        -- Knowledge Graph core tables
+        CREATE TABLE IF NOT EXISTS kg_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_key TEXT NOT NULL UNIQUE,
+            label TEXT,
+            type TEXT,
+            created_time INTEGER,
+            updated_time INTEGER,
+            properties TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS kg_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            source TEXT,
+            confidence REAL DEFAULT 1.0,
+            FOREIGN KEY (node_id) REFERENCES kg_nodes(id) ON DELETE CASCADE,
+            UNIQUE(node_id, alias)
+        );
+
+        CREATE TABLE IF NOT EXISTS kg_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            src_node_id INTEGER NOT NULL,
+            dst_node_id INTEGER NOT NULL,
+            relation TEXT NOT NULL,
+            weight REAL DEFAULT 1.0,
+            created_time INTEGER,
+            properties TEXT,
+            FOREIGN KEY (src_node_id) REFERENCES kg_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (dst_node_id) REFERENCES kg_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS kg_node_embeddings (
+            node_id INTEGER PRIMARY KEY,
+            dim INTEGER NOT NULL,
+            vector BLOB NOT NULL,
+            model TEXT,
+            updated_time INTEGER,
+            FOREIGN KEY (node_id) REFERENCES kg_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS doc_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            entity_text TEXT NOT NULL,
+            node_id INTEGER,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            confidence REAL,
+            extractor TEXT,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+            FOREIGN KEY (node_id) REFERENCES kg_nodes(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS kg_node_stats (
+            node_id INTEGER PRIMARY KEY,
+            degree INTEGER DEFAULT 0,
+            pagerank REAL,
+            neighbor_count INTEGER,
+            last_computed INTEGER,
+            FOREIGN KEY (node_id) REFERENCES kg_nodes(id) ON DELETE CASCADE
+        );
+
+        -- Indexes
+        CREATE INDEX IF NOT EXISTS idx_kg_nodes_type ON kg_nodes(type);
+        CREATE INDEX IF NOT EXISTS idx_kg_aliases_alias ON kg_aliases(alias);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_src ON kg_edges(src_node_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges(dst_node_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation);
+        CREATE INDEX IF NOT EXISTS idx_doc_entities_document ON doc_entities(document_id);
+        CREATE INDEX IF NOT EXISTS idx_doc_entities_node ON doc_entities(node_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_embeddings_model ON kg_node_embeddings(model);
+        )");
+        if (!base) return base;
+
+        // Optional FTS5 virtual index for fast alias lookup (if available)
+        auto fts5 = db.hasFTS5();
+        if (!fts5) return fts5.error();
+        if (fts5.value()) {
+            auto r1 = db.execute(R"(
+                CREATE VIRTUAL TABLE IF NOT EXISTS kg_aliases_fts USING fts5(
+                    alias,
+                    content='kg_aliases',
+                    content_rowid='id',
+                    tokenize='porter unicode61'
+                )
+            )");
+            if (!r1) return r1;
+
+            // Initial backfill
+            auto r2 = db.execute(R"(
+                INSERT INTO kg_aliases_fts(rowid, alias)
+                SELECT id, alias FROM kg_aliases
+            )");
+            if (!r2) return r2;
+
+            // Sync triggers
+            auto r3 = db.execute(R"(
+                CREATE TRIGGER IF NOT EXISTS trg_kg_aliases_ai
+                AFTER INSERT ON kg_aliases BEGIN
+                    INSERT INTO kg_aliases_fts(rowid, alias)
+                    VALUES (new.id, new.alias);
+                END
+            )");
+            if (!r3) return r3;
+
+            auto r4 = db.execute(R"(
+                CREATE TRIGGER IF NOT EXISTS trg_kg_aliases_ad
+                AFTER DELETE ON kg_aliases BEGIN
+                    INSERT INTO kg_aliases_fts(kg_aliases_fts, rowid, alias)
+                    VALUES ('delete', old.id, old.alias);
+                END
+            )");
+            if (!r4) return r4;
+
+            auto r5 = db.execute(R"(
+                CREATE TRIGGER IF NOT EXISTS trg_kg_aliases_au
+                AFTER UPDATE OF alias ON kg_aliases BEGIN
+                    INSERT INTO kg_aliases_fts(kg_aliases_fts, rowid, alias)
+                    VALUES ('delete', old.id, old.alias);
+                    INSERT INTO kg_aliases_fts(rowid, alias)
+                    VALUES (new.id, new.alias);
+                END
+            )");
+            if (!r5) return r5;
+        }
+
+        return Result<void>();
+    };
+
+    m.downSQL = R"(
+        -- Drop FTS virtual table and its triggers if they were created
+        DROP TRIGGER IF EXISTS trg_kg_aliases_ai;
+        DROP TRIGGER IF EXISTS trg_kg_aliases_ad;
+        DROP TRIGGER IF EXISTS trg_kg_aliases_au;
+        DROP TABLE IF EXISTS kg_aliases_fts;
+
+        DROP INDEX IF EXISTS idx_kg_embeddings_model;
+        DROP INDEX IF EXISTS idx_doc_entities_node;
+        DROP INDEX IF EXISTS idx_doc_entities_document;
+        DROP INDEX IF EXISTS idx_kg_edges_relation;
+        DROP INDEX IF EXISTS idx_kg_edges_dst;
+        DROP INDEX IF EXISTS idx_kg_edges_src;
+        DROP INDEX IF EXISTS idx_kg_aliases_alias;
+        DROP INDEX IF EXISTS idx_kg_nodes_type;
+
+        DROP TABLE IF EXISTS kg_node_stats;
+        DROP TABLE IF EXISTS doc_entities;
+        DROP TABLE IF EXISTS kg_node_embeddings;
+        DROP TABLE IF EXISTS kg_edges;
+        DROP TABLE IF EXISTS kg_aliases;
+        DROP TABLE IF EXISTS kg_nodes;
+    )";
+
     return m;
 }
 

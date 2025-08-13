@@ -51,6 +51,7 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 - stats
 - uninstall
 - migrate
+- update
 - browse
 - serve (only when built with YAMS_BUILD_MCP_SERVER=ON)
 
@@ -405,6 +406,48 @@ Synopsis:
 Examples:
 ```
 yams migrate
+```
+
+---
+
+## update {#cmd-update}
+
+Update metadata for existing documents.
+
+Synopsis:
+- yams update <hash> --metadata <key=value>...
+- yams update --name <name> --metadata <key=value>...
+
+Options:
+- hash
+  - Document hash (full or partial) to update
+- --name <name>
+  - Document name to update (useful for stdin documents)
+- -m, --metadata <key=value>
+  - Metadata key-value pairs to set (can be specified multiple times)
+- -v, --verbose
+  - Show detailed update information
+
+Notes:
+- Either hash or --name must be specified, but not both
+- Multiple metadata pairs can be updated in a single command
+- Existing metadata values will be overwritten
+- Works with both file-based and stdin documents
+- If multiple documents have the same name, you'll be prompted to use the hash
+
+Examples:
+```
+# Update by hash
+yams update fc8fc5fa --metadata "status=completed" --metadata "reviewed=true"
+
+# Update by name  
+yams update --name "project-notes.md" --metadata "priority=high"
+
+# Update stdin document
+yams update --name "arxiv-2402.05391" --metadata "read=true" --metadata "rating=5"
+
+# Task tracking example
+yams update --name "task-001.md" --metadata "status=in_progress" --metadata "assignee=alice"
 ```
 
 ---

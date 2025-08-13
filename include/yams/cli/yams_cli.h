@@ -6,6 +6,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <CLI/CLI.hpp>
 #include <memory>
 #include <vector>
@@ -39,6 +40,7 @@ public:
      * Get the search executor instance
      */
     std::shared_ptr<search::SearchExecutor> getSearchExecutor() const { return searchExecutor_; }
+    std::shared_ptr<metadata::KnowledgeGraphStore> getKnowledgeGraphStore() const { return kgStore_; }
     
     /**
      * Get the connection pool instance
@@ -106,6 +108,7 @@ private:
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
     std::shared_ptr<metadata::Database> database_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     
     // Configuration
     std::filesystem::path dataPath_;

@@ -99,9 +99,9 @@ check_cxx_source_compiles("
     #include <version>
     #ifdef __cpp_lib_format
     #include <format>
-    int main() { 
+    int main() {
         auto s = std::format(\"{}\", 42);
-        return 0; 
+        return 0;
     }
     #else
     #error No format support
@@ -133,11 +133,14 @@ option(YAMS_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(YAMS_ENABLE_SANITIZERS "Enable sanitizers in Debug" ON)
 option(YAMS_ENABLE_COVERAGE "Enable code coverage" OFF)
 option(YAMS_USE_VCPKG "Use vcpkg for dependencies" OFF)
+option(YAMS_ENABLE_NATIVE_OPTIMIZATIONS "Enable -march=native on supported platforms" OFF)
+option(YAMS_CLANG_USE_LIBCXX "Use libc++ with Clang (Linux requires libc++ dev packages)" OFF)
+option(YAMS_BUILD_API_DOCS "Build Doxygen API documentation" OFF)
 
 # ------------------------------------------------------------------------------
 # Docs build (Pandoc) and embedded CLI help assets
 # ------------------------------------------------------------------------------
-option(YAMS_BUILD_DOCS "Build CLI docs, generate manpages, and embed verbose help" ON)
+option(YAMS_BUILD_DOCS "Build CLI docs, generate manpages, and embed verbose help" OFF)
 find_program(PANDOC_EXECUTABLE pandoc)
 
 set(CLI_MD "${CMAKE_SOURCE_DIR}/docs/user_guide/cli.md")
@@ -343,6 +346,37 @@ else()
     endif()
 endif()
 
+# Doxygen-based API docs
+if(YAMS_BUILD_API_DOCS)
+    find_package(Doxygen QUIET)
+    if(DOXYGEN_FOUND)
+        set(DOXYGEN_OUTPUT_DIR "${CMAKE_BINARY_DIR}/docs/api")
+        file(MAKE_DIRECTORY "${DOXYGEN_OUTPUT_DIR}")
+        set(DOXYFILE_IN "${CMAKE_BINARY_DIR}/cmake/Doxyfile.in")
+        set(DOXYFILE_OUT "${CMAKE_BINARY_DIR}/Doxyfile")
+        file(WRITE "${DOXYFILE_IN}"
+"PROJECT_NAME = \"YAMS\"
+OUTPUT_DIRECTORY = \"${DOXYGEN_OUTPUT_DIR}\"
+GENERATE_HTML = YES
+GENERATE_LATEX = NO
+QUIET = YES
+WARN_AS_ERROR = NO
+INPUT = \"${CMAKE_SOURCE_DIR}/include\"
+RECURSIVE = YES
+EXTRACT_PRIVATE = NO
+")
+        configure_file("${DOXYFILE_IN}" "${DOXYFILE_OUT}" @ONLY)
+        add_custom_target(docs-api
+            COMMAND "${DOXYGEN_EXECUTABLE}" "${DOXYFILE_OUT}"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            COMMENT "Generating API documentation with Doxygen"
+            VERBATIM
+        )
+    else()
+        message(WARNING "YAMS_BUILD_API_DOCS=ON but Doxygen not found. Install doxygen to enable API docs.")
+    endif()
+endif()
+
 # Configure based on build profile
 if(YAMS_BUILD_PROFILE STREQUAL "release")
     message(STATUS "Using RELEASE build profile - CLI and MCP server only")
@@ -381,9 +415,6 @@ set(YAMS_BUILD_TOOLS ${YAMS_BUILD_CLI})
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("
     #include <concepts>
-    #include <coroutine>
-    #include <ranges>
-    #include <format>
     #include <span>
     template<typename T>
     concept Integral = std::integral<T>;
@@ -391,10 +422,10 @@ check_cxx_source_compiles("
         std::span<int> s;
         return 0;
     }
-" HAVE_CXX20_FEATURES)
+" HAVE_CXX20_BASELINE)
 
-if(NOT HAVE_CXX20_FEATURES)
-    message(FATAL_ERROR "C++20 features not fully supported by compiler")
+if(NOT HAVE_CXX20_BASELINE)
+    message(FATAL_ERROR "C++20 baseline (concepts/span) not supported by compiler")
 endif()
 
 # Compiler warnings
@@ -412,20 +443,44 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 
     # Architecture-specific optimizations (not on Apple Silicon)
-    if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-        add_compile_options($<$<CONFIG:Release>:-march=native>)
+    if(YAMS_ENABLE_NATIVE_OPTIMIZATIONS)
+        if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+            add_compile_options($<$<CONFIG:Release>:-march=native>)
+        endif()
     endif()
 
     # Coroutine support
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         add_compile_options(-fcoroutines)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        add_compile_options(-stdlib=libc++)
-        add_link_options(-stdlib=libc++)
+        if(APPLE OR YAMS_CLANG_USE_LIBCXX)
+            add_compile_options(-stdlib=libc++)
+            add_link_options(-stdlib=libc++)
+        endif()
         # Apple Clang has coroutines enabled by default in C++20
         if(NOT APPLE)
             add_compile_options(-fcoroutines-ts)
         endif()
+    endif()
+
+    # Optional coroutine capability probe (warn-only, runs after flags above)
+    check_cxx_source_compiles("
+        #include <coroutine>
+        struct task {
+            struct promise_type {
+                task get_return_object() { return {}; }
+                std::suspend_never initial_suspend() noexcept { return {}; }
+                std::suspend_never final_suspend() noexcept { return {}; }
+                void return_void() noexcept {}
+                void unhandled_exception() {}
+            };
+        };
+        task foo() { co_return; }
+        int main() { foo(); return 0; }
+    " HAVE_CXX20_COROUTINES)
+
+    if(NOT HAVE_CXX20_COROUTINES)
+        message(WARNING "C++20 coroutines appear unsupported with current flags; features requiring <coroutine> may fail to build.")
     endif()
 elseif(MSVC)
     add_compile_options(
@@ -504,9 +559,9 @@ if(YAMS_BUILD_CLI AND NOT YAMS_USE_CONAN)
                     pkg_check_modules(NCURSES ncurses)
                 endif()
             endif()
-            
+
             if(NOT NCURSES_FOUND)
-                message(FATAL_ERROR 
+                message(FATAL_ERROR
                     "ncurses library not found. Please install it:\n"
                     "  Ubuntu/Debian: sudo apt-get install libncurses-dev\n"
                     "  RHEL/CentOS: sudo yum install ncurses-devel\n"
@@ -531,7 +586,8 @@ if(YAMS_BUILD_TESTS)
 endif()
 
 # Google Benchmark
-if(YAMS_BUILD_BENCHMARKS)
+# Handle benchmarks - only use FetchContent when not using Conan
+if(YAMS_BUILD_BENCHMARKS AND NOT YAMS_USE_CONAN)
     FetchContent_Declare(
         benchmark
         GIT_REPOSITORY https://github.com/google/benchmark.git
@@ -630,7 +686,7 @@ if(NOT YAMS_USE_CONAN)
     install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    
+
     # Boost for MCP server (Beast/ASIO for WebSocket support)
     if(YAMS_BUILD_MCP_SERVER)
         message(STATUS "Fetching Boost headers for MCP server")
@@ -641,7 +697,7 @@ if(NOT YAMS_USE_CONAN)
             DOWNLOAD_EXTRACT_TIMESTAMP ON
         )
         FetchContent_MakeAvailable(Boost)
-        
+
         # Boost automatically creates boost_headers target, just need to make it available
         # The Boost::headers alias should already exist from the Boost CMake configuration
         if(NOT TARGET Boost::headers)
@@ -672,55 +728,43 @@ if(YAMS_BUILD_TOOLS)
     # ImTUI for Terminal User Interface (Immediate Mode TUI)
     if(YAMS_BUILD_CLI)
         if(YAMS_USE_CONAN)
-            # When using Conan, we need to use ExternalProject_Add to pass ncurses paths
-            include(ExternalProject)
-
-            # Find Curses package to get Conan-provided paths
+            # Use FetchContent for ImTUI with Conan as well, and provide a stable wrapper target
             find_package(Curses REQUIRED)
+            # Workaround: imtui's CMake checks tinfo when CURSES_NCURSES_HAS_NODELAY is false,
+            # which can fail with CURSES_EXTRA_LIBRARY=NOTFOUND on some Conan/system combos.
+            # Seed the result to skip the tinfo probe; we still link Curses::Curses explicitly.
+            set(CURSES_NCURSES_HAS_NODELAY TRUE CACHE BOOL "Assume ncurses provides nodelay; avoid tinfo probe" FORCE)
 
-            # Build the full library paths from Conan variables
-            set(NCURSES_LIB_PATH "${ncurses_LIB_DIRS_RELEASE}/libncursesw.a")
-            set(TINFO_LIB_PATH "${ncurses_LIB_DIRS_RELEASE}/libtinfow.a")
-
-            # Use ExternalProject_Add to build ImTUI with system ncurses
-            # Use system ncurses for ImTUI to get compatible versioned symbols
-            # while keeping Conan for all other dependencies
-            ExternalProject_Add(
-                imtui_external
+            FetchContent_Declare(
+                imtui
                 GIT_REPOSITORY https://github.com/ggerganov/imtui.git
-                GIT_TAG        master
-                CMAKE_ARGS
-                    -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-                    -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/imtui_install
-                    -DIMTUI_BUILD_EXAMPLES=OFF
-                    # Let ImTUI find system ncurses naturally for compatibility
-                BUILD_ALWAYS OFF
-                INSTALL_COMMAND ""
+                GIT_TAG master
+                GIT_SHALLOW TRUE
+                GIT_SUBMODULES_RECURSE TRUE
             )
+            set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+            FetchContent_MakeAvailable(imtui)
 
-            # Create interface library for ImTUI that our code can link to
-            add_library(imtui-ncurses INTERFACE)
-            add_dependencies(imtui-ncurses imtui_external)
+            # Ensure consistent target name and link against Curses
+            if(TARGET imtui-ncurses)
+                target_link_libraries(imtui-ncurses INTERFACE Curses::Curses)
+            elseif(TARGET imtui::imtui-ncurses)
+                add_library(imtui-ncurses INTERFACE)
+                target_link_libraries(imtui-ncurses INTERFACE imtui::imtui-ncurses Curses::Curses)
+            else()
+                message(FATAL_ERROR "ImTUI target 'imtui-ncurses' not found after FetchContent.")
+            endif()
 
-            # Add include directories - ImTUI needs to find imgui/imgui.h
-            # The ImTUI header does #include "imgui/imgui.h" so we need to add the dir that contains imgui/
-            # Our code does #include <imgui.h> so we need to add the imgui dir itself too
-            target_include_directories(imtui-ncurses INTERFACE
-                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/include
-                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/third-party/imgui
-                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external/third-party/imgui/imgui
-            )
-
-            # Link to the built ImTUI library and system ncurses for compatibility
-            target_link_libraries(imtui-ncurses INTERFACE
-                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/src/libimtui-ncurses.a
-                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/src/libimtui.a
-                ${CMAKE_BINARY_DIR}/imtui_external-prefix/src/imtui_external-build/third-party/libimgui-for-imtui.a
-                # Use system ncurses for ImTUI to match versioned symbols
-                curses
-            )
+            # Platform-specific link adjustments for ImTUI
             if(APPLE)
                 target_link_libraries(imtui-ncurses INTERFACE "-framework System")
+            endif()
+            if(UNIX AND NOT APPLE)
+                # Link to tinfo if it exists as a separate library (common on Linux)
+                find_library(TINFO_LIBRARY NAMES tinfo tinfow)
+                if(TINFO_LIBRARY)
+                    target_link_libraries(imtui-ncurses INTERFACE "${TINFO_LIBRARY}")
+                endif()
             endif()
         else()
             # Use FetchContent for non-Conan builds
@@ -733,6 +777,20 @@ if(YAMS_BUILD_TOOLS)
             )
             set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
             FetchContent_MakeAvailable(imtui)
+            # Ensure the wrapper target exists and link ncurses and tinfo as needed
+            if(TARGET imtui-ncurses)
+                if(TARGET Curses::Curses)
+                    target_link_libraries(imtui-ncurses INTERFACE Curses::Curses)
+                elseif(DEFINED CURSES_LIBRARIES)
+                    target_link_libraries(imtui-ncurses INTERFACE ${CURSES_LIBRARIES})
+                endif()
+                if(UNIX AND NOT APPLE)
+                    find_library(TINFO_LIBRARY NAMES tinfo tinfow)
+                    if(TINFO_LIBRARY)
+                        target_link_libraries(imtui-ncurses INTERFACE "${TINFO_LIBRARY}")
+                    endif()
+                endif()
+            endif()
         endif()
     endif()
 endif()
@@ -757,18 +815,18 @@ endif()
 
 # LZMA SDK for compression - always needed since no good Conan package exists
 # if(NOT YAMS_USE_CONAN)
-    FetchContent_Declare(
+FetchContent_Declare(
         lzma
         URL https://github.com/ip7z/7zip/releases/download/24.08/7z2408-src.tar.xz
         URL_HASH SHA256=aa04aac906a04df59e7301f4c69e9f48808e6c8ecae4eb697703a47bfb0ac042
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
-    FetchContent_GetProperties(lzma)
-    if(NOT lzma_POPULATED)
-        FetchContent_Populate(lzma)
+FetchContent_GetProperties(lzma)
+if(NOT lzma_POPULATED)
+    FetchContent_Populate(lzma)
 
-        # Create LZMA library from SDK sources
-        add_library(lzma_sdk STATIC
+    # Create LZMA library from SDK sources
+    add_library(lzma_sdk STATIC
             ${lzma_SOURCE_DIR}/C/LzmaEnc.c
             ${lzma_SOURCE_DIR}/C/LzmaDec.c
             ${lzma_SOURCE_DIR}/C/LzFind.c
@@ -787,19 +845,19 @@ endif()
             ${lzma_SOURCE_DIR}/C/7zStream.c
         )
 
-        target_include_directories(lzma_sdk PUBLIC
+    target_include_directories(lzma_sdk PUBLIC
             $<BUILD_INTERFACE:${lzma_SOURCE_DIR}/C>
             $<INSTALL_INTERFACE:include/lzma>
         )
-        # Enable multi-threaded support for LZMA SDK
+    # Enable multi-threaded support for LZMA SDK
 
-        # Disable warnings for third-party code
-        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-            target_compile_options(lzma_sdk PRIVATE -w)
-        elseif(MSVC)
-            target_compile_options(lzma_sdk PRIVATE /w)
-        endif()
+    # Disable warnings for third-party code
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(lzma_sdk PRIVATE -w)
+    elseif(MSVC)
+        target_compile_options(lzma_sdk PRIVATE /w)
     endif()
+endif()
 # endif()
 
 # SQLite3 with FTS5 - only if not using Conan
@@ -849,6 +907,119 @@ if(NOT YAMS_USE_CONAN)
             target_compile_options(sqlite3 PRIVATE /w)
         endif()
     endif()
+endif()
+
+# PDFium for PDF text extraction
+option(YAMS_ENABLE_PDF "Enable PDF text extraction support" ON)
+# macOS runtime search path defaults for installed binaries
+if(APPLE)
+    set(CMAKE_MACOSX_RPATH ON)
+    # Ensure installed executables/DYLIBs can find dependencies in lib/
+    set(CMAKE_INSTALL_RPATH "@loader_path/../lib")
+endif()
+
+if(YAMS_ENABLE_PDF)
+    message(STATUS "Configuring PDFium for PDF support")
+
+    # Determine platform and architecture
+    if(APPLE)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+            set(PDFIUM_PLATFORM "mac-arm64")
+        else()
+            set(PDFIUM_PLATFORM "mac-x64")
+        endif()
+    elseif(UNIX)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+            set(PDFIUM_PLATFORM "linux-arm64")
+        else()
+            set(PDFIUM_PLATFORM "linux-x64")
+        endif()
+    elseif(WIN32)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(PDFIUM_PLATFORM "win-x64")
+        else()
+            set(PDFIUM_PLATFORM "win-x86")
+        endif()
+    endif()
+
+    # Use prebuilt binaries from pdfium-binaries project
+    # Latest release: PDFium 141.0.7350.0 (chromium/7350)
+    FetchContent_Declare(
+        pdfium
+        URL https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-${PDFIUM_PLATFORM}.tgz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+
+    FetchContent_GetProperties(pdfium)
+    if(NOT pdfium_POPULATED)
+        message(STATUS "Downloading PDFium binaries for ${PDFIUM_PLATFORM}...")
+        FetchContent_Populate(pdfium)
+
+        # Verify PDFium was downloaded correctly
+        if(NOT EXISTS "${pdfium_SOURCE_DIR}/include/fpdfview.h")
+            message(WARNING "PDFium download failed or incomplete. PDF support will be disabled.")
+            set(YAMS_ENABLE_PDF OFF)
+            return()
+        endif()
+
+        # Create imported target for PDFium
+        add_library(pdfium SHARED IMPORTED GLOBAL)
+
+        # Set include directories
+        set_target_properties(pdfium PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${pdfium_SOURCE_DIR}/include"
+        )
+
+        # Set library location based on platform
+        if(APPLE)
+            set_target_properties(pdfium PROPERTIES
+                IMPORTED_LOCATION "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
+            )
+            # Ensure @rpath install_name on the fetched dylib for proper link-time embedding
+            execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib")
+        elseif(UNIX)
+            set_target_properties(pdfium PROPERTIES
+                IMPORTED_LOCATION "${pdfium_SOURCE_DIR}/lib/libpdfium.so"
+            )
+        elseif(WIN32)
+            set_target_properties(pdfium PROPERTIES
+                IMPORTED_LOCATION "${pdfium_SOURCE_DIR}/bin/pdfium.dll"
+                IMPORTED_IMPLIB "${pdfium_SOURCE_DIR}/lib/pdfium.lib"
+            )
+        endif()
+
+        # Create alias for consistent naming
+        add_library(pdfium::pdfium ALIAS pdfium)
+
+        # Install the prebuilt PDFium dylib and adjust its install_name on macOS
+        install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                COMPONENT runtime)
+
+        if(APPLE)
+            # Ensure consumers load PDFium via @rpath; installed binaries use @loader_path/../lib
+            install(CODE "execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib \"${CMAKE_INSTALL_FULL_LIBDIR}/libpdfium.dylib\")")
+
+            # Patch installed executables to reference @rpath/libpdfium.dylib and ensure rpath includes ../lib
+            install(CODE "
+                set(_bins yams yams-mcp-server)
+                foreach(_bin IN LISTS _bins)
+                    set(_path \"${CMAKE_INSTALL_FULL_BINDIR}/${_bin}\")
+                    if(EXISTS \"${_path}\")
+                        execute_process(COMMAND install_name_tool -change libpdfium.dylib @rpath/libpdfium.dylib \"${_path}\")
+                        execute_process(COMMAND install_name_tool -change ./libpdfium.dylib @rpath/libpdfium.dylib \"${_path}\")
+                        execute_process(COMMAND install_name_tool -add_rpath \"@loader_path/../lib\" \"${_path}\")
+                    endif()
+                endforeach()
+            ")
+        endif()
+
+        message(STATUS "PDFium ${PDFIUM_PLATFORM} successfully configured")
+        set(YAMS_PDFIUM_FOUND TRUE CACHE BOOL "PDFium library found and configured")
+    endif()
+else()
+    message(STATUS "PDFium support disabled (YAMS_ENABLE_PDF=OFF)")
+    set(YAMS_PDFIUM_FOUND FALSE CACHE BOOL "PDFium library found and configured")
 endif()
 
 # Protocol Buffers (optional, for manifest serialization)
@@ -1071,7 +1242,7 @@ if(YAMS_ENABLE_COVERAGE)
             COMMENT "Displaying coverage summary"
         )
 
-    # Coverage target using lcov (alternative)
+        # Coverage target using lcov (alternative)
     elseif(LCOV_PATH AND GENHTML_PATH)
         add_custom_target(coverage-html
             COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/coverage/html

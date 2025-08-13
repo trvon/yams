@@ -1,8 +1,13 @@
-# TUI Services Smoke Tests
+# CLI Tests
 
-# Create the executable for TUI services tests
+# TUI Services Smoke Tests
 add_executable(test_tui_services
     test_tui_services.cpp
+)
+
+# Update Command Tests
+add_executable(update_command_tests
+    update_command_test.cpp
 )
 
 # Require C++20 to match the project configuration
@@ -14,5 +19,20 @@ target_link_libraries(test_tui_services
         yams_cli
 )
 
-# Register the test with CTest
+# Configure update command tests
+target_compile_features(update_command_tests PRIVATE cxx_std_20)
+target_link_libraries(update_command_tests
+    PRIVATE
+        GTest::gtest_main
+        GTest::gmock
+        yams_cli
+        yams::metadata
+        yams::api
+)
+
+# Register tests with CTest
 add_test(NAME tui_services COMMAND test_tui_services)
+add_test(NAME update_command_tests COMMAND update_command_tests)
+
+# Discover tests for better integration
+gtest_discover_tests(update_command_tests)

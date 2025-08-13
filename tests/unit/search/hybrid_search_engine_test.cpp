@@ -1,0 +1,226 @@
+#include <gtest/gtest.h>
+#include <yams/search/hybrid_search_engine.h>
+#include <yams/core/types.h>
+
+#include <algorithm>
+#include <cctype>
+#include <locale>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace yams;
+using namespace yams::search;
+using namespace yams::vector;
+
+namespace {
+
+// Minimal mock keyword search engine that satisfies the interface and
+// provides deterministic tokenization for expandQuery tests.
+class MockKeywordSearchEngine final : public KeywordSearchEngine {
+public:
+    // Simple whitespace tokenizer with lowercase
+    std::vector<std::string> analyzeQuery(const std::string& query) const override {
+        std::vector<std::string> tokens;
+        std::istringstream iss(query);
+        std::string token;
+        while (iss >> token) {
+            for (auto& ch : token) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            tokens.push_back(token);
+        }
+        return tokens;
+    }
+
+    // Extract keywords (same as analyzeQuery for this mock)
+    std::vector<std::string> extractKeywords(const std::string& text) const override {
+        return analyzeQuery(text);
+    }
+
+    // The rest of the interface is not exercised by these tests; return trivial values.
+    Result<std::vector<KeywordSearchResult>> search(
+        const std::string&,
+        size_t,
+        const vector::SearchFilter*) override {
+        return Result<std::vector<KeywordSearchResult>>(std::vector<KeywordSearchResult>{});
+    }
+
+    Result<std::vector<std::vector<KeywordSearchResult>>> batchSearch(
+        const std::vector<std::string>&,
+        size_t,
+        const vector::SearchFilter*) override {
+        return Result<std::vector<std::vector<KeywordSearchResult>>>(
+            std::vector<std::vector<KeywordSearchResult>>{});
+    }
+
+    Result<void> addDocument(
+        const std::string&,
+        const std::string&,
+        const std::map<std::string, std::string>&) override {
+        return Result<void>();
+    }
+
+    Result<void> removeDocument(const std::string&) override { return Result<void>(); }
+
+    Result<void> updateDocument(
+        const std::string&,
+        const std::string&,
+        const std::map<std::string, std::string>&) override {
+        return Result<void>();
+    }
+
+    Result<void> addDocuments(
+        const std::vector<std::string>&,
+        const std::vector<std::string>&,
+        const std::vector<std::map<std::string, std::string>>&) override {
+        return Result<void>();
+    }
+
+    Result<void> buildIndex() override { return Result<void>(); }
+    Result<void> optimizeIndex() override { return Result<void>(); }
+    Result<void> clearIndex() override { return Result<void>(); }
+    Result<void> saveIndex(const std::string&) override {
+        return Result<void>(Error{ErrorCode::InvalidOperation, "Not implemented"});
+    }
+    Result<void> loadIndex(const std::string&) override {
+        return Result<void>(Error{ErrorCode::InvalidOperation, "Not implemented"});
+    }
+
+    size_t getDocumentCount() const override { return 0; }
+    size_t getTermCount() const override { return 0; }
+    size_t getIndexSize() const override { return 0; }
+};
+
+} // namespace
+
+// Test that fuseResults performs linear combination correctly and sorts by hybrid score.
+TEST(HybridSearchEngineTest, FuseResultsLinearCombination) {
+    // We don't exercise vector search or keyword search here, so vector_index can be null.
+    std::shared_ptr<VectorIndexManager> nullVectorIndex;
+    auto keywordEngine = std::make_shared<MockKeywordSearchEngine>();
+
+    HybridSearchConfig cfg;
+    cfg.fusion_strategy = HybridSearchConfig::FusionStrategy::LINEAR_COMBINATION;
+    cfg.vector_weight = 0.7f;
+    cfg.keyword_weight = 0.3f;
+    cfg.normalizeWeights(); // Ensure weights sum to 1.0
+
+    HybridSearchEngine engine(nullVectorIndex, keywordEngine, cfg);
+
+    // Prepare vector results (already similarity scores in [0,1])
+    std::vector<SearchResult> vres;
+    vres.emplace_back("A", /*distance*/ 0.0f, /*similarity*/ 0.9f);
+    vres.emplace_back("B", /*distance*/ 0.0f, /*similarity*/ 0.4f);
+
+    // Prepare keyword results sorted by descending score (as expected by normalizeKeywordScore)
+    std::vector<KeywordSearchResult> kres;
+    {
+        KeywordSearchResult rA;
+        rA.id = "A";
+        rA.content = "content A";
+        rA.score = 2.0f; // max score
+        kres.push_back(rA);
+    }
+    {
+        KeywordSearchResult rB;
+        rB.id = "B";
+        rB.content = "content B";
+        rB.score = 1.0f; // lower score -> normalized to 0.5
+        kres.push_back(rB);
+    }
+
+    auto fused = engine.fuseResults(vres, kres, cfg);
+
+    // Should have one entry per unique id
+    ASSERT_EQ(fused.size(), 2u);
+
+    // Sort order is descending by hybrid_score (operator< implements inverted compare)
+    // Expected normalized keyword scores: A=1.0, B=0.5
+    // hybrid(A) = 0.9*0.7 + 1.0*0.3 = 0.93
+    // hybrid(B) = 0.4*0.7 + 0.5*0.3 = 0.43
+    EXPECT_EQ(fused[0].id, "A");
+    EXPECT_NEAR(fused[0].hybrid_score, 0.93f, 1e-5f);
+    EXPECT_EQ(fused[1].id, "B");
+    EXPECT_NEAR(fused[1].hybrid_score, 0.43f, 1e-5f);
+
+    // Validate ranks and flags
+    EXPECT_TRUE(fused[0].found_by_vector);
+    EXPECT_TRUE(fused[0].found_by_keyword);
+    EXPECT_EQ(fused[0].vector_rank, 0u);
+    EXPECT_EQ(fused[0].keyword_rank, 0u);
+
+    EXPECT_TRUE(fused[1].found_by_vector);
+    EXPECT_TRUE(fused[1].found_by_keyword);
+    EXPECT_EQ(fused[1].vector_rank, 1u);
+    EXPECT_EQ(fused[1].keyword_rank, 1u);
+}
+
+// Test that rerankResults boosts exact query matches and keyword density.
+TEST(HybridSearchEngineTest, RerankResultsBoostsExactAndKeywords) {
+    std::shared_ptr<VectorIndexManager> nullVectorIndex;
+    auto keywordEngine = std::make_shared<MockKeywordSearchEngine>();
+
+    HybridSearchConfig cfg;
+    cfg.fusion_strategy = HybridSearchConfig::FusionStrategy::LINEAR_COMBINATION;
+    cfg.vector_weight = 0.5f;
+    cfg.keyword_weight = 0.5f;
+    cfg.rerank_top_k = 10; // ensure both results considered
+
+    HybridSearchEngine engine(nullVectorIndex, keywordEngine, cfg);
+
+    std::vector<HybridSearchResult> results;
+    HybridSearchResult good;
+    good.id = "good";
+    good.content = "This document talks about machine learning and more.";
+    good.hybrid_score = 1.0f;
+    good.matched_keywords = {"machine", "learning"};
+
+    HybridSearchResult neutral;
+    neutral.id = "neutral";
+    neutral.content = "Irrelevant content.";
+    neutral.hybrid_score = 1.0f;
+
+    results.push_back(good);
+    results.push_back(neutral);
+
+    const std::string query = "machine learning";
+    auto reranked = engine.rerankResults(results, query);
+
+    // The "good" result should be boosted by:
+    // exact match boost: *1.2
+    // keyword density boost: * (1 + 0.05 * 2) = *1.10
+    // total = 1.2 * 1.1 = 1.32
+    // With the inverted comparator, the boosted result should be at index 0.
+    ASSERT_EQ(reranked.size(), 2u);
+    EXPECT_EQ(reranked[0].id, "good");
+    EXPECT_NEAR(reranked[0].hybrid_score, 1.32f, 1e-5f);
+    EXPECT_EQ(reranked[1].id, "neutral");
+    EXPECT_NEAR(reranked[1].hybrid_score, 1.0f, 1e-5f);
+}
+
+// Test expandQuery pluralization/singularization behavior.
+TEST(HybridSearchEngineTest, ExpandQueryPluralization) {
+    std::shared_ptr<VectorIndexManager> nullVectorIndex;
+    auto keywordEngine = std::make_shared<MockKeywordSearchEngine>();
+
+    HybridSearchConfig cfg;
+    cfg.expansion_terms = 10; // allow enough expansion terms
+
+    HybridSearchEngine engine(nullVectorIndex, keywordEngine, cfg);
+
+    const std::string query = "Cats and dog";
+    auto expanded = engine.expandQuery(query);
+
+    // For tokens: "cats" -> "cat", "and" -> "ands", "dog" -> "dogs"
+    // We check for the more meaningful ones.
+    auto contains = [&](const std::string& term) {
+        return std::find(expanded.begin(), expanded.end(), term) != expanded.end();
+    };
+
+    EXPECT_TRUE(contains("cat"));
+    EXPECT_TRUE(contains("dogs"));
+    // Optional: ensure limit respected
+    EXPECT_LE(expanded.size(), static_cast<size_t>(cfg.expansion_terms));
+}

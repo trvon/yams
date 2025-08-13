@@ -85,6 +85,11 @@ public:
     static std::unique_ptr<ICommand> createMigrateCommand();
     
     /**
+     * Create update command
+     */
+    static std::unique_ptr<ICommand> createUpdateCommand();
+    
+    /**
      * Create serve command (MCP server)
      */
     static std::unique_ptr<ICommand> createServeCommand();

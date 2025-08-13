@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <type_traits>
 
 namespace yams::metadata {
 
@@ -110,8 +111,8 @@ public:
      * @brief Execute a function with a connection
      */
     template<typename Func>
-    auto withConnection(Func&& func) 
-        -> Result<decltype(func(std::declval<Database&>()))> {
+    auto withConnection(Func&& func)
+        -> std::invoke_result_t<Func, Database&> {
         
         auto connResult = acquire();
         if (!connResult) {

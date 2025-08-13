@@ -43,3 +43,9 @@ Content-addressed storage with deduplication and semantic search.
 - [Releases](https://github.com/trvon/yams/releases) - Downloads
 - [Issues](https://github.com/trvon/yams/issues) - Bug reports
 - [Discussions](https://github.com/trvon/yams/discussions) - Community
+
+## Academic Work
+
+- [Academic Paper](operations/academic_paper.md) - USENIX conference paper development
+- [Paper PBI](delivery/paper-pbi.md) - Academic publication project tracking
+- [Paper Source](/paper/) - LaTeX source and compilation

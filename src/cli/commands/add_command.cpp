@@ -115,7 +115,7 @@ private:
         if (!tempFile) {
             return Error{ErrorCode::FileNotFound, "Failed to create temporary file"};
         }
-        tempFile.write(content.data(), content.size());
+        tempFile.write(content.data(), static_cast<std::streamsize>(content.size()));
         tempFile.close();
         
         // Build metadata
@@ -151,24 +151,52 @@ private:
         // Store metadata in database
         auto metadataRepo = cli_->getMetadataRepository();
         if (metadataRepo) {
-            metadata::DocumentInfo docInfo;
-            docInfo.filePath = "stdin";
-            docInfo.fileName = documentName_.empty() ? "stdin" : documentName_;
-            docInfo.fileExtension = "";
-            docInfo.fileSize = content.size();
-            docInfo.sha256Hash = result.value().contentHash;
-            docInfo.mimeType = metadata.mimeType;
+            int64_t docId = -1;
+            bool isNewDocument = true;
             
-            auto now = std::chrono::system_clock::now();
-            docInfo.createdTime = now;
-            docInfo.modifiedTime = now;
-            docInfo.indexedTime = now;
+            // Check if document already exists (100% dedup case)
+            if (result.value().dedupRatio() >= 0.99) {  // Near 100% dedup
+                auto existingDoc = metadataRepo->getDocumentByHash(result.value().contentHash);
+                if (existingDoc && existingDoc.value().has_value()) {
+                    // Document already exists, update it
+                    isNewDocument = false;
+                    docId = existingDoc.value()->id;
+                    
+                    // Update indexed time (make a copy since it's const)
+                    auto doc = existingDoc.value().value();
+                    doc.indexedTime = std::chrono::system_clock::now();
+                    metadataRepo->updateDocument(doc);
+                    
+                    spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+                }
+            }
             
-            // Insert document
-            auto insertResult = metadataRepo->insertDocument(docInfo);
-            if (insertResult) {
-                int64_t docId = insertResult.value();
+            // Insert new document if it doesn't exist
+            if (isNewDocument) {
+                metadata::DocumentInfo docInfo;
+                docInfo.filePath = "stdin";
+                docInfo.fileName = documentName_.empty() ? "stdin" : documentName_;
+                docInfo.fileExtension = "";
+                docInfo.fileSize = static_cast<int64_t>(content.size());
+                docInfo.sha256Hash = result.value().contentHash;
+                docInfo.mimeType = metadata.mimeType;
                 
+                auto now = std::chrono::system_clock::now();
+                docInfo.createdTime = now;
+                docInfo.modifiedTime = now;
+                docInfo.indexedTime = now;
+                
+                auto insertResult = metadataRepo->insertDocument(docInfo);
+                if (insertResult) {
+                    docId = insertResult.value();
+                    spdlog::debug("Stored new stdin document with ID: {}", docId);
+                } else {
+                    spdlog::warn("Failed to store metadata for stdin: {}", insertResult.error().message);
+                }
+            }
+            
+            // Add tags and metadata for both new and existing documents
+            if (docId > 0) {
                 // Add tags as metadata
                 for (const auto& tag : tags_) {
                     metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
@@ -184,24 +212,22 @@ private:
                     }
                 }
                 
-                // Index document content for full-text search
-                auto indexResult = metadataRepo->indexDocumentContent(
-                    docId,
-                    docInfo.fileName,
-                    content,  // We already have the content from stdin
-                    docInfo.mimeType
-                );
-                if (!indexResult) {
-                    spdlog::warn("Failed to index stdin content: {}", 
-                               indexResult.error().message);
+                // Index document content for full-text search (only for new documents)
+                if (isNewDocument) {
+                    auto indexResult = metadataRepo->indexDocumentContent(
+                        docId,
+                        documentName_.empty() ? "stdin" : documentName_,
+                        content,  // We already have the content from stdin
+                        metadata.mimeType
+                    );
+                    if (!indexResult) {
+                        spdlog::warn("Failed to index stdin content: {}", 
+                                   indexResult.error().message);
+                    }
                 }
                 
                 // Update fuzzy index
                 metadataRepo->updateFuzzyIndex(docId);
-                
-                spdlog::debug("Stored metadata for stdin document ID: {}", docId);
-            } else {
-                spdlog::warn("Failed to store metadata for stdin: {}", insertResult.error().message);
             }
         }
         
@@ -344,31 +370,58 @@ private:
             return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
         }
         
-        metadata::DocumentInfo docInfo;
-        docInfo.filePath = filePath.string();
-        docInfo.fileName = filePath.filename().string();
-        docInfo.fileExtension = filePath.extension().string();
-        docInfo.fileSize = std::filesystem::file_size(filePath);
-        docInfo.sha256Hash = storeResult.contentHash;
-        docInfo.mimeType = mimeType_.empty() ? "application/octet-stream" : mimeType_;
+        int64_t docId = -1;
+        bool isNewDocument = true;
         
-        auto now = std::chrono::system_clock::now();
-        docInfo.createdTime = now;
-        
-        // Convert file_time_type to system_clock::time_point
-        auto ftime = std::filesystem::last_write_time(filePath);
-        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
-        docInfo.modifiedTime = sctp;
-        docInfo.indexedTime = now;
-        
-        // Insert document
-        auto insertResult = metadataRepo->insertDocument(docInfo);
-        if (!insertResult) {
-            return insertResult.error();
+        // Check if document already exists (high dedup case)
+        if (storeResult.dedupRatio() >= 0.99) {  // Near 100% dedup
+            auto existingDoc = metadataRepo->getDocumentByHash(storeResult.contentHash);
+            if (existingDoc && existingDoc.value().has_value()) {
+                // Document already exists, update it
+                isNewDocument = false;
+                docId = existingDoc.value()->id;
+                
+                // Update indexed time (make a copy since it's const)
+                auto doc = existingDoc.value().value();
+                doc.indexedTime = std::chrono::system_clock::now();
+                metadataRepo->updateDocument(doc);
+                
+                spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+            }
         }
         
-        int64_t docId = insertResult.value();
+        // Insert new document if it doesn't exist
+        if (isNewDocument) {
+            metadata::DocumentInfo docInfo;
+            docInfo.filePath = filePath.string();
+            docInfo.fileName = filePath.filename().string();
+            docInfo.fileExtension = filePath.extension().string();
+            docInfo.fileSize = static_cast<int64_t>(std::filesystem::file_size(filePath));
+            docInfo.sha256Hash = storeResult.contentHash;
+            docInfo.mimeType = mimeType_.empty() ? "application/octet-stream" : mimeType_;
+            
+            auto now = std::chrono::system_clock::now();
+            docInfo.createdTime = now;
+            
+            // Convert file_time_type to system_clock::time_point
+            auto ftime = std::filesystem::last_write_time(filePath);
+            auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+            docInfo.modifiedTime = sctp;
+            docInfo.indexedTime = now;
+            
+            auto insertResult = metadataRepo->insertDocument(docInfo);
+            if (!insertResult) {
+                return insertResult.error();
+            }
+            
+            docId = insertResult.value();
+            spdlog::debug("Stored new document with ID: {}", docId);
+        }
+        
+        if (docId < 0) {
+            return Error{ErrorCode::Unknown, "Failed to get document ID"};
+        }
         
         // Add tags as metadata
         for (const auto& tag : tags_) {
@@ -402,29 +455,31 @@ private:
             metadataRepo->setMetadata(docId, "path", metadata::MetadataValue(relativePath.string()));
         }
         
-        // Read file content for indexing
-        std::string fileContent;
-        try {
-            std::ifstream file(filePath, std::ios::binary);
-            if (file) {
-                std::stringstream buffer;
-                buffer << file.rdbuf();
-                fileContent = buffer.str();
-                
-                // Index document content for full-text search
-                auto indexResult = metadataRepo->indexDocumentContent(
-                    docId, 
-                    docInfo.fileName,
-                    fileContent,
-                    docInfo.mimeType
-                );
-                if (!indexResult) {
-                    spdlog::warn("Failed to index document content: {}", 
-                               indexResult.error().message);
+        // Read file content for indexing (only for new documents)
+        if (isNewDocument) {
+            std::string fileContent;
+            try {
+                std::ifstream file(filePath, std::ios::binary);
+                if (file) {
+                    std::stringstream buffer;
+                    buffer << file.rdbuf();
+                    fileContent = buffer.str();
+                    
+                    // Index document content for full-text search
+                    auto indexResult = metadataRepo->indexDocumentContent(
+                        docId, 
+                        filePath.filename().string(),
+                        fileContent,
+                        mimeType_.empty() ? "application/octet-stream" : mimeType_
+                    );
+                    if (!indexResult) {
+                        spdlog::warn("Failed to index document content: {}", 
+                                   indexResult.error().message);
+                    }
                 }
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to read file for indexing: {}", e.what());
             }
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to read file for indexing: {}", e.what());
         }
         
         // Update fuzzy index

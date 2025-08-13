@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <functional>
+#include <type_traits>
 #include <mutex>
 
 namespace yams::metadata {
@@ -202,7 +203,11 @@ private:
         if (!result.has_value()) {
             return Error{result.error()};
         }
-        return result.value();
+        if constexpr (std::is_void_v<T>) {
+            return Result<void>();
+        } else {
+            return result.value();
+        }
     }
 };
 

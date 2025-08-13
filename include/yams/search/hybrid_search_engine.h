@@ -15,6 +15,7 @@ namespace yams::search {
 
 // Forward declarations
 class KeywordSearchEngine;
+class KGScorer;
 
 /**
  * Configuration for hybrid search
@@ -23,6 +24,9 @@ struct HybridSearchConfig {
     // Weight distribution (should sum to 1.0)
     float vector_weight = 0.7f;        // Weight for vector search results
     float keyword_weight = 0.3f;       // Weight for keyword search results
+    // KG-related weights (optional; considered when enable_kg=true)
+    float kg_entity_weight = 0.0f;     // Weight for KG entity similarity score
+    float structural_weight = 0.0f;    // Weight for structural prior score (e.g., Node2Vec)
     
     // Search parameters
     size_t vector_top_k = 50;          // Number of vector results to retrieve
@@ -52,6 +56,12 @@ struct HybridSearchConfig {
     size_t expansion_terms = 5;
     float expansion_weight = 0.3f;
     
+    // KG scoring (local-first)
+    bool enable_kg = false;            // Enable KG-based scoring
+    size_t kg_max_neighbors = 32;      // Max neighbors to consider per entity
+    size_t kg_max_hops = 1;            // Max hops for structural prior
+    std::chrono::milliseconds kg_budget_ms{20}; // Time budget to include KG scoring
+    
     // Score normalization
     bool normalize_scores = true;      // Normalize scores to [0, 1]
     
@@ -70,17 +80,22 @@ struct HybridSearchConfig {
     
     // Validate configuration
     bool isValid() const {
+        const float w_sum =
+            vector_weight + keyword_weight + kg_entity_weight + structural_weight;
         return vector_weight >= 0 && keyword_weight >= 0 &&
-               (vector_weight + keyword_weight) > 0 &&
+               kg_entity_weight >= 0 && structural_weight >= 0 &&
+               w_sum > 0 &&
                vector_top_k > 0 && keyword_top_k > 0 && final_top_k > 0;
     }
     
     // Normalize weights to sum to 1.0
     void normalizeWeights() {
-        float sum = vector_weight + keyword_weight;
+        float sum = vector_weight + keyword_weight + kg_entity_weight + structural_weight;
         if (sum > 0) {
-            vector_weight /= sum;
-            keyword_weight /= sum;
+            vector_weight      = vector_weight / sum;
+            keyword_weight     = keyword_weight / sum;
+            kg_entity_weight   = kg_entity_weight / sum;
+            structural_weight  = structural_weight / sum;
         }
     }
 };
@@ -112,6 +127,8 @@ struct HybridSearchResult {
     // Individual scores
     float vector_score = 0.0f;         // Vector similarity score [0, 1]
     float keyword_score = 0.0f;        // Keyword relevance score [0, 1]
+    float kg_entity_score = 0.0f;      // KG entity similarity score [0, 1]
+    float structural_score = 0.0f;     // Structural prior score [0, 1]
     float hybrid_score = 0.0f;         // Combined score [0, 1]
     
     // Ranking information
@@ -284,6 +301,8 @@ public:
     void setConfig(const HybridSearchConfig& config);
     const HybridSearchConfig& getConfig() const;
     void updateWeights(float vector_weight, float keyword_weight);
+    // Inject KG scorer implementation (optional; used when config.enable_kg is true)
+    void setKGScorer(std::shared_ptr<class KGScorer> kg_scorer);
     
     // Performance metrics
     struct SearchMetrics {

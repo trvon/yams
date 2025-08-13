@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <yams/api/content_store.h>
 #include <yams/search/search_executor.h>
+#include <yams/search/hybrid_search_engine.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/version.hpp>
 #include <nlohmann/json.hpp>
@@ -86,6 +87,7 @@ public:
     MCPServer(std::shared_ptr<api::IContentStore> store,
               std::shared_ptr<search::SearchExecutor> searchExecutor,
               std::shared_ptr<metadata::MetadataRepository> metadataRepo,
+              std::shared_ptr<search::HybridSearchEngine> hybridEngine = nullptr,
               std::unique_ptr<ITransport> transport = std::make_unique<StdioTransport>());
     ~MCPServer();
     
@@ -165,6 +167,7 @@ private:
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
+    std::shared_ptr<search::HybridSearchEngine> hybridEngine_;
     std::unique_ptr<ITransport> transport_;
     
     std::atomic<bool> running_{false};

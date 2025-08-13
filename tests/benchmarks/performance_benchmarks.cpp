@@ -6,6 +6,7 @@
 #include <yams/storage/reference_counter.h>
 #include <yams/manifest/manifest_manager.h>
 #include <filesystem>
+#include <iostream>
 #include <random>
 #include <vector>
 
@@ -38,7 +39,7 @@ static void InitializeTestData() {
     testData100MB = generateData(100 * 1024 * 1024);
     
     // Create temp directory
-    tempDir = fs::temp_directory_path() / "kronos_bench";
+    tempDir = fs::temp_directory_path() / "yams_bench";
     fs::create_directories(tempDir);
 }
 
@@ -84,7 +85,8 @@ static void BM_SHA256_Streaming(benchmark::State& state) {
         size_t chunkSize = 64 * 1024;
         for (size_t i = 0; i < testData10MB.size(); i += chunkSize) {
             size_t size = std::min(chunkSize, testData10MB.size() - i);
-            hasher->update(testData10MB.data() + i, size);
+            std::span<const std::byte> chunk(testData10MB.data() + i, size);
+            hasher->update(chunk);
         }
         
         auto hash = hasher->finalize();
@@ -106,7 +108,7 @@ static void BM_RabinChunking_Small(benchmark::State& state) {
     auto chunker = std::make_unique<chunking::RabinChunker>(config);
     
     for (auto _ : state) {
-        auto chunks = chunker->chunkBuffer(testData1MB);
+        auto chunks = chunker->chunkData(testData1MB);
         benchmark::DoNotOptimize(chunks);
     }
     
@@ -124,7 +126,7 @@ static void BM_RabinChunking_Large(benchmark::State& state) {
     auto chunker = std::make_unique<chunking::RabinChunker>(config);
     
     for (auto _ : state) {
-        auto chunks = chunker->chunkBuffer(testData10MB);
+        auto chunks = chunker->chunkData(testData10MB);
         benchmark::DoNotOptimize(chunks);
     }
     
@@ -139,25 +141,59 @@ protected:
     std::vector<std::string> testHashes;
     
     void SetUp(const ::benchmark::State& state) override {
-        storage::StorageConfig config{
-            .basePath = tempDir / ("storage_bench_" + std::to_string(state.thread_index)),
-            .shardDepth = 2,
-            .mutexPoolSize = 256
-        };
-        
-        storage = std::make_unique<storage::StorageEngine>(std::move(config));
-        
-        // Pre-generate hashes
-        auto hasher = crypto::createSHA256Hasher();
-        for (int i = 0; i < 1000; ++i) {
-            auto data = std::to_string(i);
-            testHashes.push_back(hasher->hash({data.begin(), data.end()}));
+        try {
+            // Use a safe default for thread index during setup
+            // Google Benchmark may not have thread_index properly initialized in SetUp
+            int thread_id = 0;
+            try {
+                thread_id = state.thread_index();
+            } catch (...) {
+                // If thread_index() fails, use 0 as default
+                thread_id = 0;
+            }
+            
+            auto benchPath = tempDir / ("storage_bench_" + std::to_string(thread_id));
+            fs::create_directories(benchPath);
+            
+            storage::StorageConfig config{
+                .basePath = benchPath,
+                .shardDepth = 2,
+                .mutexPoolSize = 256
+            };
+            
+            storage = std::make_unique<storage::StorageEngine>(std::move(config));
+            
+            // Pre-generate hashes
+            auto hasher = crypto::createSHA256Hasher();
+            for (int i = 0; i < 1000; ++i) {
+                auto data = std::to_string(i);
+                std::span<const std::byte> span(reinterpret_cast<const std::byte*>(data.data()), data.size());
+                testHashes.push_back(hasher->hash(span));
+            }
+        } catch (const std::exception& e) {
+            // Log error and mark benchmark as skipped
+            std::cerr << "StorageBenchmark SetUp failed: " << e.what() << std::endl;
+            throw;  // Re-throw to let benchmark framework handle it
         }
     }
     
     void TearDown(const ::benchmark::State& state) override {
-        storage.reset();
-        fs::remove_all(tempDir / ("storage_bench_" + std::to_string(state.thread_index)));
+        try {
+            storage.reset();
+            
+            // Use safe thread index access
+            int thread_id = 0;
+            try {
+                thread_id = state.thread_index();
+            } catch (...) {
+                thread_id = 0;
+            }
+            
+            fs::remove_all(tempDir / ("storage_bench_" + std::to_string(thread_id)));
+        } catch (const std::exception& e) {
+            // Log error but don't throw in TearDown
+            std::cerr << "StorageBenchmark TearDown error: " << e.what() << std::endl;
+        }
     }
 };
 
@@ -201,13 +237,17 @@ BENCHMARK_F(StorageBenchmark, BM_Storage_Retrieve)(benchmark::State& state) {
         static_cast<double>(state.iterations() * data.size()),
         benchmark::Counter::kIsRate);
 }
+BENCHMARK_REGISTER_F(StorageBenchmark, BM_Storage_Retrieve)->UseRealTime();
 
 // Reference Counter Benchmarks
 static void BM_ReferenceCounter_Increment(benchmark::State& state) {
     auto storagePath = tempDir / "refcount_bench";
     fs::create_directories(storagePath);
     
-    storage::ReferenceCounter refCounter(storagePath / "refs.db");
+    storage::ReferenceCounter::Config refConfig{
+        .databasePath = storagePath / "refs.db"
+    };
+    storage::ReferenceCounter refCounter(refConfig);
     
     std::vector<std::string> hashes;
     for (int i = 0; i < 1000; ++i) {
@@ -216,7 +256,7 @@ static void BM_ReferenceCounter_Increment(benchmark::State& state) {
     
     size_t index = 0;
     for (auto _ : state) {
-        auto result = refCounter.increment(hashes[index % hashes.size()]);
+        auto result = refCounter.increment(hashes[index % hashes.size()], 1024);
         benchmark::DoNotOptimize(result);
         index++;
     }
@@ -233,15 +273,19 @@ static void BM_ReferenceCounter_BatchOps(benchmark::State& state) {
     auto storagePath = tempDir / "refcount_batch_bench";
     fs::create_directories(storagePath);
     
-    storage::ReferenceCounter refCounter(storagePath / "refs.db");
+    storage::ReferenceCounter::Config refConfig{
+        .databasePath = storagePath / "refs.db"
+    };
+    storage::ReferenceCounter refCounter(refConfig);
     
     for (auto _ : state) {
-        std::vector<std::pair<std::string, uint64_t>> batch;
+        struct BlockInfo { std::string hash; size_t size; };
+        std::vector<BlockInfo> batch;
         for (int i = 0; i < state.range(0); ++i) {
             batch.emplace_back("batch_hash_" + std::to_string(i), 1024 * (i + 1));
         }
         
-        auto result = refCounter.batchIncrement(batch);
+        auto result = refCounter.incrementBatchWithSizes(batch);
         benchmark::DoNotOptimize(result);
     }
     
@@ -263,8 +307,8 @@ static void BM_Manifest_Serialize(benchmark::State& state) {
     auto manager = std::make_unique<manifest::ManifestManager>(std::move(config));
     
     // Create test manifest
-    manifest::FileManifest manifest;
-    manifest.version = manifest::FileManifest::CURRENT_VERSION;
+    manifest::Manifest manifest;
+    manifest.version = manifest::Manifest::CURRENT_VERSION;
     manifest.fileHash = "test_file_hash";
     manifest.fileSize = state.range(0) * 1024;
     manifest.originalName = "test_file.bin";
@@ -301,8 +345,8 @@ static void BM_Manifest_Deserialize(benchmark::State& state) {
     auto manager = std::make_unique<manifest::ManifestManager>(std::move(config));
     
     // Create and serialize test manifest
-    manifest::FileManifest manifest;
-    manifest.version = manifest::FileManifest::CURRENT_VERSION;
+    manifest::Manifest manifest;
+    manifest.version = manifest::Manifest::CURRENT_VERSION;
     manifest.fileHash = "test_file_hash";
     manifest.fileSize = 10 * 1024 * 1024;
     manifest.originalName = "test_file.bin";
@@ -335,7 +379,7 @@ BENCHMARK(BM_Manifest_Deserialize)->UseRealTime();
 static void BM_Storage_Retrieve_MT(benchmark::State& state) {
     // Prepare storage in a dedicated temp subdir (outside timing)
     state.PauseTiming();
-    auto benchPath = tempDir / "storage_bench_mt";
+    auto benchPath = tempDir / ("storage_bench_mt_" + std::to_string(state.thread_index()));
     fs::create_directories(benchPath);
 
     storage::StorageConfig config{
@@ -352,16 +396,24 @@ static void BM_Storage_Retrieve_MT(benchmark::State& state) {
     std::vector<std::string> keys;
     keys.reserve(kPrestoreCount);
 
+    // Generate proper SHA256 hashes as keys
+    auto hasher = crypto::createSHA256Hasher();
     for (size_t i = 0; i < kPrestoreCount; ++i) {
-        keys.push_back("bench_key_" + std::to_string(i));
+        auto keyData = "bench_key_" + std::to_string(i) + "_thread_" + std::to_string(state.thread_index());
+        std::span<const std::byte> span(reinterpret_cast<const std::byte*>(keyData.data()), keyData.size());
+        keys.push_back(hasher->hash(span));
     }
 
     std::vector<std::byte> data(kObjSize);
     std::fill(data.begin(), data.end(), std::byte{0x42});
 
+    // Store objects and verify success
     for (size_t i = 0; i < kPrestoreCount; ++i) {
         auto res = engine->store(keys[i], data);
-        (void)res; // ignore result; benchmarks focus on retrieval cost
+        if (!res) {
+            state.SkipWithError("Failed to store test data");
+            return;
+        }
     }
     state.ResumeTiming();
 
@@ -374,14 +426,14 @@ static void BM_Storage_Retrieve_MT(benchmark::State& state) {
     }
 
     // Report throughput and operations
-    state.SetBytesProcessed(state.iterations() * kObjSize * state.threads());
-    state.SetItemsProcessed(state.iterations() * state.threads());
+    state.SetBytesProcessed(state.iterations() * kObjSize);
+    state.SetItemsProcessed(state.iterations());
 
     // Cleanup (outside timing)
     state.PauseTiming();
     engine.reset();
     fs::remove_all(benchPath);
-    state.ResumeTiming();
+    // Do NOT call ResumeTiming() here - benchmark iteration is complete
 }
 
 BENCHMARK(BM_Storage_Retrieve_MT)

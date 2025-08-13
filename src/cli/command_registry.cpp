@@ -17,6 +17,7 @@ std::unique_ptr<ICommand> createAuthCommand();
 std::unique_ptr<ICommand> createStatsCommand();
 std::unique_ptr<ICommand> createUninstallCommand();
 std::unique_ptr<ICommand> createMigrateCommand();
+std::unique_ptr<ICommand> createUpdateCommand();
 std::unique_ptr<ICommand> createBrowseCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
@@ -36,6 +37,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createStatsCommand());
     cli->registerCommand(CommandRegistry::createUninstallCommand());
     cli->registerCommand(CommandRegistry::createMigrateCommand());
+    cli->registerCommand(CommandRegistry::createUpdateCommand());
     cli->registerCommand(CommandRegistry::createBrowseCommand());
 #ifdef YAMS_BUILD_MCP_SERVER
     cli->registerCommand(CommandRegistry::createServeCommand());
@@ -92,6 +94,10 @@ std::unique_ptr<ICommand> CommandRegistry::createUninstallCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createMigrateCommand() {
     return ::yams::cli::createMigrateCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createUpdateCommand() {
+    return ::yams::cli::createUpdateCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createBrowseCommand() {

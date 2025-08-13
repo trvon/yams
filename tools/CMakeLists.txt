@@ -20,7 +20,7 @@ if(YAMS_BUILD_MAINTENANCE_TOOLS)
             spdlog::spdlog
     )
     target_compile_features(yams-stats PRIVATE cxx_std_20)
-    
+
     # Simple GC tool
     add_executable(yams-gc yams-tools/src/simple_gc.cpp)
     target_link_libraries(yams-gc
@@ -32,9 +32,14 @@ if(YAMS_BUILD_MAINTENANCE_TOOLS)
             spdlog::spdlog
     )
     target_compile_features(yams-gc PRIVATE cxx_std_20)
-    
+
+    # Retrieval evaluation tool
+    add_executable(yams-eval eval/retrieval_eval.cpp)
+    # No special libraries required; pure C++20
+    target_compile_features(yams-eval PRIVATE cxx_std_20)
+
     # Installation for maintenance tools
-    install(TARGETS yams-stats yams-gc
+    install(TARGETS yams-stats yams-gc yams-eval
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT maintenance
     )

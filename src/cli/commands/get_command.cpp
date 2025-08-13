@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 
 namespace yams::cli {
 
@@ -61,6 +62,37 @@ public:
                 // Name-based retrieval
                 auto resolveResult = resolveNameToHash(name_);
                 if (!resolveResult) {
+                    // If document not found in YAMS, check if it's a local file
+                    if (resolveResult.error().code == ErrorCode::NotFound && 
+                        std::filesystem::exists(name_)) {
+                        // Fall back to local file operations
+                        if (outputPath_.empty() || outputPath_ == "-") {
+                            // Output to stdout
+                            std::ifstream file(name_, std::ios::binary);
+                            if (!file) {
+                                return Error{ErrorCode::FileNotFound, "Cannot read local file: " + name_};
+                            }
+                            std::cout << file.rdbuf();
+                        } else {
+                            // Copy local file to output path
+                            try {
+                                std::filesystem::copy_file(name_, outputPath_, 
+                                    std::filesystem::copy_options::overwrite_existing);
+                                
+                                auto fileSize = std::filesystem::file_size(name_);
+                                
+                                // Output success message to stderr
+                                std::cerr << "Document retrieved successfully!" << std::endl;
+                                std::cerr << "Output: " << outputPath_ << std::endl;
+                                std::cerr << "Size: " << fileSize << " bytes" << std::endl;
+                            } catch (const std::filesystem::filesystem_error& e) {
+                                return Error{ErrorCode::WriteError, 
+                                           "Failed to copy local file: " + std::string(e.what())};
+                            }
+                        }
+                        return Result<void>();
+                    }
+                    // Not a local file either, return original error
                     return resolveResult.error();
                 }
                 hashToRetrieve = resolveResult.value();
@@ -120,31 +152,59 @@ private:
             return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
         }
         
-        // Search for documents with matching fileName
+        // First try as a path suffix (for real files)
         auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
-        if (!documentsResult) {
-            return Error{documentsResult.error().code, 
-                        "Failed to search for document: " + documentsResult.error().message};
-        }
-        
-        const auto& results = documentsResult.value();
-        
-        if (results.empty()) {
-            return Error{ErrorCode::NotFound, "No document found with name: " + name};
-        }
-        
-        if (results.size() > 1) {
-            // Multiple documents with the same name
-            std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-            for (const auto& doc : results) {
-                std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " 
-                         << doc.fileName << std::endl;
+        if (documentsResult && !documentsResult.value().empty()) {
+            const auto& results = documentsResult.value();
+            if (results.size() > 1) {
+                std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
+                for (const auto& doc : results) {
+                    std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " 
+                             << doc.filePath << std::endl;
+                }
+                return Error{ErrorCode::InvalidOperation, 
+                            "Multiple documents with the same name. Please use hash to specify which one."};
             }
-            return Error{ErrorCode::InvalidOperation, 
-                        "Multiple documents with the same name. Please use hash to specify which one."};
+            return results[0].sha256Hash;
         }
         
-        return results[0].sha256Hash;
+        // Try exact path match
+        documentsResult = metadataRepo->findDocumentsByPath(name);
+        if (documentsResult && !documentsResult.value().empty()) {
+            return documentsResult.value()[0].sha256Hash;
+        }
+        
+        // For stdin documents or when path search fails, use search
+        auto searchResult = metadataRepo->search(name, 100, 0);
+        if (searchResult) {
+            std::vector<std::string> matchingHashes;
+            std::vector<std::string> matchingPaths;
+            
+            for (const auto& result : searchResult.value().results) {
+                // SearchResult contains document directly
+                const auto& doc = result.document;
+                // Check if fileName matches exactly
+                if (doc.fileName == name) {
+                    matchingHashes.push_back(doc.sha256Hash);
+                    matchingPaths.push_back(doc.filePath);
+                }
+            }
+            
+            if (!matchingHashes.empty()) {
+                if (matchingHashes.size() > 1) {
+                    std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
+                    for (size_t i = 0; i < matchingHashes.size(); ++i) {
+                        std::cerr << "  " << matchingHashes[i].substr(0, 12) << "... - " 
+                                 << matchingPaths[i] << std::endl;
+                    }
+                    return Error{ErrorCode::InvalidOperation, 
+                                "Multiple documents with the same name. Please use hash to specify which one."};
+                }
+                return matchingHashes[0];
+            }
+        }
+        
+        return Error{ErrorCode::NotFound, "No document found with name: " + name};
     }
     
     YamsCLI* cli_ = nullptr;

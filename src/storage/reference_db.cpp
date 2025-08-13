@@ -15,6 +15,8 @@ namespace yamsfmt = fmt;
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <vector>
 
@@ -157,8 +159,8 @@ public:
         // Enable foreign keys
         execute("PRAGMA foreign_keys = ON");
         
-        // Set busy timeout
-        sqlite3_busy_timeout(db_, 5000);
+        // Set busy timeout for concurrent transactions (15 seconds)
+        sqlite3_busy_timeout(db_, 15000);
     }
     
     ~Database() {
@@ -199,8 +201,9 @@ public:
         return Statement(db_, sql);
     }
     
-    // Transaction control
+    // Transaction control with proper timeout handling
     void beginTransaction() {
+        // IMMEDIATE transaction with high busy timeout should handle concurrency
         execute("BEGIN IMMEDIATE TRANSACTION");
     }
     
