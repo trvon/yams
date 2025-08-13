@@ -24,7 +24,7 @@ class YamsConan(ConanFile):
         "build_mcp_server": True,  # Enabled by default for v0.0.4
         "build_tests": False,
         "build_benchmarks": False,
-        "enable_pdf": True,  # PDF support enabled by default
+        "enable_pdf": True,  # PDF support enabled by default (uses FetchContent since PDFium not in Conan Center)
     }
 
     generators = "CMakeDeps"  # CMakeToolchain is handled in generate()
@@ -40,6 +40,10 @@ class YamsConan(ConanFile):
         self.requires("lz4/1.9.4")
         self.requires("openssl/3.2.0")
         self.requires("protobuf/3.21.12")
+
+        # Note: PDFium is not available in Conan Center
+        # When enable_pdf=True, CMake will fall back to FetchContent
+        # to download prebuilt binaries from pdfium-binaries project
 
         # For TUI
         if self.options.build_cli:

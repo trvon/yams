@@ -923,38 +923,53 @@ endif()
 
 if(YAMS_ENABLE_PDF)
     message(STATUS "Configuring PDFium for PDF support")
-
-    # Determine platform and architecture
-    if(APPLE)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-            set(PDFIUM_PLATFORM "mac-arm64")
+    
+    # Try to find PDFium from Conan first if using Conan
+    set(PDFium_FOUND FALSE)
+    if(YAMS_USE_CONAN)
+        message(STATUS "Attempting to find PDFium via Conan...")
+        find_package(PDFium QUIET)
+        if(PDFium_FOUND)
+            message(STATUS "PDFium found via Conan")
+            add_library(pdfium::pdfium ALIAS PDFium::PDFium)
         else()
-            set(PDFIUM_PLATFORM "mac-x64")
-        endif()
-    elseif(UNIX)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-            set(PDFIUM_PLATFORM "linux-arm64")
-        else()
-            set(PDFIUM_PLATFORM "linux-x64")
-        endif()
-    elseif(WIN32)
-        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-            set(PDFIUM_PLATFORM "win-x64")
-        else()
-            set(PDFIUM_PLATFORM "win-x86")
+            message(STATUS "PDFium not available via Conan, falling back to FetchContent")
         endif()
     endif()
+    
+    # If PDFium not found via Conan, use FetchContent (both Conan and non-Conan builds)
+    if(NOT PDFium_FOUND)
+        # Determine platform and architecture
+        if(APPLE)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+                set(PDFIUM_PLATFORM "mac-arm64")
+            else()
+                set(PDFIUM_PLATFORM "mac-x64")
+            endif()
+        elseif(UNIX)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+                set(PDFIUM_PLATFORM "linux-arm64")
+            else()
+                set(PDFIUM_PLATFORM "linux-x64")
+            endif()
+        elseif(WIN32)
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+                set(PDFIUM_PLATFORM "win-x64")
+            else()
+                set(PDFIUM_PLATFORM "win-x86")
+            endif()
+        endif()
 
-    # Use prebuilt binaries from pdfium-binaries project
-    # Latest release: PDFium 141.0.7350.0 (chromium/7350)
-    FetchContent_Declare(
-        pdfium
-        URL https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-${PDFIUM_PLATFORM}.tgz
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
+        # Use prebuilt binaries from pdfium-binaries project
+        # Latest release: PDFium 141.0.7350.0 (chromium/7350)
+        FetchContent_Declare(
+            pdfium
+            URL https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-${PDFIUM_PLATFORM}.tgz
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
 
-    FetchContent_GetProperties(pdfium)
-    if(NOT pdfium_POPULATED)
+        FetchContent_GetProperties(pdfium)
+        if(NOT pdfium_POPULATED)
         message(STATUS "Downloading PDFium binaries for ${PDFIUM_PLATFORM}...")
         FetchContent_Populate(pdfium)
 
@@ -1032,7 +1047,8 @@ if(YAMS_ENABLE_PDF)
 
         message(STATUS "PDFium ${PDFIUM_PLATFORM} successfully configured")
         set(YAMS_PDFIUM_FOUND TRUE CACHE BOOL "PDFium library found and configured")
-    endif()
+        endif()  # end if(NOT pdfium_POPULATED)
+    endif()  # end if(NOT PDFium_FOUND)
 else()
     message(STATUS "PDFium support disabled (YAMS_ENABLE_PDF=OFF)")
     set(YAMS_PDFIUM_FOUND FALSE CACHE BOOL "PDFium library found and configured")

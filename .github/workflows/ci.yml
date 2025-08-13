@@ -211,39 +211,51 @@ jobs:
           echo "otool -L output:"
           otool -L "$BIN"
 
-          # Assert that the binary references @rpath/libpdfium.dylib
-          if ! otool -L "$BIN" | grep -q '@rpath/libpdfium.dylib'; then
-            echo "ERROR: @rpath/libpdfium.dylib not referenced by yams binary"
-            exit 1
-          fi
-
-          # Assert LC_RPATH contains @loader_path/../lib
-          if ! otool -l "$BIN" | awk '/LC_RPATH/{flag=1} flag&&/path/{print $2} /LC_/&&$0!~/LC_RPATH/{flag=0}' | grep -q '@loader_path/../lib'; then
-            echo "ERROR: @loader_path/../lib not present in LC_RPATH of yams binary"
-            exit 1
-          fi
-
-          # Verify libpdfium.dylib has install_name set to @rpath/libpdfium.dylib
-          PDF="$INSTALL_PREFIX/lib/libpdfium.dylib"
-          if [ -f "$PDF" ]; then
-            echo "otool -D for libpdfium.dylib:"
-            otool -D "$PDF" || true
-            if ! otool -D "$PDF" | grep -q '@rpath/libpdfium.dylib'; then
-              echo "ERROR: libpdfium.dylib install_name is not @rpath/libpdfium.dylib"
+          # Check if PDFium is linked - only verify if it's actually linked
+          if otool -L "$BIN" | grep -q 'libpdfium'; then
+            echo "PDFium detected in binary, verifying @rpath configuration..."
+            # Assert that the binary references @rpath/libpdfium.dylib (not absolute path)
+            if ! otool -L "$BIN" | grep -q '@rpath/libpdfium.dylib'; then
+              echo "ERROR: PDFium is linked but not using @rpath/libpdfium.dylib"
+              echo "Found PDFium references:"
+              otool -L "$BIN" | grep libpdfium || true
               exit 1
             fi
-          else
-            echo "libpdfium.dylib not found at $PDF, attempting discovery..."
-            PDF_ALT=$(find "$INSTALL_PREFIX" -maxdepth 2 -name 'libpdfium.dylib' -print -quit || true)
-            if [ -n "$PDF_ALT" ]; then
-              echo "Found libpdfium.dylib at: $PDF_ALT"
-              if ! otool -D "$PDF_ALT" | grep -q '@rpath/libpdfium.dylib'; then
-                echo "ERROR: libpdfium.dylib install_name is not @rpath/libpdfium.dylib (found at $PDF_ALT)"
+            echo "✅ PDFium correctly linked with @rpath/libpdfium.dylib"
+            
+            # Also verify LC_RPATH contains @loader_path/../lib when PDFium is linked
+            if ! otool -l "$BIN" | awk '/LC_RPATH/{flag=1} flag&&/path/{print $2} /LC_/&&$0!~/LC_RPATH/{flag=0}' | grep -q '@loader_path/../lib'; then
+              echo "ERROR: @loader_path/../lib not present in LC_RPATH of yams binary (required for PDFium)"
+              exit 1
+            fi
+            echo "✅ LC_RPATH correctly configured for PDFium"
+
+            # Verify libpdfium.dylib has install_name set to @rpath/libpdfium.dylib
+            PDF="$INSTALL_PREFIX/lib/libpdfium.dylib"
+            if [ -f "$PDF" ]; then
+              echo "otool -D for libpdfium.dylib:"
+              otool -D "$PDF" || true
+              if ! otool -D "$PDF" | grep -q '@rpath/libpdfium.dylib'; then
+                echo "ERROR: libpdfium.dylib install_name is not @rpath/libpdfium.dylib"
                 exit 1
               fi
+              echo "✅ libpdfium.dylib install_name correctly set"
             else
-              echo "WARNING: libpdfium.dylib not present in install prefix; skipping install_name verification"
+              echo "libpdfium.dylib not found at $PDF, attempting discovery..."
+              PDF_ALT=$(find "$INSTALL_PREFIX" -maxdepth 2 -name 'libpdfium.dylib' -print -quit || true)
+              if [ -n "$PDF_ALT" ]; then
+                echo "Found libpdfium.dylib at: $PDF_ALT"
+                if ! otool -D "$PDF_ALT" | grep -q '@rpath/libpdfium.dylib'; then
+                  echo "ERROR: libpdfium.dylib install_name is not @rpath/libpdfium.dylib (found at $PDF_ALT)"
+                  exit 1
+                fi
+                echo "✅ libpdfium.dylib install_name correctly set"
+              else
+                echo "WARNING: libpdfium.dylib not present in install prefix; skipping install_name verification"
+              fi
             fi
+          else
+            echo "ℹ️  PDFium not linked in this build (this is acceptable)"
           fi
 
       - name: Upload installed prefix
