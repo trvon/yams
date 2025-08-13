@@ -144,7 +144,7 @@ jobs:
         if: matrix.build_type == 'conan'
         shell: bash
         run: |
-          cmake --build --preset build-conan-release
+          cmake --build --preset conan-release
 
       - name: Build (Traditional)
         if: matrix.build_type == 'traditional'
