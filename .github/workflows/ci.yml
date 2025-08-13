@@ -22,11 +22,11 @@ jobs:
         include:
           - os: linux-self-hosted
             platform: linux
-            runs_on: '["self-hosted","linux","X64"]'
+            runs_on: '["self-hosted","Linux","X64"]'
             build_type: conan
           - os: linux-self-hosted
             platform: linux
-            runs_on: '["self-hosted","linux","X64"]'
+            runs_on: '["self-hosted","Linux","X64"]'
             build_type: traditional
           - os: macos-latest
             platform: macos

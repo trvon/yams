@@ -5,7 +5,7 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.0.7] - 2025-08-12
+## [0.1.0] - 2025-08-12
 
 ### Added
 - **List Command Enhancement**: Added `--recent N` flag to show N most recent documents
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Page-by-page extraction with configurable options
   - Automatic section detection for academic papers
 - **Metadata Update Command**: New `update` command for modifying document metadata
-  - Update metadata by document hash or name  
+  - Update metadata by document hash or name
   - Support for multiple key-value pairs in single command
   - Enables task tracking and status management workflows
   - Works with both file and stdin documents
@@ -55,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Resolved conflicts between Conan and FetchContent for Google Benchmark
   - Fixed imgui.h include path for browse_command.cpp
   - Fixed compilation issues with performance benchmarks
-  
+
 ### Changed
 - **Extraction Module**: Enhanced to support multiple file formats
   - Modular extractor registration system

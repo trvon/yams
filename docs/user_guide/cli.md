@@ -253,10 +253,29 @@ Options:
   - Maximum number of documents to list (default: 100)
 - --offset <number>
   - Offset for pagination (default: 0)
+- --recent <N>
+  - Show N most recent documents
+- --sort <field>
+  - Sort by: name | size | date | hash (default: date)
+- -r, --reverse
+  - Reverse sort order
+- -v, --verbose
+  - Show detailed information
+- --show-snippets
+  - Show content previews (default: true)
+- --show-metadata
+  - Show all metadata for each document
+- --show-tags
+  - Show document tags (default: true)
+- --snippet-length <N>
+  - Length of content snippets (default: 50)
+- --no-snippets
+  - Disable content previews
 
 Description:
 - Displays documents with comprehensive metadata including names, types, sizes, content snippets, tags, and timestamps.
 - Rich table format shows NAME, TYPE, SIZE, SNIPPET, TAGS, and WHEN columns.
+- The --recent flag filters to the N most recent documents before applying other sorting options.
 - Content snippets provide quick previews of document contents.
 - Multiple output formats support different use cases from human-readable to machine processing.
 
@@ -264,9 +283,12 @@ Examples:
 ```
 yams list
 yams ls  # Using alias
+yams list --recent 10  # Show 10 most recent documents
+yams list --sort size --reverse  # Sort by size, largest first
 yams list --format json
 yams ls --format csv --limit 50  # Using alias
 yams list --format minimal --offset 20
+yams list --no-snippets --show-metadata  # No previews, full metadata
 ```
 
 ---
