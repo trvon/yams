@@ -56,47 +56,14 @@ jobs:
         with:
           changelog_file: CHANGELOG.md
 
-      - name: Install dependencies (Ubuntu self-hosted)
-        if: contains(matrix.os, 'ubuntu')
-        shell: bash
-        run: |
-          echo "Checking for required build tools on self-hosted Ubuntu runner..."
-          
-          # Verify critical tools (assume most are pre-installed on self-hosted)
-          cmake --version || echo "Warning: cmake not found"
-          pkg-config --version || echo "Warning: pkg-config not found"
-          
-          # Check if ninja is installed, install if missing
-          if ! command -v ninja &> /dev/null; then
-            echo "Ninja not found, installing..."
-            sudo apt-get update && sudo apt-get install -y ninja-build
-          fi
-
-      - name: Install dependencies (macOS self-hosted)
-        if: contains(matrix.os, 'macos')
-        shell: bash
-        run: |
-          echo "Checking for required build tools on self-hosted macOS runner..."
-          
-          # Verify critical tools are available
-          cmake --version || echo "Warning: cmake not found"
-          
-          # Set up environment for dependencies (assume they're pre-installed)
-          if [ -d "/opt/homebrew" ]; then
-            # Apple Silicon Homebrew path
-            echo "OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3" >> "$GITHUB_ENV"
-          elif [ -d "/usr/local" ]; then
-            # Intel Homebrew path  
-            echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> "$GITHUB_ENV"
-          fi
 
       - name: Configure (CMake)
         shell: bash
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DYAMS_BUILD_PROFILE=custom \
-            -DYAMS_BUILD_TESTS=ON \
+            -DYAMS_BUILD_PROFILE=release \
+            -DYAMS_BUILD_DOCS=OFF \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args }}

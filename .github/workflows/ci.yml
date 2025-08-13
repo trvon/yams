@@ -45,12 +45,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python (for Conan)
-        if: matrix.build_type == 'conan'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Cache Conan packages
         if: matrix.build_type == 'conan'
         uses: actions/cache@v4
@@ -60,66 +54,10 @@ jobs:
           restore-keys: |
             conan-${{ runner.os }}-${{ matrix.platform }}-
 
-      - name: Install dependencies (Linux self-hosted)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          echo "Checking for required build tools on self-hosted Linux runner..."
-          
-          # Check if ninja is installed, install if missing
-          if ! command -v ninja &> /dev/null; then
-            echo "Ninja not found, installing..."
-            sudo apt-get update && sudo apt-get install -y ninja-build
-          else
-            echo "Ninja is already installed"
-          fi
-          
-          # Verify other critical tools
-          cmake --version || echo "Warning: cmake not found"
-          ninja --version || echo "Warning: ninja still not found after install attempt"
-
-      - name: Install dependencies (macOS self-hosted)
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          echo "Checking for required build tools on self-hosted macOS runner..."
-          
-          # Verify critical tools are available
-          cmake --version || echo "Warning: cmake not found"
-          
-          # For traditional builds, ensure system dependencies are discoverable
-          if [[ "${{ matrix.build_type }}" == "traditional" ]]; then
-            # Assume dependencies are pre-installed, just set environment
-            if [ -d "/opt/homebrew" ]; then
-              # Apple Silicon Homebrew path
-              echo "OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
-            elif [ -d "/usr/local" ]; then
-              # Intel Homebrew path
-              echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
-            fi
-          fi
-
-      - name: Install Conan
-        if: matrix.build_type == 'conan'
-        shell: bash
-        run: |
-          pip install conan
-          conan --version
-
       - name: Configure with Conan
         if: matrix.build_type == 'conan'
         shell: bash
         run: |
-          # Create default profile with C++20
-          conan profile detect --force
-
-          # Fix C++ standard to 20 instead of gnu17
-          if [[ "${{ matrix.platform }}" == "linux" ]]; then
-            sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
-          else
-            sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
-          fi
-
           # Create/refresh Release lockfile
           conan lock create . -s build_type=Release --lockfile-out=conan.lock --build=missing
 
