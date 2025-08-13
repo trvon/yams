@@ -64,7 +64,19 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          echo "Using self-hosted Linux runner; assuming toolchain and build dependencies are pre-installed."
+          echo "Checking for required build tools on self-hosted Linux runner..."
+          
+          # Check if ninja is installed, install if missing
+          if ! command -v ninja &> /dev/null; then
+            echo "Ninja not found, installing..."
+            sudo apt-get update && sudo apt-get install -y ninja-build
+          else
+            echo "Ninja is already installed"
+          fi
+          
+          # Verify other critical tools
+          cmake --version || echo "Warning: cmake not found"
+          ninja --version || echo "Warning: ninja still not found after install attempt"
 
       - name: Install dependencies (macOS)
         if: matrix.platform == 'macos'
@@ -106,14 +118,14 @@ jobs:
 
           # Install dependencies to preset build folder using the lockfile
           conan install . \
-            --output-folder=build/conan-ninja-release \
+            --output-folder=build/conan-release \
             -s build_type=Release \
             --lockfile=conan.lock \
             --build=missing
 
           # Configure with CMake using Conan presets
-          cmake --preset conan-ninja-release -DYAMS_BUILD_DOCS=OFF
-          echo "BUILD_DIR=build/conan-ninja-release" >> $GITHUB_ENV
+          cmake --preset conan-release -DYAMS_BUILD_DOCS=OFF
+          echo "BUILD_DIR=build/conan-release" >> $GITHUB_ENV
 
       - name: Configure (Traditional CMake)
         if: matrix.build_type == 'traditional'
@@ -132,7 +144,7 @@ jobs:
         if: matrix.build_type == 'conan'
         shell: bash
         run: |
-          cmake --build --preset build-conan-ninja-release
+          cmake --build --preset build-conan-release
 
       - name: Build (Traditional)
         if: matrix.build_type == 'traditional'
@@ -144,7 +156,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            ctest --preset test-conan-ninja-release --output-on-failure || true
+            ctest --preset test-conan-release --output-on-failure || true
           else
             ctest --test-dir "$BUILD_DIR" --output-on-failure
             ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^consumer_'
@@ -204,7 +216,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.build_type }}" == "conan" ]]; then
-            cmake --install build/conan-ninja-release --prefix "$INSTALL_PREFIX"
+            cmake --install build/conan-release --prefix "$INSTALL_PREFIX"
           else
             cmake --install "$BUILD_DIR" --config Release --prefix "$INSTALL_PREFIX"
           fi

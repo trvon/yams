@@ -1,3 +1,4 @@
+[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml) [![CI](https://github.com/trvon/yams/actions/workflows/ci.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/ci.yml)
 # YAMS - Yet Another Memory System
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
@@ -22,7 +23,6 @@ My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/
 
 ### Quick Start
 
-#### macOS
 ```bash
 # Install Conan
 pip install conan
@@ -31,32 +31,11 @@ pip install conan
 conan profile detect --force
 
 # Build with Conan
-conan install . --build=missing -s build_type=Release
+conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
 
 cmake --preset conan-release
-cmake --build --preset conan-release -j
-sudo cmake --install build/Release
-```
-
-#### Linux
-```bash
-# Install dependencies
-sudo apt-get update
-sudo apt-get install -y cmake ninja-build pkg-config git
-pip install conan
-
-# One-time: create default Conan profile
-conan profile detect --force
-
-# Build with Conan
-conan install . \
-  --output-folder=build/conan-ninja-release \
-  -s build_type=Release \
-  --build=missing
-
-cmake --preset conan-ninja-release
-cmake --build build/conan-ninja-release -j
-sudo cmake --install build/conan-ninja-release
+cmake --build build/conan-release -j
+sudo cmake --install build/conan-release
 ```
 
 ### Build Options
@@ -71,17 +50,15 @@ sudo cmake --install build/conan-ninja-release
 | `YAMS_ENABLE_PDF` | ON | PDF text extraction support |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 
-### Dependencies (Optional - only if not using Conan)
-
-When using Conan (recommended), dependencies are managed automatically. If building without Conan:
+### Dependencies
 
 ```bash
 # macOS
 brew install openssl@3 protobuf sqlite3 ncurses
 export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
-# Linux (Ubuntu/Debian)
-sudo apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
+# Linux
+apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
 ```
 
 ## Setup
@@ -120,16 +97,11 @@ sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || 
 
 Then re-run:
 ```bash
-# macOS
-conan install . --build=missing -s build_type=Release
-cmake --preset conan-release
-cmake --build --preset conan-release -j
-
-# Linux
 conan install . \
   --output-folder=build/conan-ninja-release \
   -s build_type=Release \
   --build=missing
+
 cmake --preset conan-ninja-release
 cmake --build build/conan-ninja-release -j
 ```
