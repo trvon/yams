@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# YAMS Installation Script
-# Usage: curl -fsSL https://raw.githubusercontent.com/username/yams/main/install.sh | bash
+# YAMS Installation Script - Downloads Pre-Built Binaries
+# This script downloads pre-built binaries from GitHub Releases (built with Conan)
+# Usage: curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
 
 set -euo pipefail
 
@@ -304,6 +305,8 @@ cleanup() {
 main() {
     info "YAMS Installation Script"
     info "========================"
+    info "Downloads pre-built binaries from GitHub Releases"
+    info ""
     
     # Setup cleanup trap
     trap cleanup EXIT
@@ -358,7 +361,7 @@ Options:
 Environment Variables:
   YAMS_VERSION         Version to install (default: latest)
   YAMS_INSTALL_DIR     Installation directory (default: ~/.local/bin)
-  YAMS_GITHUB_USER     GitHub username (default: your-username)
+  YAMS_GITHUB_USER     GitHub username (default: trvon)
   YAMS_GITHUB_REPO     GitHub repository (default: yams)
 
 Examples:
