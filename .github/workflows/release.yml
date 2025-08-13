@@ -78,10 +78,136 @@ jobs:
         run: |
           ctest --test-dir "$BUILD_DIR" --output-on-failure --build-config Release
 
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          mkdir -p "$BUILD_DIR/bench_results"
+          # Find all benchmark executables (named *_bench, *_bench.exe, or *_benchmark*)
+          benches=()
+          while IFS= read -r exe; do
+            [ -n "$exe" ] && benches+=("$exe")
+          done < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" -o -name "*_benchmark*" \) 2>/dev/null | sort)
+          
+          if [ ${#benches[@]} -eq 0 ]; then
+            echo "No benchmark executables found."
+          else
+            for exe in "${benches[@]}"; do
+              name=$(basename "$exe")
+              out="$BUILD_DIR/bench_results/${name%.exe}.json"
+              echo "Running $exe -> $out"
+              "$exe" --benchmark_min_time=0.1 --benchmark_format=json --benchmark_out="$out" || true
+            done
+          fi
+
+      - name: Generate coverage report (Linux only)
+        if: matrix.os == 'ubuntu-self-hosted'
+        shell: bash
+        run: |
+          # Reconfigure with coverage enabled for Linux
+          cmake -S . -B "$BUILD_DIR-coverage" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYAMS_BUILD_PROFILE=release \
+            -DYAMS_BUILD_DOCS=OFF \
+            -DYAMS_ENABLE_COVERAGE=ON \
+            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
+            ${{ matrix.cmake_args }}
+          
+          # Build with coverage
+          cmake --build "$BUILD_DIR-coverage" --config Release --parallel
+          
+          # Run tests to generate coverage data
+          ctest --test-dir "$BUILD_DIR-coverage" --output-on-failure --build-config Release || true
+          
+          # Install gcovr if not present
+          pip install gcovr || true
+          
+          # Generate coverage reports
+          if command -v gcovr &> /dev/null; then
+            gcovr --root . \
+              --exclude '_deps/*' \
+              --exclude 'tests/*' \
+              --exclude '.*src/.*/benchmarks/.*' \
+              --exclude 'tools/*' \
+              --html --html-details \
+              --output "$BUILD_DIR/coverage.html"
+
+            gcovr --root . \
+              --exclude '_deps/*' \
+              --exclude 'tests/*' \
+              --exclude '.*src/.*/benchmarks/.*' \
+              --exclude 'tools/*' \
+              --xml \
+              --output "$BUILD_DIR/coverage.xml"
+
+            # Generate summary for release notes
+            gcovr --root . \
+              --exclude '_deps/*' \
+              --exclude 'tests/*' \
+              --exclude '.*src/.*/benchmarks/.*' \
+              --exclude 'tools/*' \
+              --txt > "$BUILD_DIR/coverage_summary.txt"
+          fi
+
       - name: Install
         shell: bash
         run: |
           cmake --install "$BUILD_DIR" --config Release
+
+      - name: Generate performance summary
+        shell: bash
+        run: |
+          SUMMARY_FILE="$BUILD_DIR/performance_summary.md"
+          echo "## 📊 Performance & Coverage Report (v${{ steps.v.outputs.version }})" > "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+          
+          # Add benchmark results if available
+          if [ -d "$BUILD_DIR/bench_results" ] && [ "$(ls -A $BUILD_DIR/bench_results)" ]; then
+            echo "### ⚡ Benchmark Results" >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+            echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |" >> "$SUMMARY_FILE"
+            echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
+            
+            # Parse JSON benchmark files and extract key metrics
+            for json_file in "$BUILD_DIR/bench_results"/*.json; do
+              if [ -f "$json_file" ]; then
+                python3 -c "
+import json, sys
+try:
+    with open('$json_file') as f:
+        data = json.load(f)
+        if 'benchmarks' in data:
+            for bench in data['benchmarks']:
+                name = bench.get('name', 'Unknown')
+                real_time = bench.get('real_time', 0)
+                cpu_time = bench.get('cpu_time', 0) 
+                bytes_per_sec = bench.get('bytes_per_second', 0)
+                items_per_sec = bench.get('items_per_second', 0)
+                memory = f'{bytes_per_sec/1024/1024:.1f}MB/s' if bytes_per_sec > 0 else f'{items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
+                print(f'| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |')
+except: pass
+" >> "$SUMMARY_FILE" 2>/dev/null || true
+              fi
+            done
+            echo "" >> "$SUMMARY_FILE"
+          else
+            echo "### ⚡ Benchmark Results" >> "$SUMMARY_FILE"
+            echo "No benchmarks available for this platform." >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+          fi
+          
+          # Add coverage results if available (Linux only)
+          if [ "${{ matrix.os }}" = "ubuntu-self-hosted" ] && [ -f "$BUILD_DIR/coverage_summary.txt" ]; then
+            echo "### 🎯 Code Coverage" >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+            echo '```' >> "$SUMMARY_FILE"
+            cat "$BUILD_DIR/coverage_summary.txt" >> "$SUMMARY_FILE"
+            echo '```' >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+          fi
+          
+          echo "Generated performance summary at: $SUMMARY_FILE"
+          cat "$SUMMARY_FILE"
 
       - name: Package
         id: pkg
@@ -101,11 +227,30 @@ jobs:
           echo "asset_path=$OUTDIR/$ASSET" >> "$GITHUB_OUTPUT"
           echo "Created asset: $OUTDIR/$ASSET"
 
-      - name: Create GitHub Release and Upload Asset
+      - name: Combine release notes with performance summary
+        shell: bash
+        run: |
+          COMBINED_NOTES="$BUILD_DIR/combined_release_notes.md"
+          echo "${{ steps.changelog.outputs.release_notes }}" > "$COMBINED_NOTES"
+          echo "" >> "$COMBINED_NOTES"
+          
+          # Add performance summary if it exists
+          if [ -f "$BUILD_DIR/performance_summary.md" ]; then
+            cat "$BUILD_DIR/performance_summary.md" >> "$COMBINED_NOTES"
+          fi
+          
+          echo "Combined release notes:"
+          cat "$COMBINED_NOTES"
+
+      - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.release_notes }}
-          files: ${{ steps.pkg.outputs.asset_path }}
+          body_path: ${{ env.BUILD_DIR }}/combined_release_notes.md
+          files: |
+            ${{ steps.pkg.outputs.asset_path }}
+            ${{ env.BUILD_DIR }}/coverage.html
+            ${{ env.BUILD_DIR }}/coverage.xml
+            ${{ env.BUILD_DIR }}/bench_results/*.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

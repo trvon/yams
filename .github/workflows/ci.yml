@@ -112,7 +112,11 @@ jobs:
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
           # Find all benchmark executables (named *_bench, *_bench.exe, or *_benchmark*)
-          mapfile -t benches < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" -o -name "*_benchmark*" \) 2>/dev/null | sort)
+          benches=()
+          while IFS= read -r exe; do
+            [ -n "$exe" ] && benches+=("$exe")
+          done < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" -o -name "*_benchmark*" \) 2>/dev/null | sort)
+          
           if [ ${#benches[@]} -eq 0 ]; then
             echo "No benchmark executables found."
           else
@@ -160,14 +164,27 @@ jobs:
       - name: Install
         shell: bash
         run: |
-          cmake --install "$BUILD_DIR" --config Release --prefix "$INSTALL_PREFIX"
+          # Make install prefix absolute path to avoid confusion
+          ABSOLUTE_PREFIX="$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
+          echo "Installing to: $ABSOLUTE_PREFIX"
+          
+          cmake --install "$BUILD_DIR" --config Release --prefix "$ABSOLUTE_PREFIX"
+          
           # Verify installation succeeded
-          if [ ! -d "$INSTALL_PREFIX" ]; then
-            echo "ERROR: Install prefix directory does not exist!"
+          if [ ! -d "$ABSOLUTE_PREFIX" ]; then
+            echo "ERROR: Install prefix directory does not exist at: $ABSOLUTE_PREFIX"
+            echo "Current working directory: $(pwd)"
+            echo "BUILD_DIR contents:"
+            ls -la "$BUILD_DIR" || true
+            echo "GITHUB_WORKSPACE contents:"
+            ls -la "$GITHUB_WORKSPACE" || true
             exit 1
           fi
-          echo "Installation contents:"
-          ls -la "$INSTALL_PREFIX" || true
+          echo "Installation contents at $ABSOLUTE_PREFIX:"
+          ls -la "$ABSOLUTE_PREFIX" || true
+          
+          # Update environment variable for subsequent steps
+          echo "INSTALL_PREFIX=$ABSOLUTE_PREFIX" >> $GITHUB_ENV
 
       - name: Verify macOS packaging (PDFium @rpath and rpath)
         if: matrix.platform == 'macos'
