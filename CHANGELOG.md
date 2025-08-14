@@ -5,7 +5,29 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.1] - 2025-08-14
+## [v0.2.2] - 2025-08-14
+
+### Fixed
+- **Docker Build C++20 Configuration**
+  - Added explicit C++20 standard setting in Conan profile
+  - Fixed "Current cppstd (gnu17) is lower than required C++ standard (20)" error
+  - Ensures Docker builds use correct C++ standard matching project requirements
+- **Release Notes Formatting**
+  - Fixed Conan profile output contaminating GitHub release descriptions
+  - Redirected debug output to stderr to keep release notes clean
+  - Release pages now display properly formatted markdown
+- **macOS Cross-Compilation**
+  - Fixed Boost build failures when cross-compiling x86_64 on ARM64 macOS
+  - Disabled Boost.Locale and Boost.Stacktrace.Backtrace components that fail in cross-compilation
+  - Enables successful builds on Apple Silicon machines with Rosetta 2
+
+### Changed
+- **Docker Build Process**
+  - Switched from CMake presets to direct CMake commands with Conan toolchain
+  - Added ninja-build to Docker dependencies for faster builds
+  - More robust build process that doesn't rely on dynamically generated presets
+
+## [v0.2.1] - 2025-08-13
 
 ### Fixed
 - **Build System Standardization**: All workflows now use Conan exclusively
@@ -15,9 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Resolves "target requires target that is not in any export set" errors
 - **Docker Build Issues**
   - Fixed Conan 2.0 command syntax (`conan profile show` instead of `conan profile show default`)
+  - Fixed CMake preset issues by using direct CMake commands with Conan toolchain
+  - Added ninja-build to Docker dependencies for faster builds
   - Improved version handling: uses git tags for releases, `dev-<sha>` for development builds
   - Fixed undefined variable warnings in Dockerfile labels
   - Added proper build argument handling for YAMS_VERSION and GITHUB_SHA
+- **Release Page Formatting**
+  - Fixed Conan profile output contaminating release notes
+  - Redirected debug output to stderr to keep release notes clean
 
 ### Changed
 - **MIME Type Detection Default Behavior**

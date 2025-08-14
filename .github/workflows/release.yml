@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-self-hosted
+          - os: linux-self-hosted
             runs_on: '["self-hosted", "Linux", "X64"]'
             packaging: tgz
             cmake_args: ""
@@ -87,16 +87,21 @@ jobs:
           else
             sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           fi
-          conan profile show
+          # Show profile for debugging (to stderr to avoid contaminating outputs)
+          echo "Conan profile configured:" >&2
+          conan profile show >&2
 
       - name: Configure with Conan
         shell: bash
         run: |
           # Install dependencies with Conan
+          # Disable problematic Boost components for cross-compilation
           conan install . \
             --output-folder=build/conan-release \
             -s build_type=Release \
-            --build=missing
+            --build=missing \
+            -o "boost/*:without_locale=True" \
+            -o "boost/*:with_stacktrace_backtrace=False"
           
           # Configure with CMake using Conan presets
           cmake --preset conan-release \

@@ -33,8 +33,10 @@ WORKDIR /src
 # Copy source code
 COPY . .
 
-# Configure Conan profile
+# Configure Conan profile with C++20
 RUN conan profile detect --force && \
+    sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default && \
+    echo "Conan profile configured with C++20:" && \
     conan profile show
 
 # Build YAMS using Conan

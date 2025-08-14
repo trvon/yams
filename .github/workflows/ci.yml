@@ -66,12 +66,15 @@ jobs:
           conan lock create . -s build_type=Release --options "yams/*:build_tests=True" --lockfile-out=conan.lock --build=missing
 
           # Install dependencies to preset build folder using the lockfile
+          # Disable problematic Boost components for cross-compilation compatibility
           conan install . \
             --output-folder=build/conan-release \
             -s build_type=Release \
             --options "yams/*:build_tests=True" \
             --lockfile=conan.lock \
-            --build=missing
+            --build=missing \
+            -o "boost/*:without_locale=True" \
+            -o "boost/*:with_stacktrace_backtrace=False"
 
           # Configure with CMake using Conan presets (tests will be built)
           # Enable coverage for Linux builds
