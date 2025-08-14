@@ -39,6 +39,7 @@ jobs:
 
       - name: Cache Conan packages
         uses: actions/cache@v4
+        continue-on-error: true
         with:
           path: ~/.conan2/p
           key: conan-${{ runner.os }}-${{ matrix.platform }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
@@ -54,10 +55,48 @@ jobs:
           fi
           conan --version
           
+          # Configure Conan for robustness
+          conan config set core.net.retry=3
+          conan config set core.net.retry_wait=5
+          
           # Ensure profile exists
           if [ ! -f ~/.conan2/profiles/default ]; then
             conan profile detect --force
           fi
+
+      - name: Clean corrupted Conan cache if needed
+        shell: bash
+        run: |
+          # Function to remove corrupted package
+          clean_corrupted_package() {
+            local package="$1"
+            echo "Cleaning corrupted package: $package"
+            # Try to remove the specific package
+            conan remove "$package" -c 2>/dev/null || true
+            # Also try to clean the download cache
+            find ~/.conan2/p -name "*${package%%/*}*" -type f -name "*.tgz" -delete 2>/dev/null || true
+          }
+          
+          # Test if cache has issues by trying to list packages
+          if ! conan list "*" 2>/dev/null; then
+            echo "Conan cache appears corrupted, cleaning locks and temp files..."
+            conan cache clean --locks --temp 2>/dev/null || true
+            echo "Conan cache locks/temp cleaned"
+          fi
+          
+          # Known problematic packages that often get corrupted
+          for pkg in "gtest/1.14.0" "boost/1.83.0"; do
+            if [ -d ~/.conan2/p ] && find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null | grep -q .; then
+              # Check if the tgz files are valid
+              for tgz in $(find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null); do
+                if ! tar -tzf "$tgz" >/dev/null 2>&1; then
+                  echo "Found corrupted archive: $tgz"
+                  rm -f "$tgz"
+                  clean_corrupted_package "$pkg"
+                fi
+              done
+            fi
+          done
 
       - name: Configure with Conan (with tests enabled)
         shell: bash

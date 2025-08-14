@@ -1409,7 +1409,7 @@ set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
-include(CPack)
+# CPack already included above at line 1306
 
 # Generate and install CMake package config for find_package(Yams)
 include(CMakePackageConfigHelpers)

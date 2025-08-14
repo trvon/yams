@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kronos/scripts/local-ci/matrix.sh
+# yams/scripts/local-ci/matrix.sh
 #
 # Simulate the Ubuntu GitHub Actions job in a Docker container.
 #

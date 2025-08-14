@@ -19,21 +19,25 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 - Crash safety: WAL
 - Fast and portable CLI + MCP server
 
-## Install
+## Versioning
 
-Quick install (prebuilt binaries):
+YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
-```
-
-Docker:
+### Build
 
 ```bash
-docker run --rm -it ghcr.io/trvon/yams:latest --version
-```
+# Install Conan
+pip install conan
 
-From source (Conan): see Get Started → Installation.
+# One-time: create default Conan profile
+conan profile detect --force
+
+# Build with Conan (recommended - this is what creates the release binaries)
+conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
+cmake --preset conan-release
+cmake --build --preset conan-release
+sudo cmake --install build/conan-release/build/Release
+```
 
 ## Quick start
 
