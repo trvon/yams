@@ -1,10 +1,12 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/cli/progress_indicator.h>
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <iomanip>
 
 namespace yams::cli {
 
@@ -28,6 +30,7 @@ public:
         group->add_option("--name", name_, "Delete document by name");
         group->add_option("--names", names_, "Delete multiple documents by names (comma-separated)");
         group->add_option("--pattern", pattern_, "Delete documents matching pattern (e.g., *.log)");
+        group->add_option("--directory", directory_, "Directory to delete (requires --recursive)");
         group->require_option(1);
         
         // Flags (can be combined with any deletion method)
@@ -35,6 +38,7 @@ public:
         cmd->add_flag("--dry-run", dryRun_, "Preview what would be deleted without actually deleting");
         cmd->add_flag("--keep-refs", keepRefs_, "Keep reference counts (don't decrement)");
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+        cmd->add_flag("--recursive,-r", recursive_, "Delete directory contents recursively");
         
         cmd->callback([this]() { 
             auto result = execute();
@@ -87,6 +91,17 @@ public:
                     return result.error();
                 }
                 toDelete = result.value();
+            } else if (!directory_.empty()) {
+                // Delete by directory
+                if (!recursive_) {
+                    return Error{ErrorCode::InvalidArgument, 
+                                "Directory deletion requires --recursive flag for safety"};
+                }
+                auto result = resolveDirectoryToHashes(directory_);
+                if (!result) {
+                    return result.error();
+                }
+                toDelete = result.value();
             } else {
                 return Error{ErrorCode::InvalidArgument, "No deletion criteria specified"};
             }
@@ -108,11 +123,31 @@ public:
                 }
             }
             
+            // Calculate total size if needed for confirmation
+            uint64_t totalSize = 0;
+            if (!force_ || verbose_) {
+                auto metadataRepo = cli_->getMetadataRepository();
+                if (metadataRepo) {
+                    for (const auto& [hash, name] : toDelete) {
+                        auto docResult = metadataRepo->getDocumentByHash(hash);
+                        if (docResult && docResult.value()) {
+                            totalSize += docResult.value()->fileSize;
+                        }
+                    }
+                }
+            }
+            
             // Confirm deletion unless --force is used
             if (!force_) {
                 std::string prompt = toDelete.size() == 1 
-                    ? "Are you sure you want to delete 1 document? (y/N): "
-                    : "Are you sure you want to delete " + std::to_string(toDelete.size()) + " documents? (y/N): ";
+                    ? "Delete 1 document"
+                    : "Delete " + std::to_string(toDelete.size()) + " documents";
+                
+                if (totalSize > 0) {
+                    prompt += " (total size: " + formatSize(totalSize) + ")";
+                }
+                prompt += "? (y/N): ";
+                
                 std::cout << prompt;
                 std::string response;
                 std::getline(std::cin, response);
@@ -127,7 +162,15 @@ public:
             size_t failCount = 0;
             std::vector<std::string> failures;
             
-            for (const auto& [hash, name] : toDelete) {
+            // Use progress indicator for large deletions
+            ProgressIndicator progress(ProgressIndicator::Style::Percentage);
+            if (toDelete.size() > 100 && !dryRun_) {
+                progress.start("Deleting files");
+            }
+            
+            for (size_t i = 0; i < toDelete.size(); ++i) {
+                const auto& [hash, name] = toDelete[i];
+                
                 if (verbose_) {
                     std::cout << "Deleting " << name << "...\n";
                 }
@@ -135,23 +178,59 @@ public:
                 // Check if document exists
                 auto existsResult = store->exists(hash);
                 if (!existsResult || !existsResult.value()) {
+                    // File doesn't exist in storage, check if we need to clean up metadata
+                    if (auto metadataRepo = cli_->getMetadataRepository()) {
+                        auto docResult = metadataRepo->getDocumentByHash(hash);
+                        if (docResult && docResult.value()) {
+                            // Clean up orphaned metadata entry
+                            auto deleteMetaResult = metadataRepo->deleteDocument(docResult.value()->id);
+                            if (deleteMetaResult) {
+                                successCount++;
+                                if (verbose_) {
+                                    std::cout << "  Cleaned orphaned metadata for " << name << "\n";
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     failures.push_back(name + ": not found in storage");
                     failCount++;
                     continue;
                 }
                 
-                // Delete the document
+                // Delete the document from storage
                 auto deleteResult = store->remove(hash);
                 if (!deleteResult) {
                     failures.push_back(name + ": " + deleteResult.error().message);
                     failCount++;
                 } else {
                     successCount++;
+                    
+                    // Also remove from metadata repository
+                    if (auto metadataRepo = cli_->getMetadataRepository()) {
+                        auto docResult = metadataRepo->getDocumentByHash(hash);
+                        if (docResult && docResult.value()) {
+                            auto deleteMetaResult = metadataRepo->deleteDocument(docResult.value()->id);
+                            if (!deleteMetaResult) {
+                                spdlog::warn("Failed to delete metadata for {}: {}", 
+                                           hash, deleteMetaResult.error().message);
+                            }
+                        }
+                    }
+                    
                     if (verbose_) {
                         std::cout << "  Deleted " << name << "\n";
                     }
                 }
+                
+                // Update progress indicator
+                if (toDelete.size() > 100 && !dryRun_) {
+                    progress.update(i + 1, toDelete.size());
+                }
             }
+            
+            // Stop progress indicator
+            progress.stop();
             
             // Report results
             if (successCount > 0) {
@@ -170,8 +249,7 @@ public:
                 std::cout << "\nStorage statistics:\n";
                 std::cout << "  Total objects: " << stats.totalObjects << "\n";
                 std::cout << "  Unique blocks: " << stats.uniqueBlocks << "\n";
-                std::cout << "  Storage size: " << (stats.totalBytes / (1024.0 * 1024.0)) 
-                         << " MB\n";
+                std::cout << "  Storage size: " << formatSize(stats.totalBytes) << "\n";
             }
             
             return failCount > 0 && successCount == 0 
@@ -193,6 +271,8 @@ private:
     bool dryRun_ = false;
     bool keepRefs_ = false;
     bool verbose_ = false;
+    bool recursive_ = false;
+    std::string directory_;
     
     // Helper methods for name resolution
     Result<std::vector<std::pair<std::string, std::string>>> resolveNameToHashes(const std::string& name) {
@@ -347,6 +427,65 @@ private:
         }
         
         return patIdx == patLen;
+    }
+    
+    Result<std::vector<std::pair<std::string, std::string>>> 
+    resolveDirectoryToHashes(const std::string& directory) {
+        auto metadataRepo = cli_->getMetadataRepository();
+        if (!metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+        }
+        
+        // Build pattern for directory contents
+        std::string pattern = directory;
+        if (!pattern.empty() && pattern.back() != '/') {
+            pattern += '/';
+        }
+        pattern += "%";
+        
+        auto documentsResult = metadataRepo->findDocumentsByPath(pattern);
+        if (!documentsResult) {
+            return Error{ErrorCode::DatabaseError, 
+                        "Failed to query directory: " + documentsResult.error().message};
+        }
+        
+        std::vector<std::pair<std::string, std::string>> results;
+        std::string dirPrefix = directory;
+        if (!dirPrefix.empty() && dirPrefix.back() != '/') {
+            dirPrefix += '/';
+        }
+        
+        for (const auto& doc : documentsResult.value()) {
+            // Verify path starts with directory
+            if (doc.filePath.find(dirPrefix) == 0 || doc.filePath == directory) {
+                results.push_back({doc.sha256Hash, doc.filePath});
+            }
+        }
+        
+        if (results.empty()) {
+            return Error{ErrorCode::NotFound, "No documents found in directory: " + directory};
+        }
+        
+        return results;
+    }
+    
+    std::string formatSize(uint64_t bytes) const {
+        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = static_cast<double>(bytes);
+        
+        while (size >= 1024 && unitIndex < 4) {
+            size /= 1024;
+            unitIndex++;
+        }
+        
+        std::ostringstream oss;
+        if (unitIndex == 0) {
+            oss << bytes << " B";
+        } else {
+            oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
+        }
+        return oss.str();
     }
 };
 

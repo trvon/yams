@@ -549,7 +549,74 @@ public:
     // Get statistics
     ContentStoreStats getStats() const override {
         std::shared_lock lock(statsMutex_);
-        return stats_;
+        ContentStoreStats currentStats = stats_;
+        
+        // If in-memory stats are zero, try to get actual counts
+        if (currentStats.totalObjects == 0 || currentStats.totalBytes == 0) {
+            // First try storage engine stats
+            auto storageStats = storage_->getStats();
+            if (storageStats.totalObjects > 0) {
+                currentStats.totalObjects = storageStats.totalObjects.load();
+                currentStats.totalBytes = storageStats.totalBytes.load();
+            }
+            
+            // If still zero, count actual files on disk (more expensive)
+            if (currentStats.totalObjects == 0) {
+                auto manifestPath = config_.storagePath / "manifests";
+                auto objectsPath = config_.storagePath / "objects";
+                
+                size_t fileCount = 0;
+                size_t totalSize = 0;
+                
+                // Count manifest files
+                if (std::filesystem::exists(manifestPath)) {
+                    try {
+                        for (const auto& entry : std::filesystem::recursive_directory_iterator(manifestPath)) {
+                            if (entry.is_regular_file() && entry.path().extension() == ".manifest") {
+                                fileCount++;
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("Failed to count manifest files: {}", e.what());
+                    }
+                }
+                
+                // If no manifests found, count object files as fallback
+                if (fileCount == 0 && std::filesystem::exists(objectsPath)) {
+                    try {
+                        for (const auto& entry : std::filesystem::recursive_directory_iterator(objectsPath)) {
+                            if (entry.is_regular_file()) {
+                                fileCount++;
+                                totalSize += entry.file_size();
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("Failed to count object files: {}", e.what());
+                    }
+                }
+                
+                if (fileCount > 0) {
+                    currentStats.totalObjects = fileCount;
+                    if (totalSize > 0) {
+                        currentStats.totalBytes = totalSize;
+                    }
+                }
+            }
+        }
+        
+        // Get unique block count and total bytes from reference counter
+        if (refCounter_) {
+            auto refStats = refCounter_->getStats();
+            if (refStats) {
+                currentStats.uniqueBlocks = refStats.value().totalBlocks;
+                // Use ref counter's byte count if we don't have one
+                if (currentStats.totalBytes == 0 && refStats.value().totalBytes > 0) {
+                    currentStats.totalBytes = refStats.value().totalBytes;
+                }
+            }
+        }
+        
+        return currentStats;
     }
     
     // Check health

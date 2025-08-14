@@ -5,6 +5,7 @@ set(CLI_SOURCES
     yams_cli.cpp
     command_registry.cpp
     time_parser.cpp
+    progress_indicator.cpp
     commands/add_command.cpp
     commands/get_command.cpp
     commands/restore_command.cpp
@@ -23,6 +24,7 @@ set(CLI_SOURCES
     commands/browse_command.cpp
     commands/completion_command.cpp
     commands/repair_mime_command.cpp
+    commands/repair_command.cpp
     tui/browse_state.cpp
     tui/browse_services.cpp
     tui/browse_commands.cpp
@@ -48,6 +50,7 @@ target_link_libraries(yams_cli
         spdlog::spdlog
         OpenSSL::Crypto
         imtui-ncurses
+        SQLite::SQLite3
 )
 
 # Link MCP library only if enabled

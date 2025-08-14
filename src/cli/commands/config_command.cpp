@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <iomanip>
 
 namespace yams::cli {
 
@@ -162,6 +163,14 @@ private:
                     value = value.substr(1, value.size() - 2);
                 }
                 
+                // Remove comments from value
+                size_t comment = value.find('#');
+                if (comment != std::string::npos) {
+                    value = value.substr(0, comment);
+                    // Trim again after removing comment
+                    value.erase(value.find_last_not_of(" \t") + 1);
+                }
+                
                 config[currentSection + key] = value;
             }
         }
@@ -197,6 +206,14 @@ private:
     Result<void> executeSet() {
         try {
             auto configPath = getConfigPath();
+            
+            // Validate compression settings
+            if (key_.starts_with("compression.")) {
+                auto validationResult = validateCompressionSetting(key_, value_);
+                if (!validationResult) {
+                    return validationResult;
+                }
+            }
             
             // For now, just display what would be set
             std::cout << "Would set " << key_ << " = " << value_ << "\n";
@@ -256,9 +273,27 @@ private:
                 errors.push_back("Missing required field: auth.private_key_path");
             }
             
+            // Validate compression settings if present
+            validateCompressionConfig(config, errors);
+            
             if (errors.empty()) {
                 std::cout << "✓ Configuration is valid\n";
                 std::cout << "  Config file: " << configPath << "\n";
+                
+                // Show compression settings if present
+                if (config.find("compression.enable") != config.end()) {
+                    std::cout << "\n  Compression Settings:\n";
+                    std::cout << "    Enabled: " << config["compression.enable"] << "\n";
+                    if (config.find("compression.algorithm") != config.end()) {
+                        std::cout << "    Algorithm: " << config["compression.algorithm"] << "\n";
+                    }
+                    if (config.find("compression.zstd_level") != config.end()) {
+                        std::cout << "    Zstd Level: " << config["compression.zstd_level"] << "\n";
+                    }
+                    if (config.find("compression.lzma_level") != config.end()) {
+                        std::cout << "    LZMA Level: " << config["compression.lzma_level"] << "\n";
+                    }
+                }
             } else {
                 std::cerr << "✗ Configuration validation failed:\n";
                 for (const auto& error : errors) {
@@ -304,6 +339,110 @@ private:
             
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+    
+    Result<void> validateCompressionSetting(const std::string& key, const std::string& value) {
+        if (key == "compression.enable" || key == "compression.async_compression") {
+            if (value != "true" && value != "false") {
+                return Error{ErrorCode::InvalidArgument, 
+                           key + " must be 'true' or 'false'"};
+            }
+        } else if (key == "compression.algorithm") {
+            if (value != "zstd" && value != "lzma") {
+                return Error{ErrorCode::InvalidArgument, 
+                           "compression.algorithm must be 'zstd' or 'lzma'"};
+            }
+        } else if (key == "compression.zstd_level") {
+            try {
+                int level = std::stoi(value);
+                if (level < 1 || level > 22) {
+                    return Error{ErrorCode::InvalidArgument, 
+                               "compression.zstd_level must be between 1 and 22"};
+                }
+            } catch (...) {
+                return Error{ErrorCode::InvalidArgument, 
+                           "compression.zstd_level must be a number between 1 and 22"};
+            }
+        } else if (key == "compression.lzma_level") {
+            try {
+                int level = std::stoi(value);
+                if (level < 0 || level > 9) {
+                    return Error{ErrorCode::InvalidArgument, 
+                               "compression.lzma_level must be between 0 and 9"};
+                }
+            } catch (...) {
+                return Error{ErrorCode::InvalidArgument, 
+                           "compression.lzma_level must be a number between 0 and 9"};
+            }
+        } else if (key == "compression.max_concurrent_compressions") {
+            try {
+                int count = std::stoi(value);
+                if (count < 1 || count > 32) {
+                    return Error{ErrorCode::InvalidArgument, 
+                               "compression.max_concurrent_compressions must be between 1 and 32"};
+                }
+            } catch (...) {
+                return Error{ErrorCode::InvalidArgument, 
+                           "compression.max_concurrent_compressions must be a number between 1 and 32"};
+            }
+        } else if (key.starts_with("compression.") && 
+                  (key.ends_with("_threshold") || key.ends_with("_above") || 
+                   key.ends_with("_below") || key.ends_with("_days"))) {
+            try {
+                int num = std::stoi(value);
+                if (num < 0) {
+                    return Error{ErrorCode::InvalidArgument, 
+                               key + " must be a positive number"};
+                }
+            } catch (...) {
+                return Error{ErrorCode::InvalidArgument, 
+                           key + " must be a positive number"};
+            }
+        }
+        
+        return Result<void>();
+    }
+    
+    void validateCompressionConfig(const std::map<std::string, std::string>& config, 
+                                   std::vector<std::string>& errors) {
+        // Check compression level ranges
+        if (config.find("compression.zstd_level") != config.end()) {
+            try {
+                int level = std::stoi(config.at("compression.zstd_level"));
+                if (level < 1 || level > 22) {
+                    errors.push_back("compression.zstd_level must be between 1 and 22");
+                }
+            } catch (...) {
+                errors.push_back("compression.zstd_level must be a valid number");
+            }
+        }
+        
+        if (config.find("compression.lzma_level") != config.end()) {
+            try {
+                int level = std::stoi(config.at("compression.lzma_level"));
+                if (level < 0 || level > 9) {
+                    errors.push_back("compression.lzma_level must be between 0 and 9");
+                }
+            } catch (...) {
+                errors.push_back("compression.lzma_level must be a valid number");
+            }
+        }
+        
+        // Check algorithm validity
+        if (config.find("compression.algorithm") != config.end()) {
+            const auto& algo = config.at("compression.algorithm");
+            if (algo != "zstd" && algo != "lzma") {
+                errors.push_back("compression.algorithm must be 'zstd' or 'lzma'");
+            }
+        }
+        
+        // Check boolean values
+        for (const auto& [key, value] : config) {
+            if ((key == "compression.enable" || key == "compression.async_compression") &&
+                value != "true" && value != "false") {
+                errors.push_back(key + " must be 'true' or 'false'");
+            }
         }
     }
 };

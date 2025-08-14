@@ -8,6 +8,11 @@
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <yams/version.hpp>
+#include <fstream>
+#include <sstream>
+#include <map>
+
+namespace fs = std::filesystem;
 
 #ifdef __linux__
 #include <unistd.h>
@@ -72,7 +77,7 @@ YamsCLI::YamsCLI() {
     // Default: suppress info/debug unless --verbose is used
     spdlog::set_level(spdlog::level::warn);
 
-    app_ = std::make_unique<CLI::App>("YAMS Document Management System", "yams");
+    app_ = std::make_unique<CLI::App>("YAMS", "yams");
     app_->set_version_flag("--version", YAMS_VERSION_STRING);
     
     // Global options
@@ -291,10 +296,13 @@ Result<void> YamsCLI::initializeStorage() {
         // Build content store
         api::ContentStoreBuilder builder;
         builder.withStoragePath(dataPath_ / "storage")
-               .withChunkSize(DEFAULT_CHUNK_SIZE)
-               .withCompression(true)
-               .withCompressionType("zstd")
-               .withCompressionLevel(3)
+               .withChunkSize(DEFAULT_CHUNK_SIZE);
+        
+        // Load compression settings from config
+        auto compressionConfig = loadCompressionConfig();
+        builder.withCompression(compressionConfig.enable)
+               .withCompressionType(compressionConfig.algorithm)
+               .withCompressionLevel(compressionConfig.level)
                .withDeduplication(true)
                .withIntegrityChecks(true);
         
@@ -413,6 +421,125 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
     
     spdlog::warn("magic_numbers.json not found in any standard location");
     return fs::path(); // Return empty path if not found
+}
+
+YamsCLI::CompressionConfig YamsCLI::loadCompressionConfig() const {
+    CompressionConfig config;
+    config.enable = true;  // Default
+    config.algorithm = "zstd";  // Default
+    config.level = 3;  // Default
+    
+    // Try to read from config file
+    fs::path configPath = getConfigPath();
+    if (!fs::exists(configPath)) {
+        return config;  // Return defaults
+    }
+    
+    auto configMap = parseSimpleToml(configPath);
+    
+    // Load compression enable flag
+    if (configMap.find("compression.enable") != configMap.end()) {
+        config.enable = (configMap["compression.enable"] == "true");
+    }
+    
+    // Load algorithm
+    if (configMap.find("compression.algorithm") != configMap.end()) {
+        config.algorithm = configMap["compression.algorithm"];
+    }
+    
+    // Load compression level based on algorithm
+    if (config.algorithm == "zstd" && configMap.find("compression.zstd_level") != configMap.end()) {
+        try {
+            config.level = std::stoi(configMap["compression.zstd_level"]);
+        } catch (...) {
+            config.level = 3;  // Default zstd level
+        }
+    } else if (config.algorithm == "lzma" && configMap.find("compression.lzma_level") != configMap.end()) {
+        try {
+            config.level = std::stoi(configMap["compression.lzma_level"]);
+        } catch (...) {
+            config.level = 6;  // Default lzma level
+        }
+    }
+    
+    spdlog::debug("Loaded compression config: enable={}, algorithm={}, level={}",
+                 config.enable, config.algorithm, config.level);
+    
+    return config;
+}
+
+fs::path YamsCLI::getConfigPath() const {
+    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
+    const char* homeEnv = std::getenv("HOME");
+    
+    fs::path configHome;
+    if (xdgConfigHome) {
+        configHome = fs::path(xdgConfigHome);
+    } else if (homeEnv) {
+        configHome = fs::path(homeEnv) / ".config";
+    } else {
+        return fs::path("~/.config") / "yams" / "config.toml";
+    }
+    
+    return configHome / "yams" / "config.toml";
+}
+
+std::map<std::string, std::string> YamsCLI::parseSimpleToml(const fs::path& path) const {
+    std::map<std::string, std::string> config;
+    std::ifstream file(path);
+    if (!file) {
+        return config;
+    }
+    
+    std::string line;
+    std::string currentSection;
+    
+    while (std::getline(file, line)) {
+        // Skip comments and empty lines
+        if (line.empty() || line[0] == '#') continue;
+        
+        // Check for section headers
+        if (line[0] == '[') {
+            size_t end = line.find(']');
+            if (end != std::string::npos) {
+                currentSection = line.substr(1, end - 1);
+                if (!currentSection.empty()) {
+                    currentSection += ".";
+                }
+            }
+            continue;
+        }
+        
+        // Parse key-value pairs
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+            std::string key = line.substr(0, eq);
+            std::string value = line.substr(eq + 1);
+            
+            // Trim whitespace
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            
+            // Remove quotes if present
+            if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
+                value = value.substr(1, value.size() - 2);
+            }
+            
+            // Remove comments from value
+            size_t comment = value.find('#');
+            if (comment != std::string::npos) {
+                value = value.substr(0, comment);
+                // Trim again after removing comment
+                value.erase(value.find_last_not_of(" \t") + 1);
+            }
+            
+            config[currentSection + key] = value;
+        }
+    }
+    
+    return config;
 }
 
 } // namespace yams::cli

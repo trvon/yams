@@ -113,6 +113,11 @@ public:
      * Create repair-mime command
      */
     static std::unique_ptr<ICommand> createRepairMimeCommand();
+    
+    /**
+     * Create repair command (maintenance and integrity)
+     */
+    static std::unique_ptr<ICommand> createRepairCommand();
 };
 
 } // namespace yams::cli

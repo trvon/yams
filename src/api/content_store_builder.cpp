@@ -5,6 +5,12 @@
 #include <yams/chunking/streaming_chunker.h>
 
 #include <spdlog/spdlog.h>
+#include <fstream>
+#include <sstream>
+#include <filesystem>
+#include <map>
+
+namespace fs = std::filesystem;
 
 // Forward declare the factory function from content_store_impl.cpp
 namespace yams::api {
@@ -56,22 +62,33 @@ struct ContentStoreBuilder::Impl {
                 // Configure compression policy
                 compression::CompressionPolicy::Rules policyRules;
                 
-                // Set size thresholds
-                policyRules.neverCompressBelow = 1024;  // Don't compress files < 1KB
-                policyRules.alwaysCompressAbove = 10 * 1024 * 1024;  // Always compress >10MB
-                policyRules.preferZstdBelow = 50 * 1024 * 1024;  // Use Zstd for <50MB
+                // Load compression settings from config if available
+                loadCompressionSettings(policyRules);
                 
-                // Set age thresholds
-                policyRules.compressAfterAge = std::chrono::hours(24);  // Compress after 1 day
-                policyRules.archiveAfterAge = std::chrono::hours(24 * 30);  // Archive after 30 days
+                // Use configured values or defaults
+                if (policyRules.neverCompressBelow == 0) {
+                    policyRules.neverCompressBelow = 1024;  // Default: Don't compress < 1KB
+                }
+                if (policyRules.alwaysCompressAbove == 0) {
+                    policyRules.alwaysCompressAbove = 10 * 1024 * 1024;  // Default: Always compress >10MB
+                }
+                if (policyRules.preferZstdBelow == 0) {
+                    policyRules.preferZstdBelow = 50 * 1024 * 1024;  // Default: Use Zstd for <50MB
+                }
+                if (policyRules.compressAfterAge.count() == 0) {
+                    policyRules.compressAfterAge = std::chrono::hours(24);  // Default: Compress after 1 day
+                }
+                if (policyRules.archiveAfterAge.count() == 0) {
+                    policyRules.archiveAfterAge = std::chrono::hours(24 * 30);  // Default: Archive after 30 days
+                }
                 
                 // Configure compressed storage
                 storage::CompressedStorageEngine::Config compressConfig{
                     .enableCompression = true,
                     .compressExisting = false,  // Don't compress existing data on startup
                     .policyRules = policyRules,
-                    .compressionThreshold = 1024,  // Min size to consider compression
-                    .asyncCompression = true,  // Use background compression
+                    .compressionThreshold = policyRules.neverCompressBelow,  // Use configured threshold
+                    .asyncCompression = getConfigBool("compression.async_compression", true),
                     .maxAsyncQueue = 1000,
                     .metadataCacheTTL = std::chrono::seconds(300)
                 };
@@ -140,6 +157,162 @@ struct ContentStoreBuilder::Impl {
         }
         
         return Result<void>();
+    }
+    
+    void loadCompressionSettings(compression::CompressionPolicy::Rules& rules) {
+        // Try to read config file
+        fs::path configPath = getConfigPath();
+        if (!fs::exists(configPath)) {
+            return;  // Use defaults if no config
+        }
+        
+        auto configMap = parseSimpleToml(configPath);
+        
+        // Load compression levels
+        if (configMap.find("compression.zstd_level") != configMap.end()) {
+            try {
+                rules.defaultZstdLevel = std::stoi(configMap["compression.zstd_level"]);
+                rules.archiveZstdLevel = rules.defaultZstdLevel + 3;  // Higher for archives
+                if (rules.archiveZstdLevel > 22) rules.archiveZstdLevel = 22;
+            } catch (...) {}
+        }
+        
+        if (configMap.find("compression.lzma_level") != configMap.end()) {
+            try {
+                rules.defaultLzmaLevel = std::stoi(configMap["compression.lzma_level"]);
+            } catch (...) {}
+        }
+        
+        // Load size thresholds
+        if (configMap.find("compression.chunk_threshold") != configMap.end()) {
+            try {
+                rules.neverCompressBelow = std::stoull(configMap["compression.chunk_threshold"]);
+            } catch (...) {}
+        }
+        
+        if (configMap.find("compression.always_compress_above") != configMap.end()) {
+            try {
+                rules.alwaysCompressAbove = std::stoull(configMap["compression.always_compress_above"]);
+            } catch (...) {}
+        }
+        
+        if (configMap.find("compression.never_compress_below") != configMap.end()) {
+            try {
+                rules.neverCompressBelow = std::stoull(configMap["compression.never_compress_below"]);
+            } catch (...) {}
+        }
+        
+        // Load age-based policies
+        if (configMap.find("compression.compress_after_days") != configMap.end()) {
+            try {
+                int days = std::stoi(configMap["compression.compress_after_days"]);
+                rules.compressAfterAge = std::chrono::hours(24 * days);
+            } catch (...) {}
+        }
+        
+        if (configMap.find("compression.archive_after_days") != configMap.end()) {
+            try {
+                int days = std::stoi(configMap["compression.archive_after_days"]);
+                rules.archiveAfterAge = std::chrono::hours(24 * days);
+            } catch (...) {}
+        }
+        
+        // Load performance settings
+        if (configMap.find("compression.max_concurrent_compressions") != configMap.end()) {
+            try {
+                rules.maxConcurrentCompressions = std::stoull(configMap["compression.max_concurrent_compressions"]);
+            } catch (...) {}
+        }
+        
+        spdlog::debug("Loaded compression config: zstd_level={}, lzma_level={}, threshold={}",
+                     rules.defaultZstdLevel, rules.defaultLzmaLevel, rules.neverCompressBelow);
+    }
+    
+    bool getConfigBool(const std::string& key, bool defaultValue) {
+        fs::path configPath = getConfigPath();
+        if (!fs::exists(configPath)) {
+            return defaultValue;
+        }
+        
+        auto configMap = parseSimpleToml(configPath);
+        if (configMap.find(key) != configMap.end()) {
+            return configMap[key] == "true";
+        }
+        return defaultValue;
+    }
+    
+    fs::path getConfigPath() const {
+        const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
+        const char* homeEnv = std::getenv("HOME");
+        
+        fs::path configHome;
+        if (xdgConfigHome) {
+            configHome = fs::path(xdgConfigHome);
+        } else if (homeEnv) {
+            configHome = fs::path(homeEnv) / ".config";
+        } else {
+            return fs::path("~/.config") / "yams" / "config.toml";
+        }
+        
+        return configHome / "yams" / "config.toml";
+    }
+    
+    std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
+        std::map<std::string, std::string> config;
+        std::ifstream file(path);
+        if (!file) {
+            return config;
+        }
+        
+        std::string line;
+        std::string currentSection;
+        
+        while (std::getline(file, line)) {
+            // Skip comments and empty lines
+            if (line.empty() || line[0] == '#') continue;
+            
+            // Check for section headers
+            if (line[0] == '[') {
+                size_t end = line.find(']');
+                if (end != std::string::npos) {
+                    currentSection = line.substr(1, end - 1);
+                    if (!currentSection.empty()) {
+                        currentSection += ".";
+                    }
+                }
+                continue;
+            }
+            
+            // Parse key-value pairs
+            size_t eq = line.find('=');
+            if (eq != std::string::npos) {
+                std::string key = line.substr(0, eq);
+                std::string value = line.substr(eq + 1);
+                
+                // Trim whitespace
+                key.erase(0, key.find_first_not_of(" \t"));
+                key.erase(key.find_last_not_of(" \t") + 1);
+                value.erase(0, value.find_first_not_of(" \t"));
+                value.erase(value.find_last_not_of(" \t") + 1);
+                
+                // Remove quotes if present
+                if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
+                    value = value.substr(1, value.size() - 2);
+                }
+                
+                // Remove comments from value
+                size_t comment = value.find('#');
+                if (comment != std::string::npos) {
+                    value = value.substr(0, comment);
+                    // Trim again after removing comment
+                    value.erase(value.find_last_not_of(" \t") + 1);
+                }
+                
+                config[currentSection + key] = value;
+            }
+        }
+        
+        return config;
     }
 };
 

@@ -94,6 +94,14 @@ public:
     
 private:
     /**
+     * Compression configuration loaded from config file
+     */
+    struct CompressionConfig {
+        bool enable = true;
+        std::string algorithm = "zstd";
+        int level = 3;
+    };
+    /**
      * Initialize the storage system
      */
     Result<void> initializeStorage();
@@ -102,6 +110,21 @@ private:
      * Register all built-in commands
      */
     void registerBuiltinCommands();
+    
+    /**
+     * Load compression configuration from config file
+     */
+    CompressionConfig loadCompressionConfig() const;
+    
+    /**
+     * Get the config file path
+     */
+    std::filesystem::path getConfigPath() const;
+    
+    /**
+     * Parse a simple TOML config file
+     */
+    std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
     
 private:
     std::unique_ptr<CLI::App> app_;

@@ -1,5 +1,6 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/cli/progress_indicator.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/detection/file_type_detector.h>
@@ -12,6 +13,9 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <thread>
+#include <sqlite3.h>
 
 namespace yams::cli {
 
@@ -41,6 +45,7 @@ public:
         cmd->add_flag("--performance", showPerformance_, "Show performance metrics");
         cmd->add_flag("--file-types", showFileTypes_, "Show file type breakdown");
         cmd->add_flag("--duplicates", showDuplicates_, "Show duplicate file analysis");
+        cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         
         cmd->callback([this]() { 
             auto result = execute();
@@ -70,17 +75,84 @@ public:
             fs::path storagePath = cli_->getDataPath();
             uint64_t totalDiskUsage = 0;
             uint64_t objectCount = 0;
+            size_t fileCount = 0;
+            
+            // Count objects directly from the objects directory
+            fs::path objectsPath = storagePath / "storage" / "objects";
+            int unreferencedChunks = 0;
+            uint64_t unreferencedBytes = 0;
+            
+            if (fs::exists(objectsPath)) {
+                for (const auto& entry : fs::recursive_directory_iterator(objectsPath)) {
+                    if (entry.is_regular_file()) {
+                        objectCount++;
+                    }
+                }
+            }
+            
+            // Query refs.db for chunk health
+            fs::path refsDbPath = storagePath / "storage" / "refs.db";
+            if (fs::exists(refsDbPath)) {
+                sqlite3* db;
+                if (sqlite3_open(refsDbPath.string().c_str(), &db) == SQLITE_OK) {
+                    sqlite3_stmt* stmt;
+                    
+                    // Count unreferenced blocks
+                    if (sqlite3_prepare_v2(db, 
+                        "SELECT COUNT(*) FROM unreferenced_blocks", -1, &stmt, nullptr) == SQLITE_OK) {
+                        if (sqlite3_step(stmt) == SQLITE_ROW) {
+                            unreferencedChunks = sqlite3_column_int(stmt, 0);
+                        }
+                        sqlite3_finalize(stmt);
+                    }
+                    
+                    // Estimate unreferenced bytes (average chunk size * count)
+                    if (unreferencedChunks > 0 && objectCount > 0) {
+                        // Simple estimate: total disk usage / total objects * unreferenced
+                        double avgChunkSize = totalDiskUsage / (double)objectCount;
+                        unreferencedBytes = unreferencedChunks * avgChunkSize;
+                    }
+                    
+                    sqlite3_close(db);
+                }
+            }
+            
+            // Declare progress indicator outside try block
+            ProgressIndicator progress(ProgressIndicator::Style::Spinner);
+            bool progressStarted = false;
             
             try {
+                // Start progress indicator right before the slow operation
+                if (!cli_->getJsonOutput() && !verbose_) {
+                    progress.setUpdateInterval(50);  // Update every 50ms for smoother animation
+                    progress.start("Analyzing storage");
+                    std::cout << std::flush;  // Force flush to display immediately
+                    // Small delay to ensure initial render
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    progressStarted = true;
+                }
+                
                 for (const auto& entry : fs::recursive_directory_iterator(storagePath)) {
                     if (entry.is_regular_file()) {
                         totalDiskUsage += entry.file_size();
-                        if (entry.path().parent_path().filename() == "objects") {
-                            objectCount++;
+                        fileCount++;
+                        
+                        // Update progress every 10 files for better responsiveness
+                        if (progressStarted && fileCount % 10 == 0) {
+                            progress.update(fileCount);
                         }
                     }
                 }
+                
+                // Final update before stopping
+                if (progressStarted && fileCount > 0) {
+                    progress.update(fileCount);
+                    progress.stop();
+                }
             } catch (const std::exception& e) {
+                if (progressStarted) {
+                    progress.stop();
+                }
                 spdlog::error("Failed to calculate disk usage: {}", e.what());
             }
             
@@ -108,8 +180,11 @@ public:
             std::map<std::string, std::vector<std::string>> duplicatesByHash;
             uint64_t duplicateBytes = 0;
             int uniqueDocuments = 0;
+            uint64_t totalDocumentBytes = 0;  // Track total bytes for dedup calculation
+            int orphanedCount = 0;  // Track orphaned metadata entries
             
-            if (metadataRepo && (showFileTypes_ || showDuplicates_ || detailed_)) {
+            // Always get metadata for unique document count
+            if (metadataRepo) {
                 auto documentsResult = metadataRepo->findDocumentsByPath("%");
                 if (documentsResult) {
                     // Initialize file type detector for analysis
@@ -121,8 +196,16 @@ public:
                     }
                     
                     for (const auto& doc : documentsResult.value()) {
-                        // Track duplicates
+                        // Check if document actually exists in storage
+                        auto existsResult = store->exists(doc.sha256Hash);
+                        if (!existsResult || !existsResult.value()) {
+                            orphanedCount++;  // Track but don't include in stats
+                            continue;
+                        }
+                        
+                        // Track duplicates for existing documents only
                         duplicatesByHash[doc.sha256Hash].push_back(doc.fileName);
+                        totalDocumentBytes += doc.fileSize;  // Add all document sizes
                         
                         // File type analysis
                         if (showFileTypes_) {
@@ -146,7 +229,9 @@ public:
                         }
                     }
                     
-                    // Calculate duplicate stats
+                    // Calculate duplicate stats and unique documents
+                    uniqueDocuments = duplicatesByHash.size();  // Unique documents = unique hashes
+                    
                     for (const auto& [hash, files] : duplicatesByHash) {
                         if (files.size() > 1) {
                             // Get size of one instance (they're all the same)
@@ -154,8 +239,24 @@ public:
                             if (docResult && docResult.value()) {
                                 duplicateBytes += docResult.value()->fileSize * (files.size() - 1);
                             }
-                        } else {
-                            uniqueDocuments++;
+                        }
+                    }
+                    
+                    // Calculate deduplicated bytes (savings from deduplication)
+                    if (stats.deduplicatedBytes == 0 && duplicatesByHash.size() > 0) {
+                        // Count actual duplicates
+                        int totalInstances = 0;
+                        int uniqueFiles = duplicatesByHash.size();
+                        
+                        for (const auto& [hash, files] : duplicatesByHash) {
+                            totalInstances += files.size();
+                        }
+                        
+                        // If we have more instances than unique files, we have deduplication
+                        if (totalInstances > uniqueFiles && uniqueFiles > 0) {
+                            // Calculate actual savings from duplicates
+                            double avgFileSize = stats.totalBytes / (double)uniqueFiles;
+                            stats.deduplicatedBytes = (totalInstances - uniqueFiles) * avgFileSize;
                         }
                     }
                     
@@ -169,6 +270,19 @@ public:
                             stats.topExtensions.resize(3);
                         }
                     }
+                }
+            }
+            
+            // Ensure we always have a unique document count
+            if (uniqueDocuments == 0 && !duplicatesByHash.empty()) {
+                uniqueDocuments = duplicatesByHash.size();
+            }
+            
+            // When there are no duplicates, unique should equal total
+            if (uniqueDocuments == duplicatesByHash.size() && stats.totalObjects > 0) {
+                // Ensure consistency - if all are unique, total should match unique
+                if (stats.totalObjects != uniqueDocuments && duplicateBytes == 0) {
+                    stats.totalObjects = uniqueDocuments;
                 }
             }
             
@@ -207,7 +321,7 @@ public:
                 objects["totalSize"] = stats.totalBytes;
                 objects["uniqueBlocks"] = stats.uniqueBlocks;
                 objects["deduplicationRatio"] = stats.dedupRatio();
-                objects["uniqueDocuments"] = uniqueDocuments;
+                objects["uniqueDocuments"] = uniqueDocuments > 0 ? uniqueDocuments : duplicatesByHash.size();
                 output["objects"] = objects;
                 
                 if (showFileTypes_ && !fileTypeStats.empty()) {
@@ -288,11 +402,20 @@ public:
                 std::cout << "\n";
                 
                 std::cout << "Storage Efficiency:\n";
-                std::cout << "  Unique Blocks: " << stats.uniqueBlocks << "\n";
-                std::cout << "  Deduplicated Bytes: " << formatSize(stats.deduplicatedBytes) << "\n";
-                std::cout << "  Deduplication Ratio: " 
-                         << std::fixed << std::setprecision(2) 
-                         << stats.dedupRatio() << "\n";
+                std::cout << "  Unique Blocks: " << stats.uniqueBlocks;
+                if (objectCount > 0 && objectCount != stats.uniqueBlocks) {
+                    std::cout << " (" << objectCount << " total chunks)";
+                }
+                std::cout << "\n";
+                // Only show deduplication info if there are actual duplicates
+                if (duplicateBytes > 0 || stats.deduplicatedBytes > 0) {
+                    std::cout << "  Deduplicated Bytes: " << formatSize(stats.deduplicatedBytes) << "\n";
+                    std::cout << "  Deduplication Ratio: " 
+                             << std::fixed << std::setprecision(2) 
+                             << stats.dedupRatio() << "\n";
+                } else {
+                    std::cout << "  Deduplication: None (all documents are unique)\n";
+                }
                 
                 // Explain storage usage
                 if (totalDiskUsage > stats.totalBytes) {
@@ -401,6 +524,25 @@ public:
                     std::cout << "\n";
                 }
                 
+                // Show orphan warning if any found
+                if (orphanedCount > 0) {
+                    std::cout << "\n⚠️  Database Inconsistency:\n";
+                    std::cout << "  Metadata entries: " << (duplicatesByHash.size() + orphanedCount) << "\n";
+                    std::cout << "  Existing files: " << duplicatesByHash.size() << "\n";
+                    std::cout << "  Orphaned entries: " << orphanedCount << "\n";
+                    std::cout << "  Run 'yams repair --orphans' to clean up\n";
+                }
+                
+                // Show chunk health if there are issues
+                if (unreferencedChunks > 0) {
+                    std::cout << "\n⚠️  Chunk Storage Issues:\n";
+                    std::cout << "  Total Chunks: " << objectCount << "\n";
+                    std::cout << "  Active Chunks: " << (objectCount - unreferencedChunks) << "\n";
+                    std::cout << "  Orphaned Chunks: " << unreferencedChunks 
+                              << " (" << formatSize(unreferencedBytes) << ")\n";
+                    std::cout << "  Run 'yams repair --chunks' to reclaim space\n";
+                }
+                
                 std::cout << "═══════════════════════════════════════════════════════════\n";
             }
             
@@ -420,6 +562,7 @@ private:
     bool showPerformance_ = false;
     bool showFileTypes_ = false;
     bool showDuplicates_ = false;
+    bool verbose_ = false;
     
     std::string formatSize(uint64_t bytes) const {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};

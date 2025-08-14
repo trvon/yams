@@ -53,6 +53,7 @@ public:
         cmd->add_flag("-c,--count", countOnly_, "Show only count of matching lines");
         cmd->add_flag("-l,--files-with-matches", filesOnly_, "Show only filenames with matches");
         cmd->add_flag("-L,--files-without-match", filesWithoutMatch_, "Show only filenames without matches");
+        cmd->add_flag("--paths-only", pathsOnly_, "Show only file paths (no content)");
         
         // Output options
         cmd->add_option("--color", colorMode_, "Color mode: always, never, auto")
@@ -210,7 +211,7 @@ public:
                     matchingFiles.push_back(doc.filePath);
                     totalMatches += matches.size();
                     
-                    if (filesOnly_) {
+                    if (filesOnly_ || pathsOnly_) {
                         std::cout << doc.filePath << std::endl;
                     } else if (countOnly_) {
                         if (showFilename_) {
@@ -435,6 +436,7 @@ private:
     bool countOnly_ = false;
     bool filesOnly_ = false;
     bool filesWithoutMatch_ = false;
+    bool pathsOnly_ = false;
     
     // Output options
     std::string colorMode_ = "auto";

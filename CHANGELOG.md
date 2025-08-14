@@ -6,8 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [v0.2.7] - 2025-08-14
+
+### Added
+- **Repair Command**: New comprehensive storage maintenance command
+  - `yams repair --orphans`: Clean orphaned metadata entries (removed 28,101 orphaned entries in testing)
+  - `yams repair --chunks`: Remove orphaned chunk files (freed 38MB from 23,988 orphaned chunks)
+  - `yams repair --mime`: Fix missing MIME types in documents
+  - `yams repair --optimize`: Vacuum and optimize database (reduced 314MB to 272MB)
+  - `yams repair --all`: Run all repair operations
+  - Dry-run support with `--dry-run` flag for safe preview
+  - Force mode with `--force` to skip confirmations
+
+- **Delete Command Enhancements**:
+  - Added `--directory` option for recursive directory deletion
+  - Improved metadata cleanup when deleting documents
+  - Added progress indicator for large deletion operations
+  - Properly removes both manifest and chunk files
+  - Fixed orphaned metadata cleanup after storage deletion
+
+- **Config Command Enhancements**:
+  - Added compression tuning support via configuration
+  - `config get` - Retrieve configuration values
+  - `config set` - Set configuration values (placeholder)
+  - `config list` - List all configuration settings
+  - `config validate` - Validate configuration file
+  - `config export` - Export configuration in TOML or JSON format
+
 ### Fixed
-- **CI version bump**
+- **Stats Command**:
+  - Fixed object file counting (was showing 0, now correctly counts chunks)
+  - Fixed unique document calculation to match total when no duplicates exist
+  - Added orphaned chunk detection and reporting
+  - Fixed deduplication stats to only show when duplicates exist
+  - Properly filters orphaned metadata entries from counts (28,101 orphaned found)
+  - Added chunk health reporting with progress indicator
+  - Fixed verbose mode not being properly tracked
+
+- **Storage Path Issues**:
+  - Fixed duplicate "storage" in path construction bug throughout codebase
+  - Fixed content_store_impl.cpp manifest and object paths
+  - Fixed same issue in delete_command.cpp and repair_command.cpp
+
+- **Chunk Management Crisis**:
+  - Delete command wasn't properly removing chunks when ref_count reached 0
+  - Implemented proper chunk cleanup when documents are deleted
+  - Added reference counting verification in repair command
+  - Fixed hash format mismatch between database (64 chars) and filesystem (62 chars + 2 char directory)
+
+- **Database Issues**:
+  - Fixed view vs table issue with `unreferenced_blocks` (it's a VIEW not a table)
+  - Properly clean `block_references` table where `ref_count = 0`
+  - Added database optimization to reclaim space from deleted entries
+  - Database reduced from 314MB to 272MB after VACUUM
+
+### Changed
+- **Stats Output**: Improved formatting and information display
+  - Shows storage overhead calculation
+  - Displays warnings for orphaned chunks and metadata
+  - Only shows deduplication info when relevant
+  - Added database inconsistency warnings
+  - Better progress indicators for long operations
+
 
 ## [v0.2.6] - 2025-08-14
 ### Fixed
