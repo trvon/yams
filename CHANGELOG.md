@@ -5,7 +5,41 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.1.5] - 2025-08-13
+## [v0.2.1] - 2025-08-14
+
+### Fixed
+- **Build System Standardization**: All workflows now use Conan exclusively
+  - Fixed CMake export errors for spdlog and other dependencies
+  - Release workflow migrated from plain CMake to Conan-based builds
+  - Ensures consistent dependency management across CI and release
+  - Resolves "target requires target that is not in any export set" errors
+- **Docker Build Issues**
+  - Fixed Conan 2.0 command syntax (`conan profile show` instead of `conan profile show default`)
+  - Improved version handling: uses git tags for releases, `dev-<sha>` for development builds
+  - Fixed undefined variable warnings in Dockerfile labels
+  - Added proper build argument handling for YAMS_VERSION and GITHUB_SHA
+
+### Changed
+- **MIME Type Detection Default Behavior**
+  - MIME types are now detected automatically during add operations
+  - `repair-mime` command remains available for fixing existing documents
+  - Detection uses FileTypeDetector with both signature and extension methods
+- **Docker Versioning Strategy**
+  - Tagged releases use semantic version from git tag
+  - Development builds use `dev-<short-sha>` format
+  - Provides clear distinction between releases and development builds
+
+### Technical Details
+- **Testing Interface**: MCP server now exposes test methods via conditional compilation
+  - `#ifdef YAMS_TESTING` enables test-specific public methods
+  - Replaces hacky `#define private public` approach
+  - Maintains encapsulation while allowing proper unit testing
+- **Build Workflows**: Unified Conan usage with proper profiles and caching
+  - Conan profile detection with C++20 enforcement
+  - Package caching for faster builds
+  - Consistent preset usage (`conan-release`) across all platforms
+
+## [v0.2.0] - 2025-08-13
 
 ### Added
 - **LLM Ergonomics Enhancements**

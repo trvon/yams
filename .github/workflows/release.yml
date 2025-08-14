@@ -38,7 +38,7 @@ jobs:
             suffix: macos-arm64
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     env:
-      BUILD_DIR: build
+      BUILD_DIR: build/conan-release/build/Release
       STAGE_DIR: stage
     steps:
       - name: Checkout
@@ -46,6 +46,15 @@ jobs:
         with:
           # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-release-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          restore-keys: |
+            conan-release-${{ runner.os }}-${{ matrix.suffix }}-
+            conan-${{ runner.os }}-
 
       - name: Extract version from tag
         id: v
@@ -62,25 +71,63 @@ jobs:
         with:
           changelog_file: CHANGELOG.md
 
-      - name: Configure (CMake)
+      - name: Install Conan
         shell: bash
         run: |
-          cmake -S . -B "$BUILD_DIR" \
-            -DCMAKE_BUILD_TYPE=Release \
+          pip3 install conan || python3 -m pip install conan || python -m pip install conan
+          conan --version
+
+      - name: Setup Conan Profile
+        shell: bash
+        run: |
+          conan profile detect --force
+          # Ensure C++20 support
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          else
+            sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          fi
+          conan profile show
+
+      - name: Configure with Conan
+        shell: bash
+        run: |
+          # Install dependencies with Conan
+          conan install . \
+            --output-folder=build/conan-release \
+            -s build_type=Release \
+            --build=missing
+          
+          # Configure with CMake using Conan presets
+          cmake --preset conan-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_BUILD_DOCS=OFF \
+            -DYAMS_BUILD_TESTS=OFF \
+            -DYAMS_BUILD_BENCHMARKS=OFF \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args }}
+          
+          # Update BUILD_DIR to point to Conan build directory
+          echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 
       - name: Build
         shell: bash
         run: |
-          cmake --build "$BUILD_DIR" --config Release --parallel
+          cmake --build --preset conan-release --parallel
 
       - name: Run quick benchmarks for release metrics
         shell: bash
         run: |
+          # Ensure BUILD_DIR is properly set for Conan builds
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "BUILD_DIR not found at $BUILD_DIR, checking for alternative..."
+            if [ -d "build/conan-release/build/Release" ]; then
+              BUILD_DIR="build/conan-release/build/Release"
+              echo "Using BUILD_DIR: $BUILD_DIR"
+            fi
+          fi
+          
           mkdir -p "$BUILD_DIR/bench_results"
           # Find all benchmark executables (named *_bench, *_bench.exe, or *_benchmark*)
           benches=()
@@ -105,6 +152,15 @@ jobs:
       - name: Install
         shell: bash
         run: |
+          # Ensure BUILD_DIR is properly set
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "BUILD_DIR not found at $BUILD_DIR, checking for alternative..."
+            if [ -d "build/conan-release/build/Release" ]; then
+              BUILD_DIR="build/conan-release/build/Release"
+              echo "Using BUILD_DIR: $BUILD_DIR"
+              echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+            fi
+          fi
           cmake --install "$BUILD_DIR" --config Release
 
       - name: Generate release summary

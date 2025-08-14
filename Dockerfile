@@ -4,7 +4,8 @@ FROM ubuntu:22.04 AS builder
 
 # Set build arguments
 ARG TARGETARCH
-ARG YAMS_VERSION=0.1.2
+ARG YAMS_VERSION=dev
+ARG GITHUB_SHA=""
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -33,7 +34,7 @@ COPY . .
 
 # Configure Conan profile
 RUN conan profile detect --force && \
-    conan profile show default
+    conan profile show
 
 # Build YAMS using Conan
 RUN conan install . \
@@ -91,12 +92,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 ENTRYPOINT ["yams"]
 CMD ["--help"]
 
-# Labels for metadata
+# Note: Labels for metadata are added via docker/metadata-action in CI
+# These are fallback labels when building locally
 LABEL org.opencontainers.image.title="YAMS" \
       org.opencontainers.image.description="Yet Another Memory System - High-performance content-addressed storage" \
       org.opencontainers.image.url="https://github.com/trvon/yams" \
       org.opencontainers.image.source="https://github.com/trvon/yams" \
-      org.opencontainers.image.version="${YAMS_VERSION}" \
-      org.opencontainers.image.created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-      org.opencontainers.image.revision="${GITHUB_SHA}" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="Apache-2.0"

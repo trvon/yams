@@ -22,10 +22,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensure tags are available for version derivation
 
       - name: Verify Docker is available
         run: |
           docker version
+      
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # For tags, extract version
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            # For non-tags, use short SHA
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Determined version: $VERSION"
 
       - name: Set up QEMU (for multi-arch builds)
         uses: docker/setup-qemu-action@v3
@@ -55,11 +72,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.title=YAMS
             org.opencontainers.image.description=Yet Another Memory System - High-performance content-addressed storage
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -71,7 +91,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            YAMS_VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+            YAMS_VERSION=${{ steps.version.outputs.version }}
             GITHUB_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

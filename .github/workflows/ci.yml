@@ -45,6 +45,20 @@ jobs:
           restore-keys: |
             conan-${{ runner.os }}-${{ matrix.platform }}-
 
+      - name: Ensure Conan is installed
+        shell: bash
+        run: |
+          if ! command -v conan &> /dev/null; then
+            echo "Conan not found, installing..."
+            pip3 install conan || python3 -m pip install conan || python -m pip install conan
+          fi
+          conan --version
+          
+          # Ensure profile exists
+          if [ ! -f ~/.conan2/profiles/default ]; then
+            conan profile detect --force
+          fi
+
       - name: Configure with Conan (with tests enabled)
         shell: bash
         run: |
