@@ -178,6 +178,8 @@ jobs:
               HOST_PROFILE="default"
               # Ensure default profile has x86_64 arch
               sed -i.bak 's/arch=.*/arch=x86_64/' ~/.conan2/profiles/default
+              # Also set C++20 for cross-compilation
+              sed -i.bak 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
             fi
             BUILD_PROFILE="default"  # Native ARM64 for build tools
           elif [[ "$NATIVE_ARCH" == "x86_64" ]] && [[ "$TARGET_ARCH" == "arm64" ]]; then
@@ -191,6 +193,8 @@ jobs:
               HOST_PROFILE="default"
               # Ensure default profile has arm64 arch
               sed -i.bak 's/arch=.*/arch=armv8/' ~/.conan2/profiles/default
+              # Also set C++20 for cross-compilation
+              sed -i.bak 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
             fi
             BUILD_PROFILE="default"  # Native x86_64 for build tools
           else

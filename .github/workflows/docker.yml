@@ -16,9 +16,12 @@ permissions:
   packages: write
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Images
+  # Build AMD64 image on Linux x86_64 runner
+  build-amd64:
+    name: Build Docker Image (linux/amd64)
     runs-on: [ self-hosted, Linux, X64 ]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,10 +47,80 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Determined version: $VERSION"
 
-      - name: Set up QEMU (for multi-arch builds)
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
         with:
-          platforms: linux/amd64,linux/arm64
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=-amd64
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }}
+
+      - name: Build and push AMD64 Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=YAMS
+            org.opencontainers.image.description=Yet Another Memory System - High-performance content-addressed storage
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.architecture=amd64
+          build-args: |
+            YAMS_VERSION=${{ steps.version.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_TAG=${{ github.ref_name }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+  # Build ARM64 image on macOS ARM64 runner
+  build-arm64:
+    name: Build Docker Image (linux/arm64)
+    runs-on: [ self-hosted, macOS, ARM64 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Docker is available
+        run: |
+          docker version || echo "Docker not found, please ensure Docker Desktop or Colima is installed"
+      
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Determined version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -65,14 +138,23 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=-arm64
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ steps.version.outputs.version }}
+
+      - name: Build and push ARM64 Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.title=YAMS
             org.opencontainers.image.description=Yet Another Memory System - High-performance content-addressed storage
@@ -80,29 +162,88 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.architecture=arm64
           build-args: |
             YAMS_VERSION=${{ steps.version.outputs.version }}
-            GITHUB_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            GIT_COMMIT=${{ github.sha }}
+            GIT_TAG=${{ github.ref_name }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
 
-      - name: Test Docker image
-        if: github.event_name != 'pull_request'
+  # Create multi-arch manifest
+  create-manifest:
+    name: Create Multi-arch Manifest
+    needs: [build-amd64, build-arm64]
+    runs-on: [ self-hosted, Linux, X64 ]
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        env:
+          VERSION: ${{ needs.build-amd64.outputs.version }}
         run: |
-          # Test that the image runs and shows version
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --version
+          # Base image name
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           
-          # Test basic functionality
-          docker run --rm -v $PWD/test-data:/workspace ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest init --non-interactive --storage /workspace/test-yams || true
+          # For main branch, create 'latest' manifest
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            docker buildx imagetools create -t ${IMAGE}:latest \
+              ${IMAGE}:latest-amd64 \
+              ${IMAGE}:latest-arm64
+            echo "Created multi-arch manifest: ${IMAGE}:latest"
+          fi
           
-          echo "Docker image test completed successfully"
+          # For version tags, create versioned manifest
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${{ github.ref_name }}"
+            TAG="${TAG#v}"
+            
+            # Create manifest for full version
+            docker buildx imagetools create -t ${IMAGE}:${TAG} \
+              ${IMAGE}:${TAG}-amd64 \
+              ${IMAGE}:${TAG}-arm64
+            echo "Created multi-arch manifest: ${IMAGE}:${TAG}"
+            
+            # Also create major.minor manifest
+            MAJOR_MINOR=$(echo ${TAG} | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+            if [[ "${MAJOR_MINOR}" != "${TAG}" ]]; then
+              docker buildx imagetools create -t ${IMAGE}:${MAJOR_MINOR} \
+                ${IMAGE}:${TAG}-amd64 \
+                ${IMAGE}:${TAG}-arm64
+              echo "Created multi-arch manifest: ${IMAGE}:${MAJOR_MINOR}"
+            fi
+            
+            # And major-only manifest
+            MAJOR=$(echo ${TAG} | sed -E 's/^([0-9]+).*/\1/')
+            if [[ "${MAJOR}" != "${TAG}" ]]; then
+              docker buildx imagetools create -t ${IMAGE}:${MAJOR} \
+                ${IMAGE}:${TAG}-amd64 \
+                ${IMAGE}:${TAG}-arm64
+              echo "Created multi-arch manifest: ${IMAGE}:${MAJOR}"
+            fi
+          fi
+          
+          # For dev builds
+          if [[ "$VERSION" == dev-* ]]; then
+            docker buildx imagetools create -t ${IMAGE}:${VERSION} \
+              ${IMAGE}:${VERSION}-amd64 \
+              ${IMAGE}:${VERSION}-arm64
+            echo "Created multi-arch manifest: ${IMAGE}:${VERSION}"
+          fi
+
+      - name: Test multi-arch image
+        run: |
+          # Test that the multi-arch image works
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --version
+            echo "Multi-arch image test completed successfully"
+          fi

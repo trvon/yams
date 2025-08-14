@@ -167,6 +167,7 @@ option(YAMS_ENABLE_SANITIZERS "Enable sanitizers in Debug" ON)
 option(YAMS_ENABLE_COVERAGE "Enable code coverage" OFF)
 option(YAMS_USE_VCPKG "Use vcpkg for dependencies" OFF)
 option(YAMS_ENABLE_NATIVE_OPTIMIZATIONS "Enable -march=native on supported platforms" OFF)
+option(YAMS_ENABLE_APPLE_SILICON_OPTIMIZATIONS "Enable Apple Silicon optimizations (auto-enabled on ARM64 Macs)" ON)
 option(YAMS_CLANG_USE_LIBCXX "Use libc++ with Clang (Linux requires libc++ dev packages)" OFF)
 option(YAMS_BUILD_API_DOCS "Build Doxygen API documentation" OFF)
 
@@ -490,11 +491,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         $<$<CONFIG:Release>:-O3>
     )
 
-    # Architecture-specific optimizations (not on Apple Silicon)
-    if(YAMS_ENABLE_NATIVE_OPTIMIZATIONS)
-        if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-            add_compile_options($<$<CONFIG:Release>:-march=native>)
+    # Architecture-specific optimizations
+    if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        # Apple Silicon (M1/M2/M3) optimizations
+        if(YAMS_ENABLE_APPLE_SILICON_OPTIMIZATIONS)
+            add_compile_options($<$<CONFIG:Release>:-mcpu=apple-m1>)
+            add_compile_options($<$<CONFIG:Release>:-fvectorize>)
+            message(STATUS "Apple Silicon optimizations enabled (-mcpu=apple-m1)")
         endif()
+    elseif(YAMS_ENABLE_NATIVE_OPTIMIZATIONS)
+        # x86_64 and other architectures
+        add_compile_options($<$<CONFIG:Release>:-march=native>)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+            add_compile_options($<$<CONFIG:Release>:-mtune=native>)
+        endif()
+        message(STATUS "Native optimizations enabled (-march=native)")
     endif()
 
     # Coroutine support

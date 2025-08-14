@@ -5,6 +5,20 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0] - 2025-08-14
+
+### Added
+- **Apple Silicon Optimizations**
+  - New `YAMS_ENABLE_APPLE_SILICON_OPTIMIZATIONS` CMake option (enabled by default on ARM64 Macs)
+  - Native `-mcpu=apple-m1` optimization flag for M1/M2/M3 processors
+  - Added `-fvectorize` for improved SIMD utilization on Apple Silicon
+
+### Fixed
+- **CI/CD C++ Standard Configuration**
+  - Fixed Conan profile resetting to C++17 in CI/CD workflows
+  - Added explicit C++20 enforcement after `conan profile detect --force`
+  - Fixed cross-compilation profile configurations for both CI and Release workflows
+
 ## [v0.2.9] - 2025-08-14
 
 **Enhanced Deduplication Reporting**
@@ -14,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **CI version bump**
   - Fixed CMake export error with spdlog dependency
   - Resolved CI failures on macOS x64 and Linux x86
-  
+
 ## [v0.2.8] - 2025-08-14
 
 ### Added

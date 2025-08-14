@@ -63,6 +63,13 @@ jobs:
           if [ ! -f ~/.conan2/profiles/default ]; then
             conan profile detect --force
           fi
+          
+          # Ensure C++20 is set in the profile
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          else
+            sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          fi
 
       - name: Clean corrupted Conan cache if needed
         shell: bash
@@ -119,6 +126,8 @@ jobs:
               # Ensure default profile has x86_64 arch
               conan profile detect --force
               sed -i.bak 's/arch=.*/arch=x86_64/' ~/.conan2/profiles/default
+              # Also set C++20 for cross-compilation
+              sed -i.bak 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
             fi
             BUILD_PROFILE="default"  # Native ARM64 for build tools
           else
