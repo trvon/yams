@@ -101,8 +101,8 @@ jobs:
           conan --version
           
           # Configure Conan for robustness
-          conan config set core.net.retry=3
-          conan config set core.net.retry_wait=5
+          mkdir -p ~/.conan2
+          cp .conan/global.conf ~/.conan2/global.conf
 
       - name: Setup Conan Profile
         shell: bash
