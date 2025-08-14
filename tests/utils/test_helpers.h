@@ -3,9 +3,9 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <yams/core/types.h>
+#include <yams/core/format.h>
 #include <filesystem>
 #include <random>
-#include <format>
 #include <fstream>
 
 namespace yams::test {
@@ -102,7 +102,7 @@ protected:
 private:
     static std::string generateTestId() {
         auto now = std::chrono::system_clock::now().time_since_epoch().count();
-        return std::format("kronos_test_{}", now);
+        return yams::format("kronos_test_{}", now);
     }
 };
 
@@ -111,7 +111,7 @@ inline std::filesystem::path getTempDir() {
     static std::mt19937_64 rng{std::random_device{}()};
     auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
     auto random = rng();
-    auto dirname = std::format("kronos_test_{}_{}", timestamp, random);
+    auto dirname = yams::format("kronos_test_{}_{}", timestamp, random);
     auto path = std::filesystem::temp_directory_path() / dirname;
     std::filesystem::create_directories(path);
     return path;
@@ -167,7 +167,7 @@ public:
     ~ScopedTimer() {
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start_);
-        std::cout << std::format("{} took {}ms\n", name_, duration.count());
+        std::cout << yams::format("{} took {}ms\n", name_, duration.count());
     }
     
 private:

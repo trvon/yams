@@ -1,0 +1,57 @@
+name: Pages
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    name: Build and Deploy (self-hosted Linux)
+    runs-on: [ self-hosted, Linux, X64 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build site (Docker)
+        shell: bash
+        run: |
+          # Ensure Docker is available on the self-hosted runner
+          docker version
+
+          # Pull a reproducible MkDocs image with Material theme
+          DOCKER_IMAGE=squidfunk/mkdocs-material:latest
+          docker pull "$DOCKER_IMAGE"
+
+          # Build the site inside the container
+          # Use current user to avoid root-owned files in workspace
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -v "$PWD:/docs" \
+            "$DOCKER_IMAGE" \
+            build --clean --config-file mkdocs.yml --site-dir public
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

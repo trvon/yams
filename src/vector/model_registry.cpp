@@ -1,4 +1,5 @@
 #include <yams/vector/model_registry.h>
+#include <yams/core/format.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +24,7 @@ public:
         
         if (models_.find(info.model_id) != models_.end()) {
             return Error{ErrorCode::InvalidArgument, 
-                std::format("Model {} already registered", info.model_id)};
+                yams::format("Model {} already registered", info.model_id)};
         }
         
         models_[info.model_id] = info;

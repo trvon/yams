@@ -22,6 +22,7 @@ set(CLI_SOURCES
     commands/update_command.cpp
     commands/browse_command.cpp
     commands/completion_command.cpp
+    commands/repair_mime_command.cpp
     tui/browse_state.cpp
     tui/browse_services.cpp
     tui/browse_commands.cpp

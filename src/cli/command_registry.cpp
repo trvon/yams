@@ -21,6 +21,7 @@ std::unique_ptr<ICommand> createMigrateCommand();
 std::unique_ptr<ICommand> createUpdateCommand();
 std::unique_ptr<ICommand> createBrowseCommand();
 std::unique_ptr<ICommand> createCompletionCommand();
+std::unique_ptr<ICommand> createRepairMimeCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -43,6 +44,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createUpdateCommand());
     cli->registerCommand(CommandRegistry::createBrowseCommand());
     cli->registerCommand(CommandRegistry::createCompletionCommand());
+    cli->registerCommand(CommandRegistry::createRepairMimeCommand());
 #ifdef YAMS_BUILD_MCP_SERVER
     cli->registerCommand(CommandRegistry::createServeCommand());
 #endif
@@ -114,6 +116,10 @@ std::unique_ptr<ICommand> CommandRegistry::createBrowseCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createCompletionCommand() {
     return ::yams::cli::createCompletionCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createRepairMimeCommand() {
+    return ::yams::cli::createRepairMimeCommand();
 }
 
 #ifdef YAMS_BUILD_MCP_SERVER

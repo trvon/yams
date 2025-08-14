@@ -3,6 +3,12 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
+#include <regex>
+#include <set>
+#include <filesystem>
+#include <algorithm>
+#include <unordered_map>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/ssl.hpp>
@@ -493,7 +499,7 @@ json MCPServer::listTools() {
     // Search documents tool
     tools.push_back({
         {"name", "search_documents"},
-        {"description", "Search documents by query with support for fuzzy matching and hash search"},
+        {"description", "Search documents by query with support for fuzzy matching, hash search, and LLM ergonomics"},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
@@ -503,9 +509,42 @@ json MCPServer::listTools() {
                 {"similarity", {{"type", "number"}, {"description", "Minimum similarity for fuzzy search (0.0-1.0)"}, {"default", 0.7}}},
                 {"hash", {{"type", "string"}, {"description", "Search by file hash (full or partial, minimum 8 characters)"}}},
                 {"verbose", {{"type", "boolean"}, {"description", "Include method and score breakdown when true"}, {"default", false}}},
-                {"type", {{"type", "string"}, {"description", "Search type: keyword, semantic, hybrid"}, {"default", "hybrid"}}}
+                {"type", {{"type", "string"}, {"description", "Search type: keyword, semantic, hybrid"}, {"default", "hybrid"}}},
+                {"paths_only", {{"type", "boolean"}, {"description", "Output only file paths (LLM-friendly format)"}, {"default", false}}},
+                {"line_numbers", {{"type", "boolean"}, {"description", "Show line numbers with matches"}, {"default", false}}},
+                {"after_context", {{"type", "integer"}, {"description", "Show N lines after match"}, {"default", 0}}},
+                {"before_context", {{"type", "integer"}, {"description", "Show N lines before match"}, {"default", 0}}},
+                {"context", {{"type", "integer"}, {"description", "Show N lines before and after match"}, {"default", 0}}},
+                {"color", {{"type", "string"}, {"description", "Color highlighting: always, never, auto"}, {"default", "never"}}}
             }},
             {"required", json::array({"query"})}
+        }}
+    });
+    
+    // Grep documents tool
+    tools.push_back({
+        {"name", "grep_documents"},
+        {"description", "Search for regex patterns within document contents (similar to grep command)"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"pattern", {{"type", "string"}, {"description", "Regular expression pattern to search for"}}},
+                {"paths", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Files or directories to search (default: all indexed files)"}}},
+                {"after_context", {{"type", "integer"}, {"description", "Show N lines after match"}, {"default", 0}}},
+                {"before_context", {{"type", "integer"}, {"description", "Show N lines before match"}, {"default", 0}}},
+                {"context", {{"type", "integer"}, {"description", "Show N lines before and after match"}, {"default", 0}}},
+                {"ignore_case", {{"type", "boolean"}, {"description", "Case-insensitive search"}, {"default", false}}},
+                {"word", {{"type", "boolean"}, {"description", "Match whole words only"}, {"default", false}}},
+                {"invert", {{"type", "boolean"}, {"description", "Invert match (show non-matching lines)"}, {"default", false}}},
+                {"line_numbers", {{"type", "boolean"}, {"description", "Show line numbers"}, {"default", false}}},
+                {"with_filename", {{"type", "boolean"}, {"description", "Show filename with matches"}, {"default", false}}},
+                {"count", {{"type", "boolean"}, {"description", "Show only count of matching lines"}, {"default", false}}},
+                {"files_with_matches", {{"type", "boolean"}, {"description", "Show only filenames with matches"}, {"default", false}}},
+                {"files_without_match", {{"type", "boolean"}, {"description", "Show only filenames without matches"}, {"default", false}}},
+                {"color", {{"type", "string"}, {"description", "Color mode: always, never, auto"}, {"default", "never"}}},
+                {"max_count", {{"type", "integer"}, {"description", "Stop after N matches per file"}, {"default", 0}}}
+            }},
+            {"required", json::array({"pattern"})}
         }}
     });
     
@@ -527,12 +566,15 @@ json MCPServer::listTools() {
     // Retrieve document tool
     tools.push_back({
         {"name", "retrieve_document"},
-        {"description", "Retrieve a document by hash"},
+        {"description", "Retrieve a document by hash with optional knowledge graph relationships"},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
                 {"hash", {{"type", "string"}, {"description", "Document hash"}}},
-                {"outputPath", {{"type", "string"}, {"description", "Output file path"}}}
+                {"outputPath", {{"type", "string"}, {"description", "Output file path"}}},
+                {"graph", {{"type", "boolean"}, {"description", "Include related documents in response"}, {"default", false}}},
+                {"depth", {{"type", "integer"}, {"description", "Graph traversal depth (1-5)"}, {"default", 2}, {"minimum", 1}, {"maximum", 5}}},
+                {"include_content", {{"type", "boolean"}, {"description", "Include full document content in response"}, {"default", false}}}
             }},
             {"required", json::array({"hash"})}
         }}
@@ -541,12 +583,32 @@ json MCPServer::listTools() {
     // Get stats tool
     tools.push_back({
         {"name", "get_stats"},
-        {"description", "Get storage statistics"},
+        {"description", "Get storage statistics with optional file type breakdown"},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
-                {"detailed", {{"type", "boolean"}, {"default", false}}}
+                {"detailed", {{"type", "boolean"}, {"default", false}}},
+                {"file_types", {{"type", "boolean"}, {"description", "Include detailed file type analysis"}, {"default", false}}}
             }}
+        }}
+    });
+    
+    // Update metadata tool
+    tools.push_back({
+        {"name", "update_metadata"},
+        {"description", "Update metadata for an existing document"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"hash", {{"type", "string"}, {"description", "Hash of the document to update"}}},
+                {"name", {{"type", "string"}, {"description", "Name of the document to update"}}},
+                {"metadata", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Metadata key=value pairs to update"}}},
+                {"verbose", {{"type", "boolean"}, {"description", "Enable verbose output"}, {"default", false}}}
+            }},
+            {"oneOf", json::array({
+                {{"required", json::array({"hash", "metadata"})}},
+                {{"required", json::array({"name", "metadata"})}}
+            })}
         }}
     });
     
@@ -604,13 +666,27 @@ json MCPServer::listTools() {
     // List documents tool
     tools.push_back({
         {"name", "list_documents"},
-        {"description", "List stored documents with metadata"},
+        {"description", "List stored documents with comprehensive filtering and sorting"},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
                 {"limit", {{"type", "integer"}, {"default", 50}, {"description", "Maximum number of results"}}},
                 {"pattern", {{"type", "string"}, {"description", "Filter by name pattern"}}},
-                {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Filter by tags"}}}
+                {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Filter by tags"}}},
+                {"type", {{"type", "string"}, {"description", "Filter by file type (text, binary, image, document, etc.)"}}},
+                {"mime", {{"type", "string"}, {"description", "Filter by MIME type"}}},
+                {"extension", {{"type", "string"}, {"description", "Filter by file extension"}}},
+                {"binary", {{"type", "boolean"}, {"description", "Filter for binary files only"}}},
+                {"text", {{"type", "boolean"}, {"description", "Filter for text files only"}}},
+                {"created_after", {{"type", "string"}, {"description", "Filter by creation date (ISO 8601 or relative like '7d')"}}},
+                {"created_before", {{"type", "string"}, {"description", "Filter by creation date (ISO 8601 or relative like '7d')"}}},
+                {"modified_after", {{"type", "string"}, {"description", "Filter by modification date"}}},
+                {"modified_before", {{"type", "string"}, {"description", "Filter by modification date"}}},
+                {"indexed_after", {{"type", "string"}, {"description", "Filter by indexed date"}}},
+                {"indexed_before", {{"type", "string"}, {"description", "Filter by indexed date"}}},
+                {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}},
+                {"sort_by", {{"type", "string"}, {"description", "Sort by: name, size, created, modified, indexed"}, {"default", "indexed"}}},
+                {"sort_order", {{"type", "string"}, {"description", "Sort order: asc, desc"}, {"default", "desc"}}}
             }}
         }}
     });
@@ -728,10 +804,14 @@ json MCPServer::listPrompts() {
 json MCPServer::callTool(const std::string& name, const json& arguments) {
     if (name == "search_documents") {
         return searchDocuments(arguments);
+    } else if (name == "grep_documents") {
+        return grepDocuments(arguments);
     } else if (name == "store_document") {
         return storeDocument(arguments);
     } else if (name == "retrieve_document") {
         return retrieveDocument(arguments);
+    } else if (name == "update_metadata") {
+        return updateDocumentMetadata(arguments);
     } else if (name == "get_stats") {
         return getStats(arguments);
     } else if (name == "delete_by_name") {
@@ -854,6 +934,19 @@ json MCPServer::searchDocuments(const json& args) {
         bool verbose = args.value("verbose", false);
         std::string searchType = args.value("type", "hybrid");
         
+        // LLM ergonomics parameters
+        bool pathsOnly = args.value("paths_only", false);
+        bool showLineNumbers = args.value("line_numbers", false);
+        int afterContext = args.value("after_context", 0);
+        int beforeContext = args.value("before_context", 0);
+        int context = args.value("context", 0);
+        std::string colorMode = args.value("color", "never");
+        
+        // Handle context option
+        if (context > 0) {
+            beforeContext = afterContext = context;
+        }
+        
         // Handle explicit hash search if --hash parameter is provided
         if (!hashQuery.empty()) {
             if (!isValidHash(hashQuery)) {
@@ -872,6 +965,19 @@ json MCPServer::searchDocuments(const json& args) {
                     auto hres = hybridEngine_->search(query, limit);
                     if (hres) {
                         const auto& items = hres.value();
+                        
+                        // Handle paths_only mode
+                        if (pathsOnly) {
+                            json paths = json::array();
+                            for (const auto& r : items) {
+                                auto itPath = r.metadata.find("path");
+                                if (itPath != r.metadata.end()) {
+                                    paths.push_back(itPath->second);
+                                }
+                            }
+                            return {{"paths", paths}};
+                        }
+                        
                         json response;
                         response["total"] = items.size();
                         response["type"] = "hybrid";
@@ -888,9 +994,18 @@ json MCPServer::searchDocuments(const json& args) {
                             auto itPath = r.metadata.find("path");
                             if (itPath != r.metadata.end()) doc["path"] = itPath->second;
                             doc["score"] = r.hybrid_score;
+                            
+                            // Enhanced content handling with line context
                             if (!r.content.empty()) {
-                                doc["snippet"] = r.content;
+                                if (showLineNumbers || beforeContext > 0 || afterContext > 0) {
+                                    doc["snippet"] = formatSnippetWithContext(r.content, query, 
+                                                                            beforeContext, afterContext, 
+                                                                            showLineNumbers, colorMode);
+                                } else {
+                                    doc["snippet"] = r.content;
+                                }
                             }
+                            
                             if (verbose) {
                                 json breakdown;
                                 breakdown["vector_score"] = r.vector_score;
@@ -916,6 +1031,15 @@ json MCPServer::searchDocuments(const json& args) {
                     }
             
                     const auto& searchResults = result.value();
+                    
+                    // Handle paths_only mode
+                    if (pathsOnly) {
+                        json paths = json::array();
+                        for (const auto& item : searchResults.results) {
+                            paths.push_back(item.document.filePath);
+                        }
+                        return {{"paths", paths}};
+                    }
             
                     json response;
                     response["total"] = searchResults.totalCount;
@@ -924,14 +1048,26 @@ json MCPServer::searchDocuments(const json& args) {
             
                     json results = json::array();
                     for (const auto& item : searchResults.results) {
-                        results.push_back({
+                        json doc = {
                             {"id", item.document.id},
                             {"hash", item.document.sha256Hash},
                             {"title", item.document.fileName},
                             {"path", item.document.filePath},
-                            {"score", item.score},
-                            {"snippet", item.snippet}
-                        });
+                            {"score", item.score}
+                        };
+                        
+                        // Enhanced snippet handling
+                        if (!item.snippet.empty()) {
+                            if (showLineNumbers || beforeContext > 0 || afterContext > 0) {
+                                doc["snippet"] = formatSnippetWithContext(item.snippet, query, 
+                                                                        beforeContext, afterContext, 
+                                                                        showLineNumbers, colorMode);
+                            } else {
+                                doc["snippet"] = item.snippet;
+                            }
+                        }
+                        
+                        results.push_back(doc);
                     }
                     response["results"] = results;
             
@@ -944,6 +1080,15 @@ json MCPServer::searchDocuments(const json& args) {
                     }
             
                     const auto& searchResults = result.value();
+                    
+                    // Handle paths_only mode
+                    if (pathsOnly) {
+                        json paths = json::array();
+                        for (const auto& item : searchResults.results) {
+                            paths.push_back(item.document.filePath);
+                        }
+                        return {{"paths", paths}};
+                    }
             
                     json response;
                     response["total"] = searchResults.totalCount;
@@ -952,14 +1097,26 @@ json MCPServer::searchDocuments(const json& args) {
             
                     json results = json::array();
                     for (const auto& item : searchResults.results) {
-                        results.push_back({
+                        json doc = {
                             {"id", item.document.id},
                             {"hash", item.document.sha256Hash},
                             {"title", item.document.fileName},
                             {"path", item.document.filePath},
-                            {"score", item.score},
-                            {"snippet", item.snippet}
-                        });
+                            {"score", item.score}
+                        };
+                        
+                        // Enhanced snippet handling
+                        if (!item.snippet.empty()) {
+                            if (showLineNumbers || beforeContext > 0 || afterContext > 0) {
+                                doc["snippet"] = formatSnippetWithContext(item.snippet, query, 
+                                                                        beforeContext, afterContext, 
+                                                                        showLineNumbers, colorMode);
+                            } else {
+                                doc["snippet"] = item.snippet;
+                            }
+                        }
+                        
+                        results.push_back(doc);
                     }
                     response["results"] = results;
             
@@ -968,6 +1125,167 @@ json MCPServer::searchDocuments(const json& args) {
         
     } catch (const std::exception& e) {
         return {{"error", std::string("Search failed: ") + e.what()}};
+    }
+}
+
+json MCPServer::grepDocuments(const json& args) {
+    try {
+        std::string pattern = args["pattern"];
+        std::vector<std::string> paths = args.value("paths", std::vector<std::string>{});
+        
+        // Context options
+        int beforeContext = args.value("before_context", 0);
+        int afterContext = args.value("after_context", 0);
+        int context = args.value("context", 0);
+        
+        // Search options
+        bool ignoreCase = args.value("ignore_case", false);
+        bool wholeWord = args.value("word", false);
+        bool invertMatch = args.value("invert", false);
+        bool showLineNumbers = args.value("line_numbers", false);
+        bool showFilename = args.value("with_filename", false);
+        (void)showFilename; // Suppress unused variable warning
+        bool countOnly = args.value("count", false);
+        bool filesOnly = args.value("files_with_matches", false);
+        bool filesWithoutMatch = args.value("files_without_match", false);
+        std::string colorMode = args.value("color", "never");
+        int maxCount = args.value("max_count", 0);
+        
+        // Handle context option
+        if (context > 0) {
+            beforeContext = afterContext = context;
+        }
+        
+        // Build regex pattern
+        std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+        if (ignoreCase) {
+            flags |= std::regex_constants::icase;
+        }
+        
+        std::string regexPattern = pattern;
+        if (wholeWord) {
+            regexPattern = "\\b" + regexPattern + "\\b";
+        }
+        
+        std::regex regex;
+        try {
+            regex = std::regex(regexPattern, flags);
+        } catch (const std::regex_error& e) {
+            return {{"error", "Invalid regex pattern: " + std::string(e.what())}};
+        }
+        
+        // Get documents to search
+        std::vector<metadata::DocumentInfo> documents;
+        
+        if (paths.empty()) {
+            // Search all indexed files
+            auto docsResult = metadataRepo_->findDocumentsByPath("%");
+            if (!docsResult) {
+                return {{"error", "Failed to query documents: " + docsResult.error().message}};
+            }
+            documents = docsResult.value();
+        } else {
+            // Search specific paths
+            for (const auto& path : paths) {
+                auto docsResult = metadataRepo_->findDocumentsByPath(path);
+                if (!docsResult) {
+                    continue; // Skip if path not found
+                }
+                
+                for (const auto& doc : docsResult.value()) {
+                    documents.push_back(doc);
+                }
+                
+                // Also try path suffix match
+                if (docsResult.value().empty()) {
+                    auto suffixResult = metadataRepo_->findDocumentsByPath("%/" + path);
+                    if (suffixResult && !suffixResult.value().empty()) {
+                        for (const auto& doc : suffixResult.value()) {
+                            documents.push_back(doc);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (documents.empty()) {
+            return {{"message", "No files to search"}};
+        }
+        
+        // Process each document
+        json results = json::array();
+        size_t totalMatches = 0;
+        std::vector<std::string> matchingFiles;
+        std::vector<std::string> nonMatchingFiles;
+        
+        for (const auto& doc : documents) {
+            // Retrieve document content
+            auto contentResult = store_->retrieveBytes(doc.sha256Hash);
+            if (!contentResult) {
+                continue; // Skip if can't retrieve
+            }
+            
+            std::string content(
+                reinterpret_cast<const char*>(contentResult.value().data()),
+                contentResult.value().size()
+            );
+            
+            // Process the file
+            auto matches = processGrepFile(doc.filePath, content, regex, invertMatch, maxCount);
+            
+            if (!matches.empty()) {
+                matchingFiles.push_back(doc.filePath);
+                totalMatches += matches.size();
+                
+                if (filesOnly) {
+                    results.push_back({{"file", doc.filePath}});
+                } else if (countOnly) {
+                    json fileResult = {{"file", doc.filePath}, {"count", matches.size()}};
+                    results.push_back(fileResult);
+                } else if (!filesWithoutMatch) {
+                    json fileResult = {{"file", doc.filePath}, {"matches", json::array()}};
+                    
+                    for (const auto& match : matches) {
+                        json matchData = {{"line_number", match.lineNumber}, {"line", match.line}};
+                        
+                        if (showLineNumbers) {
+                            matchData["line_number"] = match.lineNumber;
+                        }
+                        
+                        if (beforeContext > 0 || afterContext > 0) {
+                            matchData["context"] = formatGrepContext(content, match.lineNumber, beforeContext, afterContext);
+                        }
+                        
+                        fileResult["matches"].push_back(matchData);
+                    }
+                    
+                    results.push_back(fileResult);
+                }
+            } else {
+                nonMatchingFiles.push_back(doc.filePath);
+            }
+        }
+        
+        // Handle files-without-match option
+        if (filesWithoutMatch) {
+            for (const auto& file : nonMatchingFiles) {
+                results.push_back({{"file", file}});
+            }
+        }
+        
+        json response;
+        response["total_matches"] = totalMatches;
+        response["matching_files"] = matchingFiles.size();
+        response["results"] = results;
+        
+        if (filesWithoutMatch) {
+            response["non_matching_files"] = nonMatchingFiles.size();
+        }
+        
+        return response;
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Grep failed: ") + e.what()}};
     }
 }
 
@@ -1003,17 +1321,61 @@ json MCPServer::retrieveDocument(const json& args) {
     try {
         std::string hash = args["hash"];
         std::string outputPath = args.value("outputPath", hash);
+        bool enableGraph = args.value("graph", false);
+        int depth = args.value("depth", 2);
+        bool includeContent = args.value("include_content", false);
         
-        auto result = store_->retrieve(hash, outputPath);
-        if (!result) {
-            return {{"error", result.error().message}};
+        // Validate depth parameter
+        depth = std::max(1, std::min(5, depth));
+        
+        // Check if document exists and get metadata
+        if (!metadataRepo_) {
+            return {{"error", "Metadata repository not initialized"}};
         }
         
-        return {
-            {"found", result.value().found},
-            {"size", result.value().size},
-            {"path", outputPath}
-        };
+        auto docResult = metadataRepo_->getDocumentByHash(hash);
+        if (!docResult) {
+            return {{"error", docResult.error().message}};
+        }
+        
+        if (!docResult.value().has_value()) {
+            return {{"error", "Document not found: " + hash}};
+        }
+        
+        const auto& baseDoc = docResult.value().value();
+        
+        // If graph functionality is not requested, use original behavior
+        if (!enableGraph) {
+            auto result = store_->retrieve(hash, outputPath);
+            if (!result) {
+                return {{"error", result.error().message}};
+            }
+            
+            return {
+                {"found", result.value().found},
+                {"size", result.value().size},
+                {"path", outputPath}
+            };
+        }
+        
+        // Knowledge graph functionality requested
+        auto relatedDocs = findRelatedDocuments(baseDoc, depth);
+        
+        // Build the enhanced response
+        auto response = buildKnowledgeGraphResponse(baseDoc, relatedDocs, includeContent, outputPath);
+        
+        // If outputPath was specified, also retrieve to file
+        if (!outputPath.empty() && outputPath != hash) {
+            auto result = store_->retrieve(hash, outputPath);
+            if (!result) {
+                response["file_error"] = result.error().message;
+            } else {
+                response["file_written"] = outputPath;
+                response["file_size"] = result.value().size;
+            }
+        }
+        
+        return response;
         
     } catch (const std::exception& e) {
         return {{"error", std::string("Retrieve failed: ") + e.what()}};
@@ -1022,9 +1384,12 @@ json MCPServer::retrieveDocument(const json& args) {
 
 json MCPServer::getStats(const json& args) {
     try {
+        bool detailed = args.value("detailed", false);
+        bool fileTypes = args.value("file_types", false);
+        
         auto stats = store_->getStats();
         
-        return {
+        json result = {
             {"total_objects", stats.totalObjects},
             {"total_bytes", stats.totalBytes},
             {"unique_blocks", stats.uniqueBlocks},
@@ -1032,8 +1397,230 @@ json MCPServer::getStats(const json& args) {
             {"dedup_ratio", stats.dedupRatio()}
         };
         
+        // Add file type breakdown if requested
+        if (fileTypes && metadataRepo_) {
+            try {
+                // Get all documents for file type analysis
+                auto documentsResult = metadataRepo_->findDocumentsByPath("%");
+                if (documentsResult) {
+                    const auto& documents = documentsResult.value();
+                    
+                    // Aggregate by file types
+                    std::unordered_map<std::string, int> typeCount;
+                    std::unordered_map<std::string, int64_t> typeSize;
+                    std::unordered_map<std::string, int> extCount;
+                    std::unordered_map<std::string, int> mimeCount;
+                    
+                    int totalDocuments = 0;
+                    int64_t totalDocumentSize = 0;
+                    
+                    for (const auto& doc : documents) {
+                        totalDocuments++;
+                        totalDocumentSize += doc.fileSize;
+                        
+                        // File type categorization
+                        std::string fileType = getFileTypeFromMime(doc.mimeType);
+                        typeCount[fileType]++;
+                        typeSize[fileType] += doc.fileSize;
+                        
+                        // Extension analysis
+                        if (!doc.fileExtension.empty()) {
+                            extCount[doc.fileExtension]++;
+                        }
+                        
+                        // MIME type analysis
+                        mimeCount[doc.mimeType]++;
+                    }
+                    
+                    // Build file types breakdown
+                    json fileTypeBreakdown = json::object();
+                    fileTypeBreakdown["total_documents"] = totalDocuments;
+                    fileTypeBreakdown["total_document_size"] = totalDocumentSize;
+                    
+                    // File type distribution
+                    json typeDistribution = json::array();
+                    for (const auto& [type, count] : typeCount) {
+                        typeDistribution.push_back({
+                            {"type", type},
+                            {"count", count},
+                            {"size", typeSize[type]},
+                            {"percentage", totalDocuments > 0 ? (count * 100.0 / totalDocuments) : 0}
+                        });
+                    }
+                    
+                    // Sort by count (descending)
+                    std::sort(typeDistribution.begin(), typeDistribution.end(),
+                        [](const json& a, const json& b) {
+                            return a["count"].get<int>() > b["count"].get<int>();
+                        });
+                    
+                    fileTypeBreakdown["file_type_distribution"] = typeDistribution;
+                    
+                    // Top extensions
+                    json topExtensions = json::array();
+                    std::vector<std::pair<std::string, int>> extPairs(extCount.begin(), extCount.end());
+                    std::sort(extPairs.begin(), extPairs.end(),
+                        [](const auto& a, const auto& b) { return a.second > b.second; });
+                    
+                    for (size_t i = 0; i < std::min(extPairs.size(), size_t(10)); ++i) {
+                        topExtensions.push_back({
+                            {"extension", extPairs[i].first},
+                            {"count", extPairs[i].second}
+                        });
+                    }
+                    fileTypeBreakdown["top_extensions"] = topExtensions;
+                    
+                    // Top MIME types
+                    json topMimeTypes = json::array();
+                    std::vector<std::pair<std::string, int>> mimePairs(mimeCount.begin(), mimeCount.end());
+                    std::sort(mimePairs.begin(), mimePairs.end(),
+                        [](const auto& a, const auto& b) { return a.second > b.second; });
+                    
+                    for (size_t i = 0; i < std::min(mimePairs.size(), size_t(10)); ++i) {
+                        topMimeTypes.push_back({
+                            {"mime_type", mimePairs[i].first},
+                            {"count", mimePairs[i].second}
+                        });
+                    }
+                    fileTypeBreakdown["top_mime_types"] = topMimeTypes;
+                    
+                    result["file_type_breakdown"] = fileTypeBreakdown;
+                }
+            } catch (const std::exception& e) {
+                result["file_type_error"] = std::string("Failed to analyze file types: ") + e.what();
+            }
+        }
+        
+        if (detailed) {
+            result["detailed"] = true;
+            // Could add more detailed storage information here
+        }
+        
+        return result;
+        
     } catch (const std::exception& e) {
         return {{"error", std::string("Stats failed: ") + e.what()}};
+    }
+}
+
+json MCPServer::updateDocumentMetadata(const json& args) {
+    try {
+        std::string hash = args.value("hash", "");
+        std::string name = args.value("name", "");
+        std::vector<std::string> metadataList = args["metadata"];
+        bool verbose = args.value("verbose", false);
+        
+        if (!metadataRepo_) {
+            return {{"error", "Metadata repository not initialized"}};
+        }
+        
+        // Determine document to update
+        int64_t docId = -1;
+        std::string docHash;
+        
+        if (!hash.empty()) {
+            docHash = hash;
+            // Get document by hash to get its ID
+            auto docResult = metadataRepo_->getDocumentByHash(docHash);
+            if (!docResult) {
+                return {{"error", docResult.error().message}};
+            }
+            if (!docResult.value().has_value()) {
+                return {{"error", "Document not found with hash: " + docHash}};
+            }
+            docId = docResult.value()->id;
+        } else if (!name.empty()) {
+            // Resolve name to document using existing search functionality
+            auto searchResult = metadataRepo_->search(name, 10, 0);
+            if (!searchResult) {
+                return {{"error", "Failed to search for document: " + searchResult.error().message}};
+            }
+            
+            const auto& results = searchResult.value().results;
+            if (results.empty()) {
+                return {{"error", "Document not found with name: " + name}};
+            }
+            
+            // Use first match (could be improved with better name resolution)
+            docId = results[0].document.id;
+            docHash = results[0].document.sha256Hash;
+        } else {
+            return {{"error", "No document identifier specified (hash or name required)"}};
+        }
+        
+        // Parse and apply metadata updates
+        size_t successCount = 0;
+        size_t failureCount = 0;
+        json results = json::array();
+        
+        for (const auto& kv : metadataList) {
+            auto pos = kv.find('=');
+            if (pos != std::string::npos) {
+                std::string key = kv.substr(0, pos);
+                std::string value = kv.substr(pos + 1);
+                
+                // Trim whitespace
+                key.erase(0, key.find_first_not_of(" \t"));
+                key.erase(key.find_last_not_of(" \t") + 1);
+                value.erase(0, value.find_first_not_of(" \t"));
+                value.erase(value.find_last_not_of(" \t") + 1);
+                
+                if (!key.empty()) {
+                    auto updateResult = metadataRepo_->setMetadata(docId, key, metadata::MetadataValue(value));
+                    if (updateResult) {
+                        successCount++;
+                        if (verbose) {
+                            results.push_back({
+                                {"key", key},
+                                {"value", value},
+                                {"status", "success"}
+                            });
+                        }
+                    } else {
+                        failureCount++;
+                        if (verbose) {
+                            results.push_back({
+                                {"key", key},
+                                {"value", value},
+                                {"status", "failed"},
+                                {"error", updateResult.error().message}
+                            });
+                        }
+                    }
+                }
+            } else {
+                failureCount++;
+                if (verbose) {
+                    results.push_back({
+                        {"input", kv},
+                        {"status", "failed"},
+                        {"error", "Invalid format - expected key=value"}
+                    });
+                }
+            }
+        }
+        
+        json response;
+        response["document_id"] = docId;
+        response["document_hash"] = docHash;
+        response["updates_applied"] = successCount;
+        response["updates_failed"] = failureCount;
+        response["total_updates"] = successCount + failureCount;
+        
+        if (verbose) {
+            response["details"] = results;
+        }
+        
+        if (successCount > 0) {
+            response["message"] = "Metadata updated successfully";
+        } else {
+            response["message"] = "No metadata updates were successful";
+        }
+        
+        return response;
+        
+    } catch (const std::exception& e) {
+        return {{"error", std::string("Update metadata failed: ") + e.what()}};
     }
 }
 
@@ -1219,6 +1806,22 @@ json MCPServer::listDocuments(const json& args) {
         std::string pattern = args.value("pattern", "");
         auto tags = args.value("tags", std::vector<std::string>{});
         
+        // Enhanced filtering parameters
+        std::string fileType = args.value("type", "");
+        std::string mimeType = args.value("mime", "");
+        std::string extension = args.value("extension", "");
+        bool binaryOnly = args.value("binary", false);
+        bool textOnly = args.value("text", false);
+        std::string createdAfter = args.value("created_after", "");
+        std::string createdBefore = args.value("created_before", "");
+        std::string modifiedAfter = args.value("modified_after", "");
+        std::string modifiedBefore = args.value("modified_before", "");
+        std::string indexedAfter = args.value("indexed_after", "");
+        std::string indexedBefore = args.value("indexed_before", "");
+        int recent = args.value("recent", 0);
+        std::string sortBy = args.value("sort_by", "indexed");
+        std::string sortOrder = args.value("sort_order", "desc");
+        
         if (!metadataRepo_) {
             return {{"error", "Metadata repository not available"}};
         }
@@ -1226,7 +1829,7 @@ json MCPServer::listDocuments(const json& args) {
         json result = json::object();
         result["limit"] = limit;
         
-        // Use existing CLI logic - get all documents from metadata repository
+        // Get all documents from metadata repository
         std::string searchPattern = pattern.empty() ? "%" : pattern;
         
         // Convert glob pattern to SQL LIKE pattern if needed
@@ -1243,11 +1846,86 @@ json MCPServer::listDocuments(const json& args) {
             return {{"error", "Failed to query documents: " + documentsResult.error().message}};
         }
         
-        json documents = json::array();
+        std::vector<metadata::DocumentInfo> documents = documentsResult.value();
         
-        // Process each document (similar to CLI list command)
-        for (const auto& docInfo : documentsResult.value()) {
-            if (documents.size() >= static_cast<size_t>(limit)) {
+        // Apply filters
+        documents.erase(std::remove_if(documents.begin(), documents.end(), 
+            [&](const metadata::DocumentInfo& doc) {
+                
+                // File type filter
+                if (!fileType.empty()) {
+                    std::string docType = getFileTypeFromMime(doc.mimeType);
+                    if (docType != fileType) return true;
+                }
+                
+                // MIME type filter
+                if (!mimeType.empty()) {
+                    if (doc.mimeType.find(mimeType) == std::string::npos) return true;
+                }
+                
+                // Extension filter
+                if (!extension.empty()) {
+                    if (doc.fileExtension != extension && doc.fileExtension != "." + extension) return true;
+                }
+                
+                // Binary/text filter
+                if (binaryOnly || textOnly) {
+                    bool isBinary = isBinaryMimeType(doc.mimeType);
+                    if (binaryOnly && !isBinary) return true;
+                    if (textOnly && isBinary) return true;
+                }
+                
+                // Time filters would require parsing date strings
+                // For simplicity, implement basic filtering for now
+                
+                return false; // Keep the document
+            }), documents.end());
+        
+        // Apply recent filter
+        if (recent > 0) {
+            std::sort(documents.begin(), documents.end(), 
+                [](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                    return a.indexedTime > b.indexedTime;
+                });
+            if (documents.size() > static_cast<size_t>(recent)) {
+                documents.resize(recent);
+            }
+        }
+        
+        // Apply sorting
+        if (sortBy == "name") {
+            std::sort(documents.begin(), documents.end(), 
+                [&](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                    return sortOrder == "asc" ? a.fileName < b.fileName : a.fileName > b.fileName;
+                });
+        } else if (sortBy == "size") {
+            std::sort(documents.begin(), documents.end(), 
+                [&](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                    return sortOrder == "asc" ? a.fileSize < b.fileSize : a.fileSize > b.fileSize;
+                });
+        } else if (sortBy == "created") {
+            std::sort(documents.begin(), documents.end(), 
+                [&](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                    return sortOrder == "asc" ? a.createdTime < b.createdTime : a.createdTime > b.createdTime;
+                });
+        } else if (sortBy == "modified") {
+            std::sort(documents.begin(), documents.end(), 
+                [&](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                    return sortOrder == "asc" ? a.modifiedTime < b.modifiedTime : a.modifiedTime > b.modifiedTime;
+                });
+        } else { // default to indexed
+            std::sort(documents.begin(), documents.end(), 
+                [&](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                    return sortOrder == "asc" ? a.indexedTime < b.indexedTime : a.indexedTime > b.indexedTime;
+                });
+        }
+        
+        // Apply limit and build response
+        json docArray = json::array();
+        size_t count = 0;
+        
+        for (const auto& docInfo : documents) {
+            if (count >= static_cast<size_t>(limit)) {
                 break;
             }
             
@@ -1258,59 +1936,77 @@ json MCPServer::listDocuments(const json& args) {
             doc["extension"] = docInfo.fileExtension;
             doc["size"] = docInfo.fileSize;
             doc["mime_type"] = docInfo.mimeType;
+            doc["file_type"] = getFileTypeFromMime(docInfo.mimeType);
+            doc["is_binary"] = isBinaryMimeType(docInfo.mimeType);
             doc["created"] = std::chrono::duration_cast<std::chrono::seconds>(docInfo.createdTime.time_since_epoch()).count();
             doc["modified"] = std::chrono::duration_cast<std::chrono::seconds>(docInfo.modifiedTime.time_since_epoch()).count();
             doc["indexed"] = std::chrono::duration_cast<std::chrono::seconds>(docInfo.indexedTime.time_since_epoch()).count();
             
-            // Get metadata including tags if requested
-            if (!tags.empty()) {
-                auto metadataResult = metadataRepo_->getAllMetadata(docInfo.id);
-                if (metadataResult) {
-                    const auto& metadata = metadataResult.value();
-                    json docTags = json::array();
-                    
-                    // Extract tags from metadata
-                    for (const auto& [key, value] : metadata) {
-                        if (key == "tag" || key.starts_with("tag:")) {
-                            docTags.push_back(value.value.empty() ? key : value.value);
-                        }
+            // Get metadata including tags
+            auto metadataResult = metadataRepo_->getAllMetadata(docInfo.id);
+            if (metadataResult) {
+                const auto& metadata = metadataResult.value();
+                json docTags = json::array();
+                json docMetadata = json::object();
+                
+                // Extract tags and other metadata
+                for (const auto& [key, value] : metadata) {
+                    if (key == "tag" || key.starts_with("tag:")) {
+                        docTags.push_back(value.value.empty() ? key : value.value);
+                    } else {
+                        docMetadata[key] = value.value;
                     }
-                    
-                    // Filter by tags if specified
-                    bool hasMatchingTag = tags.empty();
-                    if (!tags.empty()) {
-                        for (const auto& requiredTag : tags) {
-                            for (const auto& docTag : docTags) {
-                                if (docTag.get<std::string>() == requiredTag) {
-                                    hasMatchingTag = true;
-                                    break;
-                                }
+                }
+                
+                // Filter by tags if specified
+                if (!tags.empty()) {
+                    bool hasMatchingTag = false;
+                    for (const auto& requiredTag : tags) {
+                        for (const auto& docTag : docTags) {
+                            if (docTag.get<std::string>() == requiredTag) {
+                                hasMatchingTag = true;
+                                break;
                             }
-                            if (hasMatchingTag) break;
                         }
+                        if (hasMatchingTag) break;
                     }
                     
                     if (!hasMatchingTag) {
                         continue; // Skip this document
                     }
-                    
+                }
+                
+                if (!docTags.empty()) {
                     doc["tags"] = docTags;
+                }
+                if (!docMetadata.empty()) {
+                    doc["metadata"] = docMetadata;
                 }
             }
             
-            documents.push_back(doc);
+            docArray.push_back(doc);
+            count++;
         }
         
-        result["documents"] = documents;
-        result["count"] = documents.size();
-        result["total_found"] = documentsResult.value().size();
+        result["documents"] = docArray;
+        result["count"] = count;
+        result["total_found"] = documents.size();
+        result["sort_by"] = sortBy;
+        result["sort_order"] = sortOrder;
         
-        if (!pattern.empty()) {
-            result["pattern"] = pattern;
-        }
+        // Add filter information
+        json filters = json::object();
+        if (!pattern.empty()) filters["pattern"] = pattern;
+        if (!tags.empty()) filters["tags"] = tags;
+        if (!fileType.empty()) filters["type"] = fileType;
+        if (!mimeType.empty()) filters["mime"] = mimeType;
+        if (!extension.empty()) filters["extension"] = extension;
+        if (binaryOnly) filters["binary_only"] = true;
+        if (textOnly) filters["text_only"] = true;
+        if (recent > 0) filters["recent"] = recent;
         
-        if (!tags.empty()) {
-            result["filtered_by_tags"] = tags;
+        if (!filters.empty()) {
+            result["filters"] = filters;
         }
         
         return result;
@@ -1320,6 +2016,7 @@ json MCPServer::listDocuments(const json& args) {
 }
 
 json MCPServer::readResource(const std::string& uri) {
+    (void)uri; // Suppress unused parameter warning
     // Could implement reading document content by URI
     return {{"content", "Resource reading not implemented"}};
 }
@@ -1690,6 +2387,7 @@ json MCPServer::restoreSnapshot(const json& args) {
 }
 
 json MCPServer::listCollections(const json& args) {
+    (void)args; // Suppress unused parameter warning
     try {
         auto collectionsResult = metadataRepo_->getCollections();
         if (!collectionsResult) {
@@ -1874,6 +2572,363 @@ std::string MCPServer::expandLayoutTemplate(const std::string& layoutTemplate,
     }
     
     return result;
+}
+
+std::string MCPServer::formatSnippetWithContext(const std::string& content, const std::string& query,
+                                               int beforeContext, int afterContext,
+                                               bool showLineNumbers, const std::string& colorMode) {
+    (void)query; // Suppress unused parameter warning
+    (void)beforeContext; // Suppress unused parameter warning  
+    (void)afterContext; // Suppress unused parameter warning
+    (void)colorMode; // Suppress unused parameter warning
+    if (content.empty()) {
+        return content;
+    }
+    
+    // Split content into lines
+    std::vector<std::string> lines;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        lines.push_back(line);
+    }
+    
+    if (lines.empty()) {
+        return content;
+    }
+    
+    // Simple implementation: return first few lines with line numbers if requested
+    // For a more sophisticated implementation, we would search for query matches
+    std::ostringstream result;
+    
+    size_t linesToShow = std::min(static_cast<size_t>(5), lines.size()); // Show up to 5 lines
+    
+    for (size_t i = 0; i < linesToShow; ++i) {
+        if (showLineNumbers) {
+            result << std::setw(4) << (i + 1) << ": ";
+        }
+        
+        // Simple highlighting: for now just return the line as-is
+        // Full implementation would search for query in line and apply color codes
+        result << lines[i];
+        
+        if (i < linesToShow - 1) {
+            result << "\n";
+        }
+    }
+    
+    return result.str();
+}
+
+std::vector<MCPServer::GrepMatch> MCPServer::processGrepFile(const std::string& filename, 
+                                                           const std::string& content, 
+                                                           const std::regex& pattern, 
+                                                           bool invertMatch, 
+                                                           int maxCount) {
+    (void)filename; // Suppress unused parameter warning
+    std::vector<GrepMatch> matches;
+    std::istringstream stream(content);
+    std::string line;
+    size_t lineNumber = 1;
+    
+    while (std::getline(stream, line)) {
+        bool hasMatch = false;
+        std::smatch match;
+        std::string searchLine = line;
+        size_t columnOffset = 0;
+        
+        while (std::regex_search(searchLine, match, pattern)) {
+            if (!invertMatch) {
+                GrepMatch m;
+                m.lineNumber = lineNumber;
+                m.columnStart = columnOffset + match.position();
+                m.columnEnd = m.columnStart + match.length();
+                m.line = line;
+                matches.push_back(m);
+                hasMatch = true;
+            }
+            
+            columnOffset += match.position() + match.length();
+            searchLine = match.suffix();
+            
+            // For performance, one match per line is often enough
+            break;
+        }
+        
+        // Handle inverted match
+        if (invertMatch && !hasMatch) {
+            GrepMatch m;
+            m.lineNumber = lineNumber;
+            m.columnStart = 0;
+            m.columnEnd = 0;
+            m.line = line;
+            matches.push_back(m);
+        }
+        
+        // Check max count
+        if (maxCount > 0 && static_cast<int>(matches.size()) >= maxCount) {
+            break;
+        }
+        
+        lineNumber++;
+    }
+    
+    return matches;
+}
+
+std::string MCPServer::formatGrepContext(const std::string& content, size_t lineNumber, 
+                                       int beforeContext, int afterContext) {
+    if (beforeContext == 0 && afterContext == 0) {
+        return "";
+    }
+    
+    // Split content into lines
+    std::vector<std::string> lines;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        lines.push_back(line);
+    }
+    
+    if (lines.empty() || lineNumber == 0 || lineNumber > lines.size()) {
+        return "";
+    }
+    
+    // Calculate context range (convert to 0-based indexing)
+    size_t zeroBasedLine = lineNumber - 1;
+    size_t startLine = (zeroBasedLine >= static_cast<size_t>(beforeContext)) 
+        ? zeroBasedLine - beforeContext : 0;
+    size_t endLine = std::min(zeroBasedLine + afterContext, lines.size() - 1);
+    
+    std::ostringstream result;
+    for (size_t i = startLine; i <= endLine; ++i) {
+        if (i != zeroBasedLine) { // Don't include the match line itself
+            result << (i + 1) << ": " << lines[i];
+            if (i < endLine) {
+                result << "\n";
+            }
+        }
+    }
+    
+    return result.str();
+}
+
+std::vector<MCPServer::RelatedDocument> MCPServer::findRelatedDocuments(const metadata::DocumentInfo& baseDoc, 
+                                                                       int depth, int maxResults) {
+    std::vector<RelatedDocument> related;
+    
+    if (!metadataRepo_) {
+        return related;
+    }
+    
+    try {
+        // Extract base document information
+        std::filesystem::path basePath(baseDoc.filePath);
+        std::string baseDir = basePath.parent_path().string();
+        std::string baseExtension = basePath.extension().string();
+        
+        // Find documents in the same directory (distance 1)
+        auto sameDirResult = metadataRepo_->findDocumentsByPath(baseDir + "/%");
+        if (sameDirResult) {
+            for (const auto& doc : sameDirResult.value()) {
+                if (doc.sha256Hash != baseDoc.sha256Hash) { // Don't include self
+                    RelatedDocument rel;
+                    rel.hash = doc.sha256Hash;
+                    rel.path = doc.filePath;
+                    rel.relationship = "same_directory";
+                    rel.distance = 1;
+                    rel.metadata = {
+                        {"size", doc.fileSize},
+                        {"extension", doc.fileExtension},
+                        {"mime_type", doc.mimeType}
+                    };
+                    related.push_back(rel);
+                    
+                    if (related.size() >= static_cast<size_t>(maxResults / 2)) break;
+                }
+            }
+        }
+        
+        // Find documents with similar extensions (distance 1)
+        if (!baseExtension.empty() && related.size() < static_cast<size_t>(maxResults)) {
+            auto sameExtResult = metadataRepo_->findDocumentsByPath("%*" + baseExtension);
+            if (sameExtResult) {
+                for (const auto& doc : sameExtResult.value()) {
+                    if (doc.sha256Hash != baseDoc.sha256Hash) { // Don't include self
+                        // Check if already added from same directory
+                        bool alreadyAdded = false;
+                        for (const auto& existing : related) {
+                            if (existing.hash == doc.sha256Hash) {
+                                alreadyAdded = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!alreadyAdded) {
+                            RelatedDocument rel;
+                            rel.hash = doc.sha256Hash;
+                            rel.path = doc.filePath;
+                            rel.relationship = "similar_extension";
+                            rel.distance = 1;
+                            rel.metadata = {
+                                {"size", doc.fileSize},
+                                {"extension", doc.fileExtension},
+                                {"mime_type", doc.mimeType}
+                            };
+                            related.push_back(rel);
+                            
+                            if (related.size() >= static_cast<size_t>(maxResults)) break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If depth > 1, find documents with same MIME type (distance 2)
+        if (depth > 1 && !baseDoc.mimeType.empty() && related.size() < static_cast<size_t>(maxResults)) {
+            // For now, implement a simple search for similar MIME types
+            // In a full implementation, this would use more sophisticated relationships
+            auto allDocsResult = metadataRepo_->findDocumentsByPath("%");
+            if (allDocsResult) {
+                for (const auto& doc : allDocsResult.value()) {
+                    if (doc.sha256Hash != baseDoc.sha256Hash && doc.mimeType == baseDoc.mimeType) {
+                        // Check if already added
+                        bool alreadyAdded = false;
+                        for (const auto& existing : related) {
+                            if (existing.hash == doc.sha256Hash) {
+                                alreadyAdded = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!alreadyAdded) {
+                            RelatedDocument rel;
+                            rel.hash = doc.sha256Hash;
+                            rel.path = doc.filePath;
+                            rel.relationship = "similar_mime_type";
+                            rel.distance = 2;
+                            rel.metadata = {
+                                {"size", doc.fileSize},
+                                {"extension", doc.fileExtension},
+                                {"mime_type", doc.mimeType}
+                            };
+                            related.push_back(rel);
+                            
+                            if (related.size() >= static_cast<size_t>(maxResults)) break;
+                        }
+                    }
+                }
+            }
+        }
+        
+    } catch (const std::exception& e) {
+        // Log error but don't fail the whole operation
+        spdlog::warn("Error finding related documents: {}", e.what());
+    }
+    
+    return related;
+}
+
+json MCPServer::buildKnowledgeGraphResponse(const metadata::DocumentInfo& baseDoc, 
+                                          const std::vector<RelatedDocument>& related,
+                                          bool includeContent, const std::string& outputPath) {
+    (void)outputPath; // Suppress unused parameter warning
+    json response;
+    
+    // Main document information
+    json mainDoc = {
+        {"hash", baseDoc.sha256Hash},
+        {"path", baseDoc.filePath},
+        {"name", baseDoc.fileName},
+        {"size", baseDoc.fileSize},
+        {"extension", baseDoc.fileExtension},
+        {"mime_type", baseDoc.mimeType},
+        {"created", std::chrono::duration_cast<std::chrono::seconds>(baseDoc.createdTime.time_since_epoch()).count()},
+        {"modified", std::chrono::duration_cast<std::chrono::seconds>(baseDoc.modifiedTime.time_since_epoch()).count()},
+        {"indexed", std::chrono::duration_cast<std::chrono::seconds>(baseDoc.indexedTime.time_since_epoch()).count()}
+    };
+    
+    // Include content if requested
+    if (includeContent && store_) {
+        try {
+            auto contentResult = store_->retrieveBytes(baseDoc.sha256Hash);
+            if (contentResult) {
+                std::string content(
+                    reinterpret_cast<const char*>(contentResult.value().data()),
+                    contentResult.value().size()
+                );
+                mainDoc["content"] = content;
+            }
+        } catch (const std::exception& e) {
+            mainDoc["content_error"] = e.what();
+        }
+    }
+    
+    response["document"] = mainDoc;
+    
+    // Related documents
+    json relatedArray = json::array();
+    for (const auto& rel : related) {
+        json relDoc = {
+            {"hash", rel.hash},
+            {"path", rel.path},
+            {"relationship", rel.relationship},
+            {"distance", rel.distance},
+            {"metadata", rel.metadata}
+        };
+        
+        // Include content for related documents if requested (but limit to smaller ones)
+        if (includeContent && rel.metadata.contains("size")) {
+            int64_t size = rel.metadata["size"];
+            if (size < 50000) { // Only include content for files < 50KB
+                try {
+                    auto contentResult = store_->retrieveBytes(rel.hash);
+                    if (contentResult) {
+                        std::string content(
+                            reinterpret_cast<const char*>(contentResult.value().data()),
+                            contentResult.value().size()
+                        );
+                        relDoc["content"] = content;
+                    }
+                } catch (const std::exception& e) {
+                    relDoc["content_error"] = e.what();
+                }
+            }
+        }
+        
+        relatedArray.push_back(relDoc);
+    }
+    
+    response["related_documents"] = relatedArray;
+    response["total_related"] = related.size();
+    response["graph_enabled"] = true;
+    
+    return response;
+}
+
+std::string MCPServer::getFileTypeFromMime(const std::string& mimeType) {
+    if (mimeType.starts_with("text/")) return "text";
+    if (mimeType.starts_with("image/")) return "image";
+    if (mimeType.starts_with("audio/")) return "audio";
+    if (mimeType.starts_with("video/")) return "video";
+    if (mimeType.starts_with("application/pdf")) return "document";
+    if (mimeType.starts_with("application/msword") || 
+        mimeType.starts_with("application/vnd.openxmlformats-officedocument")) return "document";
+    if (mimeType.starts_with("application/zip") || 
+        mimeType.starts_with("application/x-tar") ||
+        mimeType.starts_with("application/gzip")) return "archive";
+    if (mimeType == "application/json" || mimeType == "application/xml") return "data";
+    if (mimeType == "application/octet-stream") return "binary";
+    return "other";
+}
+
+bool MCPServer::isBinaryMimeType(const std::string& mimeType) {
+    if (mimeType.starts_with("text/")) return false;
+    if (mimeType == "application/json") return false;
+    if (mimeType == "application/xml") return false;
+    if (mimeType == "application/javascript") return false;
+    if (mimeType.starts_with("application/") && mimeType.find("xml") != std::string::npos) return false;
+    return true;
 }
 
 } // namespace yams::mcp

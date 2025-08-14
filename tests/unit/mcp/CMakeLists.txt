@@ -4,6 +4,7 @@ add_executable(mcp_tests
     mcp_server_test.cpp
     websocket_transport_test.cpp
     stdio_transport_test.cpp
+    mcp_tools_schema_and_smoke_test.cpp
 )
 
 target_link_libraries(mcp_tests
@@ -13,12 +14,16 @@ target_link_libraries(mcp_tests
         yams_mcp
         yams::api
         yams::search
+        yams::metadata
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::SSL
         OpenSSL::Crypto
         Threads::Threads
 )
+
+# Define YAMS_TESTING macro for testing interface
+target_compile_definitions(mcp_tests PRIVATE YAMS_TESTING)
 
 # Boost.Beast is header-only and included with Boost
 # No additional include directories needed

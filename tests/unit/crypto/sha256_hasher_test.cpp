@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <yams/crypto/hasher.h>
+#include <yams/core/span.h>
 #include "test_helpers.h"
 
 using namespace yams;
@@ -27,7 +28,7 @@ TEST_F(SHA256HasherTest, KnownTestVectors) {
     {
         auto data = TestVectors::getABCData();
         hasher->init();
-        hasher->update(std::span{data});
+        hasher->update(yams::span{data});
         auto hash = hasher->finalize();
         EXPECT_EQ(hash, TestVectors::ABC_SHA256);
     }
@@ -36,7 +37,7 @@ TEST_F(SHA256HasherTest, KnownTestVectors) {
     {
         auto data = TestVectors::getHelloWorldData();
         hasher->init();
-        hasher->update(std::span{data});
+        hasher->update(yams::span{data});
         auto hash = hasher->finalize();
         EXPECT_EQ(hash, TestVectors::HELLO_WORLD_SHA256);
     }
@@ -47,12 +48,12 @@ TEST_F(SHA256HasherTest, LargeInput) {
     auto data = generateRandomBytes(1024 * 1024);
     
     hasher->init();
-    hasher->update(std::span{data});
+    hasher->update(yams::span{data});
     auto hash1 = hasher->finalize();
     
     // Hash again to verify consistency
     hasher->init();
-    hasher->update(std::span{data});
+    hasher->update(yams::span{data});
     auto hash2 = hasher->finalize();
     
     EXPECT_EQ(hash1, hash2);
@@ -64,14 +65,14 @@ TEST_F(SHA256HasherTest, StreamingUpdate) {
     auto data = generateRandomBytes(1000);
     
     hasher->init();
-    hasher->update(std::span{data.data(), 100});
-    hasher->update(std::span{data.data() + 100, 400});
-    hasher->update(std::span{data.data() + 500, 500});
+    hasher->update(yams::span{data.data(), 100});
+    hasher->update(yams::span{data.data() + 100, 400});
+    hasher->update(yams::span{data.data() + 500, 500});
     auto hash1 = hasher->finalize();
     
     // Hash all at once
     hasher->init();
-    hasher->update(std::span{data});
+    hasher->update(yams::span{data});
     auto hash2 = hasher->finalize();
     
     EXPECT_EQ(hash1, hash2);
@@ -135,7 +136,7 @@ TEST_F(SHA256HasherTest, ProgressCallback) {
 
 TEST_F(SHA256HasherTest, StaticHashMethod) {
     auto data = TestVectors::getABCData();
-    auto hash = SHA256Hasher::hash(std::span{data});
+    auto hash = SHA256Hasher::hash(yams::span{data});
     EXPECT_EQ(hash, TestVectors::ABC_SHA256);
 }
 

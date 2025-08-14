@@ -69,6 +69,9 @@ namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
 
 YamsCLI::YamsCLI() {
+    // Default: suppress info/debug unless --verbose is used
+    spdlog::set_level(spdlog::level::warn);
+
     app_ = std::make_unique<CLI::App>("YAMS Document Management System", "yams");
     app_->set_version_flag("--version", YAMS_VERSION_STRING);
     
@@ -89,7 +92,7 @@ YamsCLI::YamsCLI() {
         ->envname("YAMS_STORAGE")
         ->default_val(defaultDataPath);
     
-    app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+    auto* verboseFlag = app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
     app_->add_flag("--json", jsonOutput_, "Output in JSON format");
 }
 
@@ -102,7 +105,7 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init","add","get","delete","list","search","config","auth","stats","uninstall","migrate","update","browse","serve","completion"
+            "init","add","get","delete","list","search","config","auth","stats","uninstall","migrate","update","browse","serve","completion","repair-mime"
         };
 
         auto hasArg = [&](std::string_view needle) {
@@ -199,6 +202,13 @@ int YamsCLI::run(int argc, char* argv[]) {
         
         // Parse command line
         app_->parse(argc, argv);
+
+        // Apply log level after parsing flags (avoid CLI11 Option::callback dependency)
+        if (verbose_) {
+            spdlog::set_level(spdlog::level::debug);
+        } else {
+            spdlog::set_level(spdlog::level::warn);
+        }
         
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()
         

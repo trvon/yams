@@ -80,40 +80,73 @@ if(POLICY CMP0135) # IN_LIST behavior and other modern improvements
     cmake_policy(SET CMP0135 NEW)
 endif()
 
-# C++20 is required
-set(CMAKE_CXX_STANDARD 20)
+# C++ standard configuration
+option(YAMS_CXX17_MODE "Use C++17 for broader compatibility (default: C++20)" OFF)
+
+if(YAMS_CXX17_MODE)
+    set(CMAKE_CXX_STANDARD 17)
+    message(STATUS "Using C++17 compatibility mode")
+    
+    # Compiler version checks for C++17 mode
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+            message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 9+ is required for C++17 support.")
+        endif()
+        message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION} in C++17 mode")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+            message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected. Clang 9+ is required for C++17 support.")
+        endif()
+        message(STATUS "Using Clang ${CMAKE_CXX_COMPILER_VERSION} in C++17 mode")
+    endif()
+else()
+    set(CMAKE_CXX_STANDARD 20)
+    message(STATUS "Using C++20 mode (default)")
+    
+    # Compiler version checks for C++20 mode
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
+            message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 11+ is required for C++20 support.")
+        endif()
+        message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION} in C++20 mode")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+            message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected. Clang 12+ is required for C++20 support.")
+        endif()
+        message(STATUS "Using Clang ${CMAKE_CXX_COMPILER_VERSION} in C++20 mode")
+    endif()
+endif()
+
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Compiler version checks for GCC
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
-        message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 11+ is required for C++20 support.")
-    endif()
-    message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION}")
-endif()
-
-# Check for std::format availability
+# Check for std::format availability (only in C++20 mode)
 include(CheckCXXSourceCompiles)
-check_cxx_source_compiles("
-    #include <version>
-    #ifdef __cpp_lib_format
-    #include <format>
-    int main() {
-        auto s = std::format(\"{}\", 42);
-        return 0;
-    }
-    #else
-    #error No format support
-    #endif
-" YAMS_HAS_STD_FORMAT)
+if(NOT YAMS_CXX17_MODE)
+    check_cxx_source_compiles("
+        #include <version>
+        #ifdef __cpp_lib_format
+        #include <format>
+        int main() {
+            auto s = std::format(\"{}\", 42);
+            return 0;
+        }
+        #else
+        #error No format support
+        #endif
+    " YAMS_HAS_STD_FORMAT)
+else()
+    # In C++17 mode, std::format is not available
+    set(YAMS_HAS_STD_FORMAT FALSE)
+    message(STATUS "C++17 mode: std::format not available, using fmt fallback")
+endif()
 
 if(YAMS_HAS_STD_FORMAT)
     add_compile_definitions(YAMS_HAS_STD_FORMAT=1)
     message(STATUS "std::format is available")
 else()
     add_compile_definitions(YAMS_HAS_STD_FORMAT=0)
-    message(STATUS "std::format is NOT available - using fallbacks")
+    message(STATUS "std::format is NOT available - using fmt fallback")
 endif()
 
 # Export compile commands for tooling
@@ -416,21 +449,33 @@ endif()
 # Legacy compatibility
 set(YAMS_BUILD_TOOLS ${YAMS_BUILD_CLI})
 
-# C++20 feature checks
+# C++ feature detection
 include(CheckCXXSourceCompiles)
-check_cxx_source_compiles("
-    #include <concepts>
-    #include <span>
-    template<typename T>
-    concept Integral = std::integral<T>;
-    int main() {
-        std::span<int> s;
-        return 0;
-    }
-" HAVE_CXX20_BASELINE)
 
-if(NOT HAVE_CXX20_BASELINE)
-    message(FATAL_ERROR "C++20 baseline (concepts/span) not supported by compiler")
+if(NOT YAMS_CXX17_MODE)
+    # C++20 feature checks (only when in C++20 mode)
+    check_cxx_source_compiles("
+        #include <concepts>
+        template<typename T>
+        concept Integral = std::integral<T>;
+        int main() {
+            return 0;
+        }
+    " YAMS_HAS_CXX20_CONCEPTS)
+    
+    # std::span check is already done above for compatibility layer
+    
+    if(NOT YAMS_HAS_CXX20_CONCEPTS)
+        message(WARNING "C++20 concepts not available, some features may be limited")
+        add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=0)
+    else()
+        add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=1)
+        message(STATUS "C++20 concepts available")
+    endif()
+else()
+    # C++17 mode - set feature flags appropriately
+    add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=0)
+    message(STATUS "C++17 mode: C++20 concepts not available")
 endif()
 
 # Compiler warnings
@@ -639,6 +684,10 @@ if(YAMS_USE_CONAN)
     find_package(SQLite3 REQUIRED)
     find_package(Protobuf REQUIRED)
     find_package(OpenSSL REQUIRED)
+    # fmt for std::format fallback
+    if(NOT YAMS_HAS_STD_FORMAT)
+        find_package(fmt REQUIRED)
+    endif()
     if(YAMS_BUILD_CLI)
         find_package(Curses REQUIRED)
     endif()
@@ -647,9 +696,13 @@ if(YAMS_USE_CONAN)
         # Boost will be handled via FetchContent below for non-Conan builds
     endif()
     if(YAMS_BUILD_TESTS)
-        # Note: Conan's GTest config has issues with alias targets
-        # We'll use FetchContent for tests even with Conan
-        set(YAMS_USE_FETCHCONTENT_FOR_TESTS ON)
+        find_package(gtest REQUIRED)
+        message(STATUS "Conan build: Found gtest package")
+        if(TARGET gtest::gtest)
+            message(STATUS "Conan build: gtest::gtest target is available")
+        else()
+            message(WARNING "Conan build: gtest::gtest target NOT found")
+        endif()
     endif()
     if(YAMS_BUILD_BENCHMARKS)
         find_package(benchmark REQUIRED)
@@ -660,6 +713,19 @@ endif()
 message(STATUS "YAMS_USE_CONAN is: ${YAMS_USE_CONAN}")
 if(NOT YAMS_USE_CONAN)
     message(STATUS "Using FetchContent for dependencies (non-Conan mode)")
+    
+    # fmt for std::format fallback when not available
+    if(NOT YAMS_HAS_STD_FORMAT)
+        FetchContent_Declare(
+            fmt
+            GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+            GIT_TAG 10.2.1
+        )
+        set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(fmt)
+        message(STATUS "Using fmt library as std::format fallback")
+    endif()
+    
     # spdlog for logging
     FetchContent_Declare(
         spdlog
@@ -1086,7 +1152,11 @@ target_include_directories(yams_core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(yams_core INTERFACE cxx_std_20)
+if(YAMS_CXX17_MODE)
+    target_compile_features(yams_core INTERFACE cxx_std_17)
+else()
+    target_compile_features(yams_core INTERFACE cxx_std_20)
+endif()
 add_library(yams::core ALIAS yams_core)
 
 # Add subdirectories
@@ -1094,9 +1164,11 @@ add_subdirectory(src)
 
 if(YAMS_BUILD_TESTS)
     enable_testing()
+    message(STATUS "Building tests: YAMS_USE_CONAN=${YAMS_USE_CONAN}")
 
-    # Use FetchContent for GTest due to Conan config issues
-    if(YAMS_USE_FETCHCONTENT_FOR_TESTS OR NOT YAMS_USE_CONAN)
+    # Use FetchContent for GTest only when not using Conan
+    if(NOT YAMS_USE_CONAN)
+        message(STATUS "Non-Conan build: Using FetchContent for GoogleTest")
         include(FetchContent)
         FetchContent_Declare(
             googletest
@@ -1107,6 +1179,20 @@ if(YAMS_BUILD_TESTS)
         # Prevent overriding the parent project's compiler/linker settings on Windows
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googletest)
+        
+        # Create alias targets for compatibility with find_package(GTest)
+        if(TARGET gtest AND NOT TARGET GTest::gtest)
+            add_library(GTest::gtest ALIAS gtest)
+        endif()
+        if(TARGET gtest_main AND NOT TARGET GTest::gtest_main)
+            add_library(GTest::gtest_main ALIAS gtest_main)
+        endif()
+        if(TARGET gmock AND NOT TARGET GTest::gmock)
+            add_library(GTest::gmock ALIAS gmock)
+        endif()
+        if(TARGET gmock_main AND NOT TARGET GTest::gmock_main)
+            add_library(GTest::gmock_main ALIAS gmock_main)
+        endif()
     endif()
 
     add_subdirectory(tests)

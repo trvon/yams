@@ -45,11 +45,16 @@ protected:
         // Initialize metadata repository  
         metadataRepo_ = std::make_shared<MetadataRepository>(*pool_);
         
-        // Run migrations
-        Migration migration;
-        auto result = migration.migrate(*database_);
+        // Run migrations (initialize and apply YAMS metadata schema)
+        MigrationManager mm(*database_);
+        auto initResult = mm.initialize();
+        if (!initResult) {
+            throw std::runtime_error("Failed to initialize migration system: " + initResult.error().message);
+        }
+        mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        auto result = mm.migrate();
         if (!result) {
-            throw std::runtime_error("Failed to initialize database: " + result.error().message);
+            throw std::runtime_error("Failed to run migrations: " + result.error().message);
         }
         
         // Create some test files

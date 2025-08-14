@@ -1,0 +1,117 @@
+:root {
+  --md-primary-fg-color: #00ff7f; /* neon green */
+  --md-primary-bg-color: #0b0f10; /* deep black */
+  --md-accent-fg-color: #00e5ff; /* cyan accent */
+}
+
+/* Global background and text for a CRT-ish vibe */
+:root, [data-md-color-scheme="slate"] {
+  --md-default-bg-color: #0b0f10;
+  --md-default-fg-color: rgba(235, 255, 235, 0.88);
+  --md-code-bg-color: #0f1416;
+  --md-code-fg-color: #a9ffb0;
+}
+
+/* Monospace everywhere for hacker feel */
+html, body, .md-typeset {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Headings with subtle scanline glow */
+.md-typeset h1, .md-typeset h2, .md-typeset h3 {
+  color: #9bffb0;
+  text-shadow: 0 0 8px rgba(0, 255, 127, 0.25);
+}
+
+/* Links: neon cyan */
+.md-typeset a {
+  color: #00e5ff;
+}
+.md-typeset a:hover {
+  color: #66f0ff;
+}
+
+/* Code blocks: grid + faint scanlines */
+.md-typeset pre > code {
+  background-image: linear-gradient(rgba(0, 255, 127, 0.03) 50%, rgba(0, 0, 0, 0.03) 50%);
+  background-size: 100% 4px;
+  box-shadow: inset 0 0 0 1px rgba(0,255,127,0.08);
+}
+
+/* Navigation accents */
+.md-nav__link--active, .md-tabs__link--active {
+  color: #00ff7f !important;
+}
+
+/* Buttons and chips */
+.md-button, .md-typeset .md-tag {
+  border-color: #00ff7f !important;
+  color: #00ff7f !important;
+}
+
+/* Table styling */
+.md-typeset table {
+  border-color: rgba(0,255,127,0.25);
+}
+.md-typeset table th, .md-typeset table td {
+  border-color: rgba(0,255,127,0.2);
+}
+
+/* Footer/minor text dimming */
+.md-footer, .md-footer__inner {
+  background: #0b0f10;
+}
+
+/* ========================= */
+/* Header & Top Tabs Styling */
+/* ========================= */
+.md-header {
+  background: #0b0f10 !important;
+  color: #9bffb0 !important;
+  box-shadow: none !important;
+  border-bottom: 1px solid rgba(0,255,127,0.25) !important;
+}
+.md-header a, .md-header__button {
+  color: #9bffb0 !important;
+}
+.md-header a:hover, .md-header__button:hover {
+  color: #00ff7f !important;
+}
+.md-header__title {
+  color: #00ff7f !important;
+}
+
+/* Top navigation tabs */
+.md-tabs {
+  background: #0b0f10 !important;
+  border-bottom: 1px solid rgba(0,255,127,0.2) !important;
+}
+.md-tabs__link {
+  color: #9bffb0 !important;
+}
+.md-tabs__link--active, .md-tabs__link:focus, .md-tabs__link:hover {
+  color: #00ff7f !important;
+}
+
+/* Search bar in header */
+.md-search__form {
+  background: #0f1416 !important;
+  border: 1px solid rgba(0,255,127,0.25) !important;
+}
+.md-search__input {
+  color: #a9ffb0 !important;
+}
+.md-search__input::placeholder {
+  color: rgba(0,255,127,0.55) !important;
+}
+.md-search__icon, .md-search__options {
+  color: #66f0ff !important;
+}
+
+/* Repo icon / header icons */
+.md-header__source {
+  color: #9bffb0 !important;
+}
+.md-header__source:hover {
+  color: #00ff7f !important;
+}

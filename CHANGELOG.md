@@ -31,6 +31,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added context options: `-A/--after`, `-B/--before`, `-C/--context`
   - Highlights matching lines with color
   - Shows surrounding context lines for better understanding
+- **C++17 Compatibility Mode** for broader system support
+  - New `YAMS_CXX17_MODE` CMake option for legacy compiler compatibility
+  - Support for GCC 9+, Clang 9+, older MSVC versions
+  - Automatic fallbacks: `boost::span` for `std::span`, `fmt` for `std::format`
+  - Compatible with Ubuntu 20.04 LTS, CentOS 8, older macOS versions
+  - Comprehensive compatibility documentation and build matrix
+  - Runtime feature detection with graceful degradation
+- **Enhanced Build System Flexibility**
+  - Dual-mode compilation: full C++20 for modern systems, C++17 for legacy
+  - Automatic dependency management with Conan and FetchContent fallbacks
+  - Compiler-specific optimizations and warning configurations
+  - Performance-oriented feature selection based on available capabilities
+- **MCP Server Feature Parity Enhancements** (~85% CLI-MCP parity achieved)
+  - **Enhanced search_documents tool** with LLM ergonomics optimizations
+    - Added `paths_only` parameter for LLM-friendly file path output (one per line)
+    - Added line context parameters: `line_numbers`, `after_context`, `before_context`, `context`
+    - Added `color` parameter for syntax highlighting control (always, never, auto)
+  - **New grep_documents tool** with full CLI grep parity
+    - Complete regex pattern matching across indexed document contents
+    - Context options: `-A/--after`, `-B/--before`, `-C/--context` for surrounding lines
+    - Pattern options: `ignore_case`, `word`, `invert` for flexible matching
+    - Output modes: `line_numbers`, `with_filename`, `count`, `files_with_matches`, `files_without_match`
+    - Color highlighting and `max_count` limit support
+  - **Knowledge graph integration** in retrieve_document tool
+    - Added `graph` parameter to include related documents in response
+    - Added `depth` parameter (1-5) for graph traversal control
+    - Added `include_content` parameter for full document content in graph responses
+    - Finds documents in same directory, similar extensions, and metadata relationships
+  - **New update_metadata tool** for document metadata management
+    - Update metadata by document `hash` or `name` with automatic resolution
+    - Support for multiple `key=value` metadata pairs in single operation
+    - Verbose output option for detailed update information
+  - **Enhanced list_documents tool** with comprehensive filtering and sorting
+    - File type filtering: `type`, `mime`, `extension`, `binary`, `text` parameters
+    - Time-based filtering: `created_after/before`, `modified_after/before`, `indexed_after/before`
+    - Recent documents filter: `recent` parameter for N most recent files
+    - Sorting control: `sort_by` (name, size, created, modified, indexed) and `sort_order` (asc, desc)
+  - **Enhanced get_stats tool** with file type breakdown analysis
+    - Added `file_types` parameter for detailed file type distribution
+    - Shows file type counts, sizes, top extensions per type, and top MIME types
+    - Provides comprehensive storage analytics for better content understanding
+
+### Enhanced
+- **MCP Tool Documentation** comprehensively updated with new schemas and examples
+  - Added complete JSON schemas for all enhanced tools with parameter descriptions
+  - Added practical usage examples for each tool capability
+  - Updated integration documentation for Claude Desktop configuration
+- **YAMS-first workflow guidance**: default to indexing and searching code via YAMS pre-watch; avoid external grep/find/rg for repository queries.
+- **CLI docs enhanced** with pre-watch indexing workflow and YAMS-only search/grep examples.
+
+### Technical Details
+- **File type classification system** with MIME type analysis using `getFileTypeFromMime()` and `isBinaryMimeType()` helper methods
+- **Knowledge graph traversal** leverages document relationships through metadata repository queries
+- **LLM ergonomics optimizations** reduce context usage while maintaining full functionality
+- **Tool schema definitions** follow JSON-RPC standards for seamless MCP integration
 
 ### Fixed
 - **Indexing Tests**: Updated for new API with proper factory function declarations
@@ -38,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI11 Conflicts**: Resolved `-h` flag conflict in grep command by using only `--no-filename`
 - **Test Suite Stabilization**
   - Fixed SEGV crash in vector_database_tests (DocumentChunkerTest bounds checking)
-  - Fixed AddressSanitizer container overflow in detection_tests 
+  - Fixed AddressSanitizer container overflow in detection_tests
   - Added thread safety to FixtureManager test infrastructure with proper mutex protection
   - Added thread safety to FileTypeDetector for libmagic operations (not thread-safe by default)
   - Fixed compilation errors in multiple test files (header includes, error codes, GMock dependencies)
@@ -47,27 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed CLI11 comma-separated pattern handling in `--include` and `--exclude` options
   - Now properly splits patterns like `"*.cpp,*.h,*.md"` into individual patterns
   - Added proper whitespace trimming and empty pattern filtering
-- **CI/CD Pipeline Improvements**  
+- **CI/CD Pipeline Improvements**
   - Fixed Conan options quoting for proper test builds (`"yams/*:build_tests=True"`)
   - Added explicit `YAMS_BUILD_TESTS=ON` to CMake configuration
   - Added individual test target builds before running ctest
   - Implemented graceful test failure handling (CI continues, reports detailed results)
   - Added ASAN relaxation options for CI environment compatibility
   - Fixed YAML syntax error in release.yml (Python script indentation)
-
-### Enhanced
-- **Get Command**: Now supports partial hash resolution and fuzzy path matching
-- **Search Command**: Improved output with line-level context display
-- **Test Coverage**: Enabled previously skipped indexing tests with proper initialization
-
-### Technical Details
-- **Grep Implementation**: Uses std::regex for pattern matching with full ECMAScript support
-- **Graph Display**: Leverages MetadataRepository for document relationship queries
-- **Line Context**: Integrated content retrieval with search results for contextual display
-- **File Type Detection**: Added 40+ new patterns covering major programming languages
-- **Pattern Matching**: Fixed splitPatterns() function in add_command.cpp for proper comma handling
-- **Search Output**: Added pathsOnly_ flag with conditional output logic in search_command.cpp
-- **Documentation**: Enhanced PROMPT-eng.md with v0.1.4 LLM workflow patterns
 
 ## [v0.1.3] - 2025-08-13
 

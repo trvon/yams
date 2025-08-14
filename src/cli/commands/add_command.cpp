@@ -3,6 +3,7 @@
 #include <yams/api/content_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/document_metadata.h>
+#include <yams/detection/file_type_detector.h>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -36,6 +37,7 @@ public:
         cmd->add_option("-t,--tags", tags_, "Tags for the document (comma-separated)");
         cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs");
         cmd->add_option("--mime-type", mimeType_, "MIME type of the document");
+        cmd->add_flag("--no-auto-mime", disableAutoMime_, "Disable automatic MIME type detection");
         
         // Collection and snapshot options
         cmd->add_option("-c,--collection", collection_, "Collection name for organizing documents");
@@ -118,25 +120,8 @@ private:
         tempFile.write(content.data(), static_cast<std::streamsize>(content.size()));
         tempFile.close();
         
-        // Build metadata
-        api::ContentMetadata metadata;
-        metadata.name = documentName_.empty() ? "stdin" : documentName_;
-        metadata.mimeType = mimeType_.empty() ? "text/plain" : mimeType_;
-        
-        // Convert vector tags to unordered_map
-        for (const auto& tag : tags_) {
-            metadata.tags[tag] = "";
-        }
-        
-        // Add custom metadata
-        for (const auto& kv : metadata_) {
-            auto pos = kv.find('=');
-            if (pos != std::string::npos) {
-                std::string key = kv.substr(0, pos);
-                std::string value = kv.substr(pos + 1);
-                metadata.tags[key] = value;
-            }
-        }
+        // Build metadata using helper (will auto-detect MIME from temp file if enabled)
+        api::ContentMetadata metadata = buildMetadata("stdin", tempPath);
         
         // Store the file
         auto result = store->store(tempPath, metadata);
@@ -167,7 +152,9 @@ private:
                     doc.indexedTime = std::chrono::system_clock::now();
                     metadataRepo->updateDocument(doc);
                     
-                    spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+                    if (cli_->getVerbose()) {
+                        spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+                    }
                 }
             }
             
@@ -189,7 +176,9 @@ private:
                 auto insertResult = metadataRepo->insertDocument(docInfo);
                 if (insertResult) {
                     docId = insertResult.value();
-                    spdlog::debug("Stored new stdin document with ID: {}", docId);
+                    if (cli_->getVerbose()) {
+                        spdlog::debug("Stored new stdin document with ID: {}", docId);
+                    }
                 } else {
                     spdlog::warn("Failed to store metadata for stdin: {}", insertResult.error().message);
                 }
@@ -237,7 +226,7 @@ private:
     
     Result<void> storeFile(std::shared_ptr<api::IContentStore> store, const std::filesystem::path& filePath) {
         // Build metadata
-        api::ContentMetadata metadata = buildMetadata(filePath.filename().string());
+        api::ContentMetadata metadata = buildMetadata(filePath.filename().string(), filePath);
         
         // Store the file
         auto result = store->store(filePath, metadata);
@@ -285,10 +274,12 @@ private:
         size_t failureCount = 0;
         
         for (const auto& filePath : filesToAdd) {
-            spdlog::info("Adding: {}", filePath.string());
+            if (cli_->getVerbose()) {
+                spdlog::debug("Adding: {}", filePath.string());
+            }
             
             // Build metadata with collection/snapshot info
-            api::ContentMetadata metadata = buildMetadata(filePath.filename().string());
+            api::ContentMetadata metadata = buildMetadata(filePath.filename().string(), filePath);
             
             // Store the file
             auto result = store->store(filePath, metadata);
@@ -330,10 +321,19 @@ private:
         return Result<void>();
     }
     
-    api::ContentMetadata buildMetadata(const std::string& defaultName) {
+    api::ContentMetadata buildMetadata(const std::string& defaultName, const std::filesystem::path& filePath = {}) {
         api::ContentMetadata metadata;
         metadata.name = documentName_.empty() ? defaultName : documentName_;
-        metadata.mimeType = mimeType_;
+        
+        // Set MIME type with auto-detection fallback
+        if (!mimeType_.empty()) {
+            // User explicitly provided MIME type
+            metadata.mimeType = mimeType_;
+        } else if (!disableAutoMime_) {
+            // Auto-detect MIME type
+            metadata.mimeType = detectMimeType(filePath, defaultName);
+        }
+        // If both user MIME type and auto-detection are disabled, leave empty
         
         // Convert vector tags to unordered_map
         for (const auto& tag : tags_) {
@@ -364,6 +364,55 @@ private:
         return metadata;
     }
     
+    std::string detectMimeType(const std::filesystem::path& filePath, const std::string& fileName) {
+        // Try signature-based detection first (if we have a file path)
+        if (!filePath.empty() && std::filesystem::exists(filePath)) {
+            try {
+                auto detection = detection::FileTypeDetector::instance().detectFromFile(filePath);
+                if (detection && !detection.value().mimeType.empty()) {
+                    if (cli_->getVerbose()) {
+                        spdlog::debug("Detected MIME type '{}' for file '{}'", 
+                                     detection.value().mimeType, filePath.string());
+                    }
+                    return detection.value().mimeType;
+                }
+            } catch (const std::exception& e) {
+                if (cli_->getVerbose()) {
+                    spdlog::debug("Signature detection failed for '{}': {}", filePath.string(), e.what());
+                }
+                // Continue to extension-based detection
+            }
+        }
+        
+        // Fallback to extension-based detection
+        std::string extension;
+        if (!filePath.empty()) {
+            extension = filePath.extension().string();
+        } else if (!fileName.empty()) {
+            // Extract extension from filename
+            auto pos = fileName.rfind('.');
+            if (pos != std::string::npos) {
+                extension = fileName.substr(pos);
+            }
+        }
+        
+        if (!extension.empty()) {
+            std::string mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(extension);
+            if (cli_->getVerbose()) {
+                spdlog::debug("Detected MIME type '{}' from extension '{}' for '{}'", 
+                             mimeType, extension, fileName);
+            }
+            return mimeType;
+        }
+        
+        // Default fallback - use text/plain for stdin, application/octet-stream for files
+        std::string defaultMime = (fileName == "stdin") ? "text/plain" : "application/octet-stream";
+        if (cli_->getVerbose()) {
+            spdlog::debug("No MIME type detected for '{}', using default '{}'", fileName, defaultMime);
+        }
+        return defaultMime;
+    }
+    
     Result<void> storeFileMetadata(const std::filesystem::path& filePath, const api::StoreResult& storeResult) {
         auto metadataRepo = cli_->getMetadataRepository();
         if (!metadataRepo) {
@@ -386,7 +435,9 @@ private:
                 doc.indexedTime = std::chrono::system_clock::now();
                 metadataRepo->updateDocument(doc);
                 
-                spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+                if (cli_->getVerbose()) {
+                    spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+                }
             }
         }
         
@@ -416,7 +467,9 @@ private:
             }
             
             docId = insertResult.value();
-            spdlog::debug("Stored new document with ID: {}", docId);
+            if (cli_->getVerbose()) {
+                spdlog::debug("Stored new document with ID: {}", docId);
+            }
         }
         
         if (docId < 0) {
@@ -603,6 +656,7 @@ private:
     std::vector<std::string> tags_;
     std::vector<std::string> metadata_;
     std::string mimeType_;
+    bool disableAutoMime_ = false;
     
     // Collection and snapshot options
     std::string collection_;

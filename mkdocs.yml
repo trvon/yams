@@ -1,0 +1,88 @@
+site_name: YAMS
+site_description: Yet Another Memory System — persistent memory for LLMs and applications.
+site_url: https://trvon.github.io/yams
+repo_url: https://github.com/trvon/yams
+repo_name: trvon/yams
+
+docs_dir: docs
+site_dir: public
+use_directory_urls: true
+
+nav:
+  - Home: index.md
+  - Get Started:
+      - Installation: user_guide/installation.md
+      - CLI: user_guide/cli.md
+      - Prompts:
+          - CLI usage: PROMPT.md
+          - Engineering: PROMPT-eng.md
+  - Guides:
+      - Search: user_guide/search_guide.md
+      - Vector Search: user_guide/vector_search_guide.md
+      - Tutorials: user_guide/tutorials/README.md
+  - API:
+      - Overview: api/README.md
+      - Search API: api/search_api.md
+      - Vector Search API: api/vector_search_api.md
+      - OpenAPI (YAML): api/openapi.yaml
+      - MCP Tools: api/mcp_tools.md
+  - Architecture:
+      - Search System: architecture/search_system.md
+      - Vector Search Architecture: architecture/vector_search_architecture.md
+  - Reference:
+      - Developer:
+          - Setup: developer/setup.md
+          - Build System: developer/build_system.md
+          - Contributing: developer/contributing.md
+          - Architecture Notes: developer/architecture/README.md
+      - Admin:
+          - Configuration: admin/configuration.md
+          - Performance Tuning: admin/performance_tuning.md
+          - Vector Search Tuning: admin/vector_search_tuning.md
+      - Operations:
+          - Deployment: operations/deployment.md
+          - Monitoring: operations/monitoring.md
+          - Backup: operations/backup.md
+      - Benchmarks: benchmarks/performance_report.md
+  - Troubleshooting: troubleshooting/search_issues.md
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.path
+    - navigation.top
+    - content.code.copy
+  palette:
+    scheme: slate
+  language: en
+  font:
+    text: "JetBrains Mono"
+    code: "JetBrains Mono"
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+  - footnotes
+  - meta
+  - sane_lists
+  - smarty
+  - tables
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/trvon/yams
+      name: GitHub
+
+extra_css:
+  - assets/retro.css

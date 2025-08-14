@@ -7,8 +7,8 @@ target_include_directories(test_utils INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
 target_link_libraries(test_utils INTERFACE
-    GTest::gtest
-    GTest::gmock
+    $<IF:$<TARGET_EXISTS:gtest::gtest>,gtest::gtest,GTest::gtest>
+    $<IF:$<TARGET_EXISTS:gtest::gmock>,gtest::gmock,GTest::gmock>
     yams::core
 )
 

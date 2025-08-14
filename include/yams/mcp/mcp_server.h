@@ -12,6 +12,7 @@
 #include <functional>
 #include <atomic>
 #include <thread>
+#include <regex>
 
 namespace yams::mcp {
 
@@ -106,6 +107,17 @@ public:
      */
     bool isRunning() const { return running_; }
     
+#ifdef YAMS_TESTING
+    // Public testing interface - only available when building tests
+    json testListTools() { return listTools(); }
+    json testSearchDocuments(const json& args) { return searchDocuments(args); }
+    json testGrepDocuments(const json& args) { return grepDocuments(args); }
+    json testRetrieveDocument(const json& args) { return retrieveDocument(args); }
+    json testUpdateDocumentMetadata(const json& args) { return updateDocumentMetadata(args); }
+    json testListDocuments(const json& args) { return listDocuments(args); }
+    json testGetStats(const json& args) { return getStats(args); }
+#endif
+    
 private:
     // MCP protocol methods
     json handleRequest(const json& request);
@@ -118,10 +130,12 @@ private:
     
     // Tool implementations
     json searchDocuments(const json& args);
+    json grepDocuments(const json& args);
     json storeDocument(const json& args);
     json retrieveDocument(const json& args);
     json deleteDocument(const json& args);
     json updateMetadata(const json& args);
+    json updateDocumentMetadata(const json& args);
     json getStats(const json& args);
     
     // New v0.0.2 CLI integration tools
@@ -162,6 +176,43 @@ private:
     // Helper methods for hash search
     bool isValidHash(const std::string& str);
     json searchByHash(const std::string& hash, size_t limit);
+    
+    // Helper method for formatting search results with context
+    std::string formatSnippetWithContext(const std::string& content, const std::string& query,
+                                       int beforeContext, int afterContext,
+                                       bool showLineNumbers, const std::string& colorMode);
+    
+    // Helper structures and methods for grep functionality
+    struct GrepMatch {
+        size_t lineNumber;
+        size_t columnStart;
+        size_t columnEnd;
+        std::string line;
+    };
+    
+    std::vector<GrepMatch> processGrepFile(const std::string& filename, const std::string& content, 
+                                         const std::regex& pattern, bool invertMatch, int maxCount);
+    std::string formatGrepContext(const std::string& content, size_t lineNumber, 
+                                int beforeContext, int afterContext);
+    
+    // Helper structures and methods for knowledge graph functionality
+    struct RelatedDocument {
+        std::string hash;
+        std::string path;
+        std::string relationship;
+        int distance;
+        json metadata;
+    };
+    
+    std::vector<RelatedDocument> findRelatedDocuments(const metadata::DocumentInfo& baseDoc, 
+                                                    int depth, int maxResults = 20);
+    json buildKnowledgeGraphResponse(const metadata::DocumentInfo& baseDoc, 
+                                   const std::vector<RelatedDocument>& related,
+                                   bool includeContent, const std::string& outputPath = "");
+    
+    // Helper methods for file type classification
+    std::string getFileTypeFromMime(const std::string& mimeType);
+    bool isBinaryMimeType(const std::string& mimeType);
     
 private:
     std::shared_ptr<api::IContentStore> store_;

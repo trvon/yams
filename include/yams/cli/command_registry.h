@@ -108,6 +108,11 @@ public:
      * Create completion command (shell completions)
      */
     static std::unique_ptr<ICommand> createCompletionCommand();
+    
+    /**
+     * Create repair-mime command
+     */
+    static std::unique_ptr<ICommand> createRepairMimeCommand();
 };
 
 } // namespace yams::cli

@@ -64,3 +64,11 @@ docs/delivery
 docs/operations
 .cache/
 paper
+
+# MkDocs build output
+# Default mkdocs output
+site/
+# Our configured output dir
+public/*
+!public/.gitkeep
+conan.lock

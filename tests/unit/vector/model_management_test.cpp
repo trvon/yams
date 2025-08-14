@@ -3,6 +3,7 @@
 #include <yams/vector/model_cache.h>
 #include <yams/vector/model_loader.h>
 #include <yams/core/types.h>
+#include <yams/core/format.h>
 #include <thread>
 #include <chrono>
 #include <fstream>
@@ -218,8 +219,8 @@ TEST_F(ModelManagementTest, ConcurrentAccess) {
     // Register multiple models
     for (int i = 0; i < 10; ++i) {
         auto info = createTestModelInfo(
-            std::format("model_{}", i),
-            std::format("Model{}", i),
+            yams::format("model_{}", i),
+            yams::format("Model{}", i),
             384
         );
         registry_->registerModel(info);
@@ -232,7 +233,7 @@ TEST_F(ModelManagementTest, ConcurrentAccess) {
     for (int t = 0; t < 4; ++t) {
         threads.emplace_back([this, &success_count]() {
             for (int i = 0; i < 10; ++i) {
-                auto result = registry_->getModel(std::format("model_{}", i));
+                auto result = registry_->getModel(yams::format("model_{}", i));
                 if (result.has_value()) {
                     success_count++;
                 }

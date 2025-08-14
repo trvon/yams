@@ -55,8 +55,10 @@ public:
             ->default_val("auto")
             ->check(CLI::IsMember({"always", "never", "auto"}));
         
-        cmd->add_option("--max-count", maxCount_, "Stop after N matches per file")
+        cmd->add_option("-m,--max-count", maxCount_, "Stop after N matches per file")
             ->default_val(0);
+        
+        cmd->add_option("--limit", maxCount_, "Alias: stop after N matches per file (same as --max-count)");
         
         cmd->callback([this]() { 
             auto result = execute();
@@ -171,6 +173,10 @@ public:
                 
                 // Process the file
                 auto matches = processFile(doc.filePath, content, regex);
+                // Per-file limit: trim matches to maxCount_ if specified
+                if (maxCount_ > 0 && matches.size() > static_cast<size_t>(maxCount_)) {
+                    matches.resize(maxCount_);
+                }
                 
                 if (!matches.empty()) {
                     matchingFiles.push_back(doc.filePath);
@@ -187,10 +193,7 @@ public:
                         printMatches(doc.filePath, content, matches);
                     }
                     
-                    // Stop if max count reached
-                    if (maxCount_ > 0 && matches.size() >= static_cast<size_t>(maxCount_)) {
-                        break;
-                    }
+                    
                 } else {
                     nonMatchingFiles.push_back(doc.filePath);
                 }

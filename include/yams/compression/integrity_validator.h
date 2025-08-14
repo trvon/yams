@@ -2,7 +2,7 @@
 
 #include <yams/core/types.h>
 #include <yams/compression/compressor_interface.h>
-#include <span>
+#include <yams/core/span.h>
 #include <vector>
 #include <string>
 #include <functional>
@@ -103,7 +103,7 @@ public:
      * @return Validation result
      */
     [[nodiscard]] ValidationResult validateCompression(
-        std::span<const std::byte> original,
+        yams::span<const std::byte> original,
         const CompressionResult& result,
         ValidationType type = ValidationType::Checksum);
     
@@ -116,8 +116,8 @@ public:
      * @return Validation result
      */
     [[nodiscard]] ValidationResult validateDecompression(
-        std::span<const std::byte> compressed,
-        std::span<const std::byte> decompressed,
+        yams::span<const std::byte> compressed,
+        yams::span<const std::byte> decompressed,
         uint32_t originalChecksum = 0,
         ValidationType type = ValidationType::Checksum);
     
@@ -129,7 +129,7 @@ public:
      * @return Validation result
      */
     [[nodiscard]] ValidationResult validateRoundTrip(
-        std::span<const std::byte> original,
+        yams::span<const std::byte> original,
         ICompressor& compressor,
         uint8_t level = 0);
     
@@ -138,7 +138,7 @@ public:
      * @param data Data to checksum
      * @return CRC32 checksum
      */
-    [[nodiscard]] uint32_t calculateChecksum(std::span<const std::byte> data) const;
+    [[nodiscard]] uint32_t calculateChecksum(yams::span<const std::byte> data) const;
     
     /**
      * @brief Verify data integrity using checksum
@@ -147,7 +147,7 @@ public:
      * @return True if checksums match
      */
     [[nodiscard]] bool verifyChecksum(
-        std::span<const std::byte> data,
+        yams::span<const std::byte> data,
         uint32_t expectedChecksum) const;
     
     /**
@@ -155,7 +155,7 @@ public:
      * @param data Data to analyze
      * @return Corruption probability (0.0 = no corruption, 1.0 = certain corruption)
      */
-    [[nodiscard]] double detectCorruption(std::span<const std::byte> data) const;
+    [[nodiscard]] double detectCorruption(yams::span<const std::byte> data) const;
     
     /**
      * @brief Register validation callback
@@ -217,7 +217,7 @@ public:
      * @return Analysis result with detailed information
      */
     [[nodiscard]] ValidationResult performDeepAnalysis(
-        std::span<const std::byte> compressed,
+        yams::span<const std::byte> compressed,
         CompressionAlgorithm algorithm) const;
 
 private:
@@ -246,7 +246,7 @@ public:
      * @brief Set original data for validation
      * @param data Original data
      */
-    void setOriginalData(std::span<const std::byte> data);
+    void setOriginalData(yams::span<const std::byte> data);
     
     /**
      * @brief Set compression result for validation
@@ -258,7 +258,7 @@ public:
      * @brief Set decompressed data for validation
      * @param data Decompressed data
      */
-    void setDecompressedData(std::span<const std::byte> data);
+    void setDecompressedData(yams::span<const std::byte> data);
     
     /**
      * @brief Get validation result
@@ -295,7 +295,7 @@ namespace integrity_utils {
      * @return CRC32 checksum
      */
     [[nodiscard]] uint32_t crc32(
-        std::span<const std::byte> data,
+        yams::span<const std::byte> data,
         uint32_t polynomial = 0xEDB88320);
     
     /**
@@ -303,14 +303,14 @@ namespace integrity_utils {
      * @param data Data to analyze
      * @return Entropy value (0.0 to 8.0 bits per byte)
      */
-    [[nodiscard]] double calculateEntropy(std::span<const std::byte> data);
+    [[nodiscard]] double calculateEntropy(yams::span<const std::byte> data);
     
     /**
      * @brief Detect patterns that might indicate corruption
      * @param data Data to analyze
      * @return Pattern anomaly score (0.0 = normal, 1.0 = highly anomalous)
      */
-    [[nodiscard]] double detectPatternAnomalies(std::span<const std::byte> data);
+    [[nodiscard]] double detectPatternAnomalies(yams::span<const std::byte> data);
     
     /**
      * @brief Check for common compression artifacts
@@ -319,7 +319,7 @@ namespace integrity_utils {
      * @return True if artifacts detected
      */
     [[nodiscard]] bool hasCompressionArtifacts(
-        std::span<const std::byte> compressed,
+        yams::span<const std::byte> compressed,
         CompressionAlgorithm algorithm);
     
     /**
@@ -329,7 +329,7 @@ namespace integrity_utils {
      * @return True if format is valid
      */
     [[nodiscard]] bool validateCompressionFormat(
-        std::span<const std::byte> compressed,
+        yams::span<const std::byte> compressed,
         CompressionAlgorithm algorithm);
 }
 

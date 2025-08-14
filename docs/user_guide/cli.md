@@ -47,6 +47,7 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 - list
 - search
 - grep
+- completion
 - config (subcommands: get, set, list, validate, export)
 - auth
 - stats
@@ -89,6 +90,29 @@ yams init --print
 ---
 
 ## add {#cmd-add}
+
+Pre-watch code indexing (recommended)
+Use YAMS to index code updates until folder track/watch is available.
+
+Examples:
+```bash
+# Index entire source tree (initial import)
+yams add src/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source"
+yams add include/ --recursive --include="*.hpp,*.h" --tags "code,headers"
+
+# Re-index after local edits (quick pass)
+yams add . --recursive --include="*.cpp,*.hpp,*.h,*.md" --tags "code,working"
+
+# Add a single updated file
+yams add path/to/file.cpp --tags "code,source"
+
+# Update metadata for an existing document by name
+yams update --name path/to/file.cpp --metadata "updated=$(date -Iseconds)"
+```
+
+Tips:
+- Prefer comma-separated patterns with --include for multiple file types.
+- Tag code consistently (e.g., code,source; code,headers) to improve later queries.
 
 Add a document to the store from a file or stdin.
 
@@ -300,6 +324,28 @@ yams list --no-snippets --show-metadata  # No previews, full metadata
 
 ## search {#cmd-search}
 
+YAMS-first code search
+Always use YAMS to search the indexed codebase (no external grep/find/rg).
+
+Examples:
+```bash
+# List only file paths for efficient context
+yams search "IndexingPipeline" --paths-only
+
+# Fuzzy search for broader discovery
+yams search "vector database" --fuzzy --similarity 0.7 --paths-only
+
+# Restrict by extension via keyword filters
+yams search "class DocumentIndexer ext:.cpp" --paths-only
+
+# Show JSON for scripting
+yams search "SyncManager" --json
+```
+
+Hints:
+- Prefer hybrid or fuzzy search for exploratory queries; narrow with exact keywords as you iterate.
+- Combine with --paths-only to feed subsequent yams get calls.
+
 Search for documents with advanced query capabilities.
 
 Synopsis:
@@ -359,6 +405,25 @@ yams search --hash abcd1234 --verbose
 
 ## grep {#cmd-grep}
 
+Regex across indexed code (YAMS only)
+Use YAMS grep for project-wide regex; avoid system utilities for repository queries.
+
+Examples:
+```bash
+# Find class definitions
+yams grep "class\\s+IndexingPipeline" --include="**/*.hpp,**/*.cpp"
+
+# Locate TODOs in headers and sources
+yams grep "TODO\\b" --include="**/*.hpp,**/*.h,**/*.cpp"
+
+# Search for CLI subcommand declarations
+yams grep "##\\s+(watch|git|sync)\\b" --include="**/*.md"
+```
+
+Notes:
+- --include accepts comma-separated globs or repeated usage; prefer quoting patterns.
+- Pair with yams search --paths-only to scope subsequent grep runs.
+
 Search for regex patterns within file contents.
 
 Synopsis:
@@ -393,6 +458,8 @@ Options:
   - Color mode: always, never, auto (default: auto)
 - --max-count <N>
   - Stop after N matches per file
+- --limit <N>
+  - Alias for --max-count
 
 Description:
 - Searches through the content of all indexed files using regular expressions.
@@ -712,6 +779,31 @@ yams serve --transport websocket --host 0.0.0.0 --port 8080  # Network accessibl
 
 ---
 
+## completion {#cmd-completion}
+
+Generate shell completion scripts for popular shells.
+
+Synopsis:
+- yams completion bash
+- yams completion zsh
+- yams completion fish
+
+Notes:
+- Bash: if bash-completion isn’t installed, a minimal fallback is baked into the script.
+- Zsh: the generated script auto-runs compinit if needed to prevent “_arguments: command not found”.
+- Fish: installs via standard fish completions.
+
+Examples:
+```
+# Quick use without installing
+source <(yams completion bash)
+
+# Install for current user
+yams completion bash > ~/.local/share/bash-completion/completions/yams
+yams completion zsh  > ~/.local/share/zsh/site-functions/_yams
+yams completion fish > ~/.config/fish/completions/yams.fish
+```
+
 ## Exit Codes
 
 - 0  Success.
@@ -719,6 +811,14 @@ yams serve --transport websocket --host 0.0.0.0 --port 8080  # Network accessibl
 - Non-zero values may indicate specific errors depending on the subcommand.
 
 ## Tips
+
+YAMS-first workflow (until watch/track is available)
+- Always search the codebase with YAMS (search/grep). Do not use system grep/find/rg for repository queries.
+- After editing code, re-index affected files or directories via yams add (pre-watch workflow).
+- Use --paths-only for path lists you can pipe into further commands or editors.
+- Prefer --include with comma-separated patterns (e.g., "*.cpp,*.hpp,*.h") to bound searches and indexing.
+- Retrieve exact files for review with yams get --name <path> -o <dest>.
+- Keep tags consistent (e.g., code,source; code,headers; code,working) and update metadata with yams update as needed.
 
 - Use --json where supported to integrate with scripts and tools.
 - Specify a storage directory explicitly with --storage or via YAMS_STORAGE to keep data separate for testing vs production.

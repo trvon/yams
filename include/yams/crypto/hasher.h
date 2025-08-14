@@ -2,10 +2,10 @@
 
 #include <yams/core/concepts.h>
 #include <yams/core/types.h>
+#include <yams/core/span.h>
 #include <filesystem>
 #include <functional>
 #include <future>
-#include <span>
 #include <string>
 
 namespace yams::crypto {
@@ -17,7 +17,7 @@ public:
     
     // Stream-based hashing
     virtual void init() = 0;
-    virtual void update(std::span<const std::byte> data) = 0;
+    virtual void update(yams::span<const std::byte> data) = 0;
     virtual std::string finalize() = 0;
     
     // Convenience method for hashing files
@@ -30,7 +30,7 @@ public:
         if constexpr (std::is_same_v<T, std::filesystem::path>) {
             return hashFile(data);
         } else {
-            auto span = std::as_bytes(std::span{data});
+            auto span = yams::as_bytes(yams::span{data});
             update(span);
             return finalize();
         }

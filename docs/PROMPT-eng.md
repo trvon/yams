@@ -6,8 +6,10 @@ This document establishes a unified, machine-readable, and authoritative policy 
 
 ## Quick Usage Guidance (For AI Agents)
 - Before starting any multi-step process, begin with a concise checklist (3-7 bullets) of intended steps.
-- After each YAMS or external tool command, validate the outcome in 1-2 lines and proceed or self-correct if validation fails.
+- After each YAMS command, validate the outcome in 1-2 lines and proceed or self-correct if validation fails.
 - Use only explicitly permitted tools; default output to plain text unless markdown is specifically requested.
+- Pre-watch default: update and search code via YAMS. After editing files, re-index with YAMS (no external grep/find/rg).
+- All codebase search must use YAMS (search/grep subcommands). Do not use system utilities like grep/find/rg for project queries.
 
 ---
 
@@ -18,7 +20,7 @@ This document establishes a unified, machine-readable, and authoritative policy 
 
 ### 1.2 Knowledge Management with YAMS
 #### Overview:
-- YAMS is a Bash CLI utility—a knowledge versioning and discovery tool akin to `grep`, `find`, or `git`.
+- YAMS is a Bash CLI utility—a knowledge versioning and discovery tool with built-in full-text, fuzzy, and semantic search, plus content-addressed storage and fast retrieval.
 - Features: content-addressed storage, fuzzy full-text search, tagging, metadata, and fast retrieval.
 - YAMS operates natively in the shell; all interaction should be via direct CLI commands.
 
@@ -33,25 +35,44 @@ This document establishes a unified, machine-readable, and authoritative policy 
   ```bash
   echo "$WEB_SEARCH_RESULT" | yams add - --name "topic-$(date +%Y%m%d)" --tags "web,cache,topic" --metadata "url=$SOURCE_URL"
   ```
-- **Replacing generic file commands:**
+- **Replacing generic file commands (always prefer YAMS):**
   ```bash
   yams list --recent 20
   yams add myfile.txt --tags "code,working"
   yams get <hash>
+  ```
+- **Pre-Watch Code Update Workflow (until folder track/watch is available):**
+  ```bash
+  # After editing code, re-index changed files or directories
+  yams add src/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source"
+  yams add include/ --recursive --include="*.hpp,*.h" --tags "code,headers"
+
+  # Add a single updated file
+  yams add path/to/file.cpp --tags "code,source"
+
+  # Update metadata for an existing document (when needed)
+  yams update --name path/to/file.cpp --metadata "updated=$(date -Iseconds)"
   ```
 
 #### Command Reference - Best Practices
 - Always search YAMS first before using external resources.
 - All new information should be immediately added/tagged into YAMS.
 - Retrievals in workflows/documents reference content by YAMS hash.
+- All codebase search must be performed with YAMS:
+  - Use `yams search` for keyword/fuzzy/semantic queries.
+  - Use `yams grep` for regex across indexed content.
+  - Do not use system grep/find/rg for repository search.
 
-- **Codebase Indexing:**
+- **Codebase Indexing (initial import and after edits):**
   ```bash
   # Index entire codebase with proper file type detection
   yams add src/ --recursive --include="*.cpp,*.h" --tags="code,source"
   yams add include/ --recursive --include="*.h,*.hpp" --tags="code,headers"
+
+  # Re-index after local edits (pre-watch)
+  yams add . --recursive --include="*.cpp,*.hpp,*.h,*.md" --tags "code,working"
   ```
-- **LLM-Friendly Search:**
+- **LLM-Friendly Search (YAMS only):**
   ```bash
   # Get only file paths for context efficiency
   yams search "SearchCommand" --paths-only
@@ -59,9 +80,19 @@ This document establishes a unified, machine-readable, and authoritative policy 
 
   # Use fuzzy search for broader discovery
   yams search "vector database" --fuzzy --similarity 0.7 --paths-only
+
+  # Regex matches across indexed code (prefer YAMS grep over system grep)
+  yams grep "class\\s+IndexingPipeline" --include="**/*.hpp,**/*.cpp"
   ```
-- **Enhanced File Detection:** YAMS now automatically detects code files (C++, Python, JavaScript, Rust, Go, etc.) using magic number patterns
-- **Comma-Separated Patterns:** Use `--include="*.cpp,*.h,*.md"` for multiple file types
+- **Codebase Restore (from YAMS)**
+  ```bash
+  # Restore a file/doc by name or hash
+  yams get --name src/indexing/indexing_pipeline.cpp -o ./restored/indexing_pipeline.cpp
+  # Or restore collections/snapshots (when available)
+  yams restore --help
+  ```
+- **Enhanced File Detection:** YAMS automatically detects code files (C++, Python, JavaScript, Rust, Go, etc.) using magic number patterns.
+- **Comma-Separated Patterns:** Use `--include="*.cpp,*.h,*.md"` for multiple file types.
 
 ## 2. Fundamental Policies
 1. **Knowledge-First Development:** Always check YAMS before any external research; project knowledge is built up incrementally.

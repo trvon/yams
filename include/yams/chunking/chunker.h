@@ -2,6 +2,7 @@
 
 #include <yams/core/concepts.h>
 #include <yams/core/types.h>
+#include <yams/core/span.h>
 #include <yams/crypto/hasher.h>
 
 #include <array>
@@ -9,7 +10,6 @@
 #include <functional>
 #include <future>
 #include <memory>
-#include <span>
 #include <vector>
 
 namespace yams::chunking {
@@ -47,11 +47,11 @@ struct ChunkingConfig {
 // Concepts for chunking
 template<typename T>
 concept ChunkableData = requires(T t) {
-    { std::span{t} } -> std::convertible_to<std::span<const std::byte>>;
+    { yams::span{t} } -> std::convertible_to<yams::span<const std::byte>>;
 };
 
 template<typename T>
-concept ChunkProcessor = requires(T t, const ChunkRef& chunk, std::span<const std::byte> data) {
+concept ChunkProcessor = requires(T t, const ChunkRef& chunk, yams::span<const std::byte> data) {
     { t(chunk, data) } -> std::same_as<void>;
 };
 
@@ -67,7 +67,7 @@ public:
     virtual std::vector<Chunk> chunkFile(const std::filesystem::path& path) = 0;
     
     // Chunk data in memory
-    virtual std::vector<Chunk> chunkData(std::span<const std::byte> data) = 0;
+    virtual std::vector<Chunk> chunkData(yams::span<const std::byte> data) = 0;
     
     // Async file chunking
     virtual std::future<Result<std::vector<Chunk>>> chunkFileAsync(
@@ -93,7 +93,7 @@ public:
     const ChunkingConfig& getConfig() const override { return config_; }
     
     std::vector<Chunk> chunkFile(const std::filesystem::path& path) override;
-    std::vector<Chunk> chunkData(std::span<const std::byte> data) override;
+    std::vector<Chunk> chunkData(yams::span<const std::byte> data) override;
     
     std::future<Result<std::vector<Chunk>>> chunkFileAsync(
         const std::filesystem::path& path) override;
@@ -102,11 +102,11 @@ public:
     
     // Generator-based chunking for memory efficiency
     // Note: std::generator requires C++23 or coroutine TS
-    // std::generator<Chunk> chunkStream(std::span<const std::byte> data);
+    // std::generator<Chunk> chunkStream(yams::span<const std::byte> data);
     
     // Process chunks without storing all data
     template<ChunkProcessor F>
-    void processChunks(std::span<const std::byte> data, F&& processor) {
+    void processChunks(yams::span<const std::byte> data, F&& processor) {
         auto hasher = crypto::createSHA256Hasher();
         RabinWindow window;
         size_t pos = 0;
@@ -145,7 +145,7 @@ private:
     
     // Find next chunk boundary
     std::pair<size_t, bool> findChunkBoundary(
-        std::span<const std::byte> data, 
+        yams::span<const std::byte> data, 
         size_t start,
         RabinWindow& window);
     

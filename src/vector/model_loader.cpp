@@ -1,4 +1,5 @@
 #include <yams/vector/model_loader.h>
+#include <yams/core/format.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <fstream>
@@ -29,7 +30,7 @@ public:
     ) {
         if (!fs::exists(path)) {
             return Error{ErrorCode::NotFound, 
-                std::format("Model file not found: {}", path)};
+                yams::format("Model file not found: {}", path)};
         }
         
         auto start = std::chrono::high_resolution_clock::now();
