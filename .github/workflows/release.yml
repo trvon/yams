@@ -32,7 +32,7 @@ jobs:
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
             suffix: macos-arm64
           - os: macos-hosted-x64
-            runs_on: '"macos-13"'  # GitHub hosted Intel runner
+            runs_on: '"macos-13"' # GitHub hosted Intel runner
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
@@ -57,7 +57,7 @@ jobs:
           name: benchmark-results-${{ matrix.os }}-conan
           path: ci-artifacts/benchmarks
           if_no_artifact_found: warn
-      
+
       - name: Download CI coverage (if available)
         if: github.event_name == 'workflow_run' && matrix.os == 'linux-self-hosted'
         uses: dawidd6/action-download-artifact@v6
@@ -99,7 +99,7 @@ jobs:
         run: |
           pip3 install conan || python3 -m pip install conan || python -m pip install conan
           conan --version
-          
+
           # Configure Conan for robustness
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf
@@ -108,6 +108,13 @@ jobs:
         shell: bash
         run: |
           conan profile detect --force
+          
+          # Force correct architecture for ARM64 macOS
+          if [[ "${{ matrix.suffix }}" == "macos-arm64" ]]; then
+            sed -i '' 's/arch=x86_64/arch=armv8/' ~/.conan2/profiles/default || true
+            sed -i '' 's/arch=X86_64/arch=armv8/' ~/.conan2/profiles/default || true
+          fi
+          
           # Ensure C++20 support
           if [[ "$OSTYPE" == "darwin"* ]]; then
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
@@ -130,14 +137,14 @@ jobs:
             # Also try to clean the download cache
             find ~/.conan2/p -name "*${package%%/*}*" -type f -name "*.tgz" -delete 2>/dev/null || true
           }
-          
+
           # Test if cache has issues by trying to list packages
           if ! conan list "*" 2>/dev/null; then
             echo "Conan cache appears corrupted, cleaning locks and temp files..."
             conan cache clean --locks --temp 2>/dev/null || true
             echo "Conan cache locks/temp cleaned"
           fi
-          
+
           # Known problematic packages that often get corrupted
           for pkg in "gtest/1.14.0" "boost/1.83.0"; do
             if [ -d ~/.conan2/p ] && find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null | grep -q .; then
@@ -157,7 +164,7 @@ jobs:
         run: |
           # Simple native build for all platforms
           echo "Native build for ${{ matrix.suffix }}"
-          
+
           # Install dependencies with Conan
           conan install . \
             --output-folder=build/conan-release \
@@ -165,7 +172,7 @@ jobs:
             --build=missing \
             -o "boost/*:without_locale=True" \
             -o "boost/*:without_stacktrace=True"
-          
+
           # Configure with CMake using Conan presets
           cmake --preset conan-release \
             -DYAMS_BUILD_PROFILE=release \
@@ -175,7 +182,7 @@ jobs:
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args }}
-          
+
           # Update BUILD_DIR to point to Conan build directory
           echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 
@@ -188,7 +195,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
-          
+
           # Check if we have CI benchmark artifacts
           if [ -d "ci-artifacts/benchmarks" ] && [ "$(ls -A ci-artifacts/benchmarks/*.json 2>/dev/null)" ]; then
             echo "Using benchmark results from CI workflow"
@@ -220,14 +227,14 @@ jobs:
           echo "## Release Build Information (v${{ steps.v.outputs.version }})" > "$SUMMARY_FILE"
           echo "" >> "$SUMMARY_FILE"
           echo "**Platform:** ${{ matrix.suffix }}" >> "$SUMMARY_FILE"
-          echo "**Build Type:** Release (optimized for production)" >> "$SUMMARY_FILE"
-          
+          echo "**Build Type:** Release" >> "$SUMMARY_FILE"
+
           # Only mention CI validation if we actually have CI artifacts
           if [ -d "ci-artifacts" ] && [ "$(ls -A ci-artifacts/ 2>/dev/null)" ]; then
             echo "**CI Status:** Tests and benchmarks from CI workflow" >> "$SUMMARY_FILE"
           fi
           echo "" >> "$SUMMARY_FILE"
-          
+
           # Add coverage information if available
           if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
             echo "### Test Coverage" >> "$SUMMARY_FILE"
