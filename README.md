@@ -29,22 +29,6 @@ This script downloads **pre-built binaries** and will:
 - Set up shell completions if available
 - Verify the installation
 
-> **Note:** This is the recommended installation method for all users. No build tools or dependencies required.
-
-**Custom installation options:**
-```bash
-# Install specific version
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash -s -- --version 0.1.2
-
-# Install to custom directory
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash -s -- --install-dir /usr/local/bin
-
-# Environment variables
-export YAMS_VERSION="0.1.2"
-export YAMS_INSTALL_DIR="/usr/local/bin"
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
-```
-
 **Supported platforms:**
 - Linux x86_64, ARM64
 - macOS x86_64 (Intel), ARM64 (Apple Silicon)
@@ -61,11 +45,8 @@ docker run --rm -it ghcr.io/trvon/yams:latest --version
 brew tap trvon/yams && brew install yams
 ```
 
-### Build from Source (For Developers)
+### Build from Source
 
-> **⚠️ Note:** Building from source is only needed for development. Most users should use the install script above.
-
-**Working Build Method (Conan):**
 ```bash
 # Install Conan
 pip install conan
