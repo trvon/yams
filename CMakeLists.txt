@@ -732,10 +732,11 @@ if(NOT YAMS_USE_CONAN)
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
         GIT_TAG v1.12.0
     )
-    # Disable spdlog installation to avoid path issues in CI
-    # spdlog is header-only and will be available through the build interface
-    set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+    # Configure spdlog for proper installation
+    # Enable installation so spdlog can be exported with YAMS targets
+    set(SPDLOG_INSTALL ON CACHE BOOL "" FORCE)
     set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(spdlog)
 
     # nlohmann_json for JSON parsing

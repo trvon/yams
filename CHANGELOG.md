@@ -5,7 +5,17 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.7] - 2025-08-14
+## [v0.2.9] - 2025-08-14
+
+**Enhanced Deduplication Reporting**
+  - New stats --dedup command for block-level analysis
+  - Shows deduplication ratio, space savings, most duplicated blocks
+  - Validated 32% deduplication on real codebases
+**CI version bump**
+  - Fixed CMake export error with spdlog dependency
+  - Resolved CI failures on macOS x64 and Linux x86
+  
+## [v0.2.8] - 2025-08-14
 
 ### Added
 - **Repair Command**: New comprehensive storage maintenance command
@@ -67,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added database inconsistency warnings
   - Better progress indicators for long operations
 
+## [v0.2.7] - 2025-08-14
+### Fixed
+- **CI version bump**
+  - Conan flag fix in CI
 
 ## [v0.2.6] - 2025-08-14
 ### Fixed

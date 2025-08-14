@@ -45,6 +45,7 @@ public:
         cmd->add_flag("--performance", showPerformance_, "Show performance metrics");
         cmd->add_flag("--file-types", showFileTypes_, "Show file type breakdown");
         cmd->add_flag("--duplicates", showDuplicates_, "Show duplicate file analysis");
+        cmd->add_flag("--dedup", showDedup_, "Show block-level deduplication analysis");
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         
         cmd->callback([this]() { 
@@ -501,6 +502,10 @@ public:
                     std::cout << "\n";
                 }
                 
+                if (showDedup_) {
+                    showDeduplicationAnalysis();
+                }
+                
                 if (detailed_) {
                     std::cout << "Performance Metrics:\n";
                     std::cout << "  Store Operations: " << stats.storeOperations << "\n";
@@ -562,7 +567,128 @@ private:
     bool showPerformance_ = false;
     bool showFileTypes_ = false;
     bool showDuplicates_ = false;
+    bool showDedup_ = false;
     bool verbose_ = false;
+    
+    void showDeduplicationAnalysis() const {
+        std::cout << "Block-Level Deduplication Analysis:\n";
+        std::cout << "───────────────────────────────────\n";
+        
+        // Open refs database
+        fs::path refsDbPath = cli_->getDataPath() / "storage" / "refs.db";
+        if (!fs::exists(refsDbPath)) {
+            std::cout << "  No reference database found\n\n";
+            return;
+        }
+        
+        sqlite3* db;
+        if (sqlite3_open(refsDbPath.string().c_str(), &db) != SQLITE_OK) {
+            std::cout << "  Failed to open reference database\n\n";
+            return;
+        }
+        
+        // Get overall deduplication stats
+        sqlite3_stmt* stmt;
+        const char* sql = "SELECT COUNT(*) as total_blocks, "
+                         "SUM(CASE WHEN ref_count > 1 THEN 1 ELSE 0 END) as shared_blocks, "
+                         "SUM(ref_count) as total_refs, "
+                         "AVG(ref_count) as avg_refs "
+                         "FROM block_references WHERE ref_count > 0";
+        
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                int totalBlocks = sqlite3_column_int(stmt, 0);
+                int sharedBlocks = sqlite3_column_int(stmt, 1);
+                int totalRefs = sqlite3_column_int(stmt, 2);
+                double avgRefs = sqlite3_column_double(stmt, 3);
+                
+                // Calculate deduplication ratio and savings
+                double dedupRatio = 0;
+                uint64_t savedBlocks = 0;
+                if (totalRefs > 0) {
+                    savedBlocks = totalRefs - totalBlocks;
+                    dedupRatio = (double)savedBlocks / totalRefs * 100;
+                }
+                
+                std::cout << "  Total Unique Blocks: " << totalBlocks << "\n";
+                std::cout << "  Total Block References: " << totalRefs << "\n";
+                std::cout << "  Shared Blocks: " << sharedBlocks 
+                         << " (" << std::fixed << std::setprecision(1) 
+                         << (sharedBlocks * 100.0 / totalBlocks) << "% of blocks)\n";
+                std::cout << "  Average References per Block: " 
+                         << std::fixed << std::setprecision(2) << avgRefs << "\n";
+                std::cout << "\n";
+                
+                std::cout << "  Deduplication Savings:\n";
+                std::cout << "    Blocks Saved: " << savedBlocks << "\n";
+                std::cout << "    Deduplication Ratio: " 
+                         << std::fixed << std::setprecision(1) << dedupRatio << "%\n";
+                
+                // Estimate space saved (assuming average block size)
+                if (savedBlocks > 0 && totalBlocks > 0) {
+                    // Get total storage size
+                    fs::path objectsPath = cli_->getDataPath() / "storage" / "objects";
+                    uint64_t totalSize = 0;
+                    if (fs::exists(objectsPath)) {
+                        for (const auto& entry : fs::recursive_directory_iterator(objectsPath)) {
+                            if (entry.is_regular_file()) {
+                                totalSize += entry.file_size();
+                            }
+                        }
+                    }
+                    
+                    if (totalSize > 0) {
+                        uint64_t avgBlockSize = totalSize / totalBlocks;
+                        uint64_t savedBytes = savedBlocks * avgBlockSize;
+                        std::cout << "    Estimated Space Saved: " << formatSize(savedBytes) << "\n";
+                    }
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+        
+        // Show most duplicated blocks
+        std::cout << "\n  Most Duplicated Blocks:\n";
+        sql = "SELECT block_hash, ref_count FROM block_references "
+              "WHERE ref_count > 1 ORDER BY ref_count DESC LIMIT 10";
+        
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            int count = 0;
+            while (sqlite3_step(stmt) == SQLITE_ROW && count < 10) {
+                const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                int refCount = sqlite3_column_int(stmt, 1);
+                
+                if (hash) {
+                    std::string shortHash(hash, 12);
+                    std::cout << "    " << shortHash << "... : " << refCount << " references";
+                    
+                    // Try to show a preview of the content
+                    if (count < 3) {  // Only preview first 3
+                        std::string blockPath = cli_->getDataPath().string() + "/storage/objects/" +
+                                               std::string(hash, 2) + "/" + std::string(hash + 2);
+                        std::ifstream blockFile(blockPath, std::ios::binary);
+                        if (blockFile) {
+                            char preview[61] = {0};
+                            blockFile.read(preview, 60);
+                            // Clean up for display
+                            for (int i = 0; i < 60 && preview[i]; i++) {
+                                if (!isprint(preview[i]) && preview[i] != ' ') {
+                                    preview[i] = '.';
+                                }
+                            }
+                            std::cout << " (\"" << preview << "...\")";
+                        }
+                    }
+                    std::cout << "\n";
+                }
+                count++;
+            }
+            sqlite3_finalize(stmt);
+        }
+        
+        sqlite3_close(db);
+        std::cout << "\n";
+    }
     
     std::string formatSize(uint64_t bytes) const {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
