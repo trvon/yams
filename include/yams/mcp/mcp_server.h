@@ -41,8 +41,15 @@ public:
     bool isConnected() const override { return !closed_; }
     void close() override { closed_ = true; }
     
+    // Set external shutdown flag for non-blocking checks
+    void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
+    
 private:
     std::atomic<bool> closed_{false};
+    std::atomic<bool>* externalShutdown_{nullptr};
+    
+    // Helper for non-blocking stdin check
+    bool isInputAvailable(int timeoutMs = 100) const;
 };
 
 /**
@@ -89,7 +96,8 @@ public:
               std::shared_ptr<search::SearchExecutor> searchExecutor,
               std::shared_ptr<metadata::MetadataRepository> metadataRepo,
               std::shared_ptr<search::HybridSearchEngine> hybridEngine = nullptr,
-              std::unique_ptr<ITransport> transport = std::make_unique<StdioTransport>());
+              std::unique_ptr<ITransport> transport = std::make_unique<StdioTransport>(),
+              std::atomic<bool>* externalShutdown = nullptr);
     ~MCPServer();
     
     /**
@@ -223,6 +231,7 @@ private:
     
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
+    std::atomic<bool>* externalShutdown_{nullptr};
     
     // Server info
     struct {

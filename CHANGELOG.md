@@ -5,6 +5,37 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.4]
+
+### Fixed
+- **MCP Server Signal Handling**
+  - Server now responds properly to Ctrl+C (SIGINT) signals
+  - Replaced std::signal with sigaction to allow interrupting blocking I/O
+  - Added non-blocking stdin polling with 100ms timeout in StdioTransport
+  - Server checks external shutdown flag in main loop
+  - Handles EINTR errors and clears stdin error state properly
+  - Added clear startup messages and usage instructions to stderr
+
+- **Dockerfile**
+  - Dockerfile should build correctly
+
+- **Cross-Compilation Support**
+  - Added explicit Conan profiles for x86_64 and ARM64 architectures
+  - CI/CD workflows now properly handle cross-compilation with dual profiles
+  - Fixed zstd assembly symbol errors when cross-compiling on Apple Silicon
+  - Added zstd/*:build_programs=False option to avoid build issues
+  - Workflows detect native vs cross-compilation scenarios automatically
+
+### Added
+
+- **MCP Server Documentation**
+  - Comprehensive MCP usage guide at `docs/user_guide/mcp.md` (I personally use the CLI)
+
+### Technical Details
+- **Signal Handling**: Uses sigaction with sa_flags=0 to interrupt blocking system calls
+- **Non-blocking I/O**: Implements poll() on Unix/macOS for stdin availability checking
+- **Cross-Compilation**: Uses Conan's dual profile system (-pr:b for build, -pr:h for host)
+
 ## [v0.2.3] - 2025-08-14
 - **CI version bump**
   - README updates (removed install instructions with curl, download binary)

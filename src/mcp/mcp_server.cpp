@@ -21,6 +21,17 @@
 #include <queue>
 #include <atomic>
 #include <memory>
+#include <errno.h>
+#include <cstring>
+
+// Platform-specific includes for non-blocking I/O
+#ifdef _WIN32
+#include <windows.h>
+#include <conio.h>
+#else
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -45,22 +56,90 @@ void StdioTransport::send(const json& message) {
     }
 }
 
+bool StdioTransport::isInputAvailable(int timeoutMs) const {
+#ifdef _WIN32
+    // Windows implementation using WaitForSingleObject
+    HANDLE stdinHandle = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD waitResult = WaitForSingleObject(stdinHandle, timeoutMs);
+    return waitResult == WAIT_OBJECT_0;
+#else
+    // Unix/Linux/macOS implementation using poll
+    struct pollfd fds;
+    fds.fd = STDIN_FILENO;
+    fds.events = POLLIN;
+    fds.revents = 0;
+    
+    int result = poll(&fds, 1, timeoutMs);
+    
+    if (result == -1) {
+        if (errno == EINTR) {
+            // Signal interrupted, check shutdown
+            if (externalShutdown_ && *externalShutdown_) {
+                return false;
+            }
+        }
+        return false;
+    } else if (result == 0) {
+        // Timeout - check shutdown
+        if (externalShutdown_ && *externalShutdown_) {
+            return false;
+        }
+    }
+    
+    return result > 0 && (fds.revents & POLLIN);
+#endif
+}
+
 json StdioTransport::receive() {
     if (closed_) {
         return json{};
     }
     
-    std::string line;
-    if (std::getline(std::cin, line)) {
-        try {
-            return json::parse(line);
-        } catch (const json::parse_error& e) {
-            spdlog::error("Failed to parse JSON: {}", e.what());
+    // Use polling with timeout to check for input
+    // This allows us to periodically check the shutdown flag
+    while (!closed_) {
+        // Check external shutdown flag
+        if (externalShutdown_ && *externalShutdown_) {
+            closed_ = true;
             return json{};
         }
+        
+        // Check if input is available (100ms timeout)
+        if (isInputAvailable(100)) {
+            std::string line;
+            
+            // Clear any error state that might have been set by signal
+            if (std::cin.fail() && !std::cin.eof()) {
+                std::cin.clear();
+            }
+            
+            if (std::getline(std::cin, line)) {
+                try {
+                    return json::parse(line);
+                } catch (const json::parse_error& e) {
+                    spdlog::error("Failed to parse JSON: {}", e.what());
+                    return json{};
+                }
+            } else {
+                // Check if it was interrupted or EOF
+                if (std::cin.eof()) {
+                    closed_ = true;
+                    return json{};
+                }
+                // Clear error state and continue if interrupted
+                if (std::cin.fail()) {
+                    std::cin.clear();
+                    // Check for shutdown after clearing
+                    if (externalShutdown_ && *externalShutdown_) {
+                        closed_ = true;
+                        return json{};
+                    }
+                }
+            }
+        }
+        // No input available, loop will check shutdown flag again
     }
     
-    closed_ = true;
     return json{};
 }
 
@@ -391,12 +470,18 @@ MCPServer::MCPServer(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<search::SearchExecutor> searchExecutor,
                      std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                      std::shared_ptr<search::HybridSearchEngine> hybridEngine,
-                     std::unique_ptr<ITransport> transport)
+                     std::unique_ptr<ITransport> transport,
+                     std::atomic<bool>* externalShutdown)
     : store_(std::move(store))
     , searchExecutor_(std::move(searchExecutor))
     , metadataRepo_(std::move(metadataRepo))
     , hybridEngine_(std::move(hybridEngine))
-    , transport_(std::move(transport)) {
+    , transport_(std::move(transport))
+    , externalShutdown_(externalShutdown) {
+    // If transport is StdioTransport, set the shutdown flag
+    if (auto* stdioTransport = dynamic_cast<StdioTransport*>(transport_.get())) {
+        stdioTransport->setShutdownFlag(externalShutdown);
+    }
 }
 
 MCPServer::~MCPServer() {
@@ -405,13 +490,23 @@ MCPServer::~MCPServer() {
 
 void MCPServer::start() {
     running_ = true;
-    spdlog::info("MCP server started");
+    spdlog::info("MCP server started - entering main loop");
     
     // Main message loop
     while (running_ && transport_->isConnected()) {
+        // Check external shutdown flag if set
+        if (externalShutdown_ && *externalShutdown_) {
+            spdlog::info("External shutdown requested");
+            break;
+        }
+        
         auto message = transport_->receive();
         
         if (message.is_null() || message.empty()) {
+            // Check for shutdown again after receive returns
+            if (externalShutdown_ && *externalShutdown_) {
+                break;
+            }
             continue;
         }
         

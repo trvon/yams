@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "yams": {
+      "command": "yams",
+      "args": ["serve"],
+      "env": {
+        "YAMS_STORAGE": "/USERS/USERNAME/.local/share/yams"
+      }
+    },
+    "yams-docker": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-v",
+        "/Users/username/.local/share/yams:/data",
+        "-e",
+        "YAMS_STORAGE=/data",
+        "ghcr.io/trvon/yams:latest",
+        "serve"
+      ]
+    }
+  }
+}

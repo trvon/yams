@@ -4,9 +4,12 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <iostream>
 #include <csignal>
 #include <atomic>
+#include <cstring>
+#include <unistd.h>
 
 namespace yams::cli {
 
@@ -47,9 +50,55 @@ public:
     
     Result<void> execute() override {
         try {
-            // Set up signal handler for graceful shutdown
-            std::signal(SIGINT, [](int) { g_shutdown = true; });
-            std::signal(SIGTERM, [](int) { g_shutdown = true; });
+            // For stdio transport, redirect logging to stderr to avoid protocol conflicts
+            if (transport_ == "stdio") {
+                // Create a stderr sink for spdlog
+                auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+                auto logger = std::make_shared<spdlog::logger>("stderr", stderr_sink);
+                spdlog::set_default_logger(logger);
+                
+                // Print startup message to stderr for user feedback
+                std::cerr << "\n=== YAMS MCP Server ===" << std::endl;
+                std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)" << std::endl;
+                std::cerr << "Status: Waiting for client connection..." << std::endl;
+                std::cerr << "Press Ctrl+C to stop the server" << std::endl;
+                std::cerr << std::endl;
+                
+                // Check if we're in an interactive terminal
+                if (isatty(STDIN_FILENO)) {
+                    std::cerr << "Note: MCP stdio transport expects JSON-RPC messages on stdin." << std::endl;
+                    std::cerr << "For testing, use: yams serve --transport websocket" << std::endl;
+                    std::cerr << "Or configure with Claude Desktop: https://docs.anthropic.com/en/docs/claude-code" << std::endl;
+                    std::cerr << std::endl;
+                }
+            }
+            
+            // Set up signal handler for graceful shutdown using sigaction
+            // This allows interrupting blocking I/O operations
+            struct sigaction sa;
+            std::memset(&sa, 0, sizeof(sa));
+            
+            // Use a lambda wrapper to set the shutdown flag
+            sa.sa_handler = [](int sig) { 
+                g_shutdown = true;
+                // Print shutdown message to stderr
+                std::cerr << "\n[Signal " << sig << " received, shutting down...]" << std::endl;
+                // Clear any error state on stdin to allow getline to return
+                if (std::cin.fail()) {
+                    std::cin.clear();
+                }
+            };
+            
+            // Don't set SA_RESTART to allow interrupting blocking I/O
+            sa.sa_flags = 0;
+            
+            // Install the handler for SIGINT and SIGTERM
+            if (sigaction(SIGINT, &sa, nullptr) == -1) {
+                spdlog::warn("Failed to install SIGINT handler");
+            }
+            if (sigaction(SIGTERM, &sa, nullptr) == -1) {
+                spdlog::warn("Failed to install SIGTERM handler");
+            }
             
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
@@ -89,7 +138,7 @@ public:
             std::unique_ptr<mcp::ITransport> transport;
             if (transport_ == "stdio") {
                 transport = std::make_unique<mcp::StdioTransport>();
-                spdlog::info("Starting MCP server with stdio transport");
+                spdlog::info("MCP server initialized with stdio transport");
             } else if (transport_ == "websocket" || transport_ == "ws") {
                 mcp::WebSocketTransport::Config cfg;
                 cfg.host = host_;
@@ -109,9 +158,9 @@ public:
                              "Transport type not implemented: " + transport_};
             }
             
-            // Create and start MCP server
+            // Create and start MCP server with shutdown flag
             auto server = std::make_unique<mcp::MCPServer>(
-                store, searchExecutor, metadataRepo, hybridEngine, std::move(transport));
+                store, searchExecutor, metadataRepo, hybridEngine, std::move(transport), &g_shutdown);
             
             // Run server until shutdown signal
             server->start();

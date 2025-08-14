@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iomanip>
 #include <set>
+#include <filesystem>
 #include <unistd.h>
 
 namespace yams::cli {
@@ -30,6 +31,9 @@ public:
             ->required();
         
         cmd->add_option("paths", paths_, "Files or directories to search (default: all indexed files)");
+        
+        // Pattern filtering
+        cmd->add_option("--include", includePatterns_, "File patterns to include (e.g., '*.md,*.txt')");
         
         // Context options
         cmd->add_option("-A,--after", afterContext_, "Show N lines after match")
@@ -147,6 +151,30 @@ public:
                         }
                     }
                 }
+            }
+            
+            // Apply include pattern filtering if specified
+            if (!includePatterns_.empty()) {
+                std::vector<metadata::DocumentInfo> filteredDocs;
+                auto expandedPatterns = splitPatterns(includePatterns_);
+                
+                for (const auto& doc : documents) {
+                    std::string fileName = std::filesystem::path(doc.filePath).filename().string();
+                    bool shouldInclude = false;
+                    
+                    for (const auto& pattern : expandedPatterns) {
+                        if (matchesPattern(fileName, pattern)) {
+                            shouldInclude = true;
+                            break;
+                        }
+                    }
+                    
+                    if (shouldInclude) {
+                        filteredDocs.push_back(doc);
+                    }
+                }
+                
+                documents = filteredDocs;
             }
             
             if (documents.empty()) {
@@ -340,6 +368,53 @@ private:
         std::cout << std::endl;
     }
     
+    std::vector<std::string> splitPatterns(const std::vector<std::string>& patterns) {
+        std::vector<std::string> result;
+        for (const auto& pattern : patterns) {
+            std::stringstream ss(pattern);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                // Trim whitespace
+                item.erase(0, item.find_first_not_of(" \t"));
+                item.erase(item.find_last_not_of(" \t") + 1);
+                if (!item.empty()) {
+                    result.push_back(item);
+                }
+            }
+        }
+        return result;
+    }
+    
+    bool matchesPattern(const std::string& text, const std::string& pattern) {
+        // Simple wildcard matching (* and ?)
+        std::string regexString = pattern;
+        
+        // Escape regex special characters except * and ?
+        std::string escaped;
+        for (char c : regexString) {
+            if (c == '*') {
+                escaped += ".*";
+            } else if (c == '?') {
+                escaped += ".";
+            } else if (c == '.' || c == '[' || c == ']' || c == '(' || c == ')' || 
+                       c == '{' || c == '}' || c == '+' || c == '^' || c == '$' || 
+                       c == '|' || c == '\\') {
+                escaped += "\\";
+                escaped += c;
+            } else {
+                escaped += c;
+            }
+        }
+        
+        try {
+            std::regex regexPattern(escaped, std::regex_constants::icase);
+            return std::regex_match(text, regexPattern);
+        } catch (const std::regex_error&) {
+            // If regex fails, fall back to simple string comparison
+            return text == pattern;
+        }
+    }
+    
 private:
     YamsCLI* cli_ = nullptr;
     std::string pattern_;
@@ -364,6 +439,9 @@ private:
     // Output options
     std::string colorMode_ = "auto";
     size_t maxCount_ = 0;
+    
+    // Pattern filtering
+    std::vector<std::string> includePatterns_;
 };
 
 // Factory function

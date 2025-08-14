@@ -62,19 +62,64 @@ jobs:
       - name: Configure with Conan (with tests enabled)
         shell: bash
         run: |
+          # Detect if we're cross-compiling (ARM64 runner building for x86_64)
+          NATIVE_ARCH=$(uname -m)
+          TARGET_ARCH="$NATIVE_ARCH"
+          
+          # Check if runner specifies x86_64 but we're on arm64
+          if [[ "${{ matrix.runs_on }}" == *"X64"* ]] && [[ "$NATIVE_ARCH" == "arm64" ]]; then
+            echo "Cross-compilation detected: ARM64 -> x86_64"
+            TARGET_ARCH="x86_64"
+            CROSS_COMPILE=true
+            
+            # Use project profiles if available, otherwise fall back to default
+            if [ -f ".conan/profiles/x86_64" ]; then
+              HOST_PROFILE=".conan/profiles/x86_64"
+            else
+              HOST_PROFILE="default"
+              # Ensure default profile has x86_64 arch
+              conan profile detect --force
+              sed -i.bak 's/arch=.*/arch=x86_64/' ~/.conan2/profiles/default
+            fi
+            BUILD_PROFILE="default"  # Native ARM64 for build tools
+          else
+            echo "Native build detected: $NATIVE_ARCH"
+            CROSS_COMPILE=false
+            HOST_PROFILE="default"
+            BUILD_PROFILE="default"
+          fi
+
           # Create/refresh Release lockfile with tests enabled
-          conan lock create . -s build_type=Release --options "yams/*:build_tests=True" --lockfile-out=conan.lock --build=missing
+          if [ "$CROSS_COMPILE" = true ]; then
+            conan lock create . -pr:b="$BUILD_PROFILE" -pr:h="$HOST_PROFILE" -s build_type=Release --options "yams/*:build_tests=True" --lockfile-out=conan.lock --build=missing
+          else
+            conan lock create . -s build_type=Release --options "yams/*:build_tests=True" --lockfile-out=conan.lock --build=missing
+          fi
 
           # Install dependencies to preset build folder using the lockfile
           # Disable problematic Boost components for cross-compilation compatibility
-          conan install . \
-            --output-folder=build/conan-release \
-            -s build_type=Release \
-            --options "yams/*:build_tests=True" \
-            --lockfile=conan.lock \
-            --build=missing \
-            -o "boost/*:without_locale=True" \
-            -o "boost/*:without_stacktrace=True"
+          if [ "$CROSS_COMPILE" = true ]; then
+            conan install . \
+              --output-folder=build/conan-release \
+              -pr:b="$BUILD_PROFILE" \
+              -pr:h="$HOST_PROFILE" \
+              -s build_type=Release \
+              --options "yams/*:build_tests=True" \
+              --lockfile=conan.lock \
+              --build=missing \
+              -o "boost/*:without_locale=True" \
+              -o "boost/*:without_stacktrace=True" \
+              -o "zstd/*:build_programs=False"  # Avoid zstd program build issues
+          else
+            conan install . \
+              --output-folder=build/conan-release \
+              -s build_type=Release \
+              --options "yams/*:build_tests=True" \
+              --lockfile=conan.lock \
+              --build=missing \
+              -o "boost/*:without_locale=True" \
+              -o "boost/*:without_stacktrace=True"
+          fi
 
           # Configure with CMake using Conan presets (tests will be built)
           # Enable coverage for Linux builds

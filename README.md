@@ -3,6 +3,8 @@
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
 
+My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
+
 ## Features
 
 - **Content-Addressed Storage** - SHA-256 based, ensures data integrity
@@ -12,7 +14,9 @@ Persistent memory for LLMs and applications. Content-addressed storage with dedu
 - **Crash Recovery** - Write-ahead logging for durability
 - **High Performance** - 100MB/s+ throughput, thread-safe
 
-My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
+## Versioning
+
+YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
 ## Installation
 

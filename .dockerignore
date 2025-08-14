@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+cmake-build-*/
+out/
+dist/
+target/
+
+# CMake cache/presets (generated)
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+CMakePresets.json
+
+# Conan caches (keep local; don’t send to Docker context)
+.conan/
+.conan2/
+.conan_cache/
+
+# Python/Node junk
+__pycache__/
+.venv/
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+

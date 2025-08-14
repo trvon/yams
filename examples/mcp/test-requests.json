@@ -1,0 +1,75 @@
+{
+  "initialize": {
+    "jsonrpc": "2.0",
+    "method": "initialize",
+    "params": {
+      "clientInfo": {
+        "name": "test-client",
+        "version": "1.0.0"
+      }
+    },
+    "id": 1
+  },
+  
+  "list_tools": {
+    "jsonrpc": "2.0",
+    "method": "tools/list",
+    "id": 2
+  },
+  
+  "search_documents": {
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "search_documents",
+      "arguments": {
+        "query": "configuration",
+        "limit": 5,
+        "type": "hybrid"
+      }
+    },
+    "id": 3
+  },
+  
+  "grep_documents": {
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "grep_documents",
+      "arguments": {
+        "pattern": "TODO\\b",
+        "ignore_case": true,
+        "line_numbers": true,
+        "context": 2
+      }
+    },
+    "id": 4
+  },
+  
+  "get_stats": {
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "get_stats",
+      "arguments": {
+        "detailed": true,
+        "file_types": true
+      }
+    },
+    "id": 5
+  },
+  
+  "list_documents": {
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "list_documents",
+      "arguments": {
+        "recent": 10,
+        "sort_by": "modified",
+        "sort_order": "desc"
+      }
+    },
+    "id": 6
+  }
+}

@@ -1,0 +1,19 @@
+# Native ARM64 profile for Apple Silicon
+[settings]
+arch=armv8
+build_type=Release
+compiler=apple-clang
+compiler.cppstd=20
+compiler.libcxx=libc++
+compiler.version=17
+os=Macos
+
+[conf]
+# Ensure we're building for ARM64
+tools.cmake.cmaketoolchain:toolset_arch=arm64
+
+[buildenv]
+# Set architecture flags for native ARM64
+CFLAGS=-arch arm64
+CXXFLAGS=-arch arm64
+LDFLAGS=-arch arm64

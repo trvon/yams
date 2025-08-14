@@ -47,6 +47,28 @@ jobs:
           # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
 
+      - name: Download CI benchmark artifacts (if available)
+        if: github.event_name == 'workflow_run'
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          workflow: ci.yml
+          workflow_conclusion: success
+          name: benchmark-results-${{ matrix.os }}-conan
+          path: ci-artifacts/benchmarks
+          if_no_artifact_found: warn
+      
+      - name: Download CI coverage (if available)
+        if: github.event_name == 'workflow_run' && matrix.os == 'linux-self-hosted'
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          workflow: ci.yml
+          workflow_conclusion: success
+          name: coverage-report
+          path: ci-artifacts/coverage
+          if_no_artifact_found: warn
+
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
@@ -94,14 +116,71 @@ jobs:
       - name: Configure with Conan
         shell: bash
         run: |
+          # Detect if we're cross-compiling
+          NATIVE_ARCH=$(uname -m)
+          TARGET_ARCH="$NATIVE_ARCH"
+          
+          # Check matrix suffix to determine target architecture
+          if [[ "${{ matrix.suffix }}" == *"x86_64"* ]]; then
+            TARGET_ARCH="x86_64"
+          elif [[ "${{ matrix.suffix }}" == *"arm64"* ]]; then
+            TARGET_ARCH="arm64"
+          fi
+          
+          # Set up cross-compilation if needed
+          if [[ "$NATIVE_ARCH" == "arm64" ]] && [[ "$TARGET_ARCH" == "x86_64" ]]; then
+            echo "Cross-compilation detected: ARM64 -> x86_64"
+            CROSS_COMPILE=true
+            
+            # Use project profiles if available
+            if [ -f ".conan/profiles/x86_64" ]; then
+              HOST_PROFILE=".conan/profiles/x86_64"
+            else
+              HOST_PROFILE="default"
+              # Ensure default profile has x86_64 arch
+              sed -i.bak 's/arch=.*/arch=x86_64/' ~/.conan2/profiles/default
+            fi
+            BUILD_PROFILE="default"  # Native ARM64 for build tools
+          elif [[ "$NATIVE_ARCH" == "x86_64" ]] && [[ "$TARGET_ARCH" == "arm64" ]]; then
+            echo "Cross-compilation detected: x86_64 -> ARM64"
+            CROSS_COMPILE=true
+            
+            # Use project profiles if available
+            if [ -f ".conan/profiles/arm64" ]; then
+              HOST_PROFILE=".conan/profiles/arm64"
+            else
+              HOST_PROFILE="default"
+              # Ensure default profile has arm64 arch
+              sed -i.bak 's/arch=.*/arch=armv8/' ~/.conan2/profiles/default
+            fi
+            BUILD_PROFILE="default"  # Native x86_64 for build tools
+          else
+            echo "Native build detected: $NATIVE_ARCH"
+            CROSS_COMPILE=false
+            HOST_PROFILE="default"
+            BUILD_PROFILE="default"
+          fi
+
           # Install dependencies with Conan
           # Disable problematic Boost components for cross-compilation
-          conan install . \
-            --output-folder=build/conan-release \
-            -s build_type=Release \
-            --build=missing \
-            -o "boost/*:without_locale=True" \
-            -o "boost/*:without_stacktrace=True"
+          if [ "$CROSS_COMPILE" = true ]; then
+            conan install . \
+              --output-folder=build/conan-release \
+              -pr:b="$BUILD_PROFILE" \
+              -pr:h="$HOST_PROFILE" \
+              -s build_type=Release \
+              --build=missing \
+              -o "boost/*:without_locale=True" \
+              -o "boost/*:without_stacktrace=True" \
+              -o "zstd/*:build_programs=False"  # Avoid zstd program build issues
+          else
+            conan install . \
+              --output-folder=build/conan-release \
+              -s build_type=Release \
+              --build=missing \
+              -o "boost/*:without_locale=True" \
+              -o "boost/*:without_stacktrace=True"
+          fi
           
           # Configure with CMake using Conan presets
           cmake --preset conan-release \
@@ -121,37 +200,19 @@ jobs:
         run: |
           cmake --build --preset conan-release --parallel
 
-      - name: Run quick benchmarks for release metrics
+      - name: Collect benchmark results from CI
         shell: bash
         run: |
-          # Ensure BUILD_DIR is properly set for Conan builds
-          if [ ! -d "$BUILD_DIR" ]; then
-            echo "BUILD_DIR not found at $BUILD_DIR, checking for alternative..."
-            if [ -d "build/conan-release/build/Release" ]; then
-              BUILD_DIR="build/conan-release/build/Release"
-              echo "Using BUILD_DIR: $BUILD_DIR"
-            fi
-          fi
-          
           mkdir -p "$BUILD_DIR/bench_results"
-          # Find all benchmark executables (named *_bench, *_bench.exe, or *_benchmark*)
-          benches=()
-          while IFS= read -r exe; do
-            [ -n "$exe" ] && benches+=("$exe")
-          done < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" -o -name "*_benchmark*" \) 2>/dev/null | sort)
-
-          if [ ${#benches[@]} -eq 0 ]; then
-            echo "No benchmark executables found (expected - release builds don't include benchmarks)."
-            # Create empty results directory
-            touch "$BUILD_DIR/bench_results/.empty"
+          
+          # Check if we have CI benchmark artifacts
+          if [ -d "ci-artifacts/benchmarks" ] && [ "$(ls -A ci-artifacts/benchmarks/*.json 2>/dev/null)" ]; then
+            echo "Using benchmark results from CI workflow"
+            cp ci-artifacts/benchmarks/*.json "$BUILD_DIR/bench_results/" || true
+            echo "Found $(ls -1 $BUILD_DIR/bench_results/*.json | wc -l) benchmark files from CI"
           else
-            echo "Found benchmarks in release build (unexpected but running them):"
-            for exe in "${benches[@]}"; do
-              name=$(basename "$exe")
-              out="$BUILD_DIR/bench_results/${name%.exe}.json"
-              echo "Running $exe -> $out"
-              "$exe" --benchmark_min_time=0.05 --benchmark_format=json --benchmark_out="$out" || true
-            done
+            echo "No CI benchmark results available (release builds don't include benchmarks)"
+            touch "$BUILD_DIR/bench_results/.empty"
           fi
 
       - name: Install
@@ -172,16 +233,39 @@ jobs:
         shell: bash
         run: |
           SUMMARY_FILE="$BUILD_DIR/release_summary.md"
-          echo "## 📦 Release Build Information (v${{ steps.v.outputs.version }})" > "$SUMMARY_FILE"
+          echo "## Release Build Information (v${{ steps.v.outputs.version }})" > "$SUMMARY_FILE"
           echo "" >> "$SUMMARY_FILE"
           echo "**Platform:** ${{ matrix.suffix }}" >> "$SUMMARY_FILE"
           echo "**Build Type:** Release (optimized for production)" >> "$SUMMARY_FILE"
-          echo "**Validation:** All tests passed in CI pipeline" >> "$SUMMARY_FILE"
+          
+          # Only mention CI validation if we actually have CI artifacts
+          if [ -d "ci-artifacts" ] && [ "$(ls -A ci-artifacts/ 2>/dev/null)" ]; then
+            echo "**CI Status:** Tests and benchmarks from CI workflow" >> "$SUMMARY_FILE"
+          fi
           echo "" >> "$SUMMARY_FILE"
+          
+          # Add coverage information if available
+          if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
+            echo "### Test Coverage" >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+            # Try to extract coverage percentage from XML
+            coverage_pct=$(python3 -c "
+import xml.etree.ElementTree as ET
+try:
+  tree = ET.parse('ci-artifacts/coverage/coverage.xml')
+  root = tree.getroot()
+  line_rate = float(root.get('line-rate', 0))
+  print(f'{line_rate * 100:.1f}%')
+except:
+  print('N/A')
+            " 2>/dev/null || echo "N/A")
+            echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+          fi
 
-          # Add benchmark results if available (unlikely in release builds)
+          # Add benchmark results if available from CI
           if [ -d "$BUILD_DIR/bench_results" ] && [ "$(find $BUILD_DIR/bench_results -name '*.json' 2>/dev/null)" ]; then
-            echo "### ⚡ Performance Metrics" >> "$SUMMARY_FILE"
+            echo "### Performance Metrics" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |" >> "$SUMMARY_FILE"
             echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
@@ -201,19 +285,12 @@ jobs:
                         cpu_time = bench.get('cpu_time', 0)
                         bytes_per_sec = bench.get('bytes_per_second', 0)
                         items_per_sec = bench.get('items_per_second', 0)
-                        memory = f'{bytes_per_sec/1024/1024:.1f}MB/s' if bytes_per_sec > 0 else f'   {items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
+                        memory = f'{bytes_per_sec/1024/1024:.1f} MB/s' if bytes_per_sec > 0 else f'{items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
                         print(f'| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |')
                 except: pass
                 " >> "$SUMMARY_FILE" 2>/dev/null || true
               fi
             done
-            echo "" >> "$SUMMARY_FILE"
-          else
-            echo "### ✅ Quality Assurance" >> "$SUMMARY_FILE"
-            echo "" >> "$SUMMARY_FILE"
-            echo "- **Tests:** Passed in CI (unit, integration, benchmarks)" >> "$SUMMARY_FILE"
-            echo "- **Build:** Production-optimized release configuration" >> "$SUMMARY_FILE"
-            echo "- **Platform:** Verified for ${{ matrix.suffix }}" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
           fi
 
