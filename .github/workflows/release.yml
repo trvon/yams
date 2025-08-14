@@ -101,7 +101,7 @@ jobs:
             -s build_type=Release \
             --build=missing \
             -o "boost/*:without_locale=True" \
-            -o "boost/*:with_stacktrace_backtrace=False"
+            -o "boost/*:without_stacktrace=True"
           
           # Configure with CMake using Conan presets
           cmake --preset conan-release \

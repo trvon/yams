@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y \
     libsqlite3-dev \
     protobuf-compiler \
     libprotobuf-dev \
-    libboost-all-dev \
     python3 \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
@@ -40,11 +39,20 @@ RUN conan profile detect --force && \
     conan profile show
 
 # Build YAMS using Conan
+# Disable problematic Boost components that fail to build
 RUN conan install . \
     --output-folder=build/conan-release \
     -s build_type=Release \
-    --build=missing && \
+    --build=missing \
+    -o "boost/*:without_locale=True" \
+    -o "boost/*:without_stacktrace=True" && \
     cd build/conan-release && \
+    # Handle version format for dev builds (CMake requires X.Y.Z format)
+    if echo "${YAMS_VERSION}" | grep -q "^dev-"; then \
+      CMAKE_VERSION="0.0.0"; \
+    else \
+      CMAKE_VERSION="${YAMS_VERSION}"; \
+    fi && \
     cmake ../.. -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
     -DCMAKE_BUILD_TYPE=Release \
@@ -52,7 +60,7 @@ RUN conan install . \
     -DYAMS_BUILD_DOCS=OFF \
     -DYAMS_BUILD_TESTS=OFF \
     -DYAMS_BUILD_MCP_SERVER=ON \
-    -DYAMS_VERSION=${YAMS_VERSION} && \
+    -DYAMS_VERSION="${CMAKE_VERSION}" && \
     cmake --build . --parallel
 
 # Install to staging directory

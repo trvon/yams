@@ -16,19 +16,6 @@ My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/
 
 ## Installation
 
-### Quick Install (Recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
-```
-
-This script downloads **pre-built binaries** and will:
-- Auto-detect your platform (Linux/macOS, x86_64/ARM64)
-- Download the appropriate binary from GitHub Releases
-- Install to `~/.local/bin` by default
-- Set up shell completions if available
-- Verify the installation
-
 **Supported platforms:**
 - Linux x86_64, ARM64
 - macOS x86_64 (Intel), ARM64 (Apple Silicon)

@@ -74,7 +74,7 @@ jobs:
             --lockfile=conan.lock \
             --build=missing \
             -o "boost/*:without_locale=True" \
-            -o "boost/*:with_stacktrace_backtrace=False"
+            -o "boost/*:without_stacktrace=True"
 
           # Configure with CMake using Conan presets (tests will be built)
           # Enable coverage for Linux builds
