@@ -1291,6 +1291,19 @@ install(DIRECTORY include/
     COMPONENT development
 )
 
+# Install data files
+install(FILES 
+    data/magic_numbers.json
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/yams/data
+    COMPONENT runtime
+)
+
+install(FILES
+    sql/reference_schema.sql
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/yams/sql
+    COMPONENT runtime
+)
+
 # CPack configuration for creating packages
 set(CPACK_PACKAGE_NAME "YAMS")
 set(CPACK_PACKAGE_VENDOR "YAMS Project")

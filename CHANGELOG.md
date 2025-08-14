@@ -5,6 +5,27 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.1] - 2025-08-14
+
+### Fixed
+- **Critical: Missing ref_transactions table after init**
+  - Fixed incomplete schema initialization in reference counter that caused "no such table: ref_transactions" error
+  - Added complete inline schema fallback with all required tables (ref_transactions, ref_transaction_ops, ref_statistics, ref_audit_log)
+  - Implemented proper resource file discovery for production deployments
+  - Added installation of SQL schema files to CMake configuration
+- **CI/CD Workflow Simplification**
+  - Removed all cross-compilation logic from release workflow
+  - Fixed CI build failures on Linux (gtest cache corruption) and macOS (runner detection)
+  - Moved macOS x86_64 builds to GitHub hosted runners (macos-13)
+  - Docker builds now use native architecture on each runner (ARM on macOS, x86 on Linux)
+
+### Changed
+- **Build Infrastructure**
+  - All builds now use native compilation for better performance and reliability
+  - Simplified Conan configuration by removing cross-compilation complexity
+  - Docker workflow split into separate jobs per architecture for efficiency
+  - Data files (magic_numbers.json, reference_schema.sql) now properly installed with binary
+
 ## [v0.3.0] - 2025-08-14
 
 ### Added

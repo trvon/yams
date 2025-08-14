@@ -31,8 +31,8 @@ jobs:
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
             suffix: macos-arm64
-          - os: macos-self-hosted-x64
-            runs_on: '["self-hosted", "macOS", "X64"]'
+          - os: macos-hosted-x64
+            runs_on: '"macos-13"'  # GitHub hosted Intel runner
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
@@ -155,75 +155,16 @@ jobs:
       - name: Configure with Conan
         shell: bash
         run: |
-          # Detect if we're cross-compiling
-          NATIVE_ARCH=$(uname -m)
-          TARGET_ARCH="$NATIVE_ARCH"
+          # Simple native build for all platforms
+          echo "Native build for ${{ matrix.suffix }}"
           
-          # Check matrix suffix to determine target architecture
-          if [[ "${{ matrix.suffix }}" == *"x86_64"* ]]; then
-            TARGET_ARCH="x86_64"
-          elif [[ "${{ matrix.suffix }}" == *"arm64"* ]]; then
-            TARGET_ARCH="arm64"
-          fi
-          
-          # Set up cross-compilation if needed
-          if [[ "$NATIVE_ARCH" == "arm64" ]] && [[ "$TARGET_ARCH" == "x86_64" ]]; then
-            echo "Cross-compilation detected: ARM64 -> x86_64"
-            CROSS_COMPILE=true
-            
-            # Use project profiles if available
-            if [ -f ".conan/profiles/x86_64" ]; then
-              HOST_PROFILE=".conan/profiles/x86_64"
-            else
-              HOST_PROFILE="default"
-              # Ensure default profile has x86_64 arch
-              sed -i.bak 's/arch=.*/arch=x86_64/' ~/.conan2/profiles/default
-              # Also set C++20 for cross-compilation
-              sed -i.bak 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
-            fi
-            BUILD_PROFILE="default"  # Native ARM64 for build tools
-          elif [[ "$NATIVE_ARCH" == "x86_64" ]] && [[ "$TARGET_ARCH" == "arm64" ]]; then
-            echo "Cross-compilation detected: x86_64 -> ARM64"
-            CROSS_COMPILE=true
-            
-            # Use project profiles if available
-            if [ -f ".conan/profiles/arm64" ]; then
-              HOST_PROFILE=".conan/profiles/arm64"
-            else
-              HOST_PROFILE="default"
-              # Ensure default profile has arm64 arch
-              sed -i.bak 's/arch=.*/arch=armv8/' ~/.conan2/profiles/default
-              # Also set C++20 for cross-compilation
-              sed -i.bak 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
-            fi
-            BUILD_PROFILE="default"  # Native x86_64 for build tools
-          else
-            echo "Native build detected: $NATIVE_ARCH"
-            CROSS_COMPILE=false
-            HOST_PROFILE="default"
-            BUILD_PROFILE="default"
-          fi
-
           # Install dependencies with Conan
-          # Disable problematic Boost components for cross-compilation
-          if [ "$CROSS_COMPILE" = true ]; then
-            conan install . \
-              --output-folder=build/conan-release \
-              -pr:b="$BUILD_PROFILE" \
-              -pr:h="$HOST_PROFILE" \
-              -s build_type=Release \
-              --build=missing \
-              -o "boost/*:without_locale=True" \
-              -o "boost/*:without_stacktrace=True" \
-              -o "zstd/*:build_programs=False"  # Avoid zstd program build issues
-          else
-            conan install . \
-              --output-folder=build/conan-release \
-              -s build_type=Release \
-              --build=missing \
-              -o "boost/*:without_locale=True" \
-              -o "boost/*:without_stacktrace=True"
-          fi
+          conan install . \
+            --output-folder=build/conan-release \
+            -s build_type=Release \
+            --build=missing \
+            -o "boost/*:without_locale=True" \
+            -o "boost/*:without_stacktrace=True"
           
           # Configure with CMake using Conan presets
           cmake --preset conan-release \

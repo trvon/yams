@@ -28,6 +28,10 @@ jobs:
             platform: macos
             runs_on: '["self-hosted", "macOS", "X64"]'
             build_type: conan
+          - os: macos-github-x64
+            platform: macos-x64
+            runs_on: '"macos-13"'  # GitHub hosted Intel runner
+            build_type: conan
 
     env:
       BUILD_DIR: build
@@ -93,44 +97,50 @@ jobs:
           
           # Known problematic packages that often get corrupted
           for pkg in "gtest/1.14.0" "boost/1.83.0"; do
-            if [ -d ~/.conan2/p ] && find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null | grep -q .; then
-              # Check if the tgz files are valid
-              for tgz in $(find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null); do
-                if ! tar -tzf "$tgz" >/dev/null 2>&1; then
-                  echo "Found corrupted archive: $tgz"
-                  rm -f "$tgz"
-                  clean_corrupted_package "$pkg"
-                fi
-              done
+            # More aggressive cleaning for problematic packages
+            if [ -d ~/.conan2/p ]; then
+              # Remove any gtest directories if they exist
+              if [[ "$pkg" == "gtest/1.14.0" ]]; then
+                echo "Cleaning gtest package directories..."
+                rm -rf ~/.conan2/p/gtest* 2>/dev/null || true
+                rm -rf ~/.conan2/p/b/gtest* 2>/dev/null || true
+              fi
+              
+              # Check for corrupted archives
+              if find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null | grep -q .; then
+                for tgz in $(find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null); do
+                  if ! tar -tzf "$tgz" >/dev/null 2>&1; then
+                    echo "Found corrupted archive: $tgz"
+                    rm -f "$tgz"
+                    clean_corrupted_package "$pkg"
+                  fi
+                done
+              fi
             fi
           done
 
       - name: Configure with Conan (with tests enabled)
         shell: bash
         run: |
-          # Detect if we're cross-compiling (ARM64 runner building for x86_64)
+          # Detect actual machine architecture
           NATIVE_ARCH=$(uname -m)
-          TARGET_ARCH="$NATIVE_ARCH"
+          echo "Native architecture: $NATIVE_ARCH"
+          echo "Platform: ${{ matrix.platform }}"
           
-          # Check if runner specifies x86_64 but we're on arm64
-          if [[ "${{ matrix.runs_on }}" == *"X64"* ]] && [[ "$NATIVE_ARCH" == "arm64" ]]; then
-            echo "Cross-compilation detected: ARM64 -> x86_64"
-            TARGET_ARCH="x86_64"
-            CROSS_COMPILE=true
-            
-            # Use project profiles if available, otherwise fall back to default
-            if [ -f ".conan/profiles/x86_64" ]; then
-              HOST_PROFILE=".conan/profiles/x86_64"
-            else
-              HOST_PROFILE="default"
-              # Ensure default profile has x86_64 arch
-              conan profile detect --force
-              sed -i.bak 's/arch=.*/arch=x86_64/' ~/.conan2/profiles/default
-              # Also set C++20 for cross-compilation
-              sed -i.bak 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
-            fi
-            BUILD_PROFILE="default"  # Native ARM64 for build tools
+          # For macOS, always do native builds since runner can be dual-labeled
+          # The runner might have both X64 and ARM64 labels but is actually ARM64
+          if [[ "${{ matrix.platform }}" == "macos" ]] && [[ "$NATIVE_ARCH" == "arm64" ]]; then
+            echo "Native ARM64 build on macOS"
+            CROSS_COMPILE=false
+            HOST_PROFILE="default"
+            BUILD_PROFILE="default"
+          elif [[ "${{ matrix.platform }}" == "macos" ]] && [[ "$NATIVE_ARCH" == "x86_64" ]]; then
+            echo "Native x86_64 build on macOS"
+            CROSS_COMPILE=false
+            HOST_PROFILE="default"
+            BUILD_PROFILE="default"
           else
+            # Linux builds are always native
             echo "Native build detected: $NATIVE_ARCH"
             CROSS_COMPILE=false
             HOST_PROFILE="default"
@@ -172,9 +182,21 @@ jobs:
           # Configure with CMake using Conan presets (tests will be built)
           # Enable coverage for Linux builds
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            cmake --preset conan-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_ENABLE_COVERAGE=ON
+            if ! cmake --preset conan-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_ENABLE_COVERAGE=ON; then
+              echo "CMake configuration failed! Showing CMakeError.log:"
+              find . -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
+              echo "Showing CMakeOutput.log tail:"
+              find . -name "CMakeOutput.log" -exec tail -100 {} \; 2>/dev/null || true
+              exit 1
+            fi
           else
-            cmake --preset conan-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON
+            if ! cmake --preset conan-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON; then
+              echo "CMake configuration failed! Showing CMakeError.log:"
+              find . -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
+              echo "Showing CMakeOutput.log tail:"
+              find . -name "CMakeOutput.log" -exec tail -100 {} \; 2>/dev/null || true
+              exit 1
+            fi
           fi
           echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 

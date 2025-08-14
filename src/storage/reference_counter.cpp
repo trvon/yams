@@ -15,6 +15,14 @@ namespace yamsfmt = fmt;
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <cstdlib>
+
+#ifdef __linux__
+#include <unistd.h>
+#include <linux/limits.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace yams::storage {
 
@@ -57,6 +65,69 @@ ReferenceCounter::ReferenceCounter(ReferenceCounter&&) noexcept = default;
 // Move assignment
 ReferenceCounter& ReferenceCounter::operator=(ReferenceCounter&&) noexcept = default;
 
+// Helper function to find reference_schema.sql
+static std::filesystem::path findReferenceSchemaSql() {
+    namespace fs = std::filesystem;
+    
+    std::vector<fs::path> searchPaths;
+    
+    // 1. Check environment variable
+    if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
+        searchPaths.push_back(fs::path(dataDir) / "reference_schema.sql");
+        searchPaths.push_back(fs::path(dataDir) / "sql" / "reference_schema.sql");
+    }
+    
+    // 2. Check relative to executable location (for installed binaries)
+    try {
+        #ifdef __linux__
+            char result[PATH_MAX];
+            ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
+            if (count != -1) {
+                fs::path exePath(std::string(result, count));
+                // Check ../share/yams/sql relative to binary
+                searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" / "reference_schema.sql");
+            }
+        #elif defined(__APPLE__)
+            char path[1024];
+            uint32_t size = sizeof(path);
+            if (_NSGetExecutablePath(path, &size) == 0) {
+                fs::path exePath(path);
+                // Check ../share/yams/sql relative to binary
+                searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" / "reference_schema.sql");
+            }
+        #endif
+    } catch (...) {
+        // Ignore errors in getting executable path
+    }
+    
+    // 3. Check common installation paths
+    searchPaths.push_back("/usr/local/share/yams/sql/reference_schema.sql");
+    searchPaths.push_back("/usr/share/yams/sql/reference_schema.sql");
+    searchPaths.push_back("/opt/yams/share/sql/reference_schema.sql");
+    
+    // 4. Check relative to current working directory (for development)
+    searchPaths.push_back("sql/reference_schema.sql");
+    searchPaths.push_back("../sql/reference_schema.sql");
+    searchPaths.push_back("../../sql/reference_schema.sql");
+    searchPaths.push_back("../../../sql/reference_schema.sql");
+    
+    // 5. Check in home directory
+    if (const char* home = std::getenv("HOME")) {
+        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "sql" / "reference_schema.sql");
+    }
+    
+    // Search for the file
+    for (const auto& path : searchPaths) {
+        if (fs::exists(path) && fs::is_regular_file(path)) {
+            spdlog::debug("Found reference_schema.sql at: {}", path.string());
+            return path;
+        }
+    }
+    
+    spdlog::debug("reference_schema.sql not found in any search path");
+    return {};
+}
+
 // Initialize database
 Result<void> ReferenceCounter::initializeDatabase() {
     try {
@@ -76,14 +147,19 @@ Result<void> ReferenceCounter::initializeDatabase() {
         pImpl->db->execute("PRAGMA synchronous = NORMAL");
         pImpl->db->execute("PRAGMA temp_store = MEMORY");
         
-        // Execute schema
-        auto schemaPath = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() 
-                          / "sql" / "reference_schema.sql";
-        if (std::filesystem::exists(schemaPath)) {
+        // Execute schema - use proper path discovery
+        auto schemaPath = findReferenceSchemaSql();
+        if (!schemaPath.empty() && std::filesystem::exists(schemaPath)) {
+            spdlog::debug("Loading reference schema from: {}", schemaPath.string());
             pImpl->db->executeFile(schemaPath);
         } else {
-            // Fallback: execute inline schema
+            // Fallback: execute complete inline schema
+            spdlog::warn("reference_schema.sql not found at {}, using inline schema", schemaPath.string());
             pImpl->db->execute(R"(
+                -- Enable foreign key constraints
+                PRAGMA foreign_keys = ON;
+                
+                -- Main table for tracking block references
                 CREATE TABLE IF NOT EXISTS block_references (
                     block_hash TEXT PRIMARY KEY,
                     ref_count INTEGER NOT NULL DEFAULT 0,
@@ -95,8 +171,107 @@ Result<void> ReferenceCounter::initializeDatabase() {
                     CHECK (block_size > 0)
                 );
                 
+                -- Transaction log for crash recovery and atomicity
+                CREATE TABLE IF NOT EXISTS ref_transactions (
+                    transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_timestamp INTEGER NOT NULL,
+                    commit_timestamp INTEGER,
+                    state TEXT NOT NULL DEFAULT 'PENDING',
+                    description TEXT,
+                    CHECK (state IN ('PENDING', 'COMMITTED', 'ROLLED_BACK'))
+                );
+                
+                -- Individual operations within a transaction
+                CREATE TABLE IF NOT EXISTS ref_transaction_ops (
+                    op_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    transaction_id INTEGER NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    delta INTEGER NOT NULL DEFAULT 1,
+                    block_size INTEGER,
+                    timestamp INTEGER NOT NULL,
+                    FOREIGN KEY (transaction_id) REFERENCES ref_transactions(transaction_id),
+                    CHECK (operation IN ('INCREMENT', 'DECREMENT')),
+                    CHECK (delta > 0)
+                );
+                
+                -- Statistics table for monitoring
+                CREATE TABLE IF NOT EXISTS ref_statistics (
+                    stat_name TEXT PRIMARY KEY,
+                    stat_value INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                
+                -- Initialize statistics
+                INSERT OR IGNORE INTO ref_statistics (stat_name, stat_value, updated_at) VALUES
+                    ('total_blocks', 0, strftime('%s', 'now')),
+                    ('total_references', 0, strftime('%s', 'now')),
+                    ('total_bytes', 0, strftime('%s', 'now')),
+                    ('transactions_completed', 0, strftime('%s', 'now')),
+                    ('transactions_rolled_back', 0, strftime('%s', 'now')),
+                    ('gc_runs', 0, strftime('%s', 'now')),
+                    ('gc_blocks_collected', 0, strftime('%s', 'now')),
+                    ('gc_bytes_reclaimed', 0, strftime('%s', 'now'));
+                
+                -- Audit log for important operations
+                CREATE TABLE IF NOT EXISTS ref_audit_log (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    operation TEXT NOT NULL,
+                    block_hash TEXT,
+                    old_value INTEGER,
+                    new_value INTEGER,
+                    transaction_id INTEGER,
+                    details TEXT
+                );
+                
+                -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_ref_count ON block_references(ref_count);
                 CREATE INDEX IF NOT EXISTS idx_last_accessed ON block_references(last_accessed);
+                CREATE INDEX IF NOT EXISTS idx_block_size ON block_references(block_size);
+                CREATE INDEX IF NOT EXISTS idx_transaction_ops ON ref_transaction_ops(transaction_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON ref_audit_log(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_audit_block ON ref_audit_log(block_hash);
+                
+                -- View for unreferenced blocks (garbage collection candidates)
+                CREATE VIEW IF NOT EXISTS unreferenced_blocks AS
+                SELECT 
+                    block_hash,
+                    block_size,
+                    created_at,
+                    last_accessed,
+                    (strftime('%s', 'now') - last_accessed) AS age_seconds
+                FROM block_references
+                WHERE ref_count = 0
+                ORDER BY last_accessed ASC;
+                
+                -- View for block statistics
+                CREATE VIEW IF NOT EXISTS block_statistics AS
+                SELECT 
+                    COUNT(*) AS total_blocks,
+                    SUM(ref_count) AS total_references,
+                    SUM(block_size) AS total_bytes,
+                    COUNT(CASE WHEN ref_count = 0 THEN 1 END) AS unreferenced_blocks,
+                    SUM(CASE WHEN ref_count = 0 THEN block_size ELSE 0 END) AS unreferenced_bytes,
+                    AVG(ref_count) AS avg_ref_count,
+                    MAX(ref_count) AS max_ref_count
+                FROM block_references;
+                
+                -- View for transaction history
+                CREATE VIEW IF NOT EXISTS transaction_history AS
+                SELECT 
+                    t.transaction_id,
+                    t.start_timestamp,
+                    t.commit_timestamp,
+                    t.state,
+                    t.description,
+                    COUNT(o.op_id) AS operation_count,
+                    SUM(CASE WHEN o.operation = 'INCREMENT' THEN o.delta ELSE 0 END) AS increments,
+                    SUM(CASE WHEN o.operation = 'DECREMENT' THEN o.delta ELSE 0 END) AS decrements
+                FROM ref_transactions t
+                LEFT JOIN ref_transaction_ops o ON t.transaction_id = o.transaction_id
+                GROUP BY t.transaction_id
+                ORDER BY t.start_timestamp DESC;
             )");
         }
         
