@@ -11,6 +11,7 @@ ARG GITHUB_SHA=""
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
+    ninja-build \
     git \
     curl \
     pkg-config \
@@ -41,16 +42,19 @@ RUN conan install . \
     --output-folder=build/conan-release \
     -s build_type=Release \
     --build=missing && \
-    cmake --preset conan-release \
+    cd build/conan-release && \
+    cmake ../.. -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
     -DYAMS_BUILD_PROFILE=release \
     -DYAMS_BUILD_DOCS=OFF \
     -DYAMS_BUILD_TESTS=OFF \
     -DYAMS_BUILD_MCP_SERVER=ON \
     -DYAMS_VERSION=${YAMS_VERSION} && \
-    cmake --build --preset conan-release --parallel
+    cmake --build . --parallel
 
 # Install to staging directory
-RUN cmake --install build/conan-release/build/Release --prefix /opt/yams
+RUN cmake --install build/conan-release --prefix /opt/yams
 
 # Runtime stage: Minimal image
 FROM ubuntu:22.04 AS runtime
