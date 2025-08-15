@@ -184,7 +184,7 @@ public:
             }
             
             // Process each document
-            size_t totalMatches = 0;
+            // size_t totalMatches = 0;  // Currently only incremented but not used
             std::vector<std::string> matchingFiles;
             std::vector<std::string> nonMatchingFiles;
             
@@ -209,7 +209,7 @@ public:
                 
                 if (!matches.empty()) {
                     matchingFiles.push_back(doc.filePath);
-                    totalMatches += matches.size();
+                    // totalMatches += matches.size();
                     
                     if (filesOnly_ || pathsOnly_) {
                         std::cout << doc.filePath << std::endl;
@@ -250,7 +250,7 @@ private:
         std::string line;
     };
     
-    std::vector<Match> processFile(const std::string& filename, const std::string& content, const std::regex& regex) {
+    std::vector<Match> processFile(const std::string& /*filename*/, const std::string& content, const std::regex& regex) {
         std::vector<Match> matches;
         std::istringstream stream(content);
         std::string line;

@@ -258,10 +258,10 @@ struct ContentStoreBuilder::Impl {
     }
     
     std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
-        std::map<std::string, std::string> config;
+        std::map<std::string, std::string> parsedConfig;
         std::ifstream file(path);
         if (!file) {
-            return config;
+            return parsedConfig;
         }
         
         std::string line;
@@ -308,11 +308,11 @@ struct ContentStoreBuilder::Impl {
                     value.erase(value.find_last_not_of(" \t") + 1);
                 }
                 
-                config[currentSection + key] = value;
+                parsedConfig[currentSection + key] = value;
             }
         }
         
-        return config;
+        return parsedConfig;
     }
 };
 

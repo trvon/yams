@@ -45,7 +45,7 @@ struct ContentStoreStats {
     uint64_t storeOperations = 0;          // Total store operations
     uint64_t retrieveOperations = 0;       // Total retrieve operations
     uint64_t deleteOperations = 0;         // Total delete operations
-    TimePoint lastOperation;               // Last operation timestamp
+    TimePoint lastOperation{};             // Last operation timestamp (initialized to epoch)
     
     // Calculate deduplication ratio
     [[nodiscard]] double dedupRatio() const noexcept {
@@ -60,7 +60,7 @@ struct HealthStatus {
     std::string status = "OK";
     std::vector<std::string> warnings;
     std::vector<std::string> errors;
-    TimePoint lastCheck;
+    TimePoint lastCheck{};  // Initialize to epoch (0), will be set when health check runs
 };
 
 // Main content store interface

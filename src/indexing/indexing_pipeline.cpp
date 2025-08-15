@@ -1,5 +1,6 @@
 #include <yams/indexing/indexing_pipeline.h>
 #include <yams/indexing/document_indexer.h>
+#include <yams/profiling.h>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <sstream>
@@ -341,6 +342,8 @@ bool IndexingPipeline::processContent(IndexingTask& task) {
 }
 
 bool IndexingPipeline::indexContent(IndexingTask& task) {
+    YAMS_ZONE_SCOPED_N("IndexingPipeline::indexContent");
+    
     if (!task.extractionResult || !task.documentInfo) {
         return false;
     }

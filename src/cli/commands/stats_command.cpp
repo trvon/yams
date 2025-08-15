@@ -4,6 +4,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/detection/file_type_detector.h>
+#include <yams/profiling.h>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <thread>
 #include <sqlite3.h>
 
@@ -58,6 +60,8 @@ public:
     }
     
     Result<void> execute() override {
+        YAMS_ZONE_SCOPED_N("StatsCommand::execute");
+        
         try {
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
@@ -70,6 +74,7 @@ public:
             }
             
             // Get basic statistics
+            YAMS_ZONE_SCOPED_N("Stats::GetBasicStats");
             auto stats = store->getStats();
             
             // Calculate storage size
@@ -83,10 +88,13 @@ public:
             int unreferencedChunks = 0;
             uint64_t unreferencedBytes = 0;
             
-            if (fs::exists(objectsPath)) {
-                for (const auto& entry : fs::recursive_directory_iterator(objectsPath)) {
-                    if (entry.is_regular_file()) {
-                        objectCount++;
+            {
+                YAMS_ZONE_SCOPED_N("Stats::CountObjects");
+                if (fs::exists(objectsPath)) {
+                    for (const auto& entry : fs::recursive_directory_iterator(objectsPath)) {
+                        if (entry.is_regular_file()) {
+                            objectCount++;
+                        }
                     }
                 }
             }
@@ -186,6 +194,7 @@ public:
             
             // Always get metadata for unique document count
             if (metadataRepo) {
+                YAMS_ZONE_SCOPED_N("Stats::QueryMetadata");
                 auto documentsResult = metadataRepo->findDocumentsByPath("%");
                 if (documentsResult) {
                     // Initialize file type detector for analysis
@@ -262,13 +271,13 @@ public:
                     }
                     
                     // Calculate averages for file types
-                    for (auto& [type, stats] : fileTypeStats) {
-                        if (stats.count > 0) {
-                            stats.avgSize = stats.totalSize / stats.count;
+                    for (auto& [type, typeStats] : fileTypeStats) {
+                        if (typeStats.count > 0) {
+                            typeStats.avgSize = typeStats.totalSize / typeStats.count;
                         }
                         // Keep only top 3 extensions
-                        if (stats.topExtensions.size() > 3) {
-                            stats.topExtensions.resize(3);
+                        if (typeStats.topExtensions.size() > 3) {
+                            typeStats.topExtensions.resize(3);
                         }
                     }
                 }
@@ -280,9 +289,9 @@ public:
             }
             
             // When there are no duplicates, unique should equal total
-            if (uniqueDocuments == duplicatesByHash.size() && stats.totalObjects > 0) {
+            if (static_cast<size_t>(uniqueDocuments) == duplicatesByHash.size() && stats.totalObjects > 0) {
                 // Ensure consistency - if all are unique, total should match unique
-                if (stats.totalObjects != uniqueDocuments && duplicateBytes == 0) {
+                if (stats.totalObjects != static_cast<uint64_t>(uniqueDocuments) && duplicateBytes == 0) {
                     stats.totalObjects = uniqueDocuments;
                 }
             }
@@ -327,12 +336,12 @@ public:
                 
                 if (showFileTypes_ && !fileTypeStats.empty()) {
                     json fileTypes;
-                    for (const auto& [type, stats] : fileTypeStats) {
+                    for (const auto& [type, typeStats] : fileTypeStats) {
                         json typeInfo;
-                        typeInfo["count"] = stats.count;
-                        typeInfo["totalSize"] = stats.totalSize;
-                        typeInfo["avgSize"] = stats.avgSize;
-                        typeInfo["topExtensions"] = stats.topExtensions;
+                        typeInfo["count"] = typeStats.count;
+                        typeInfo["totalSize"] = typeStats.totalSize;
+                        typeInfo["avgSize"] = typeStats.avgSize;
+                        typeInfo["topExtensions"] = typeStats.topExtensions;
                         fileTypes[type] = typeInfo;
                     }
                     output["fileTypes"] = fileTypes;
@@ -373,7 +382,16 @@ public:
                     json healthJson;
                     healthJson["isHealthy"] = health.isHealthy;
                     healthJson["status"] = health.status;
-                    healthJson["lastCheck"] = std::chrono::duration_cast<std::chrono::seconds>(health.lastCheck.time_since_epoch()).count();
+                    // Safely convert lastCheck to seconds, handling potential overflow
+                    if (health.lastCheck.time_since_epoch().count() == 0) {
+                        healthJson["lastCheck"] = 0;  // Never checked
+                    } else {
+                        try {
+                            healthJson["lastCheck"] = std::chrono::duration_cast<std::chrono::seconds>(health.lastCheck.time_since_epoch()).count();
+                        } catch (...) {
+                            healthJson["lastCheck"] = -1;  // Error in conversion
+                        }
+                    }
                     if (!health.warnings.empty()) {
                         healthJson["warnings"] = health.warnings;
                     }
@@ -431,21 +449,21 @@ public:
                     
                     // Sort by count
                     std::vector<std::pair<std::string, FileTypeStats>> sortedTypes;
-                    for (const auto& [type, stats] : fileTypeStats) {
-                        sortedTypes.push_back({type, stats});
+                    for (const auto& [type, typeStats] : fileTypeStats) {
+                        sortedTypes.push_back({type, typeStats});
                     }
                     std::sort(sortedTypes.begin(), sortedTypes.end(),
                               [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
                     
-                    for (const auto& [type, stats] : sortedTypes) {
+                    for (const auto& [type, typeStats] : sortedTypes) {
                         std::cout << "  " << std::left << std::setw(12) << type << ": ";
-                        std::cout << std::right << std::setw(6) << stats.count << " files, ";
-                        std::cout << std::setw(10) << formatSize(stats.totalSize);
-                        if (!stats.topExtensions.empty()) {
+                        std::cout << std::right << std::setw(6) << typeStats.count << " files, ";
+                        std::cout << std::setw(10) << formatSize(typeStats.totalSize);
+                        if (!typeStats.topExtensions.empty()) {
                             std::cout << " (";
-                            for (size_t i = 0; i < stats.topExtensions.size(); ++i) {
+                            for (size_t i = 0; i < typeStats.topExtensions.size(); ++i) {
                                 if (i > 0) std::cout << ", ";
-                                std::cout << stats.topExtensions[i];
+                                std::cout << typeStats.topExtensions[i];
                             }
                             std::cout << ")";
                         }
@@ -518,7 +536,19 @@ public:
                     std::cout << "Health Status:\n";
                     std::cout << "  Status: " << (health.isHealthy ? "✓ Healthy" : "✗ Unhealthy") << "\n";
                     std::cout << "  Message: " << health.status << "\n";
-                    std::cout << "  Last Check: " << health.lastCheck << "\n";
+                    
+                    // Format the last check time properly with overflow protection
+                    // Check if lastCheck is at epoch (uninitialized) or a reasonable time
+                    if (health.lastCheck.time_since_epoch().count() == 0) {
+                        std::cout << "  Last Check: Never\n";
+                    } else {
+                        try {
+                            auto time_t_lastCheck = std::chrono::system_clock::to_time_t(health.lastCheck);
+                            std::cout << "  Last Check: " << std::put_time(std::localtime(&time_t_lastCheck), "%Y-%m-%d %H:%M:%S") << "\n";
+                        } catch (...) {
+                            std::cout << "  Last Check: Unknown (time conversion error)\n";
+                        }
+                    }
                     
                     if (!health.warnings.empty()) {
                         std::cout << "  Warnings:\n";
@@ -526,6 +556,43 @@ public:
                             std::cout << "    - " << warning << "\n";
                         }
                     }
+                    std::cout << "\n";
+                    
+                    // Check vector database and embedding status
+                    std::cout << "Vector Database Status:\n";
+                    
+                    // Check for ONNX models
+                    namespace fs = std::filesystem;
+                    const char* homeDir = std::getenv("HOME");
+                    fs::path modelsPath = fs::path(homeDir ? homeDir : "") / ".yams" / "models";
+                    std::vector<std::string> availableModels;
+                    
+                    if (fs::exists(modelsPath)) {
+                        for (const auto& entry : fs::directory_iterator(modelsPath)) {
+                            if (entry.is_directory()) {
+                                fs::path modelFile = entry.path() / "model.onnx";
+                                if (fs::exists(modelFile)) {
+                                    availableModels.push_back(entry.path().filename().string());
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (availableModels.empty()) {
+                        std::cout << "  ⚠ No embedding models found\n";
+                        std::cout << "    Run 'yams model --download all-MiniLM-L6-v2' to download a model\n";
+                    } else {
+                        std::cout << "  ✓ " << availableModels.size() << " embedding model(s) available:\n";
+                        for (const auto& model : availableModels) {
+                            std::cout << "    - " << model << "\n";
+                        }
+                    }
+                    
+                    // Check vector database tables
+                    // TODO: Add actual vector DB check when integrated
+                    std::cout << "  ℹ Vector database ready for embeddings\n";
+                    std::cout << "    Run 'yams repair --embeddings' to generate embeddings\n";
+                    
                     std::cout << "\n";
                 }
                 

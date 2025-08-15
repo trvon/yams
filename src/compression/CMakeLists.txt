@@ -44,6 +44,11 @@ endif()
 
 target_compile_features(yams_compression PUBLIC cxx_std_20)
 
+# Link Tracy if profiling is enabled
+if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
+    target_link_libraries(yams_compression PRIVATE Tracy::TracyClient)
+endif()
+
 # Create alias
 add_library(yams::compression ALIAS yams_compression)
 

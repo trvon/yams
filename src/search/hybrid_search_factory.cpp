@@ -17,17 +17,17 @@ makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store);
 HybridSearchConfig HybridSearchFactory::defaultConfig() {
     HybridSearchConfig cfg;
 
-    // Conservative defaults that keep KG contributions small but active by default.
-    cfg.vector_weight       = 0.60f;
-    cfg.keyword_weight      = 0.35f;
-    cfg.kg_entity_weight    = 0.03f;
-    cfg.structural_weight   = 0.02f;
+    // Balanced defaults with enhanced KG contribution for better entity recognition
+    cfg.vector_weight       = 0.55f;  // Slightly reduced to make room for KG
+    cfg.keyword_weight      = 0.30f;  // Still important for exact matches
+    cfg.kg_entity_weight    = 0.10f;  // Increased from 0.03 for better entity/relationship awareness
+    cfg.structural_weight   = 0.05f;  // Increased for better document structure understanding
 
-    // KG settings (local-first)
+    // Enhanced KG settings for better traversal
     cfg.enable_kg           = true;
-    cfg.kg_max_neighbors    = 32;
-    cfg.kg_max_hops         = 1;
-    cfg.kg_budget_ms        = std::chrono::milliseconds(20);
+    cfg.kg_max_neighbors    = 50;     // Increased from 32 for broader context
+    cfg.kg_max_hops         = 2;      // Increased from 1 for deeper relationships
+    cfg.kg_budget_ms        = std::chrono::milliseconds(50);  // Increased from 20ms for better traversal
 
     // Helpful during bring-up; callers can disable for production.
     cfg.generate_explanations = true;

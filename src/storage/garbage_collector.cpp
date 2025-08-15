@@ -1,5 +1,6 @@
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
+#include <yams/profiling.h>
 
 #include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
@@ -64,6 +65,8 @@ GarbageCollector& GarbageCollector::operator=(GarbageCollector&&) noexcept = def
 
 // Run garbage collection
 Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
+    YAMS_ZONE_SCOPED_N("GarbageCollector::collect");
+    
     // Check if already collecting
     bool expected = false;
     if (!pImpl->isCollecting.compare_exchange_strong(expected, true)) {
@@ -85,6 +88,7 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
     
     try {
         // Get unreferenced blocks
+        YAMS_ZONE_SCOPED_N("Get unreferenced blocks");
         auto blocksResult = pImpl->refCounter.getUnreferencedBlocks(
             options.maxBlocksPerRun, 
             std::chrono::seconds(options.minAgeSeconds));
@@ -105,14 +109,16 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
         }
         
         // Process each block
-        for (const auto& blockHash : blocks) {
-            // Double-check reference count (race condition protection)
-            auto refCountResult = pImpl->refCounter.getRefCount(blockHash);
-            if (!refCountResult || refCountResult.value() > 0) {
-                continue;  // Skip if error or references exist
-            }
-            
-            if (!options.dryRun) {
+        {
+            YAMS_ZONE_SCOPED_N("Process blocks");
+            for (const auto& blockHash : blocks) {
+                // Double-check reference count (race condition protection)
+                auto refCountResult = pImpl->refCounter.getRefCount(blockHash);
+                if (!refCountResult || refCountResult.value() > 0) {
+                    continue;  // Skip if error or references exist
+                }
+                
+                if (!options.dryRun) {
                 // Delete from storage
                 auto deleteResult = pImpl->storageEngine.remove(blockHash);
                 if (!deleteResult) {
@@ -136,9 +142,10 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
                 stats.bytesReclaimed += 4096;  // Placeholder size
             }
             
-            // Progress callback
-            if (options.progressCallback) {
-                options.progressCallback(blockHash, stats.blocksDeleted);
+                // Progress callback
+                if (options.progressCallback) {
+                    options.progressCallback(blockHash, stats.blocksDeleted);
+                }
             }
         }
         

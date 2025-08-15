@@ -5,6 +5,35 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.2] - 2025-08-15
+
+### Added
+- **Preview: Vector Database (experimental)**
+  - `SqliteVecBackend` for persistent vector storage via the sqlite-vec extension
+  - BLOB storage format for embeddings with transaction-safe writes across vector and metadata tables
+  - CLI integration: enable via `yams init` or follow prompts shown in `yams stats --health`
+- **MCP Server**
+  - Stdio transport only; HTTP framework dependencies removed
+
+### Fixed
+- **Vector DB**
+  - Embeddings now persist across restarts
+  - Updated CRUD operations for new two-table architecture
+- **Build/CI**
+  - Fixed Conan ARM64 architecture detection on macOS self-hosted runner
+- **MCP**
+  - Removed Drogon and Boost dependencies that caused runtime issues
+
+### Notes
+- **Usage**
+  - Vector search is off by default. Initialize and configure embeddings with `yams init` or via health prompts in `yams stats --health`.
+- **Requirements**
+  - SQLite with the sqlite-vec extension available at runtime.
+- **Limitations (preview)**
+  - Schema and APIs may change between minor versions.
+  - Not enabled by default; indexing currently targets text documents only.
+  - Single-process/local database only; no cross-process index sharing yet.
+
 ## [v0.3.1] - 2025-08-14
 
 ### Fixed

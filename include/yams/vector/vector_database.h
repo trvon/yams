@@ -16,7 +16,7 @@ namespace yams::vector {
  * Configuration for the vector database
  */
 struct VectorDatabaseConfig {
-    std::string db_path = "vectors.lancedb";
+    std::string database_path = "vectors.db";  // SQLite database path
     std::string table_name = "document_embeddings";
     size_t embedding_dim = 384;           // all-MiniLM-L6-v2 dimensions
     std::string index_type = "IVF_PQ";
@@ -26,6 +26,7 @@ struct VectorDatabaseConfig {
     size_t checkpoint_frequency = 1000;   // Operations between checkpoints
     size_t max_batch_size = 1000;
     float default_similarity_threshold = 0.7f;
+    bool use_in_memory = false;           // For testing
 };
 
 /**
@@ -124,6 +125,7 @@ public:
     // Utility operations
     std::optional<VectorRecord> getVector(const std::string& chunk_id) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;
+    bool hasEmbedding(const std::string& document_hash) const;
 
     // Index management
     bool buildIndex();

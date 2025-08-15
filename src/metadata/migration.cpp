@@ -294,7 +294,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
         createSearchTables(),
         createCollectionIndexes(),
         createKnowledgeGraphSchema(),
-        createBinarySignatureSchema()
+        createBinarySignatureSchema(),
+        createVectorSearchSchema()
     };
 }
 
@@ -893,6 +894,105 @@ Migration YamsMetadataMigrations::createBinarySignatureSchema() {
         DROP TABLE IF EXISTS file_patterns_version;
         DROP TABLE IF EXISTS file_patterns;
         DROP TABLE IF EXISTS document_signatures;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createVectorSearchSchema() {
+    Migration m;
+    m.version = 9;
+    m.name = "Create vector search schema";
+    m.created = std::chrono::system_clock::now();
+
+    // Use a function to handle sqlite-vec extension loading
+    m.upFunc = [](Database& db) -> Result<void> {
+        // First, record that vector search is enabled
+        auto result = db.execute(R"(
+            -- Create or update schema features table
+            CREATE TABLE IF NOT EXISTS schema_features (
+                feature_name TEXT PRIMARY KEY,
+                enabled INTEGER DEFAULT 1,
+                config TEXT,  -- JSON configuration
+                created_at INTEGER DEFAULT (unixepoch()),
+                updated_at INTEGER DEFAULT (unixepoch())
+            );
+            
+            -- Record that vector search is enabled
+            INSERT OR REPLACE INTO schema_features (feature_name, enabled, updated_at)
+            VALUES ('vector_search', 1, unixepoch());
+        )");
+        if (!result) return result;
+
+        // Create metadata table for vector models
+        result = db.execute(R"(
+            CREATE TABLE IF NOT EXISTS vector_models (
+                model_id TEXT PRIMARY KEY,
+                model_name TEXT NOT NULL,
+                embedding_dim INTEGER NOT NULL,
+                model_type TEXT,  -- 'sentence-transformer', 'openai', etc.
+                model_path TEXT,   -- Path to ONNX model file
+                config TEXT,       -- JSON configuration
+                created_at INTEGER DEFAULT (unixepoch()),
+                last_used INTEGER
+            );
+            
+            -- Insert default model configuration
+            INSERT OR IGNORE INTO vector_models (
+                model_id, 
+                model_name, 
+                embedding_dim, 
+                model_type,
+                config
+            ) VALUES (
+                'all-MiniLM-L6-v2',
+                'all-MiniLM-L6-v2',
+                384,
+                'sentence-transformer',
+                '{"max_seq_length": 256, "normalize": true}'
+            );
+        )");
+        if (!result) return result;
+
+        // Create tracking table for which documents have embeddings
+        result = db.execute(R"(
+            CREATE TABLE IF NOT EXISTS document_embeddings_status (
+                document_id INTEGER PRIMARY KEY,
+                has_embedding BOOLEAN DEFAULT 0,
+                model_id TEXT,
+                chunk_count INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (unixepoch()),
+                updated_at INTEGER DEFAULT (unixepoch()),
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                FOREIGN KEY (model_id) REFERENCES vector_models(model_id)
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_doc_embed_status 
+                ON document_embeddings_status(has_embedding);
+            CREATE INDEX IF NOT EXISTS idx_doc_embed_model 
+                ON document_embeddings_status(model_id);
+        )");
+        if (!result) return result;
+
+        // Note: The actual vector table (doc_embeddings) is created by
+        // SqliteVecBackend::createTables() when the vector database is initialized
+        // This migration just sets up the supporting metadata tables
+
+        spdlog::info("Vector search schema migration completed");
+        return Result<void>();
+    };
+
+    m.downSQL = R"(
+        -- Remove vector search metadata
+        DELETE FROM schema_features WHERE feature_name = 'vector_search';
+        
+        -- Drop vector-related tables
+        DROP INDEX IF EXISTS idx_doc_embed_model;
+        DROP INDEX IF EXISTS idx_doc_embed_status;
+        DROP TABLE IF EXISTS document_embeddings_status;
+        DROP TABLE IF EXISTS vector_models;
+        
+        -- Note: The doc_embeddings virtual table would be dropped by the backend
     )";
 
     return m;

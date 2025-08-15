@@ -6,15 +6,21 @@ add_executable(vector_database_tests
     document_chunker_test.cpp
     vector_index_manager_test.cpp
     model_management_test.cpp
+    test_onnx_runtime.cpp
 )
 
 target_link_libraries(vector_database_tests
     PRIVATE
+        test_utils
         yams::vector
         yams::core
-        gtest
-        gtest_main
+        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
 )
+
+# Link Tracy if profiling is enabled
+if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
+    target_link_libraries(vector_database_tests PRIVATE Tracy::TracyClient)
+endif()
 
 # Set properties
 set_target_properties(vector_database_tests PROPERTIES

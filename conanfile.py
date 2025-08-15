@@ -18,6 +18,7 @@ class YamsConan(ConanFile):
         "build_tests": [True, False],
         "build_benchmarks": [True, False],
         "enable_pdf": [True, False],
+        "enable_tui": [True, False],  # Separate TUI from CLI
     }
     default_options = {
         "build_cli": True,
@@ -25,6 +26,7 @@ class YamsConan(ConanFile):
         "build_tests": False,
         "build_benchmarks": False,
         "enable_pdf": True,  # PDF support enabled by default (uses FetchContent since PDFium not in Conan Center)
+        "enable_tui": False,  # TUI disabled by default to reduce dependencies
     }
 
     generators = "CMakeDeps"  # CMakeToolchain is handled in generate()
@@ -37,7 +39,7 @@ class YamsConan(ConanFile):
         self.requires("sqlite3/3.44.2")
         self.requires("zlib/1.3.1")
         self.requires("zstd/1.5.5")
-        self.requires("lz4/1.9.4")
+        # LZ4 removed - not used in codebase
         self.requires("openssl/3.2.0")
         self.requires("protobuf/3.21.12")
 
@@ -45,21 +47,24 @@ class YamsConan(ConanFile):
         # When enable_pdf=True, CMake will fall back to FetchContent
         # to download prebuilt binaries from pdfium-binaries project
 
-        # For TUI
-        if self.options.build_cli:
+        # For TUI (separate from CLI)
+        if self.options.enable_tui:
             self.requires("ncurses/6.4")
-            # Note: ImTUI needs custom recipe as it's not in Conan Center
+            # Note: ImTUI is downloaded via FetchContent when TUI is enabled
 
-        # For HTTP API (if Drogon is used)
-        if self.options.build_mcp_server:
-            self.requires("drogon/1.9.1")
-            self.requires("boost/1.83.0")
+        # MCP server no longer requires Drogon or Boost
+        
+        # ONNX Runtime for embeddings and LLM inference
+        self.requires("onnxruntime/1.18.1")
 
     def build_requirements(self):
         if self.options.build_tests:
             self.test_requires("gtest/1.14.0")
         if self.options.build_benchmarks:
             self.test_requires("benchmark/1.8.3")
+        # Add Tracy profiler for Debug builds
+        if self.settings.build_type == "Debug":
+            self.requires("tracy/0.12.1")
 
     def configure(self):
         # SQLite3 configuration - enable FTS5 for full-text search
@@ -67,12 +72,7 @@ class YamsConan(ConanFile):
         self.options["sqlite3"].enable_fts4 = True  # For additional compatibility
         self.options["sqlite3"].enable_fts3_parenthesis = True  # For advanced query syntax
 
-        # Drogon configuration
-        if self.options.build_mcp_server:
-            self.options["drogon"].with_ctl = False
-            self.options["drogon"].with_orm = False
-            self.options["drogon"].with_yaml = False
-            self.options["drogon"].with_redis = False
+        # MCP server configuration is now minimal
 
     def validate(self):
         check_min_cppstd(self, "20")
@@ -92,6 +92,7 @@ class YamsConan(ConanFile):
         tc.variables["YAMS_BUILD_TESTS"] = "ON" if self.options.build_tests else "OFF"
         tc.variables["YAMS_BUILD_BENCHMARKS"] = "ON" if self.options.build_benchmarks else "OFF"
         tc.variables["YAMS_ENABLE_PDF"] = "ON" if self.options.enable_pdf else "OFF"
+        tc.variables["YAMS_ENABLE_TUI"] = "ON" if self.options.enable_tui else "OFF"
         tc.generate()
 
     def build(self):

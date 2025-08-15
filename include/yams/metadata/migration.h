@@ -168,6 +168,9 @@ private:
     
     // Version 8: Add binary signature schema for pattern matching
     static Migration createBinarySignatureSchema();
+    
+    // Version 9: Add vector search schema for embeddings
+    static Migration createVectorSearchSchema();
 };
 
 /**

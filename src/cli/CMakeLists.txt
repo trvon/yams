@@ -21,14 +21,21 @@ set(CLI_SOURCES
     commands/list_command.cpp
     commands/stats_command.cpp
     commands/update_command.cpp
-    commands/browse_command.cpp
     commands/completion_command.cpp
     commands/repair_mime_command.cpp
     commands/repair_command.cpp
-    tui/browse_state.cpp
-    tui/browse_services.cpp
-    tui/browse_commands.cpp
+    commands/model_command.cpp
 )
+
+# Add TUI sources only if enabled
+if(YAMS_ENABLE_TUI)
+    list(APPEND CLI_SOURCES
+        commands/browse_command.cpp
+        tui/browse_state.cpp
+        tui/browse_services.cpp
+        tui/browse_commands.cpp
+    )
+endif()
 
 # Add serve command only if MCP is enabled
 if(YAMS_BUILD_MCP_SERVER)
@@ -49,7 +56,7 @@ target_link_libraries(yams_cli
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::Crypto
-        imtui-ncurses
+        $<$<BOOL:${YAMS_ENABLE_TUI}>:imtui-ncurses>
         SQLite::SQLite3
 )
 
@@ -57,6 +64,11 @@ target_link_libraries(yams_cli
 if(YAMS_BUILD_MCP_SERVER)
     target_link_libraries(yams_cli PUBLIC yams_mcp)
     target_compile_definitions(yams_cli PRIVATE YAMS_BUILD_MCP_SERVER)
+endif()
+
+# Add TUI compile definition if enabled
+if(YAMS_ENABLE_TUI)
+    target_compile_definitions(yams_cli PRIVATE YAMS_ENABLE_TUI)
 endif()
 
 # Include directories
@@ -77,3 +89,8 @@ endif()
 
 # Set C++ standard
 target_compile_features(yams_cli PUBLIC cxx_std_20)
+
+# Link Tracy if profiling is enabled
+if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
+    target_link_libraries(yams_cli PRIVATE Tracy::TracyClient)
+endif()

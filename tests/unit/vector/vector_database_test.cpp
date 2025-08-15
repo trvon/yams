@@ -5,15 +5,26 @@
 #include <string>
 #include <random>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <ctime>
 
 using namespace yams::vector;
 
 class VectorDatabaseTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        config_.db_path = "test_vectors.lancedb";
+        // Use unique database file per test
+        const ::testing::TestInfo* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+        std::string test_name = std::string(test_info->test_suite_name()) + "_" + test_info->name();
+        config_.database_path = "test_vectors_" + test_name + ".db";
         config_.table_name = "test_embeddings";
         config_.embedding_dim = 384;
+        
+        // Clean up any leftover files from previous runs
+        std::filesystem::remove(config_.database_path);
+        std::filesystem::remove(config_.database_path + "-wal");
+        std::filesystem::remove(config_.database_path + "-shm");
         
         db_ = std::make_unique<VectorDatabase>(config_);
         ASSERT_TRUE(db_->initialize());
@@ -21,9 +32,13 @@ protected:
 
     void TearDown() override {
         if (db_) {
-            db_->dropTable();
             db_->close();
+            db_.reset();
         }
+        // Remove all database files to ensure clean state
+        std::filesystem::remove(config_.database_path);
+        std::filesystem::remove(config_.database_path + "-wal");
+        std::filesystem::remove(config_.database_path + "-shm");
     }
 
     std::vector<float> generateRandomEmbedding(size_t dim = 384) {
@@ -47,6 +62,7 @@ protected:
         record.document_hash = document_hash;
         record.embedding = generateRandomEmbedding();
         record.content = content;
+        record.model_id = "test-model-v1";  // Add required model_id field
         record.start_offset = 0;
         record.end_offset = content.length();
         record.metadata["source"] = "test";
@@ -176,6 +192,7 @@ TEST_F(VectorDatabaseTest, SimilaritySearch) {
     similar_record.document_hash = "doc1";
     similar_record.embedding = similar_embedding;
     similar_record.content = "Similar content";
+    similar_record.model_id = "test-model-v1";  // Add required model_id
     
     VectorRecord different_record = createTestRecord("different_chunk", "doc2", "Different content");
     
@@ -221,7 +238,7 @@ TEST_F(VectorDatabaseTest, SimilaritySearchWithFilters) {
     // Search with document filter
     VectorSearchParams params;
     params.k = 10;
-    params.similarity_threshold = 0.0f;
+    params.similarity_threshold = -1.0f;  // Allow all similarities (cosine can be [-1, 1])
     params.document_hash = "doc1";
     
     auto results = db_->searchSimilar(generateRandomEmbedding(), params);
@@ -238,7 +255,7 @@ TEST_F(VectorDatabaseTest, SimilaritySearchWithFilters) {
     params.metadata_filters["author"] = "alice";
     
     results = db_->searchSimilar(generateRandomEmbedding(), params);
-    EXPECT_EQ(results.size(), 2);
+    EXPECT_EQ(results.size(), 2);  // Both record1 and record3 have category="science" AND author="alice"
 }
 
 TEST_F(VectorDatabaseTest, SimilarityThreshold) {
@@ -254,7 +271,7 @@ TEST_F(VectorDatabaseTest, SimilarityThreshold) {
     EXPECT_TRUE(results.empty());
     
     // Search with low similarity threshold - should return the record
-    params.similarity_threshold = 0.0f; // Very low threshold
+    params.similarity_threshold = -1.0f; // Very low threshold (cosine similarity can be negative)
     
     results = db_->searchSimilar(generateRandomEmbedding(), params);
     EXPECT_EQ(results.size(), 1);
@@ -321,7 +338,7 @@ TEST_F(VectorDatabaseTest, UtilityFunctions) {
     
     double magnitude = 0.0;
     for (float val : normalized) {
-        magnitude += val * val;
+        magnitude += static_cast<double>(val * val);
     }
     magnitude = std::sqrt(magnitude);
     
@@ -432,4 +449,176 @@ TEST_F(VectorDatabaseTest, DISABLED_PerformanceTest) {
     std::cout << "  Total vectors: " << stats.total_vectors << std::endl;
     std::cout << "  Total documents: " << stats.total_documents << std::endl;
     std::cout << "  Index size: " << (stats.index_size_bytes / 1024 / 1024) << "MB" << std::endl;
+}
+
+// Separate test class for persistence tests that don't clean up the database
+class VectorDatabasePersistenceTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        config_.database_path = "test_persistence_vectors.db";
+        config_.table_name = "test_embeddings";
+        config_.embedding_dim = 384;
+        
+        // Ensure clean state by removing any existing database file
+        std::filesystem::remove_all(config_.database_path);
+    }
+
+    void TearDown() override {
+        // Only clean up the database file, don't drop tables during test
+        std::filesystem::remove(config_.database_path);
+    }
+
+    std::vector<float> generateRandomEmbedding(size_t dim = 384) {
+        std::vector<float> embedding(dim);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        
+        for (size_t i = 0; i < dim; ++i) {
+            embedding[i] = dist(gen);
+        }
+        
+        return utils::normalizeVector(embedding);
+    }
+
+    VectorRecord createTestRecord(const std::string& chunk_id, 
+                                  const std::string& document_hash,
+                                  const std::string& content) {
+        VectorRecord record;
+        record.chunk_id = chunk_id;
+        record.document_hash = document_hash;
+        record.embedding = generateRandomEmbedding();
+        record.content = content;
+        record.model_id = "test-model-v1";  // Add required model_id field
+        record.start_offset = 0;
+        record.end_offset = content.length();
+        record.metadata["source"] = "test";
+        record.metadata["test_timestamp"] = std::to_string(std::time(nullptr));
+        return record;
+    }
+
+    VectorDatabaseConfig config_;
+};
+
+TEST_F(VectorDatabasePersistenceTest, DataPersistsAcrossDatabaseRestarts) {
+    // Step 1: Create database and insert test data
+    {
+        auto db = std::make_unique<VectorDatabase>(config_);
+        ASSERT_TRUE(db->initialize());
+        EXPECT_TRUE(db->tableExists());
+        
+        // Insert test vectors
+        std::vector<VectorRecord> test_records;
+        for (int i = 0; i < 5; ++i) {
+            test_records.push_back(createTestRecord(
+                "persist_chunk_" + std::to_string(i),
+                "persist_doc_" + std::to_string(i % 2), // 2 documents
+                "Persistent test content " + std::to_string(i)
+            ));
+        }
+        
+        EXPECT_TRUE(db->insertVectorsBatch(test_records));
+        EXPECT_EQ(db->getVectorCount(), 5);
+        
+        // Verify data exists
+        auto retrieved = db->getVector("persist_chunk_0");
+        ASSERT_TRUE(retrieved.has_value());
+        EXPECT_EQ(retrieved->content, "Persistent test content 0");
+        
+        // Close database (data should persist)
+        db.reset();
+    }
+    
+    // Step 2: Reopen database and verify data persists
+    {
+        auto db = std::make_unique<VectorDatabase>(config_);
+        ASSERT_TRUE(db->initialize());
+        
+        // Data should still exist after restart
+        EXPECT_EQ(db->getVectorCount(), 5);
+        
+        // Verify specific records persist
+        auto retrieved = db->getVector("persist_chunk_0");
+        ASSERT_TRUE(retrieved.has_value());
+        EXPECT_EQ(retrieved->content, "Persistent test content 0");
+        EXPECT_EQ(retrieved->document_hash, "persist_doc_0");
+        
+        auto retrieved2 = db->getVector("persist_chunk_3");
+        ASSERT_TRUE(retrieved2.has_value());
+        EXPECT_EQ(retrieved2->content, "Persistent test content 3");
+        
+        // Verify document-level queries work
+        auto doc0_vectors = db->getVectorsByDocument("persist_doc_0");
+        EXPECT_EQ(doc0_vectors.size(), 3); // chunks 0, 2, 4
+        
+        auto doc1_vectors = db->getVectorsByDocument("persist_doc_1");
+        EXPECT_EQ(doc1_vectors.size(), 2); // chunks 1, 3
+        
+        // Verify embeddings are preserved by doing similarity search
+        VectorSearchParams params;
+        params.k = 5;
+        params.similarity_threshold = -1.0f;
+        
+        auto search_results = db->searchSimilar(retrieved->embedding, params);
+        EXPECT_GT(search_results.size(), 0);
+        EXPECT_EQ(search_results[0].chunk_id, "persist_chunk_0"); // Should find itself as most similar
+    }
+}
+
+TEST_F(VectorDatabasePersistenceTest, DatabaseCreationAndSchemaValidation) {
+    // Test that database file is created with proper schema
+    EXPECT_FALSE(std::filesystem::exists(config_.database_path));
+    
+    auto db = std::make_unique<VectorDatabase>(config_);
+    ASSERT_TRUE(db->initialize());
+    
+    // Database file should now exist
+    EXPECT_TRUE(std::filesystem::exists(config_.database_path));
+    EXPECT_TRUE(db->tableExists());
+    
+    // Should be able to insert data immediately
+    auto record = createTestRecord("schema_test", "doc_hash", "Schema validation test");
+    EXPECT_TRUE(db->insertVector(record));
+    EXPECT_EQ(db->getVectorCount(), 1);
+}
+
+TEST_F(VectorDatabasePersistenceTest, HandleCorruptDatabase) {
+    // Create invalid database file
+    {
+        std::ofstream corrupt_file(config_.database_path);
+        corrupt_file << "This is not a valid SQLite database";
+    }
+    
+    EXPECT_TRUE(std::filesystem::exists(config_.database_path));
+    
+    // Database initialization should handle corruption gracefully
+    auto db = std::make_unique<VectorDatabase>(config_);
+    // Note: depending on implementation, this might fail or recreate the database
+    // The key is that it shouldn't crash
+    bool initialized = db->initialize();
+    
+    if (!initialized) {
+        // If initialization failed, should provide error message
+        EXPECT_FALSE(db->getLastError().empty());
+    }
+}
+
+TEST_F(VectorDatabasePersistenceTest, ConcurrentAccess) {
+    // Test multiple database instances accessing same file
+    auto db1 = std::make_unique<VectorDatabase>(config_);
+    auto db2 = std::make_unique<VectorDatabase>(config_);
+    
+    ASSERT_TRUE(db1->initialize());
+    ASSERT_TRUE(db2->initialize());
+    
+    // Insert from first instance
+    auto record1 = createTestRecord("concurrent_1", "doc1", "First instance write");
+    EXPECT_TRUE(db1->insertVector(record1));
+    
+    // Read from second instance (after first closes)
+    db1.reset();
+    
+    auto retrieved = db2->getVector("concurrent_1");
+    ASSERT_TRUE(retrieved.has_value());
+    EXPECT_EQ(retrieved->content, "First instance write");
 }

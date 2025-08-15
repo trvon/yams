@@ -105,16 +105,18 @@ jobs:
           cp .conan/global.conf ~/.conan2/global.conf
 
       - name: Setup Conan Profile
+        if: matrix.os == 'macos-hosted-x64'
         shell: bash
         run: |
+          # Hosted-only: do not modify Conan profiles on self-hosted runners
           conan profile detect --force
-          
+
           # Force correct architecture for ARM64 macOS
           if [[ "${{ matrix.suffix }}" == "macos-arm64" ]]; then
             sed -i '' 's/arch=x86_64/arch=armv8/' ~/.conan2/profiles/default || true
             sed -i '' 's/arch=X86_64/arch=armv8/' ~/.conan2/profiles/default || true
           fi
-          
+
           # Ensure C++20 support
           if [[ "$OSTYPE" == "darwin"* ]]; then
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true

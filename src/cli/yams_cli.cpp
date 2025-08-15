@@ -97,7 +97,7 @@ YamsCLI::YamsCLI() {
         ->envname("YAMS_STORAGE")
         ->default_val(defaultDataPath);
     
-    auto* verboseFlag = app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+    app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
     app_->add_flag("--json", jsonOutput_, "Output in JSON format");
 }
 
@@ -110,7 +110,11 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init","add","get","delete","list","search","config","auth","stats","uninstall","migrate","update","browse","serve","completion","repair-mime"
+            "init","add","get","delete","list","search","config","auth","stats","uninstall","migrate","update",
+            #ifdef YAMS_ENABLE_TUI
+            "browse",
+            #endif
+            "serve","completion","repair-mime","model"
         };
 
         auto hasArg = [&](std::string_view needle) {
@@ -150,7 +154,9 @@ int YamsCLI::run(int argc, char* argv[]) {
             else if (cmd == "stats") sectionPtr = yams::cli_help::CMD_STATS;
             else if (cmd == "uninstall") sectionPtr = yams::cli_help::CMD_UNINSTALL;
             else if (cmd == "migrate") sectionPtr = yams::cli_help::CMD_MIGRATE;
+            #ifdef YAMS_ENABLE_TUI
             else if (cmd == "browse") sectionPtr = yams::cli_help::CMD_BROWSE;
+            #endif
             else if (cmd == "serve") sectionPtr = yams::cli_help::CMD_SERVE;
             if (sectionPtr && sectionPtr[0] != '\0') {
                 std::cout << sectionPtr << std::endl;

@@ -43,7 +43,7 @@ public:
         listKeysCmd->add_option("--format", format_, "Output format (table, json)")
             ->default_val("table")
             ->check(CLI::IsMember({"table", "json"}));
-        listKeysCmd->callback([this]() {
+        listKeysCmd->callback([]() {
             spdlog::info("Auth list-keys command - Coming in Phase 2");
             std::cout << "Status: Phase 2 - Not yet implemented\n";
             std::cout << "Expected usage: yams auth list-keys [--verbose] [--format table|json]\n";

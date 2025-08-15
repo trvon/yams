@@ -1,5 +1,6 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
 
@@ -11,6 +12,9 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -22,6 +26,39 @@ namespace fs = std::filesystem;
 
 static constexpr std::string_view DEFAULT_STORAGE_ENGINE = "local";
 static constexpr size_t DEFAULT_API_KEY_BYTES = 32;
+
+// Available models for vector database
+struct EmbeddingModel {
+    std::string name;
+    std::string url;
+    std::string description;
+    size_t size_mb;
+    int dimensions;
+};
+
+static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
+    {
+        "all-MiniLM-L6-v2",
+        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
+        "Lightweight model for semantic search",
+        90,
+        384
+    },
+    {
+        "all-mpnet-base-v2",
+        "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
+        "High-quality embeddings for better accuracy",
+        420,
+        768
+    },
+    {
+        "nomic-embed-text-v1.5",
+        "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx",
+        "State-of-the-art lightweight embeddings",
+        138,
+        768
+    }
+};
 
 class InitCommand : public ICommand {
 public:
@@ -116,16 +153,28 @@ public:
                 spdlog::debug("Skipping key generation (--no-keygen)");
             }
 
-            // 6) Generate an initial API key
+            // 6) Vector Database Setup
+            bool enableVectorDB = false;
+            std::string selectedModel;
+            if (!nonInteractive_) {
+                enableVectorDB = promptYesNo("\nEnable vector database for semantic search? [Y/n]: ", true);
+                if (enableVectorDB) {
+                    selectedModel = promptForModel(dataPath);
+                }
+            }
+
+            // 7) Generate an initial API key
             std::string apiKeyHex = generateApiKey(DEFAULT_API_KEY_BYTES);
 
-            // 7) Write config.toml
+            // 8) Write config.toml
             auto wc = writeConfigToml(configPath,
                                       dataPath,
                                       std::string(DEFAULT_STORAGE_ENGINE),
                                       privateKeyPath,
                                       publicKeyPath,
                                       std::vector<std::string>{apiKeyHex},
+                                      enableVectorDB,
+                                      selectedModel,
                                       force_);
             if (!wc) return wc;
 
@@ -161,7 +210,43 @@ public:
                 oss << "alias_cache_capacity = 50000\n";
                 oss << "embedding_cache_capacity = 10000\n";
                 oss << "neighbor_cache_capacity = 10000\n";
+                
+                if (enableVectorDB) {
+                    oss << "\n[vector_database]\n";
+                    oss << "enabled = true\n";
+                    oss << "model = \"" << escapeTomlString(selectedModel) << "\"\n";
+                    oss << "model_path = \"" << escapeTomlString((dataPath / "models" / selectedModel / "model.onnx").string()) << "\"\n";
+                }
+                
                 std::cout << oss.str();
+            }
+
+            // Initialize vector database if enabled
+            if (enableVectorDB) {
+                spdlog::info("Initializing vector database...");
+                
+                vector::VectorDatabaseConfig vdbConfig;
+                vdbConfig.database_path = (dataPath / "vectors.db").string();
+                
+                // Set embedding dimension based on selected model
+                for (const auto& model : EMBEDDING_MODELS) {
+                    if (model.name == selectedModel) {
+                        vdbConfig.embedding_dim = model.dimensions;
+                        break;
+                    }
+                }
+                
+                auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
+                if (!vectorDb->initialize()) {
+                    spdlog::warn("Failed to initialize vector database: {}", vectorDb->getLastError());
+                    spdlog::warn("Vector database can be initialized later using 'yams repair'");
+                } else {
+                    spdlog::info("Vector database initialized successfully");
+                    // Test that tables exist
+                    if (vectorDb->tableExists()) {
+                        spdlog::debug("Vector database tables created successfully");
+                    }
+                }
             }
 
             spdlog::info("YAMS initialization complete.");
@@ -220,6 +305,8 @@ private:
                                         const fs::path& privateKeyPath,
                                         const fs::path& publicKeyPath,
                                         const std::vector<std::string>& apiKeys,
+                                        bool enableVectorDB,
+                                        const std::string& selectedModel,
                                         bool force) {
         try {
             if (fs::exists(configPath) && !force) {
@@ -262,6 +349,14 @@ private:
             oss << "alias_cache_capacity = 50000\n";
             oss << "embedding_cache_capacity = 10000\n";
             oss << "neighbor_cache_capacity = 10000\n";
+            
+            // Add vector database configuration if enabled
+            if (enableVectorDB && !selectedModel.empty()) {
+                oss << "\n[vector_database]\n";
+                oss << "enabled = true\n";
+                oss << "model = \"" << escapeTomlString(selectedModel) << "\"\n";
+                oss << "model_path = \"" << escapeTomlString((dataDir / "models" / selectedModel / "model.onnx").string()) << "\"\n";
+            }
 
             // Ensure parent directory exists
             if (configPath.has_parent_path()) {
@@ -398,6 +493,76 @@ private:
             }
         }
         return toHex(buf.data(), buf.size());
+    }
+
+    std::string promptForModel(const fs::path& dataPath) {
+        std::cout << "\nAvailable embedding models:\n";
+        for (size_t i = 0; i < EMBEDDING_MODELS.size(); ++i) {
+            const auto& model = EMBEDDING_MODELS[i];
+            std::cout << "  " << (i + 1) << ". " << model.name 
+                     << " (" << model.size_mb << " MB)\n";
+            std::cout << "     " << model.description << "\n";
+            std::cout << "     Dimensions: " << model.dimensions << "\n";
+        }
+        
+        std::cout << "\nSelect a model (1-" << EMBEDDING_MODELS.size() << "): ";
+        std::string line;
+        std::getline(std::cin, line);
+        
+        int choice = 0;
+        try {
+            choice = std::stoi(line);
+        } catch (...) {
+            choice = 1; // Default to first model
+        }
+        
+        if (choice < 1 || choice > static_cast<int>(EMBEDDING_MODELS.size())) {
+            choice = 1; // Default to first model
+        }
+        
+        const auto& selectedModel = EMBEDDING_MODELS[choice - 1];
+        
+        // Download the model
+        fs::path modelDir = dataPath / "models" / selectedModel.name;
+        fs::path modelPath = modelDir / "model.onnx";
+        
+        if (fs::exists(modelPath)) {
+            std::cout << "\nModel already downloaded at: " << modelPath.string() << "\n";
+        } else {
+            std::cout << "\nDownloading " << selectedModel.name << "...\n";
+            if (!downloadModel(selectedModel, modelDir)) {
+                spdlog::error("Failed to download model");
+                return "";
+            }
+            std::cout << "Model downloaded successfully to: " << modelPath.string() << "\n";
+        }
+        
+        return selectedModel.name;
+    }
+    
+    bool downloadModel(const EmbeddingModel& model, const fs::path& outputDir) {
+        try {
+            // Create model directory
+            fs::create_directories(outputDir);
+            fs::path outputPath = outputDir / "model.onnx";
+            
+            // Download using curl or wget
+            std::string command = "curl -L --progress-bar \"" + model.url + 
+                                 "\" -o \"" + outputPath.string() + "\"";
+            
+            int result = std::system(command.c_str());
+            if (result != 0) {
+                // Try wget as fallback
+                command = "wget -q --show-progress \"" + model.url + 
+                         "\" -O \"" + outputPath.string() + "\"";
+                result = std::system(command.c_str());
+            }
+            
+            return result == 0 && fs::exists(outputPath);
+        } catch (const std::exception& e) {
+            spdlog::error("Error downloading model: {}", e.what());
+            return false;
+        }
     }
 
 private:

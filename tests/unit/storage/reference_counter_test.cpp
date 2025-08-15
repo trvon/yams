@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <thread>
 #include <random>
+#include <future>
 
 using namespace yams::storage;
 
@@ -640,19 +641,33 @@ TEST_F(GarbageCollectorTest, AsyncCollection) {
 }
 
 TEST_F(GarbageCollectorTest, ConcurrentCollectionPrevented) {
+    // Create an unreferenced block so the garbage collector has work to do
+    std::vector<std::byte> data(1024, std::byte{42});
+    auto hash = generateHash(300);
+    storageEngine->store(hash, data);
+    refCounter->increment(hash, data.size());
+    refCounter->decrement(hash);
+    
     // Start a long-running collection
-    std::atomic<bool> collectionStarted{false};
+    std::promise<void> collectionStartedPromise;
+    auto collectionStartedFuture = collectionStartedPromise.get_future();
     std::atomic<bool> allowCompletion{false};
+    std::atomic<int> callbackCount{0};
     
     GCOptions options{
         .maxBlocksPerRun = 10,
         .minAgeSeconds = 0,
         .dryRun = false,
-        .progressCallback = [&collectionStarted, &allowCompletion]
+        .progressCallback = [&collectionStartedPromise, &allowCompletion, &callbackCount]
                            (const std::string&, size_t) {
-            collectionStarted = true;
-            while (!allowCompletion) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            int count = callbackCount.fetch_add(1);
+            if (count == 0) {
+                // First call - signal that collection has started
+                collectionStartedPromise.set_value();
+            }
+            // Don't block indefinitely - just delay briefly if not allowed to complete
+            if (!allowCompletion) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
     };
@@ -660,18 +675,29 @@ TEST_F(GarbageCollectorTest, ConcurrentCollectionPrevented) {
     // Start first collection
     auto future1 = gc->collectAsync(options);
     
-    // Wait for it to start
-    while (!collectionStarted) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Wait for it to start with timeout
+    if (collectionStartedFuture.wait_for(std::chrono::seconds(2)) == 
+        std::future_status::timeout) {
+        FAIL() << "Collection did not start within timeout";
     }
     
-    // Try to start second collection - should fail
+    // Small delay to ensure the async collection is actually running
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    
+    // Try to start second collection - should fail immediately
     auto result2 = gc->collect(options);
     EXPECT_FALSE(result2.has_value());
     EXPECT_EQ(result2.error().code, yams::ErrorCode::OperationInProgress);
     
     // Allow first collection to complete
     allowCompletion = true;
+    
+    // Wait for completion with timeout
+    if (future1.wait_for(std::chrono::seconds(5)) == 
+        std::future_status::timeout) {
+        FAIL() << "Collection did not complete within timeout";
+    }
+    
     auto result1 = future1.get();
     EXPECT_TRUE(result1.has_value());
 }

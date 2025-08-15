@@ -118,6 +118,11 @@ public:
      * Create repair command (maintenance and integrity)
      */
     static std::unique_ptr<ICommand> createRepairCommand();
+    
+    /**
+     * Create model command (ONNX model management)
+     */
+    static std::unique_ptr<ICommand> createModelCommand();
 };
 
 } // namespace yams::cli

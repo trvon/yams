@@ -66,6 +66,12 @@ target_include_directories(yams_reference_counter
 # Add C++20 features
 target_compile_features(yams_reference_counter PUBLIC cxx_std_20)
 
+# Link Tracy if profiling is enabled
+if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
+    target_link_libraries(yams_storage_engine PRIVATE Tracy::TracyClient)
+    target_link_libraries(yams_reference_counter PRIVATE Tracy::TracyClient)
+endif()
+
 # Export targets
 install(TARGETS yams_storage_engine yams_reference_counter
     EXPORT YamsTargets

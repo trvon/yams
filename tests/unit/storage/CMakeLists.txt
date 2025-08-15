@@ -31,11 +31,10 @@ add_executable(reference_counter_unit_tests
 
 target_link_libraries(reference_counter_unit_tests
     PRIVATE
-        gtest
-        gtest_main
+        test_utils
+        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
         yams::reference_counter
         yams::storage_engine
-        test_utils
 )
 
 target_include_directories(reference_counter_unit_tests

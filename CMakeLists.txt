@@ -120,6 +120,31 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Tracy profiler integration for Debug builds
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    find_package(tracy QUIET)
+    if(tracy_FOUND)
+        message(STATUS "Tracy profiler enabled for Debug build")
+        set(YAMS_ENABLE_PROFILING ON)
+        add_compile_definitions(TRACY_ENABLE)
+        # Add required flags for better profiling on macOS/Linux
+        if(UNIX)
+            add_compile_options(-g -fno-omit-frame-pointer)
+            if(APPLE)
+                add_link_options(-rdynamic)
+            endif()
+        endif()
+        # Tracy requires compiling TracyClient.cpp into the project
+        # The Tracy::TracyClient target should handle this, but we may need to add it explicitly
+        # This is handled by linking to Tracy::TracyClient in each library
+    else()
+        message(STATUS "Tracy profiler not found - profiling disabled")
+        set(YAMS_ENABLE_PROFILING OFF)
+    endif()
+else()
+    set(YAMS_ENABLE_PROFILING OFF)
+endif()
+
 # Check for std::format availability (only in C++20 mode)
 include(CheckCXXSourceCompiles)
 if(NOT YAMS_CXX17_MODE)
@@ -158,6 +183,7 @@ set_property(CACHE YAMS_BUILD_PROFILE PROPERTY STRINGS release dev custom)
 
 # Individual component options
 option(YAMS_BUILD_CLI "Build CLI tool" ON)
+option(YAMS_ENABLE_TUI "Enable TUI features in CLI" OFF)
 option(YAMS_BUILD_MCP_SERVER "Build MCP server" ON)
 option(YAMS_BUILD_MAINTENANCE_TOOLS "Build maintenance tools (gc, stats)" OFF)
 option(YAMS_BUILD_TESTS "Build unit tests" OFF)
@@ -633,8 +659,8 @@ if(YAMS_BUILD_CLI AND NOT YAMS_USE_CONAN)
     endif()
 endif()
 
-# Google Test
-if(YAMS_BUILD_TESTS)
+# Google Test - only use FetchContent when not using Conan
+if(YAMS_BUILD_TESTS AND NOT YAMS_USE_CONAN)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
@@ -691,10 +717,10 @@ if(YAMS_USE_CONAN)
     find_package(CLI11 REQUIRED)
     find_package(ZLIB REQUIRED)
     find_package(zstd REQUIRED)
-    find_package(lz4 REQUIRED)
     find_package(SQLite3 REQUIRED)
     find_package(Protobuf REQUIRED)
     find_package(OpenSSL REQUIRED)
+    find_package(onnxruntime REQUIRED)
     # fmt for std::format fallback
     if(NOT YAMS_HAS_STD_FORMAT)
         find_package(fmt REQUIRED)
@@ -702,17 +728,29 @@ if(YAMS_USE_CONAN)
     if(YAMS_BUILD_CLI)
         find_package(Curses REQUIRED)
     endif()
-    if(YAMS_BUILD_MCP_SERVER)
-        find_package(Drogon REQUIRED)
-        # Boost will be handled via FetchContent below for non-Conan builds
-    endif()
+    # MCP server no longer requires Drogon or Boost
     if(YAMS_BUILD_TESTS)
-        find_package(gtest REQUIRED)
-        message(STATUS "Conan build: Found gtest package")
+        # Try to find GTest - Conan generates both gtest and GTest configs
+        # But we should use the one that doesn't cause ALIAS target errors
+        if(EXISTS "${CMAKE_BINARY_DIR}/generators/gtestConfig.cmake")
+            # Use lowercase gtest from Conan
+            find_package(gtest REQUIRED)
+            message(STATUS "Conan build: Found gtest package")
+        else()
+            # Try uppercase GTest 
+            find_package(GTest REQUIRED)
+            message(STATUS "Conan build: Found GTest package")
+        endif()
+        
+        # Check which targets are available
         if(TARGET gtest::gtest)
             message(STATUS "Conan build: gtest::gtest target is available")
-        else()
-            message(WARNING "Conan build: gtest::gtest target NOT found")
+        endif()
+        if(TARGET GTest::gtest)
+            message(STATUS "Conan build: GTest::gtest target is available")
+        endif()
+        if(TARGET GTest::GTest)
+            message(STATUS "Conan build: GTest::GTest target is available")
         endif()
     endif()
     if(YAMS_BUILD_BENCHMARKS)
@@ -810,7 +848,7 @@ if(YAMS_BUILD_TOOLS)
     endif()
 
     # ImTUI for Terminal User Interface (Immediate Mode TUI)
-    if(YAMS_BUILD_CLI)
+    if(YAMS_BUILD_CLI AND YAMS_ENABLE_TUI)
         if(YAMS_USE_CONAN)
             # Use FetchContent for ImTUI with Conan as well, and provide a stable wrapper target
             find_package(Curses REQUIRED)
@@ -1000,6 +1038,25 @@ if(APPLE)
     set(CMAKE_MACOSX_RPATH ON)
     # Ensure installed executables/DYLIBs can find dependencies in lib/
     set(CMAKE_INSTALL_RPATH "@loader_path/../lib")
+endif()
+
+# sqlite-vec extension for vector similarity search
+# This provides fast KNN search for embeddings with minimal dependencies
+message(STATUS "Fetching sqlite-vec for vector search support")
+FetchContent_Declare(
+    sqlite_vec
+    GIT_REPOSITORY https://github.com/asg017/sqlite-vec.git
+    GIT_TAG v0.1.3  # Latest stable version as of Aug 2024
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(sqlite_vec)
+if(NOT sqlite_vec_POPULATED)
+    FetchContent_Populate(sqlite_vec)
+    
+    # Export the source directory for use by yams_vector
+    set(sqlite_vec_SOURCE_DIR ${sqlite_vec_SOURCE_DIR} CACHE INTERNAL "sqlite-vec source directory")
+    
+    message(STATUS "sqlite-vec source fetched successfully to ${sqlite_vec_SOURCE_DIR}")
 endif()
 
 if(YAMS_ENABLE_PDF)
@@ -1273,6 +1330,7 @@ if(NOT YAMS_USE_CONAN)
     if(TARGET sqlite3)
         list(APPEND YAMS_EXPORT_TARGETS sqlite3)
     endif()
+    # Note: sqlite_vec is not exported as it's an implementation detail
 endif()
 
 install(TARGETS ${YAMS_EXPORT_TARGETS}

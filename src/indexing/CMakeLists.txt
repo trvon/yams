@@ -20,5 +20,10 @@ target_link_libraries(yams_indexing PUBLIC
 # Set compile features
 target_compile_features(yams_indexing PUBLIC cxx_std_20)
 
+# Link Tracy if profiling is enabled
+if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
+    target_link_libraries(yams_indexing PRIVATE Tracy::TracyClient)
+endif()
+
 # Create alias for consistent naming
 add_library(yams::indexing ALIAS yams_indexing)

@@ -1,4 +1,5 @@
 #include <yams/vector/document_chunker.h>
+#include <yams/profiling.h>
 
 #include <algorithm>
 #include <sstream>
@@ -20,6 +21,7 @@ DocumentChunker::DocumentChunker(const ChunkingConfig& config)
 std::vector<DocumentChunk> DocumentChunker::chunkDocument(
     const std::string& content,
     const std::string& document_hash) {
+    YAMS_ZONE_SCOPED_N("DocumentChunker::chunkDocument");
     
     if (content.empty()) {
         last_error_ = "Empty content provided";

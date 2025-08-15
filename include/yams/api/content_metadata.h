@@ -19,9 +19,9 @@ struct ContentMetadata {
     uint64_t size{0};                    ///< Content size in bytes
     std::string mimeType;                ///< MIME type (e.g., "text/plain")
     Hash contentHash;                    ///< SHA-256 hash of content
-    TimePoint createdAt;                 ///< Creation timestamp
-    TimePoint modifiedAt;                ///< Last modification timestamp
-    TimePoint accessedAt;                ///< Last access timestamp
+    TimePoint createdAt{};               ///< Creation timestamp (initialized to epoch)
+    TimePoint modifiedAt{};              ///< Last modification timestamp (initialized to epoch)
+    TimePoint accessedAt{};              ///< Last access timestamp (initialized to epoch)
     std::unordered_map<std::string, std::string> tags; ///< User-defined tags
     
     /**

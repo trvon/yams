@@ -1,5 +1,7 @@
 # YAMS — Yet Another Memory System
 
+**Note**: YAMS v0.3.x is experimental software under active development.
+
 <div class="hero" style="border:1px solid #00ff7f;padding:1rem;background:#0b0f10;margin:1rem 0">
 <pre style="margin:0;color:#9bffb0">
 $ yams --version
@@ -23,7 +25,31 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 
 YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
-### Build
+## Install
+
+### Docker (simplest)
+
+```bash
+docker run --rm -it ghcr.io/trvon/yams:latest --version
+```
+
+### Native Binary
+
+```bash
+# macOS ARM64
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-arm64.zip -o yams.zip
+unzip yams.zip && sudo mv yams /usr/local/bin/
+
+# macOS x86_64  
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip
+unzip yams.zip && sudo mv yams /usr/local/bin/
+
+# Linux x86_64
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-linux-x86_64.tar.gz | tar xz
+sudo mv yams /usr/local/bin/
+```
+
+### Build from Source
 
 ```bash
 # Install Conan

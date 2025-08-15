@@ -19,10 +19,13 @@ std::unique_ptr<ICommand> createStatsCommand();
 std::unique_ptr<ICommand> createUninstallCommand();
 std::unique_ptr<ICommand> createMigrateCommand();
 std::unique_ptr<ICommand> createUpdateCommand();
+#ifdef YAMS_ENABLE_TUI
 std::unique_ptr<ICommand> createBrowseCommand();
+#endif
 std::unique_ptr<ICommand> createCompletionCommand();
 std::unique_ptr<ICommand> createRepairMimeCommand();
 std::unique_ptr<ICommand> createRepairCommand();
+std::unique_ptr<ICommand> createModelCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -43,10 +46,13 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createUninstallCommand());
     cli->registerCommand(CommandRegistry::createMigrateCommand());
     cli->registerCommand(CommandRegistry::createUpdateCommand());
+    #ifdef YAMS_ENABLE_TUI
     cli->registerCommand(CommandRegistry::createBrowseCommand());
+    #endif
     cli->registerCommand(CommandRegistry::createCompletionCommand());
     cli->registerCommand(CommandRegistry::createRepairMimeCommand());
     cli->registerCommand(CommandRegistry::createRepairCommand());
+    cli->registerCommand(CommandRegistry::createModelCommand());
 #ifdef YAMS_BUILD_MCP_SERVER
     cli->registerCommand(CommandRegistry::createServeCommand());
 #endif
@@ -112,9 +118,11 @@ std::unique_ptr<ICommand> CommandRegistry::createUpdateCommand() {
     return ::yams::cli::createUpdateCommand();
 }
 
+#ifdef YAMS_ENABLE_TUI
 std::unique_ptr<ICommand> CommandRegistry::createBrowseCommand() {
     return ::yams::cli::createBrowseCommand();
 }
+#endif
 
 std::unique_ptr<ICommand> CommandRegistry::createCompletionCommand() {
     return ::yams::cli::createCompletionCommand();
@@ -126,6 +134,11 @@ std::unique_ptr<ICommand> CommandRegistry::createRepairMimeCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createRepairCommand() {
     return ::yams::cli::createRepairCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createModelCommand() {
+    // The standalone createModelCommand function is in this namespace
+    return ::yams::cli::createModelCommand();
 }
 
 #ifdef YAMS_BUILD_MCP_SERVER

@@ -1,5 +1,10 @@
 #include <yams/mcp/mcp_server.h>
 #include <yams/api/content_store.h>
+#include <yams/api/content_store_builder.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
+#include <yams/search/search_executor.h>
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -25,8 +30,6 @@ int main(int argc, char* argv[]) {
     std::string storage_path = std::getenv("YAMS_STORAGE") ?
                                std::getenv("YAMS_STORAGE") :
                                fs::path(std::getenv("HOME")) / "yams";
-    uint16_t port = 8080;
-    std::string host = "127.0.0.1";
     std::string log_level = "info";
     std::string log_file;
     bool daemon_mode = false;
@@ -34,10 +37,6 @@ int main(int argc, char* argv[]) {
     // CLI options
     app.add_option("-s,--storage", storage_path, "Storage directory path")
        ->envname("YAMS_STORAGE");
-    app.add_option("-p,--port", port, "Server port")
-       ->default_val(8080);
-    app.add_option("--host", host, "Server host")
-       ->default_val("127.0.0.1");
     app.add_option("-l,--log-level", log_level, "Log level (trace, debug, info, warn, error)")
        ->default_val("info");
     app.add_option("--log-file", log_file, "Log file path (optional)");
@@ -50,9 +49,9 @@ int main(int argc, char* argv[]) {
     try {
         std::vector<spdlog::sink_ptr> sinks;
 
-        // Console sink
+        // Console sink - use stderr to avoid interfering with STDIO MCP transport
         if (!daemon_mode) {
-            auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+            auto console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
             sinks.push_back(console_sink);
         }
 
@@ -83,7 +82,7 @@ int main(int argc, char* argv[]) {
     // Log startup info
     spdlog::info("YAMS MCP Server v{}.{}.{}", 0, 0, 2);
     spdlog::info("Storage path: {}", storage_path);
-    spdlog::info("Server address: {}:{}", host, port);
+    spdlog::info("Transport: STDIO");
 
     // Check storage directory
     if (!fs::exists(storage_path)) {
@@ -97,24 +96,51 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signalHandler);
 
     try {
-        // Initialize the core components first
-        // TODO: Initialize ContentStore and SearchExecutor using storage_path
-
-        // For now, create a basic MCP server with StdioTransport
-        auto store = std::shared_ptr<yams::api::IContentStore>{nullptr}; // TODO: Initialize
-        auto searchExecutor = std::shared_ptr<yams::search::SearchExecutor>{nullptr}; // TODO: Initialize
-        auto metadataRepo = std::shared_ptr<yams::metadata::MetadataRepository>{nullptr}; // TODO: Initialize
-
-        // Create WebSocket transport if using WebSocket mode
-        std::unique_ptr<yams::mcp::ITransport> transport;
-        if (!host.empty() && port > 0) {
-            yams::mcp::WebSocketTransport::Config wsConfig;
-            wsConfig.host = host;
-            wsConfig.port = static_cast<uint16_t>(port);
-            transport = std::make_unique<yams::mcp::WebSocketTransport>(wsConfig);
-        } else {
-            transport = std::make_unique<yams::mcp::StdioTransport>();
+        // Initialize the core components with actual YAMS storage
+        spdlog::info("Initializing YAMS components from storage: {}", storage_path);
+        
+        // Initialize ContentStore
+        auto storeResult = yams::api::createContentStore(storage_path);
+        if (!storeResult) {
+            spdlog::error("Failed to initialize content store at {}: {}", 
+                         storage_path, storeResult.error().message);
+            return 1;
         }
+        // Move the unique_ptr out of the Result and convert to shared_ptr
+        auto storeUnique = std::move(storeResult).value();
+        std::shared_ptr<yams::api::IContentStore> store = std::move(storeUnique);
+        
+        // Initialize metadata database and connection pool
+        fs::path dbPath = fs::path(storage_path) / "metadata.db";
+        yams::metadata::ConnectionPoolConfig poolConfig;
+        poolConfig.maxConnections = 5;  // Smaller pool for MCP server
+        poolConfig.minConnections = 1;
+        poolConfig.connectTimeout = std::chrono::seconds(10);
+        
+        auto connectionPool = std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), poolConfig);
+        auto poolResult = connectionPool->initialize();
+        if (!poolResult) {
+            spdlog::error("Failed to initialize database connection pool: {}", poolResult.error().message);
+            return 1;
+        }
+        
+        // Initialize metadata repository
+        auto metadataRepo = std::make_shared<yams::metadata::MetadataRepository>(*connectionPool);
+        
+        // Initialize database for search executor
+        auto database = std::make_shared<yams::metadata::Database>();
+        auto dbOpenResult = database->open(dbPath.string());
+        if (!dbOpenResult) {
+            spdlog::error("Failed to open database: {}", dbOpenResult.error().message);
+            return 1;
+        }
+        
+        // Initialize search executor
+        auto searchExecutor = std::make_shared<yams::search::SearchExecutor>(database, metadataRepo);
+
+        // MCP servers for Claude Desktop must use STDIO transport
+        // WebSocket transport is optional and not needed for basic functionality
+        std::unique_ptr<yams::mcp::ITransport> transport = std::make_unique<yams::mcp::StdioTransport>();
 
         // Create MCP server
         auto server = std::make_unique<yams::mcp::MCPServer>(
@@ -122,7 +148,7 @@ int main(int argc, char* argv[]) {
             searchExecutor,
             metadataRepo,
             nullptr,                      // hybrid engine (builder can be added later)
-            std::move(transport));        // transport (WebSocket or stdio)std::move(transport));
+            std::move(transport));        // transport (STDIO only)
 
         // Start server in background thread
         std::thread server_thread([&server]() {

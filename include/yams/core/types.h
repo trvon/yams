@@ -49,6 +49,7 @@ enum class ErrorCode {
     WriteError,
     NotInitialized,
     NotImplemented,
+    InvalidPath,
     Unknown
 };
 
@@ -84,6 +85,7 @@ constexpr const char* errorToString(ErrorCode error) {
         case ErrorCode::WriteError: return "Write error";
         case ErrorCode::NotInitialized: return "Not initialized";
         case ErrorCode::NotImplemented: return "Not implemented";
+        case ErrorCode::InvalidPath: return "Invalid path";
         case ErrorCode::Unknown: return "Unknown error";
     }
     return "Unknown error";
@@ -247,7 +249,7 @@ struct StorageStats {
     double dedupRatio = 0.0;
     uint64_t writeOperations = 0;
     uint64_t readOperations = 0;
-    TimePoint lastModified;
+    TimePoint lastModified{};  // Initialize to epoch
 };
 
 // File information
@@ -255,7 +257,7 @@ struct FileInfo {
     Hash hash;
     uint64_t size;
     std::string mimeType;
-    TimePoint createdAt;
+    TimePoint createdAt{};  // Initialize to epoch
     std::string originalName;
 };
 

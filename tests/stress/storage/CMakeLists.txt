@@ -4,8 +4,8 @@ add_executable(storage_concurrent_tests
 
 target_link_libraries(storage_concurrent_tests
     PRIVATE
-        gtest
-        gtest_main
+        test_utils
+        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
         yams::storage_engine
         yams::crypto
         Threads::Threads

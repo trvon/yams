@@ -1,5 +1,6 @@
 #include "zstandard_compressor.h"
 #include <yams/compression/compression_monitor.h>
+#include <yams/profiling.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
 #include <chrono>
@@ -172,6 +173,7 @@ ZstandardCompressor::~ZstandardCompressor() = default;
 Result<CompressionResult> ZstandardCompressor::compress(
     std::span<const std::byte> data,
     uint8_t level) {
+    YAMS_ZONE_SCOPED_N("ZstandardCompressor::compress");
     
     // Start tracking
     CompressionTracker tracker(CompressionAlgorithm::Zstandard, data.size());
@@ -191,6 +193,7 @@ Result<CompressionResult> ZstandardCompressor::compress(
 Result<std::vector<std::byte>> ZstandardCompressor::decompress(
     std::span<const std::byte> data,
     size_t expectedSize) {
+    YAMS_ZONE_SCOPED_N("ZstandardCompressor::decompress");
     
     // Start tracking
     DecompressionTracker tracker(CompressionAlgorithm::Zstandard, data.size());

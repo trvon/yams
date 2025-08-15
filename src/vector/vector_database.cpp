@@ -1,4 +1,8 @@
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_backend.h>
+#include <yams/vector/sqlite_vec_backend.h>
+#include <yams/profiling.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -9,22 +13,22 @@
 #include <unordered_set>
 #include <mutex>
 
-// TODO: Replace with actual LanceDB includes when available
-// #include <lancedb/lancedb.hpp>
-// #include <arrow/api.h>
-
 namespace yams::vector {
 
 /**
  * Private implementation class (PIMPL pattern)
- * This will be replaced with actual LanceDB implementation
+ * Uses vector backend abstraction for storage
  */
 class VectorDatabase::Impl {
 public:
     explicit Impl(const VectorDatabaseConfig& config)
         : config_(config)
         , initialized_(false)
-        , has_error_(false) {}
+        , has_error_(false) {
+        // Create backend based on configuration
+        // For now, always use sqlite-vec for persistence
+        backend_ = std::make_unique<SqliteVecBackend>();
+    }
 
     bool initialize() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -34,15 +38,21 @@ public:
         }
 
         try {
-            // TODO: Initialize actual LanceDB connection
-            // For now, use in-memory storage for testing
-            vectors_.clear();
-            document_index_.clear();
-            
-            // Create table if it doesn't exist
-            if (!createTable()) {
-                setError("Failed to create vector table");
+            // Initialize backend with database path
+            auto result = backend_->initialize(config_.database_path);
+            if (!result) {
+                setError("Failed to initialize backend: " + result.error().message);
                 return false;
+            }
+            
+            // Create tables if they don't exist
+            if (!backend_->tablesExist()) {
+                auto createResult = backend_->createTables(config_.embedding_dim);
+                if (!createResult) {
+                    setError("Failed to create tables: " + createResult.error().message);
+                    return false;
+                }
+                spdlog::info("Created vector tables with dimension {}", config_.embedding_dim);
             }
 
             initialized_ = true;
@@ -62,35 +72,37 @@ public:
 
     void close() {
         std::lock_guard<std::mutex> lock(mutex_);
-        // TODO: Close LanceDB connection
-        vectors_.clear();
-        document_index_.clear();
+        if (backend_) {
+            backend_->close();
+        }
         initialized_ = false;
         has_error_ = false;
         last_error_.clear();
     }
 
     bool createTable() {
-        // TODO: Create actual LanceDB table with schema
-        // For now, just ensure our in-memory storage is ready
-        return true;
+        // Tables are created during initialization
+        return backend_->tablesExist();
     }
 
     bool tableExists() const {
-        // TODO: Check if LanceDB table exists
-        return initialized_;
+        return backend_->tablesExist();
     }
 
     void dropTable() {
         std::lock_guard<std::mutex> lock(mutex_);
-        // TODO: Drop actual LanceDB table
-        vectors_.clear();
-        document_index_.clear();
+        // Note: We don't actually drop tables, just clear them
+        // This preserves the schema but removes all data
+        if (backend_->isInitialized()) {
+            // Could implement a clearAll() method in backend if needed
+            spdlog::warn("Drop table requested but not implemented for safety");
+        }
     }
 
     size_t getVectorCount() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return vectors_.size();
+        auto result = backend_->getVectorCount();
+        return result ? result.value() : 0;
     }
 
     bool insertVector(const VectorRecord& record) {
@@ -107,9 +119,11 @@ public:
         }
 
         try {
-            // TODO: Insert into actual LanceDB
-            vectors_[record.chunk_id] = record;
-            document_index_[record.document_hash].insert(record.chunk_id);
+            auto result = backend_->insertVector(record);
+            if (!result) {
+                setError("Insert failed: " + result.error().message);
+                return false;
+            }
             
             has_error_ = false;
             return true;
@@ -121,6 +135,8 @@ public:
     }
 
     bool insertVectorsBatch(const std::vector<VectorRecord>& records) {
+        spdlog::debug("VectorDatabase::insertVectorsBatch called with {} records", records.size());
+        
         if (records.empty()) {
             return true;
         }
@@ -133,15 +149,19 @@ public:
         }
 
         try {
-            // TODO: Use LanceDB batch insert for efficiency
+            // Validate all records first
             for (const auto& record : records) {
                 if (!utils::validateVectorRecord(record, config_.embedding_dim)) {
                     setError("Invalid vector record in batch");
                     return false;
                 }
+            }
 
-                vectors_[record.chunk_id] = record;
-                document_index_[record.document_hash].insert(record.chunk_id);
+            // Use backend batch insert
+            auto result = backend_->insertVectorsBatch(records);
+            if (!result) {
+                setError("Batch insert failed: " + result.error().message);
+                return false;
             }
 
             has_error_ = false;
@@ -161,21 +181,16 @@ public:
             return false;
         }
 
-        auto it = vectors_.find(chunk_id);
-        if (it == vectors_.end()) {
-            setError("Vector not found: " + chunk_id);
+        if (!utils::validateVectorRecord(record, config_.embedding_dim)) {
+            setError("Invalid vector record");
             return false;
         }
 
         try {
-            // TODO: Update in actual LanceDB
-            auto old_record = it->second;
-            vectors_[chunk_id] = record;
-            
-            // Update document index if document hash changed
-            if (old_record.document_hash != record.document_hash) {
-                document_index_[old_record.document_hash].erase(chunk_id);
-                document_index_[record.document_hash].insert(chunk_id);
+            auto result = backend_->updateVector(chunk_id, record);
+            if (!result) {
+                setError("Update failed: " + result.error().message);
+                return false;
             }
 
             has_error_ = false;
@@ -195,21 +210,11 @@ public:
             return false;
         }
 
-        auto it = vectors_.find(chunk_id);
-        if (it == vectors_.end()) {
-            setError("Vector not found: " + chunk_id);
-            return false;
-        }
-
         try {
-            // TODO: Delete from actual LanceDB
-            auto record = it->second;
-            vectors_.erase(it);
-            document_index_[record.document_hash].erase(chunk_id);
-
-            // Clean up empty document entries
-            if (document_index_[record.document_hash].empty()) {
-                document_index_.erase(record.document_hash);
+            auto result = backend_->deleteVector(chunk_id);
+            if (!result) {
+                setError("Delete failed: " + result.error().message);
+                return false;
             }
 
             has_error_ = false;
@@ -229,18 +234,12 @@ public:
             return false;
         }
 
-        auto doc_it = document_index_.find(document_hash);
-        if (doc_it == document_index_.end()) {
-            // No vectors for this document - not an error
-            return true;
-        }
-
         try {
-            // TODO: Use efficient batch delete in LanceDB
-            for (const auto& chunk_id : doc_it->second) {
-                vectors_.erase(chunk_id);
+            auto result = backend_->deleteVectorsByDocument(document_hash);
+            if (!result) {
+                setError("Batch delete failed: " + result.error().message);
+                return false;
             }
-            document_index_.erase(doc_it);
 
             has_error_ = false;
             return true;
@@ -266,63 +265,13 @@ public:
         }
 
         try {
-            // TODO: Use LanceDB's optimized vector search
-            // For now, implement basic cosine similarity search
-            
-            std::vector<std::pair<double, std::string>> similarities;
-            similarities.reserve(vectors_.size());
-
-            for (const auto& [chunk_id, record] : vectors_) {
-                // Apply filters
-                if (params.document_hash && record.document_hash != *params.document_hash) {
-                    continue;
-                }
-
-                bool metadata_match = true;
-                for (const auto& [key, value] : params.metadata_filters) {
-                    auto it = record.metadata.find(key);
-                    if (it == record.metadata.end() || it->second != value) {
-                        metadata_match = false;
-                        break;
-                    }
-                }
-                if (!metadata_match) {
-                    continue;
-                }
-
-                // Compute cosine similarity
-                double similarity = computeCosineSimilarity(query_embedding, record.embedding);
-                
-                if (similarity >= params.similarity_threshold) {
-                    similarities.emplace_back(similarity, chunk_id);
-                }
+            auto result = backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold, params.document_hash, params.metadata_filters);
+            if (!result) {
+                // Can't modify has_error_ from const method
+                return {};
             }
 
-            // Sort by similarity (descending)
-            std::sort(similarities.begin(), similarities.end(), 
-                     [](const auto& a, const auto& b) { return a.first > b.first; });
-
-            // Take top k results
-            size_t num_results = std::min(params.k, similarities.size());
-            std::vector<VectorRecord> results;
-            results.reserve(num_results);
-
-            for (size_t i = 0; i < num_results; ++i) {
-                auto it = vectors_.find(similarities[i].second);
-                if (it != vectors_.end()) {
-                    VectorRecord result = it->second;
-                    result.relevance_score = static_cast<float>(similarities[i].first);
-                    
-                    // Optionally exclude embeddings to save memory
-                    if (!params.include_embeddings) {
-                        result.embedding.clear();
-                    }
-                    
-                    results.push_back(std::move(result));
-                }
-            }
-
-            return results;
+            return result.value();
 
         } catch (const std::exception& e) {
             // Can't modify has_error_ from const method
@@ -333,33 +282,29 @@ public:
     std::optional<VectorRecord> getVector(const std::string& chunk_id) const {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        auto it = vectors_.find(chunk_id);
-        if (it == vectors_.end()) {
+        auto result = backend_->getVector(chunk_id);
+        if (!result) {
             return std::nullopt;
         }
 
-        return it->second;
+        return result.value();
     }
 
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        std::vector<VectorRecord> results;
-
-        auto doc_it = document_index_.find(document_hash);
-        if (doc_it == document_index_.end()) {
-            return results;
+        auto result = backend_->getVectorsByDocument(document_hash);
+        if (!result) {
+            return {};
         }
 
-        results.reserve(doc_it->second.size());
-        for (const auto& chunk_id : doc_it->second) {
-            auto it = vectors_.find(chunk_id);
-            if (it != vectors_.end()) {
-                results.push_back(it->second);
-            }
-        }
-
-        return results;
+        return result.value();
+    }
+    
+    bool hasEmbedding(const std::string& document_hash) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto result = backend_->hasEmbedding(document_hash);
+        return result && result.value();
     }
 
     bool buildIndex() {
@@ -404,23 +349,24 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         VectorDatabase::DatabaseStats stats;
-        stats.total_vectors = vectors_.size();
-        stats.total_documents = document_index_.size();
+        
+        // Get basic stats from backend
+        auto countResult = backend_->getVectorCount();
+        stats.total_vectors = countResult ? countResult.value() : 0;
+        
+        // Get document count (estimate based on unique document hashes)
+        stats.total_documents = 0; // TODO: implement document counting in backend
 
-        if (!vectors_.empty()) {
-            double total_magnitude = 0.0;
-            for (const auto& [_, record] : vectors_) {
-                double magnitude = 0.0;
-                for (float val : record.embedding) {
-                    magnitude += val * val;
-                }
-                total_magnitude += std::sqrt(magnitude);
-            }
-            stats.avg_embedding_magnitude = total_magnitude / vectors_.size();
+        // Get stats from backend if available
+        auto backendStats = backend_->getStats();
+        if (backendStats) {
+            stats.avg_embedding_magnitude = backendStats.value().avg_embedding_magnitude;
+            stats.index_size_bytes = backendStats.value().index_size_bytes;
+        } else {
+            // Estimate index size
+            stats.index_size_bytes = stats.total_vectors * config_.embedding_dim * sizeof(float);
         }
-
-        // TODO: Get actual index size from LanceDB
-        stats.index_size_bytes = vectors_.size() * config_.embedding_dim * sizeof(float);
+        
         stats.last_optimized = std::chrono::system_clock::now();
 
         return stats;
@@ -456,9 +402,9 @@ private:
         double norm_b = 0.0;
 
         for (size_t i = 0; i < a.size(); ++i) {
-            dot_product += a[i] * b[i];
-            norm_a += a[i] * a[i];
-            norm_b += b[i] * b[i];
+            dot_product += static_cast<double>(a[i]) * static_cast<double>(b[i]);
+            norm_a += static_cast<double>(a[i]) * static_cast<double>(a[i]);
+            norm_b += static_cast<double>(b[i]) * static_cast<double>(b[i]);
         }
 
         norm_a = std::sqrt(norm_a);
@@ -472,14 +418,11 @@ private:
     }
 
     VectorDatabaseConfig config_;
+    std::unique_ptr<IVectorBackend> backend_;
     bool initialized_;
     mutable bool has_error_;
     mutable std::string last_error_;
     mutable std::mutex mutex_;
-
-    // TODO: Replace with actual LanceDB storage
-    std::unordered_map<std::string, VectorRecord> vectors_;
-    std::unordered_map<std::string, std::unordered_set<std::string>> document_index_;
 };
 
 // VectorDatabase implementation
@@ -521,10 +464,12 @@ size_t VectorDatabase::getVectorCount() const {
 }
 
 bool VectorDatabase::insertVector(const VectorRecord& record) {
+    YAMS_ZONE_SCOPED_N("VectorDB::insertVector");
     return pImpl->insertVector(record);
 }
 
 bool VectorDatabase::insertVectorsBatch(const std::vector<VectorRecord>& records) {
+    YAMS_ZONE_SCOPED_N("VectorDB::insertVectorsBatch");
     return pImpl->insertVectorsBatch(records);
 }
 
@@ -543,6 +488,7 @@ bool VectorDatabase::deleteVectorsByDocument(const std::string& document_hash) {
 std::vector<VectorRecord> VectorDatabase::searchSimilar(
     const std::vector<float>& query_embedding,
     const VectorSearchParams& params) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::searchSimilar");
     return pImpl->searchSimilar(query_embedding, params);
 }
 
@@ -551,10 +497,14 @@ std::vector<VectorRecord> VectorDatabase::searchSimilarToDocument(
     const VectorSearchParams& params) const {
     
     auto document_vectors = pImpl->getVectorsByDocument(document_hash);
+    spdlog::info("searchSimilarToDocument: Found {} vectors for document {}", document_vectors.size(), document_hash);
+    
     if (document_vectors.empty()) {
         return {};
     }
 
+    spdlog::info("searchSimilarToDocument: Using embedding of size {} from first chunk", document_vectors[0].embedding.size());
+    
     // Use the first chunk's embedding as the query
     // TODO: Could implement more sophisticated document-level embeddings
     return searchSimilar(document_vectors[0].embedding, params);
@@ -568,7 +518,12 @@ std::vector<VectorRecord> VectorDatabase::getVectorsByDocument(const std::string
     return pImpl->getVectorsByDocument(document_hash);
 }
 
+bool VectorDatabase::hasEmbedding(const std::string& document_hash) const {
+    return pImpl->hasEmbedding(document_hash);
+}
+
 bool VectorDatabase::buildIndex() {
+    YAMS_ZONE_SCOPED_N("VectorDB::buildIndex");
     return pImpl->buildIndex();
 }
 
@@ -600,6 +555,45 @@ bool VectorDatabase::hasError() const {
     return pImpl->hasError();
 }
 
+Result<void> VectorDatabase::updateEmbeddings(const std::vector<VectorRecord>& records) {
+    // TODO: Implement batch update of embeddings
+    for (const auto& record : records) {
+        if (!updateVector(record.chunk_id, record)) {
+            return Error{ErrorCode::DatabaseError, "Failed to update embedding: " + record.chunk_id};
+        }
+    }
+    return {};
+}
+
+Result<std::vector<std::string>> VectorDatabase::getStaleEmbeddings(
+    const std::string& model_id,
+    const std::string& model_version) {
+    // TODO: Implement stale embedding detection
+    return std::vector<std::string>{};
+}
+
+Result<std::vector<VectorRecord>> VectorDatabase::getEmbeddingsByVersion(
+    const std::string& model_version,
+    size_t limit) {
+    // TODO: Implement version filtering
+    return std::vector<VectorRecord>{};
+}
+
+Result<void> VectorDatabase::markAsStale(const std::string& chunk_id) {
+    // TODO: Implement stale marking
+    return {};
+}
+
+Result<void> VectorDatabase::markAsDeleted(const std::string& chunk_id) {
+    // TODO: Implement soft delete
+    return {};
+}
+
+Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours age_threshold) {
+    // TODO: Implement purge of soft-deleted records
+    return size_t{0};
+}
+
 bool VectorDatabase::isValidEmbedding(const std::vector<float>& embedding, size_t expected_dim) {
     if (embedding.size() != expected_dim) {
         return false;
@@ -625,9 +619,9 @@ double VectorDatabase::computeCosineSimilarity(const std::vector<float>& a, cons
     double norm_b = 0.0;
 
     for (size_t i = 0; i < a.size(); ++i) {
-        dot_product += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
+        dot_product += static_cast<double>(a[i]) * static_cast<double>(b[i]);
+        norm_a += static_cast<double>(a[i]) * static_cast<double>(a[i]);
+        norm_b += static_cast<double>(b[i]) * static_cast<double>(b[i]);
     }
 
     norm_a = std::sqrt(norm_a);
@@ -655,7 +649,7 @@ namespace utils {
 std::vector<float> normalizeVector(const std::vector<float>& vec) {
     double norm = 0.0;
     for (float val : vec) {
-        norm += val * val;
+        norm += static_cast<double>(val) * static_cast<double>(val);
     }
     norm = std::sqrt(norm);
 
@@ -666,7 +660,7 @@ std::vector<float> normalizeVector(const std::vector<float>& vec) {
     std::vector<float> normalized;
     normalized.reserve(vec.size());
     for (float val : vec) {
-        normalized.push_back(static_cast<float>(val / norm));
+        normalized.push_back(static_cast<float>(static_cast<double>(val) / norm));
     }
 
     return normalized;

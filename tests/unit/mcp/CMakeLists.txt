@@ -2,7 +2,6 @@
 
 add_executable(mcp_tests
     mcp_server_test.cpp
-    websocket_transport_test.cpp
     stdio_transport_test.cpp
     mcp_tools_schema_and_smoke_test.cpp
 )

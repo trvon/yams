@@ -20,7 +20,7 @@ public:
     std::string getName() const override { return "serve"; }
     
     std::string getDescription() const override { 
-        return "Start MCP server (transports: stdio, websocket)";
+        return "Start MCP server (stdio transport only)";
     }
     
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
@@ -28,16 +28,8 @@ public:
         
         auto* cmd = app.add_subcommand("serve", getDescription());
         
-        cmd->add_option("-t,--transport", transport_, "Transport: stdio | websocket")
-            ->default_val("stdio");
-        
-        cmd->add_option("-p,--port", port_, "WebSocket port (when --transport=websocket)")
-            ->default_val(8080);
-        cmd->add_option("--host", host_, "WebSocket host (when --transport=websocket)")
-            ->default_val("127.0.0.1");
-        cmd->add_option("--path", wsPath_, "WebSocket path (default /mcp)")
-            ->default_val("/mcp");
-        cmd->add_flag("--ssl", useSSL_, "Use TLS for WebSocket (wss) (when --transport=websocket)");
+        // MCP server now only supports stdio transport
+        // WebSocket support has been removed to reduce dependencies
         
         cmd->callback([this]() { 
             auto result = execute();
@@ -50,27 +42,23 @@ public:
     
     Result<void> execute() override {
         try {
-            // For stdio transport, redirect logging to stderr to avoid protocol conflicts
-            if (transport_ == "stdio") {
-                // Create a stderr sink for spdlog
-                auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-                auto logger = std::make_shared<spdlog::logger>("stderr", stderr_sink);
-                spdlog::set_default_logger(logger);
-                
-                // Print startup message to stderr for user feedback
-                std::cerr << "\n=== YAMS MCP Server ===" << std::endl;
-                std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)" << std::endl;
-                std::cerr << "Status: Waiting for client connection..." << std::endl;
-                std::cerr << "Press Ctrl+C to stop the server" << std::endl;
+            // Redirect logging to stderr to avoid protocol conflicts with stdio transport
+            // Create a stderr sink for spdlog
+            auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+            auto logger = std::make_shared<spdlog::logger>("stderr", stderr_sink);
+            spdlog::set_default_logger(logger);
+            
+            // Print startup message to stderr for user feedback
+            std::cerr << "\n=== YAMS MCP Server ===" << std::endl;
+            std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)" << std::endl;
+            std::cerr << "Status: Waiting for client connection..." << std::endl;
+            std::cerr << "Press Ctrl+C to stop the server" << std::endl;
+            std::cerr << std::endl;
+            
+            // Check if we're in an interactive terminal
+            if (isatty(STDIN_FILENO)) {
+                std::cerr << "Note: MCP stdio transport expects JSON-RPC messages on stdin." << std::endl;
                 std::cerr << std::endl;
-                
-                // Check if we're in an interactive terminal
-                if (isatty(STDIN_FILENO)) {
-                    std::cerr << "Note: MCP stdio transport expects JSON-RPC messages on stdin." << std::endl;
-                    std::cerr << "For testing, use: yams serve --transport websocket" << std::endl;
-                    std::cerr << "Or configure with Claude Desktop: https://docs.anthropic.com/en/docs/claude-code" << std::endl;
-                    std::cerr << std::endl;
-                }
             }
             
             // Set up signal handler for graceful shutdown using sigaction
@@ -134,29 +122,9 @@ public:
                 return Error{ErrorCode::NotInitialized, "Storage not initialized"};
             }
             
-            // Create transport based on type
-            std::unique_ptr<mcp::ITransport> transport;
-            if (transport_ == "stdio") {
-                transport = std::make_unique<mcp::StdioTransport>();
-                spdlog::info("MCP server initialized with stdio transport");
-            } else if (transport_ == "websocket" || transport_ == "ws") {
-                mcp::WebSocketTransport::Config cfg;
-                cfg.host = host_;
-                cfg.port = static_cast<uint16_t>(port_);
-                cfg.path = wsPath_;
-                cfg.useSSL = useSSL_;
-                auto wsTransport = std::make_unique<mcp::WebSocketTransport>(cfg);
-                auto* ws = dynamic_cast<mcp::WebSocketTransport*>(wsTransport.get());
-                if (!ws || !ws->connect()) {
-                    return Error{ErrorCode::InternalError, "Failed to open websocket transport"};
-                }
-                spdlog::info("Starting MCP server with websocket transport on {}://{}:{}{}",
-                             (useSSL_ ? "wss" : "ws"), host_, port_, wsPath_);
-                transport = std::move(wsTransport);
-            } else {
-                return Error{ErrorCode::NotImplemented, 
-                             "Transport type not implemented: " + transport_};
-            }
+            // Create stdio transport (only supported transport)
+            std::unique_ptr<mcp::ITransport> transport = std::make_unique<mcp::StdioTransport>();
+            spdlog::info("MCP server initialized with stdio transport");
             
             // Create and start MCP server with shutdown flag
             auto server = std::make_unique<mcp::MCPServer>(
@@ -181,11 +149,6 @@ public:
     
 private:
     YamsCLI* cli_ = nullptr;
-    std::string transport_ = "stdio";
-    int port_ = 8080;
-    std::string host_ = "127.0.0.1";
-    std::string wsPath_ = "/mcp";
-    bool useSSL_ = false;
 };
 
 // Factory function

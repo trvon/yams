@@ -51,11 +51,4 @@ install(TARGETS yams_api
 # Create alias
 add_library(yams::api ALIAS yams_api)
 
-# Add HTTP API if Drogon is available
-find_package(Drogon CONFIG QUIET)
-if(Drogon_FOUND)
-    add_subdirectory(http)
-    message(STATUS "Building YAMS HTTP API with Drogon")
-else()
-    message(STATUS "Drogon not found, skipping HTTP API")
-endif()
+# HTTP API removed - use MCP server instead

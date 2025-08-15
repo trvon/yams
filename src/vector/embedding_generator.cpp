@@ -1,4 +1,6 @@
 #include <yams/vector/embedding_generator.h>
+#include <yams/profiling.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -12,8 +14,7 @@
 #include <random>
 #include <iomanip>
 
-// TODO: Replace with actual ONNX Runtime includes when available
-// #include <onnxruntime_cxx_api.h>
+#include <onnxruntime_cxx_api.h>
 
 namespace yams::vector {
 
@@ -191,9 +192,17 @@ private:
             return it->second;
         }
         
-        // Add new tokens dynamically (in real implementation, this wouldn't happen)
-        vocab_to_id_[token] = vocab_to_id_.size();
-        return vocab_to_id_[token];
+        // Don't add new tokens beyond model vocabulary limit
+        // Most BERT-based models have vocab size around 30k-32k
+        const size_t MAX_VOCAB_SIZE = 30527; // Known limit from error message
+        
+        if (vocab_to_id_.size() < MAX_VOCAB_SIZE) {
+            vocab_to_id_[token] = vocab_to_id_.size();
+            return vocab_to_id_[token];
+        } else {
+            // Return UNK token for unknown tokens beyond vocab limit
+            return static_cast<int32_t>(config_.unk_token_id);
+        }
     }
 
     int32_t getSpecialTokenId(const std::string& token) {
@@ -255,9 +264,13 @@ std::string TextPreprocessor::decodeToken(int32_t token_id) const {
 
 class ModelManager::Impl {
 public:
-    Impl() = default;
+    Impl() : env_(ORT_LOGGING_LEVEL_WARNING, "yams") {
+        session_options_.SetIntraOpNumThreads(4);
+        session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    }
 
     bool loadModel(const std::string& model_name, const std::string& model_path) {
+        YAMS_ZONE_SCOPED_N("ModelManager::loadModel");
         std::lock_guard<std::mutex> lock(mutex_);
         
         if (models_.find(model_name) != models_.end()) {
@@ -265,9 +278,6 @@ public:
         }
         
         try {
-            // TODO: Load actual ONNX model
-            // For now, simulate model loading
-            
             if (!std::filesystem::exists(model_path)) {
                 setError("Model file not found: " + model_path);
                 return false;
@@ -275,16 +285,68 @@ public:
             
             ModelInfo info;
             info.model_path = model_path;
-            info.embedding_dim = 384; // Default for all-MiniLM-L6-v2
-            info.max_sequence_length = 512;
             info.model_size_bytes = std::filesystem::file_size(model_path);
             info.load_time = std::chrono::system_clock::now();
             
-            // Detect embedding dimension from model name
-            if (model_name.find("all-mpnet-base-v2") != std::string::npos) {
-                info.embedding_dim = 768;
-            } else if (model_name.find("multilingual") != std::string::npos) {
-                info.embedding_dim = 384;
+            // Load ONNX model
+            info.session = std::make_unique<Ort::Session>(env_, model_path.c_str(), session_options_);
+            
+            // Get model metadata from ONNX
+            size_t num_input_nodes = info.session->GetInputCount();
+            size_t num_output_nodes = info.session->GetOutputCount();
+            
+            // Set fixed sequence lengths based on model type
+            // Sentence-transformers ONNX models expect fixed input shapes
+            if (model_name.find("MiniLM") != std::string::npos) {
+                info.max_sequence_length = 256; // MiniLM models typically use 256
+            } else if (model_name.find("mpnet") != std::string::npos) {
+                info.max_sequence_length = 512; // MPNet models can handle 512
+            } else {
+                info.max_sequence_length = 512; // Default to 512
+            }
+            
+            // Get output shape to determine embedding dimension
+            if (num_output_nodes > 0) {
+                auto output_shape = info.session->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+                if (output_shape.size() >= 2) {
+                    info.embedding_dim = output_shape[output_shape.size() - 1] > 0 ? 
+                                         output_shape[output_shape.size() - 1] : 384;
+                }
+            }
+            
+            // Validate that the model has the expected inputs
+            if (num_input_nodes < 2) {
+                throw std::runtime_error("Model should have at least 2 inputs (input_ids, attention_mask). Found: " + 
+                                        std::to_string(num_input_nodes));
+            }
+            
+            // Use the actual model input/output names for flexibility
+            // This allows different sentence-transformers models with different input requirements
+            info.input_names.clear();
+            info.output_names.clear();
+            
+            // Get actual input names from the model
+            Ort::AllocatorWithDefaultOptions allocator;
+            for (size_t i = 0; i < num_input_nodes; ++i) {
+                auto input_name = info.session->GetInputNameAllocated(i, allocator);
+                info.input_names.push_back(input_name.get());
+            }
+            
+            // Get actual output names from the model  
+            for (size_t i = 0; i < num_output_nodes; ++i) {
+                auto output_name = info.session->GetOutputNameAllocated(i, allocator);
+                info.output_names.push_back(output_name.get());
+            }
+            
+            // Build char* vectors for ONNX Runtime
+            info.input_names_char.clear();
+            for (const auto& name : info.input_names) {
+                info.input_names_char.push_back(name.c_str());
+            }
+            
+            info.output_names_char.clear();
+            for (const auto& name : info.output_names) {
+                info.output_names_char.push_back(name.c_str());
             }
             
             models_[model_name] = std::move(info);
@@ -318,6 +380,7 @@ public:
         const std::vector<std::vector<int32_t>>& input_tokens,
         const std::vector<std::vector<int32_t>>& attention_masks) {
         
+        YAMS_ZONE_SCOPED_N("ModelManager::runInference");
         std::lock_guard<std::mutex> lock(mutex_);
         
         auto it = models_.find(model_name);
@@ -330,53 +393,201 @@ public:
         try {
             auto start = std::chrono::high_resolution_clock::now();
             
-            // TODO: Run actual ONNX inference
-            // For now, generate mock embeddings
-            std::vector<std::vector<float>> embeddings;
-            embeddings.reserve(input_tokens.size());
-            
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            
-            for (size_t i = 0; i < input_tokens.size(); ++i) {
-                std::vector<float> embedding(model_info.embedding_dim);
+            if (model_info.session) {
+                YAMS_ZONE_SCOPED_N("ONNX_Inference");
                 
-                // Generate deterministic but varied embeddings based on input
-                std::mt19937 token_gen(input_tokens[i].empty() ? 0 : input_tokens[i][0]);
-                std::normal_distribution<float> token_dist(0.0f, 1.0f);
+                std::vector<std::vector<float>> embeddings;
+                embeddings.reserve(input_tokens.size());
                 
-                for (size_t j = 0; j < model_info.embedding_dim; ++j) {
-                    embedding[j] = token_dist(token_gen);
-                }
-                
-                // Normalize embedding
-                double norm = 0.0;
-                for (float val : embedding) {
-                    norm += val * val;
-                }
-                norm = std::sqrt(norm);
-                
-                if (norm > 0.0) {
-                    for (float& val : embedding) {
-                        val /= norm;
+                // Process each item in the batch
+                for (size_t batch_idx = 0; batch_idx < input_tokens.size(); ++batch_idx) {
+                    const auto& tokens = input_tokens[batch_idx];
+                    const auto& mask = attention_masks[batch_idx];
+                    
+                    // Ensure input is exactly the expected sequence length
+                    size_t expected_seq_len = model_info.max_sequence_length;
+                    if (tokens.size() != expected_seq_len || mask.size() != expected_seq_len) {
+                        throw std::runtime_error("Input sequence length mismatch: expected " + 
+                            std::to_string(expected_seq_len) + ", got " + std::to_string(tokens.size()));
+                    }
+                    
+                    // Create input tensors with fixed shape
+                    std::vector<int64_t> input_shape = {1, static_cast<int64_t>(expected_seq_len)};
+                    size_t input_tensor_size = expected_seq_len;
+                    
+                    // Convert tokens to int64, with conservative vocabulary bounds
+                    const int64_t MAX_TOKEN_ID = 30521; // BERT vocab size for sentence-transformers
+                    const int64_t UNK_TOKEN_ID = 100; // [UNK] token ID in BERT vocab
+                    
+                    std::vector<int64_t> tokens_int64;
+                    tokens_int64.reserve(expected_seq_len);
+                    for (const auto& token : tokens) {
+                        if (token < 0 || token > MAX_TOKEN_ID) {
+                            tokens_int64.push_back(UNK_TOKEN_ID);
+                        } else {
+                            tokens_int64.push_back(static_cast<int64_t>(token));
+                        }
+                    }
+                    
+                    std::vector<int64_t> mask_int64(mask.begin(), mask.end());
+                    
+                    // Create ONNX tensors
+                    auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+                    
+                    std::vector<Ort::Value> input_tensors;
+                    
+                    // Add input_ids (always first)
+                    input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memory_info, tokens_int64.data(), input_tensor_size, input_shape.data(), 2));
+                    
+                    // Add attention_mask (always second)
+                    input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memory_info, mask_int64.data(), input_tensor_size, input_shape.data(), 2));
+                    
+                    // Add token_type_ids if the model expects it (some models like MiniLM need it, MPNet doesn't)
+                    std::vector<int64_t> token_type_ids;
+                    if (model_info.input_names.size() >= 3) {
+                        token_type_ids.resize(expected_seq_len, 0); // All zeros for single sentences
+                        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                            memory_info, token_type_ids.data(), input_tensor_size, input_shape.data(), 2));
+                    }
+                    
+                    // Run inference with the actual number of inputs and outputs
+                    auto output_tensors = model_info.session->Run(
+                        Ort::RunOptions{nullptr},
+                        model_info.input_names_char.data(),
+                        input_tensors.data(),
+                        model_info.input_names.size(), // Use actual input count
+                        model_info.output_names_char.data(),
+                        model_info.output_names.size()  // Use actual output count
+                    );
+                    
+                    // Extract embeddings from output with proper attention-mask-weighted mean pooling
+                    if (!output_tensors.empty()) {
+                        auto& output_tensor = output_tensors[0];
+                        auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
+                        auto output_data = output_tensor.GetTensorData<float>();
+                        
+                        size_t embedding_size = model_info.embedding_dim;
+                        
+                        // Sentence-transformers models output token embeddings that need mean pooling
+                        // Expected shape: [batch_size, seq_len, hidden_dim]
+                        if (output_shape.size() == 3) {
+                            size_t batch_size = output_shape[0];
+                            size_t seq_len = output_shape[1];
+                            size_t hidden_dim = output_shape[2];
+                            
+                            // Validate output dimensions
+                            if (hidden_dim != embedding_size) {
+                                throw std::runtime_error("Output dimension " + std::to_string(hidden_dim) + 
+                                                        " doesn't match expected " + std::to_string(embedding_size));
+                            }
+                            
+                            // Process each batch item (should only be 1 in our case)
+                            for (size_t b_idx = 0; b_idx < batch_size; ++b_idx) {
+                                std::vector<float> embedding(embedding_size, 0.0f);
+                                float total_attention = 0.0f;
+                                
+                                // Get attention mask for this batch item
+                                const auto& attention_mask = attention_masks[b_idx];
+                                
+                                // Attention-mask-weighted mean pooling
+                                for (size_t seq_idx = 0; seq_idx < seq_len && seq_idx < attention_mask.size(); ++seq_idx) {
+                                    float attention_weight = static_cast<float>(attention_mask[seq_idx]);
+                                    
+                                    if (attention_weight > 0.0f) {
+                                        total_attention += attention_weight;
+                                        
+                                        // Add weighted token embedding to sentence embedding
+                                        size_t token_offset = b_idx * seq_len * hidden_dim + seq_idx * hidden_dim;
+                                        for (size_t dim = 0; dim < hidden_dim; ++dim) {
+                                            embedding[dim] += output_data[token_offset + dim] * attention_weight;
+                                        }
+                                    }
+                                }
+                                
+                                // Normalize by total attention (number of non-padding tokens)
+                                if (total_attention > 0.0f) {
+                                    for (float& val : embedding) {
+                                        val /= total_attention;
+                                    }
+                                }
+                                
+                                // L2 normalize the final embedding (sentence-transformers standard)
+                                double norm = 0.0;
+                                for (float val : embedding) {
+                                    norm += val * val;
+                                }
+                                norm = std::sqrt(norm);
+                                
+                                if (norm > 1e-8) {
+                                    for (float& val : embedding) {
+                                        val /= static_cast<float>(norm);
+                                    }
+                                } else {
+                                    // Handle zero embedding case
+                                    std::fill(embedding.begin(), embedding.end(), 0.0f);
+                                }
+                                
+                                embeddings.push_back(std::move(embedding));
+                            }
+                        } else if (output_shape.size() == 2 && output_shape[1] == embedding_size) {
+                            // Direct pooled output - already sentence embedding
+                            size_t batch_size = output_shape[0];
+                            for (size_t b_idx = 0; b_idx < batch_size; ++b_idx) {
+                                std::vector<float> embedding(embedding_size);
+                                std::copy(output_data + b_idx * embedding_size,
+                                         output_data + (b_idx + 1) * embedding_size,
+                                         embedding.begin());
+                                
+                                // L2 normalize
+                                double norm = 0.0;
+                                for (float val : embedding) {
+                                    norm += val * val;
+                                }
+                                norm = std::sqrt(norm);
+                                
+                                if (norm > 1e-8) {
+                                    for (float& val : embedding) {
+                                        val /= static_cast<float>(norm);
+                                    }
+                                }
+                                
+                                embeddings.push_back(std::move(embedding));
+                            }
+                        } else {
+                            throw std::runtime_error("Unexpected output tensor shape: [" + 
+                                                    std::to_string(output_shape[0]) + 
+                                                    (output_shape.size() > 1 ? ", " + std::to_string(output_shape[1]) : "") +
+                                                    (output_shape.size() > 2 ? ", " + std::to_string(output_shape[2]) : "") + "]");
+                        }
                     }
                 }
                 
-                embeddings.push_back(std::move(embedding));
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+                
+                // Update statistics
+                model_info.stats.inference_count++;
+                model_info.stats.total_inference_time += duration;
+                
+                return embeddings;
             }
             
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            
-            // Update statistics
-            model_info.stats.inference_count++;
-            model_info.stats.total_inference_time += duration;
-            
-            return embeddings;
+            // If we reach here, ONNX session is null - this should not happen after proper model loading
+            setError("ONNX session is null - model was not loaded properly");
+            return {};
 
+        } catch (const Ort::Exception& e) {
+            std::string error_msg = "ONNX Runtime error: " + std::string(e.what()) + 
+                                   " (code: " + std::to_string(e.GetOrtErrorCode()) + ")";
+            spdlog::error("ONNX inference failed for model '{}': {}", model_name, error_msg);
+            setError(error_msg);
+            return {};
         } catch (const std::exception& e) {
-            setError("Inference failed: " + std::string(e.what()));
+            std::string error_msg = "Inference failed: " + std::string(e.what());
+            spdlog::error("Embedding generation failed for model '{}': {}", model_name, error_msg);
+            setError(error_msg);
             return {};
         }
     }
@@ -443,8 +654,11 @@ private:
             std::chrono::milliseconds total_inference_time{0};
         } stats;
         
-        // TODO: Add ONNX runtime session
-        // Ort::Session session;
+        std::unique_ptr<Ort::Session> session;
+        std::vector<std::string> input_names;
+        std::vector<std::string> output_names;
+        std::vector<const char*> input_names_char;
+        std::vector<const char*> output_names_char;
     };
 
     void setError(const std::string& error) const {
@@ -456,6 +670,9 @@ private:
     std::unordered_map<std::string, ModelInfo> models_;
     mutable std::string last_error_;
     mutable bool has_error_ = false;
+    
+    Ort::Env env_;
+    Ort::SessionOptions session_options_;
 };
 
 ModelManager::ModelManager() : pImpl(std::make_unique<Impl>()) {}
@@ -568,10 +785,15 @@ public:
         try {
             auto start = std::chrono::high_resolution_clock::now();
             
-            // Tokenize and preprocess
+            // Tokenize and preprocess using model-specific sequence length
+            size_t model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
+            if (model_seq_length == 0) {
+                model_seq_length = config_.max_sequence_length; // Fallback to config
+            }
+            
             auto tokens = preprocessor_.tokenize(text);
-            tokens = preprocessor_.truncateTokens(tokens, config_.max_sequence_length);
-            tokens = preprocessor_.padTokens(tokens, config_.max_sequence_length);
+            tokens = preprocessor_.truncateTokens(tokens, model_seq_length);
+            tokens = preprocessor_.padTokens(tokens, model_seq_length);
             
             auto attention_mask = preprocessor_.generateAttentionMask(tokens);
             
@@ -639,10 +861,16 @@ public:
                 auto batch_tokens = preprocessor_.tokenizeBatch(batch_texts);
                 std::vector<std::vector<int32_t>> batch_masks;
                 
+                // Get model-specific sequence length
+                size_t model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
+                if (model_seq_length == 0) {
+                    model_seq_length = config_.max_sequence_length; // Fallback to config
+                }
+                
                 // Truncate and pad
                 for (auto& tokens : batch_tokens) {
-                    tokens = preprocessor_.truncateTokens(tokens, config_.max_sequence_length);
-                    tokens = preprocessor_.padTokens(tokens, config_.max_sequence_length);
+                    tokens = preprocessor_.truncateTokens(tokens, model_seq_length);
+                    tokens = preprocessor_.padTokens(tokens, model_seq_length);
                 }
                 
                 // Generate attention masks
@@ -767,10 +995,12 @@ void EmbeddingGenerator::shutdown() {
 }
 
 std::vector<float> EmbeddingGenerator::generateEmbedding(const std::string& text) {
+    YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbedding");
     return pImpl->generateEmbedding(text);
 }
 
 std::vector<std::vector<float>> EmbeddingGenerator::generateEmbeddings(const std::vector<std::string>& texts) {
+    YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbeddings");
     return pImpl->generateEmbeddings(texts);
 }
 
