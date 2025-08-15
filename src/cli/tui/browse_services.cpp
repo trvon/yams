@@ -1,7 +1,7 @@
 #include <yams/cli/tui/browse_services.hpp>
 
-#include <yams/cli/yams_cli.h>
 #include <yams/api/content_store.h>
+#include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
 
 #include <spdlog/spdlog.h>
@@ -30,20 +30,19 @@ namespace {
 inline std::string toLower(std::string_view s) {
     std::string out;
     out.reserve(s.size());
-    for (char c : s) out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    for (char c : s)
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     return out;
 }
 
-
-
 inline char toPrintable(unsigned char c) {
-    if (std::isprint(c)) return static_cast<char>(c);
+    if (std::isprint(c))
+        return static_cast<char>(c);
     return '.';
 }
 } // namespace
 
-BrowseServices::BrowseServices(yams::cli::YamsCLI* cli) noexcept
-    : _cli(cli) {}
+BrowseServices::BrowseServices(yams::cli::YamsCLI* cli) noexcept : _cli(cli) {}
 
 // ------------- Documents listing -------------
 
@@ -53,12 +52,13 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
 
     if (!_cli) {
         spdlog::error("TUI Services: CLI not available");
-        if (status_message) *status_message = "Internal error: CLI not available";
+        if (status_message)
+            *status_message = "Internal error: CLI not available";
         return all;
     }
-    
+
     spdlog::debug("TUI Services: Starting document load");
-    
+
     auto startTime = std::chrono::steady_clock::now();
 
     auto metadataRepo = _cli->getMetadataRepository();
@@ -71,21 +71,23 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
         if (count > 0) {
             // Limit initial query to prevent UI freezing on large databases
             constexpr int INITIAL_LOAD_LIMIT = 1000;
-            
+
             auto docsRes = metadataRepo->findDocumentsByPath("%");
             if (docsRes.has_value()) {
-                spdlog::debug("TUI Services: Query returned {} document results", docsRes.value().size());
+                spdlog::debug("TUI Services: Query returned {} document results",
+                              docsRes.value().size());
                 int loaded = 0;
                 for (const auto& di : docsRes.value()) {
                     // Check timeout every 100 documents
                     if (loaded % 100 == 0) {
                         auto elapsed = std::chrono::steady_clock::now() - startTime;
-                        if (elapsed > std::chrono::seconds(10)) {  // 10 second timeout
-                            status = std::to_string(loaded) + " documents loaded (timeout - more available)";
+                        if (elapsed > std::chrono::seconds(10)) { // 10 second timeout
+                            status = std::to_string(loaded) +
+                                     " documents loaded (timeout - more available)";
                             break;
                         }
                     }
-                    
+
                     DocEntry e;
                     e.hash = di.sha256Hash;
                     e.name = di.fileName;
@@ -94,14 +96,15 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
                     e.createdAt = di.createdTime;
                     e.id = di.id;
                     all.push_back(std::move(e));
-                    
+
                     loaded++;
                     if (loaded >= INITIAL_LOAD_LIMIT) {
-                        status = std::to_string(loaded) + " documents loaded (limited for performance)";
+                        status =
+                            std::to_string(loaded) + " documents loaded (limited for performance)";
                         break;
                     }
                 }
-                
+
                 if (status.empty()) {
                     status = std::to_string(all.size()) + " documents loaded";
                 }
@@ -115,7 +118,8 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
             spdlog::warn("TUI Services: No documents available (count: {})", count);
         }
     } else {
-        spdlog::warn("TUI Services: No metadata repository available, falling back to content store");
+        spdlog::warn(
+            "TUI Services: No metadata repository available, falling back to content store");
         // Fallback to content store stats with synthetic entries
         auto store = _cli->getContentStore();
         if (store) {
@@ -145,18 +149,20 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
             status += " (capped to " + std::to_string(MAX_TUI_DOCS) + " for TUI)";
         }
     }
-    if (status_message) *status_message = std::move(status);
+    if (status_message)
+        *status_message = std::move(status);
     return all;
 }
 
-std::vector<DocEntry> BrowseServices::fuzzySearch(std::string_view query,
-                                                  float min_similarity,
+std::vector<DocEntry> BrowseServices::fuzzySearch(std::string_view query, float min_similarity,
                                                   int limit) {
     std::vector<DocEntry> out;
-    if (!_cli) return out;
+    if (!_cli)
+        return out;
 
     auto metadataRepo = _cli->getMetadataRepository();
-    if (!metadataRepo) return out;
+    if (!metadataRepo)
+        return out;
 
     auto res = metadataRepo->fuzzySearch(std::string(query), min_similarity, limit);
     if (res.has_value() && res.value().isSuccess()) {
@@ -177,19 +183,20 @@ std::vector<DocEntry> BrowseServices::fuzzySearch(std::string_view query,
 
 std::vector<DocEntry> BrowseServices::filterBasic(const std::vector<DocEntry>& all,
                                                   std::string_view needle) {
-    if (needle.empty()) return all;
+    if (needle.empty())
+        return all;
 
     std::vector<DocEntry> filtered;
     filtered.reserve(all.size());
 
     // Case-insensitive substring search without extra allocations for names
     auto ci_contains = [](std::string_view hay, std::string_view ndl) -> bool {
-        if (ndl.empty()) return true;
-        auto it = std::search(hay.begin(), hay.end(), ndl.begin(), ndl.end(),
-            [](char a, char b) {
-                return std::tolower(static_cast<unsigned char>(a)) ==
-                       std::tolower(static_cast<unsigned char>(b));
-            });
+        if (ndl.empty())
+            return true;
+        auto it = std::search(hay.begin(), hay.end(), ndl.begin(), ndl.end(), [](char a, char b) {
+            return std::tolower(static_cast<unsigned char>(a)) ==
+                   std::tolower(static_cast<unsigned char>(b));
+        });
         return it != hay.end();
     };
 
@@ -208,30 +215,38 @@ std::vector<DocEntry> BrowseServices::filterBasic(const std::vector<DocEntry>& a
 // ------------- Content loading -------------
 
 std::optional<std::string> BrowseServices::loadTextContent(int64_t doc_id) {
-    if (!_cli) return std::nullopt;
+    if (!_cli)
+        return std::nullopt;
     auto metadataRepo = _cli->getMetadataRepository();
-    if (!metadataRepo) return std::nullopt;
+    if (!metadataRepo)
+        return std::nullopt;
 
     auto contentRes = metadataRepo->getContent(doc_id);
-    if (!contentRes.has_value()) return std::nullopt;
+    if (!contentRes.has_value())
+        return std::nullopt;
 
     const auto& optContent = contentRes.value();
-    if (!optContent.has_value()) return std::nullopt;
+    if (!optContent.has_value())
+        return std::nullopt;
 
     return optContent->contentText;
 }
 
 std::vector<std::byte> BrowseServices::loadRawBytes(std::string_view hash, size_t cap_bytes) {
     std::vector<std::byte> out;
-    if (!_cli) return out;
+    if (!_cli)
+        return out;
     auto store = _cli->getContentStore();
-    if (!store) return out;
+    if (!store)
+        return out;
 
     auto res = store->retrieveBytes(std::string(hash));
-    if (!res.has_value()) return out;
+    if (!res.has_value())
+        return out;
 
     auto& bytes = res.value();
-    if (bytes.empty()) return out;
+    if (bytes.empty())
+        return out;
 
     if (cap_bytes > 0 && bytes.size() > cap_bytes) {
         out.assign(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(cap_bytes));
@@ -244,13 +259,16 @@ std::vector<std::byte> BrowseServices::loadRawBytes(std::string_view hash, size_
 // ------------- Content utilities -------------
 
 bool BrowseServices::looksBinary(std::string_view sample) const {
-    if (sample.empty()) return false;
+    if (sample.empty())
+        return false;
     size_t check = std::min<size_t>(sample.size(), 1024);
     size_t nonprint = 0;
     for (size_t i = 0; i < check; ++i) {
         unsigned char c = static_cast<unsigned char>(sample[i]);
-        if (c == '\n' || c == '\r' || c == '\t') continue;
-        if (!std::isprint(c)) nonprint++;
+        if (c == '\n' || c == '\r' || c == '\t')
+            continue;
+        if (!std::isprint(c))
+            nonprint++;
     }
     return nonprint > check / 10;
 }
@@ -263,18 +281,20 @@ std::vector<std::string> BrowseServices::splitLines(const std::string& content,
     std::istringstream iss(content);
     std::string line;
     while (std::getline(iss, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
         lines.push_back(std::move(line));
-        if (lines.size() >= max_lines) break;
+        if (lines.size() >= max_lines)
+            break;
     }
     return lines;
 }
 
 std::vector<std::string> BrowseServices::toHexDump(const std::vector<std::byte>& bytes,
-                                                   size_t bytes_per_line,
-                                                   size_t max_lines) const {
+                                                   size_t bytes_per_line, size_t max_lines) const {
     std::vector<std::string> lines;
-    if (bytes_per_line == 0) return lines;
+    if (bytes_per_line == 0)
+        return lines;
 
     const size_t total = bytes.size();
     const size_t line_count = std::min(max_lines, (total + bytes_per_line - 1) / bytes_per_line);
@@ -282,7 +302,8 @@ std::vector<std::string> BrowseServices::toHexDump(const std::vector<std::byte>&
 
     for (size_t line_idx = 0; line_idx < line_count; ++line_idx) {
         size_t offset = line_idx * bytes_per_line;
-        if (offset >= total) break;
+        if (offset >= total)
+            break;
 
         size_t n = std::min(bytes_per_line, total - offset);
         std::ostringstream oss;
@@ -297,8 +318,10 @@ std::vector<std::string> BrowseServices::toHexDump(const std::vector<std::byte>&
         // Hex bytes
         for (size_t i = 0; i < bytes_per_line; ++i) {
             if (i < n) {
-                unsigned int v = static_cast<unsigned int>(std::to_integer<unsigned char>(bytes[offset + i]));
-                if (v < 0x10) oss << '0';
+                unsigned int v =
+                    static_cast<unsigned int>(std::to_integer<unsigned char>(bytes[offset + i]));
+                if (v < 0x10)
+                    oss << '0';
                 oss << std::uppercase << v << std::nouppercase;
             } else {
                 oss << "  ";
@@ -320,22 +343,21 @@ std::vector<std::string> BrowseServices::toHexDump(const std::vector<std::byte>&
     return lines;
 }
 
-std::vector<std::string> BrowseServices::makePreviewLines(const DocEntry& doc,
-                                                          PreviewMode mode,
-                                                          size_t max_bytes,
-                                                          size_t max_lines) {
+std::vector<std::string> BrowseServices::makePreviewLines(const DocEntry& doc, PreviewMode mode,
+                                                          size_t max_bytes, size_t max_lines) {
     switch (mode) {
         case PreviewMode::Text:
         case PreviewMode::Auto: {
             // Prefer metadata text
             if (auto text = loadTextContent(doc.id)) {
                 auto lines = splitLines(*text, max_lines);
-                if (!lines.empty()) return lines;
+                if (!lines.empty())
+                    return lines;
             }
             // Fallback to raw bytes
             auto bytes = loadRawBytes(doc.hash, max_bytes);
             if (bytes.empty()) {
-                return { "No preview available." };
+                return {"No preview available."};
             }
             // Convert to string to run binary heuristic and split
             std::string sample;
@@ -345,7 +367,7 @@ std::vector<std::string> BrowseServices::makePreviewLines(const DocEntry& doc,
             }
             if (mode == PreviewMode::Text) {
                 if (looksBinary(sample)) {
-                    return { "Binary content. Preview unavailable." };
+                    return {"Binary content. Preview unavailable."};
                 }
                 return splitLines(sample, max_lines);
             }
@@ -353,23 +375,22 @@ std::vector<std::string> BrowseServices::makePreviewLines(const DocEntry& doc,
             if (!looksBinary(sample)) {
                 return splitLines(sample, max_lines);
             }
-            return { "Binary content. Preview unavailable." };
+            return {"Binary content. Preview unavailable."};
         }
         case PreviewMode::Hex: {
             auto bytes = loadRawBytes(doc.hash, max_bytes);
             if (bytes.empty()) {
-                return { "No preview available." };
+                return {"No preview available."};
             }
             return toHexDump(bytes, 16, max_lines);
         }
     }
-    return { "No preview available." };
+    return {"No preview available."};
 }
 
 // ------------- External pager -------------
 
-bool BrowseServices::openInPager(const std::string& name,
-                                 const std::optional<std::string>& text,
+bool BrowseServices::openInPager(const std::string& name, const std::optional<std::string>& text,
                                  const std::vector<std::byte>& raw_bytes,
                                  std::string* error_message) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -381,7 +402,8 @@ bool BrowseServices::openInPager(const std::string& name,
     char tmpl[] = "/tmp/yams-pager-XXXXXX";
     int fd = mkstemp(tmpl);
     if (fd == -1) {
-        if (error_message) *error_message = "Failed to create temporary file";
+        if (error_message)
+            *error_message = "Failed to create temporary file";
         return false;
     }
     std::string tmp_path = tmpl;
@@ -390,7 +412,8 @@ bool BrowseServices::openInPager(const std::string& name,
     {
         std::ofstream ofs(tmp_path, std::ios::binary);
         if (!ofs) {
-            if (error_message) *error_message = "Failed to open temporary file for writing";
+            if (error_message)
+                *error_message = "Failed to open temporary file for writing";
             ::close(fd);
             std::remove(tmp_path.c_str());
             return false;
@@ -418,7 +441,8 @@ bool BrowseServices::openInPager(const std::string& name,
     std::remove(tmp_path.c_str());
 
     if (rc == -1) {
-        if (error_message) *error_message = "Failed to execute pager";
+        if (error_message)
+            *error_message = "Failed to execute pager";
         return false;
     }
     return true;
@@ -426,7 +450,8 @@ bool BrowseServices::openInPager(const std::string& name,
     (void)name;
     (void)text;
     (void)raw_bytes;
-    if (error_message) *error_message = "External pager not supported on this platform";
+    if (error_message)
+        *error_message = "External pager not supported on this platform";
     return false;
 #endif
 }
@@ -444,7 +469,8 @@ bool BrowseServices::openInPagerWithSuspend(const std::string& name,
                 ok = false;
             }
         });
-        if (!ok && error_message) *error_message = err;
+        if (!ok && error_message)
+            *error_message = err;
         return ok;
     }
     return openInPager(name, text, raw_bytes, error_message);

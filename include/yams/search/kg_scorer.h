@@ -77,9 +77,8 @@ public:
      * @param candidate_ids  Document/Chunk IDs to score.
      * @return Map from candidate id -> KGScore (missing IDs imply zero scores).
      */
-    virtual Result<std::unordered_map<std::string, KGScore>> score(
-        const std::string& query_text,
-        const std::vector<std::string>& candidate_ids) = 0;
+    virtual Result<std::unordered_map<std::string, KGScore>>
+    score(const std::string& query_text, const std::vector<std::string>& candidate_ids) = 0;
 
     /**
      * Optional: return explanations for the last scoring call.

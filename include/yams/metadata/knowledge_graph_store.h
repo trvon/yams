@@ -6,9 +6,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
-#include <unordered_map>
 
 namespace yams::metadata {
 
@@ -53,11 +53,11 @@ struct KGNode {
  * Alias representation (kg_aliases).
  */
 struct KGAlias {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::int64_t nodeId = 0;                 // REFERENCES kg_nodes(id)
-    std::string alias;                       // Surface form
-    std::optional<std::string> source;       // Origin/system of alias
-    float confidence = 1.0f;                 // [0,1]
+    std::int64_t id = 0;               // PRIMARY KEY (assigned by DB)
+    std::int64_t nodeId = 0;           // REFERENCES kg_nodes(id)
+    std::string alias;                 // Surface form
+    std::optional<std::string> source; // Origin/system of alias
+    float confidence = 1.0f;           // [0,1]
 };
 
 /**
@@ -102,11 +102,11 @@ struct DocEntity {
  * Node statistics (kg_node_stats).
  */
 struct KGNodeStats {
-    std::int64_t nodeId = 0;                 // PRIMARY KEY, REFERENCES kg_nodes(id)
-    std::optional<std::int64_t> degree;      // Total degree
-    std::optional<float> pagerank;           // Optional PageRank score
+    std::int64_t nodeId = 0;                   // PRIMARY KEY, REFERENCES kg_nodes(id)
+    std::optional<std::int64_t> degree;        // Total degree
+    std::optional<float> pagerank;             // Optional PageRank score
     std::optional<std::int64_t> neighborCount; // Redundant with degree in simple graphs
-    std::optional<std::int64_t> lastComputed;   // Unix seconds
+    std::optional<std::int64_t> lastComputed;  // Unix seconds
 };
 
 /**
@@ -144,9 +144,8 @@ public:
     virtual Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) = 0;
 
     // Simple scans/filters
-    virtual Result<std::vector<KGNode>> findNodesByType(std::string_view type,
-                                                        std::size_t limit = 100,
-                                                        std::size_t offset = 0) = 0;
+    virtual Result<std::vector<KGNode>>
+    findNodesByType(std::string_view type, std::size_t limit = 100, std::size_t offset = 0) = 0;
 
     // Delete node (cascades to aliases/edges/embeddings/doc_entities as per schema)
     virtual Result<void> deleteNodeById(std::int64_t nodeId) = 0;
@@ -184,15 +183,13 @@ public:
     virtual Result<void> addEdges(const std::vector<KGEdge>& edges) = 0;
 
     // Adjacency queries
-    virtual Result<std::vector<KGEdge>> getEdgesFrom(std::int64_t srcNodeId,
-                                                     std::optional<std::string_view> relation = std::nullopt,
-                                                     std::size_t limit = 200,
-                                                     std::size_t offset = 0) = 0;
+    virtual Result<std::vector<KGEdge>>
+    getEdgesFrom(std::int64_t srcNodeId, std::optional<std::string_view> relation = std::nullopt,
+                 std::size_t limit = 200, std::size_t offset = 0) = 0;
 
-    virtual Result<std::vector<KGEdge>> getEdgesTo(std::int64_t dstNodeId,
-                                                   std::optional<std::string_view> relation = std::nullopt,
-                                                   std::size_t limit = 200,
-                                                   std::size_t offset = 0) = 0;
+    virtual Result<std::vector<KGEdge>>
+    getEdgesTo(std::int64_t dstNodeId, std::optional<std::string_view> relation = std::nullopt,
+               std::size_t limit = 200, std::size_t offset = 0) = 0;
 
     // For quick structural scoring: neighbor ids only (fast path)
     virtual Result<std::vector<std::int64_t>> neighbors(std::int64_t nodeId,
@@ -271,13 +268,11 @@ class ConnectionPool; // forward declaration
 // Create a SQLite-backed store using a file path. The database will be opened/configured
 // internally according to the provided config.
 Result<std::unique_ptr<KnowledgeGraphStore>>
-makeSqliteKnowledgeGraphStore(const std::string& dbPath,
-                              const KnowledgeGraphStoreConfig& cfg = {});
+makeSqliteKnowledgeGraphStore(const std::string& dbPath, const KnowledgeGraphStoreConfig& cfg = {});
 
 // Create a SQLite-backed store that uses an existing ConnectionPool for connections.
 // The store does not own the pool.
 Result<std::unique_ptr<KnowledgeGraphStore>>
-makeSqliteKnowledgeGraphStore(ConnectionPool& pool,
-                              const KnowledgeGraphStoreConfig& cfg = {});
+makeSqliteKnowledgeGraphStore(ConnectionPool& pool, const KnowledgeGraphStoreConfig& cfg = {});
 
 } // namespace yams::metadata

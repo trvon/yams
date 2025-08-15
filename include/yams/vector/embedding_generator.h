@@ -2,11 +2,11 @@
 
 #include <yams/core/types.h>
 
-#include <vector>
-#include <string>
-#include <memory>
 #include <chrono>
 #include <future>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace yams::vector {
 
@@ -24,13 +24,13 @@ struct EmbeddingConfig {
     float padding_token_id = 0.0f;
     float unk_token_id = 1.0f;
     bool enable_gpu = false;
-    int num_threads = -1;  // -1 for auto-detect
-    
+    int num_threads = -1; // -1 for auto-detect
+
     // Version tracking
-    std::string model_version = "1.0.0";      // Semantic version
-    uint32_t embedding_schema_version = 1;     // Schema version
-    bool track_content_hash = true;            // Track content changes
-    
+    std::string model_version = "1.0.0";   // Semantic version
+    uint32_t embedding_schema_version = 1; // Schema version
+    bool track_content_hash = true;        // Track content changes
+
     // Model-specific settings
     struct ModelSettings {
         std::string vocab_file;
@@ -75,18 +75,18 @@ public:
 
     // Text normalization
     std::string normalizeText(const std::string& text);
-    
+
     // Tokenization (basic implementation - can be extended with proper tokenizers)
     std::vector<int32_t> tokenize(const std::string& text);
     std::vector<std::vector<int32_t>> tokenizeBatch(const std::vector<std::string>& texts);
-    
+
     // Token processing
     std::vector<int32_t> truncateTokens(const std::vector<int32_t>& tokens, size_t max_length);
     std::vector<int32_t> padTokens(const std::vector<int32_t>& tokens, size_t target_length);
-    
+
     // Attention mask generation
     std::vector<int32_t> generateAttentionMask(const std::vector<int32_t>& tokens);
-    
+
     // Utility functions
     size_t getVocabSize() const;
     bool isValidToken(int32_t token_id) const;
@@ -116,17 +116,17 @@ public:
     bool isModelLoaded(const std::string& model_name) const;
     void unloadModel(const std::string& model_name);
     void clearCache();
-    
+
     // Model inference
-    std::vector<std::vector<float>> runInference(
-        const std::string& model_name,
-        const std::vector<std::vector<int32_t>>& input_tokens,
-        const std::vector<std::vector<int32_t>>& attention_masks = {});
-    
+    std::vector<std::vector<float>>
+    runInference(const std::string& model_name,
+                 const std::vector<std::vector<int32_t>>& input_tokens,
+                 const std::vector<std::vector<int32_t>>& attention_masks = {});
+
     // Model information
     size_t getModelEmbeddingDim(const std::string& model_name) const;
     size_t getModelMaxLength(const std::string& model_name) const;
-    
+
     // Performance and monitoring
     struct ModelStats {
         size_t inference_count = 0;
@@ -134,7 +134,7 @@ public:
         size_t model_size_bytes = 0;
         size_t memory_usage_bytes = 0;
     };
-    
+
     ModelStats getModelStats(const std::string& model_name) const;
     std::vector<std::string> getLoadedModels() const;
 
@@ -164,35 +164,36 @@ public:
 
     // Single text embedding
     std::vector<float> generateEmbedding(const std::string& text);
-    
+
     // Batch embedding generation (synchronous)
     std::vector<std::vector<float>> generateEmbeddings(const std::vector<std::string>& texts);
-    
+
     // Asynchronous embedding generation
     std::future<std::vector<float>> generateEmbeddingAsync(const std::string& text);
-    std::future<std::vector<std::vector<float>>> generateEmbeddingsAsync(const std::vector<std::string>& texts);
-    
+    std::future<std::vector<std::vector<float>>>
+    generateEmbeddingsAsync(const std::vector<std::string>& texts);
+
     // Model management
     bool loadModel(const std::string& model_path);
     bool switchModel(const std::string& model_name, const EmbeddingConfig& new_config);
     bool isModelLoaded() const;
     void unloadModel();
-    
+
     // Configuration and information
     size_t getEmbeddingDimension() const;
     size_t getMaxSequenceLength() const;
     const EmbeddingConfig& getConfig() const;
     void updateConfig(const EmbeddingConfig& new_config);
-    
+
     // Statistics and monitoring
     GenerationStats getStats() const;
     void resetStats();
-    
+
     // Validation and utility
     bool validateText(const std::string& text) const;
     size_t estimateTokenCount(const std::string& text) const;
     std::string getModelInfo() const;
-    
+
     // Error handling
     std::string getLastError() const;
     bool hasError() const;
@@ -211,50 +212,51 @@ std::unique_ptr<EmbeddingGenerator> createEmbeddingGenerator(const EmbeddingConf
  * Utility functions for embedding operations
  */
 namespace embedding_utils {
-    /**
-     * Normalize embeddings to unit length
-     */
-    std::vector<float> normalizeEmbedding(const std::vector<float>& embedding);
-    
-    /**
-     * Normalize batch of embeddings
-     */
-    std::vector<std::vector<float>> normalizeEmbeddings(const std::vector<std::vector<float>>& embeddings);
-    
-    /**
-     * Compute embedding magnitude
-     */
-    double computeMagnitude(const std::vector<float>& embedding);
-    
-    /**
-     * Validate embedding dimensions and values
-     */
-    bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim);
-    
-    /**
-     * Convert embedding to string representation (for debugging)
-     */
-    std::string embeddingToString(const std::vector<float>& embedding, size_t max_values = 10);
-    
-    /**
-     * Load model configuration from JSON file
-     */
-    EmbeddingConfig loadConfigFromFile(const std::string& config_path);
-    
-    /**
-     * Save model configuration to JSON file
-     */
-    bool saveConfigToFile(const EmbeddingConfig& config, const std::string& config_path);
-    
-    /**
-     * Get available models in models directory
-     */
-    std::vector<std::string> getAvailableModels(const std::string& models_dir = "models");
-    
-    /**
-     * Download model files (placeholder for future implementation)
-     */
-    bool downloadModel(const std::string& model_name, const std::string& target_dir);
-}
+/**
+ * Normalize embeddings to unit length
+ */
+std::vector<float> normalizeEmbedding(const std::vector<float>& embedding);
+
+/**
+ * Normalize batch of embeddings
+ */
+std::vector<std::vector<float>>
+normalizeEmbeddings(const std::vector<std::vector<float>>& embeddings);
+
+/**
+ * Compute embedding magnitude
+ */
+double computeMagnitude(const std::vector<float>& embedding);
+
+/**
+ * Validate embedding dimensions and values
+ */
+bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim);
+
+/**
+ * Convert embedding to string representation (for debugging)
+ */
+std::string embeddingToString(const std::vector<float>& embedding, size_t max_values = 10);
+
+/**
+ * Load model configuration from JSON file
+ */
+EmbeddingConfig loadConfigFromFile(const std::string& config_path);
+
+/**
+ * Save model configuration to JSON file
+ */
+bool saveConfigToFile(const EmbeddingConfig& config, const std::string& config_path);
+
+/**
+ * Get available models in models directory
+ */
+std::vector<std::string> getAvailableModels(const std::string& models_dir = "models");
+
+/**
+ * Download model files (placeholder for future implementation)
+ */
+bool downloadModel(const std::string& model_name, const std::string& target_dir);
+} // namespace embedding_utils
 
 } // namespace yams::vector

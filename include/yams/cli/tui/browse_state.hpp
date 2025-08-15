@@ -1,31 +1,23 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <vector>
-#include <chrono>
 
 namespace yams::cli::tui {
 
 // Layout modes for different screen sizes
 enum class LayoutMode {
-    MultiPane,    // 3-column layout for wide screens (>=100 cols)
-    SinglePane,   // Single pane with navigation for medium screens (60-99 cols)
-    Compact       // Minimal list-only view for small screens (<60 cols)
+    MultiPane,  // 3-column layout for wide screens (>=100 cols)
+    SinglePane, // Single pane with navigation for medium screens (60-99 cols)
+    Compact     // Minimal list-only view for small screens (<60 cols)
 };
 
 // Column focus in the multi-pane layout
-enum class Column {
-    Collections = 0,
-    Documents = 1,
-    Preview = 2
-};
+enum class Column { Collections = 0, Documents = 1, Preview = 2 };
 
 // Rendering/preview mode for content
-enum class PreviewMode {
-    Auto,
-    Text,
-    Hex
-};
+enum class PreviewMode { Auto, Text, Hex };
 
 // Lightweight document entry used by the TUI
 struct DocEntry {
@@ -74,10 +66,10 @@ struct BrowseState {
     PreviewMode previewMode = PreviewMode::Auto;
 
     // Virtual scrolling and pagination
-    int documentScrollOffset = 0;    // For virtual scrolling in document list
-    int documentsPerPage = 100;      // Number of documents to load per page
-    int currentPage = 0;             // Current page for pagination
-    bool hasMoreDocuments = false;   // Whether more documents are available
+    int documentScrollOffset = 0;  // For virtual scrolling in document list
+    int documentsPerPage = 100;    // Number of documents to load per page
+    int currentPage = 0;           // Current page for pagination
+    bool hasMoreDocuments = false; // Whether more documents are available
 
     // Viewer overlay
     bool viewerOpen = false;

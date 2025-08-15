@@ -1,9 +1,9 @@
 #if __has_include(<benchmark/benchmark.h>)
-#include <benchmark/benchmark.h>
-#include <yams/search/query_tokenizer.h>
+#include <random>
 #include <string>
 #include <vector>
-#include <random>
+#include <benchmark/benchmark.h>
+#include <yams/search/query_tokenizer.h>
 
 // NOLINTBEGIN(readability-identifier-naming)
 
@@ -16,17 +16,16 @@ static std::mt19937& rng() {
 }
 
 enum class AlphabetKind : int {
-    AsciiWords = 0,     // simple lower-case words
-    AlphaNum,           // alphanumeric terms
-    Operators,          // AND/OR/NOT with parentheses and quotes
-    Mixed               // mixture of words, operators, wildcards, phrases
+    AsciiWords = 0, // simple lower-case words
+    AlphaNum,       // alphanumeric terms
+    Operators,      // AND/OR/NOT with parentheses and quotes
+    Mixed           // mixture of words, operators, wildcards, phrases
 };
 
 static std::string makeAsciiWordsQuery(size_t targetLen) {
-    static const char* words[] = {
-        "search", "engine", "database", "vector", "semantic", "precision",
-        "recall", "index", "hybrid", "ranking", "token", "parser", "query"
-    };
+    static const char* words[] = {"search",    "engine", "database", "vector", "semantic",
+                                  "precision", "recall", "index",    "hybrid", "ranking",
+                                  "token",     "parser", "query"};
     constexpr size_t N = sizeof(words) / sizeof(words[0]);
 
     std::string query;
@@ -34,7 +33,8 @@ static std::string makeAsciiWordsQuery(size_t targetLen) {
 
     size_t i = 0;
     while (query.size() < targetLen) {
-        if (!query.empty()) query.push_back(' ');
+        if (!query.empty())
+            query.push_back(' ');
         query += words[i % N];
         ++i;
     }
@@ -42,10 +42,9 @@ static std::string makeAsciiWordsQuery(size_t targetLen) {
 }
 
 static std::string makeAlphaNumQuery(size_t targetLen) {
-    static const char charset[] =
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789";
+    static const char charset[] = "abcdefghijklmnopqrstuvwxyz"
+                                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                  "0123456789";
 
     std::uniform_int_distribution<size_t> pick(0, sizeof(charset) - 2);
 
@@ -57,7 +56,8 @@ static std::string makeAlphaNumQuery(size_t targetLen) {
         std::uniform_int_distribution<int> lenDist(3, 10);
         int termLen = lenDist(rng());
 
-        if (!query.empty()) query.push_back(' ');
+        if (!query.empty())
+            query.push_back(' ');
         for (int i = 0; i < termLen; ++i) {
             query.push_back(charset[pick(rng())]);
         }
@@ -80,7 +80,8 @@ static std::string makeOperatorsQuery(size_t targetLen) {
     size_t i = 0;
 
     while (query.size() < targetLen) {
-        if (!query.empty()) query.push_back(' ');
+        if (!query.empty())
+            query.push_back(' ');
         query += patterns[i % N];
         ++i;
     }
@@ -88,10 +89,9 @@ static std::string makeOperatorsQuery(size_t targetLen) {
 }
 
 static std::string makeMixedQuery(size_t targetLen) {
-    static const char* words[] = {
-        "search", "engine", "database", "vector", "semantic", "precision",
-        "recall", "index", "hybrid", "ranking", "token", "parser", "query"
-    };
+    static const char* words[] = {"search",    "engine", "database", "vector", "semantic",
+                                  "precision", "recall", "index",    "hybrid", "ranking",
+                                  "token",     "parser", "query"};
     constexpr size_t N = sizeof(words) / sizeof(words[0]);
 
     std::uniform_int_distribution<int> pick(0, 3);
@@ -102,13 +102,16 @@ static std::string makeMixedQuery(size_t targetLen) {
     query.reserve(targetLen + 64);
 
     auto appendWord = [&](bool quoted) {
-        if (quoted) query.push_back('"');
+        if (quoted)
+            query.push_back('"');
         query += words[static_cast<size_t>(wordPick(rng()))];
-        if (quoted) query.push_back('"');
+        if (quoted)
+            query.push_back('"');
     };
 
     while (query.size() < targetLen) {
-        if (!query.empty()) query.push_back(' ');
+        if (!query.empty())
+            query.push_back(' ');
 
         int choice = pick(rng());
         switch (choice) {
@@ -147,21 +150,31 @@ static std::string makeMixedQuery(size_t targetLen) {
 
 static std::string makeQuery(size_t targetLen, AlphabetKind kind) {
     switch (kind) {
-        case AlphabetKind::AsciiWords: return makeAsciiWordsQuery(targetLen);
-        case AlphabetKind::AlphaNum:   return makeAlphaNumQuery(targetLen);
-        case AlphabetKind::Operators:  return makeOperatorsQuery(targetLen);
-        case AlphabetKind::Mixed:      return makeMixedQuery(targetLen);
-        default:                       return makeAsciiWordsQuery(targetLen);
+        case AlphabetKind::AsciiWords:
+            return makeAsciiWordsQuery(targetLen);
+        case AlphabetKind::AlphaNum:
+            return makeAlphaNumQuery(targetLen);
+        case AlphabetKind::Operators:
+            return makeOperatorsQuery(targetLen);
+        case AlphabetKind::Mixed:
+            return makeMixedQuery(targetLen);
+        default:
+            return makeAsciiWordsQuery(targetLen);
     }
 }
 
 static const char* kindToString(AlphabetKind kind) {
     switch (kind) {
-        case AlphabetKind::AsciiWords: return "ascii";
-        case AlphabetKind::AlphaNum:   return "alnum";
-        case AlphabetKind::Operators:  return "ops";
-        case AlphabetKind::Mixed:      return "mixed";
-        default:                       return "ascii";
+        case AlphabetKind::AsciiWords:
+            return "ascii";
+        case AlphabetKind::AlphaNum:
+            return "alnum";
+        case AlphabetKind::Operators:
+            return "ops";
+        case AlphabetKind::Mixed:
+            return "mixed";
+        default:
+            return "ascii";
     }
 }
 
@@ -174,8 +187,7 @@ static void BM_QueryTokenizer_LenKind(benchmark::State& state) {
     size_t totalBytes = 0;
     size_t totalTokens = 0;
 
-    state.SetLabel(std::string("len=") + std::to_string(queryLen) +
-                   ",kind=" + kindToString(kind));
+    state.SetLabel(std::string("len=") + std::to_string(queryLen) + ",kind=" + kindToString(kind));
 
     for (auto _ : state) {
         std::string query = makeQuery(queryLen, kind);
@@ -194,26 +206,24 @@ static void BM_QueryTokenizer_LenKind(benchmark::State& state) {
         }
     }
 
-    state.SetItemsProcessed(state.iterations());            // number of queries
-    state.SetBytesProcessed(totalBytes);                    // total query bytes processed
+    state.SetItemsProcessed(state.iterations()); // number of queries
+    state.SetBytesProcessed(totalBytes);         // total query bytes processed
     if (state.iterations() > 0) {
-        state.counters["avg_tokens_per_query"] =
-            benchmark::Counter(static_cast<double>(totalTokens) /
-                               static_cast<double>(state.iterations()));
+        state.counters["avg_tokens_per_query"] = benchmark::Counter(
+            static_cast<double>(totalTokens) / static_cast<double>(state.iterations()));
         state.counters["throughput_Bps"] =
-            benchmark::Counter(static_cast<double>(totalBytes),
-                               benchmark::Counter::kIsRate);
+            benchmark::Counter(static_cast<double>(totalBytes), benchmark::Counter::kIsRate);
     }
 }
 BENCHMARK(BM_QueryTokenizer_LenKind)
-    ->Args({16,  static_cast<int>(AlphabetKind::AsciiWords)})
-    ->Args({64,  static_cast<int>(AlphabetKind::AsciiWords)})
+    ->Args({16, static_cast<int>(AlphabetKind::AsciiWords)})
+    ->Args({64, static_cast<int>(AlphabetKind::AsciiWords)})
     ->Args({128, static_cast<int>(AlphabetKind::AsciiWords)})
-    ->Args({64,  static_cast<int>(AlphabetKind::AlphaNum)})
+    ->Args({64, static_cast<int>(AlphabetKind::AlphaNum)})
     ->Args({128, static_cast<int>(AlphabetKind::AlphaNum)})
-    ->Args({64,  static_cast<int>(AlphabetKind::Operators)})
+    ->Args({64, static_cast<int>(AlphabetKind::Operators)})
     ->Args({128, static_cast<int>(AlphabetKind::Operators)})
-    ->Args({64,  static_cast<int>(AlphabetKind::Mixed)})
+    ->Args({64, static_cast<int>(AlphabetKind::Mixed)})
     ->Args({256, static_cast<int>(AlphabetKind::Mixed)})
     ->UseRealTime();
 
@@ -250,18 +260,13 @@ static void BM_QueryTokenizer_PathologicalOps(benchmark::State& state) {
     state.SetBytesProcessed(totalBytes);
     state.counters["depth_hint"] = static_cast<double>(depth);
     if (state.iterations() > 0) {
-        state.counters["avg_tokens_per_query"] =
-            benchmark::Counter(static_cast<double>(totalTokens) /
-                               static_cast<double>(state.iterations()));
+        state.counters["avg_tokens_per_query"] = benchmark::Counter(
+            static_cast<double>(totalTokens) / static_cast<double>(state.iterations()));
         state.counters["throughput_Bps"] =
-            benchmark::Counter(static_cast<double>(totalBytes),
-                               benchmark::Counter::kIsRate);
+            benchmark::Counter(static_cast<double>(totalBytes), benchmark::Counter::kIsRate);
     }
 }
-BENCHMARK(BM_QueryTokenizer_PathologicalOps)
-    ->Arg(256)
-    ->Arg(1024)
-    ->UseRealTime();
+BENCHMARK(BM_QueryTokenizer_PathologicalOps)->Arg(256)->Arg(1024)->UseRealTime();
 
 BENCHMARK_MAIN();
 #else

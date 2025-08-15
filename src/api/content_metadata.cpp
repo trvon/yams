@@ -4,9 +4,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 #include <regex>
 #include <sstream>
-#include <iomanip>
 
 namespace yams::api {
 
@@ -26,50 +26,47 @@ enum class FieldType : uint8_t {
 
 void writeString(std::vector<std::byte>& buffer, const std::string& str) {
     uint32_t len = static_cast<uint32_t>(str.size());
-    buffer.insert(buffer.end(), 
-        reinterpret_cast<const std::byte*>(&len),
-        reinterpret_cast<const std::byte*>(&len) + sizeof(len));
-    buffer.insert(buffer.end(),
-        reinterpret_cast<const std::byte*>(str.data()),
-        reinterpret_cast<const std::byte*>(str.data()) + str.size());
+    buffer.insert(buffer.end(), reinterpret_cast<const std::byte*>(&len),
+                  reinterpret_cast<const std::byte*>(&len) + sizeof(len));
+    buffer.insert(buffer.end(), reinterpret_cast<const std::byte*>(str.data()),
+                  reinterpret_cast<const std::byte*>(str.data()) + str.size());
 }
 
 std::string readString(const std::byte*& ptr, const std::byte* end) {
     if (ptr + sizeof(uint32_t) > end) {
         throw std::runtime_error("Buffer underflow reading string length");
     }
-    
+
     uint32_t len;
     std::memcpy(&len, ptr, sizeof(len));
     ptr += sizeof(len);
-    
+
     if (ptr + len > end) {
         throw std::runtime_error("Buffer underflow reading string data");
     }
-    
+
     std::string result(reinterpret_cast<const char*>(ptr), len);
     ptr += len;
     return result;
 }
 
-void writeTimestamp(std::vector<std::byte>& buffer, 
-                   const std::chrono::system_clock::time_point& tp) {
+void writeTimestamp(std::vector<std::byte>& buffer,
+                    const std::chrono::system_clock::time_point& tp) {
     auto duration = tp.time_since_epoch();
     auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-    buffer.insert(buffer.end(),
-        reinterpret_cast<const std::byte*>(&millis),
-        reinterpret_cast<const std::byte*>(&millis) + sizeof(millis));
+    buffer.insert(buffer.end(), reinterpret_cast<const std::byte*>(&millis),
+                  reinterpret_cast<const std::byte*>(&millis) + sizeof(millis));
 }
 
 std::chrono::system_clock::time_point readTimestamp(const std::byte*& ptr, const std::byte* end) {
     if (ptr + sizeof(int64_t) > end) {
         throw std::runtime_error("Buffer underflow reading timestamp");
     }
-    
+
     int64_t millis;
     std::memcpy(&millis, ptr, sizeof(millis));
     ptr += sizeof(millis);
-    
+
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(millis));
 }
 
@@ -164,7 +161,7 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
         ContentMetadata metadata;
         const std::byte* ptr = data.data();
         const std::byte* end = ptr + data.size();
-        
+
         // Read version
         if (ptr + sizeof(uint32_t) > end) {
             return Result<ContentMetadata>(ErrorCode::CorruptedData);
@@ -172,11 +169,11 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
         uint32_t version;
         std::memcpy(&version, ptr, sizeof(version));
         ptr += sizeof(version);
-        
+
         if (version != 1) {
             return Result<ContentMetadata>(ErrorCode::InvalidArgument);
         }
-        
+
         // Read field count
         if (ptr + sizeof(uint32_t) > end) {
             return Result<ContentMetadata>(ErrorCode::CorruptedData);
@@ -184,45 +181,52 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
         uint32_t fieldCount;
         std::memcpy(&fieldCount, ptr, sizeof(fieldCount));
         ptr += sizeof(fieldCount);
-        
+
         // Read fields
         for (uint32_t i = 0; i < fieldCount; ++i) {
             if (ptr + 1 + sizeof(uint16_t) > end) {
                 return Result<ContentMetadata>(ErrorCode::CorruptedData);
             }
-            
+
             FieldType type = static_cast<FieldType>(*ptr++);
-            
+
             uint16_t nameLen;
             std::memcpy(&nameLen, ptr, sizeof(nameLen));
             ptr += sizeof(nameLen);
-            
+
             if (ptr + nameLen > end) {
                 return Result<ContentMetadata>(ErrorCode::CorruptedData);
             }
-            
+
             std::string fieldName(reinterpret_cast<const char*>(ptr), nameLen);
             ptr += nameLen;
-            
+
             // Read field data based on type
             switch (type) {
                 case FieldType::String: {
                     auto value = readString(ptr, end);
-                    if (fieldName == "mimeType") metadata.mimeType = value;
-                    else if (fieldName == "name") metadata.name = value;
-                    else if (fieldName == "id") metadata.id = value;
-                    else if (fieldName == "contentHash") metadata.contentHash = value;
+                    if (fieldName == "mimeType")
+                        metadata.mimeType = value;
+                    else if (fieldName == "name")
+                        metadata.name = value;
+                    else if (fieldName == "id")
+                        metadata.id = value;
+                    else if (fieldName == "contentHash")
+                        metadata.contentHash = value;
                     break;
                 }
-                
+
                 case FieldType::Timestamp: {
                     auto value = readTimestamp(ptr, end);
-                    if (fieldName == "createdAt") metadata.createdAt = value;
-                    else if (fieldName == "modifiedAt") metadata.modifiedAt = value;
-                    else if (fieldName == "accessedAt") metadata.accessedAt = value;
+                    if (fieldName == "createdAt")
+                        metadata.createdAt = value;
+                    else if (fieldName == "modifiedAt")
+                        metadata.modifiedAt = value;
+                    else if (fieldName == "accessedAt")
+                        metadata.accessedAt = value;
                     break;
                 }
-                
+
                 case FieldType::UInt32: {
                     if (ptr + sizeof(uint32_t) > end) {
                         return Result<ContentMetadata>(ErrorCode::CorruptedData);
@@ -237,7 +241,7 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
                     }
                     break;
                 }
-                
+
                 case FieldType::StringVector: {
                     if (ptr + sizeof(uint32_t) > end) {
                         return Result<ContentMetadata>(ErrorCode::CorruptedData);
@@ -245,14 +249,14 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
                     uint32_t count;
                     std::memcpy(&count, ptr, sizeof(count));
                     ptr += sizeof(count);
-                    
+
                     // Skip unknown vector fields
                     for (uint32_t j = 0; j < count; ++j) {
                         readString(ptr, end);
                     }
                     break;
                 }
-                
+
                 case FieldType::StringMap: {
                     if (ptr + sizeof(uint32_t) > end) {
                         return Result<ContentMetadata>(ErrorCode::CorruptedData);
@@ -260,7 +264,7 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
                     uint32_t count;
                     std::memcpy(&count, ptr, sizeof(count));
                     ptr += sizeof(count);
-                    
+
                     if (fieldName == "tags") {
                         metadata.tags.clear();
                         for (uint32_t j = 0; j < count; ++j) {
@@ -279,9 +283,9 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
                 }
             }
         }
-        
+
         return metadata;
-        
+
     } catch (const std::exception& e) {
         spdlog::error("Failed to deserialize metadata: {}", e.what());
         return Result<ContentMetadata>(ErrorCode::CorruptedData);
@@ -292,7 +296,7 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
 std::string ContentMetadata::toJson() const {
     std::ostringstream oss;
     oss << "{\n";
-    
+
     // Helper to format timestamp
     auto formatTime = [](const auto& tp) {
         auto time = std::chrono::system_clock::to_time_t(tp);
@@ -300,25 +304,40 @@ std::string ContentMetadata::toJson() const {
         timeStr << std::put_time(std::gmtime(&time), "%Y-%m-%dT%H:%M:%SZ");
         return timeStr.str();
     };
-    
+
     // Helper to escape JSON string
     auto escapeJson = [](const std::string& str) {
         std::string result;
         for (char c : str) {
             switch (c) {
-                case '"': result += "\\\""; break;
-                case '\\': result += "\\\\"; break;
-                case '\b': result += "\\b"; break;
-                case '\f': result += "\\f"; break;
-                case '\n': result += "\\n"; break;
-                case '\r': result += "\\r"; break;
-                case '\t': result += "\\t"; break;
-                default: result += c;
+                case '"':
+                    result += "\\\"";
+                    break;
+                case '\\':
+                    result += "\\\\";
+                    break;
+                case '\b':
+                    result += "\\b";
+                    break;
+                case '\f':
+                    result += "\\f";
+                    break;
+                case '\n':
+                    result += "\\n";
+                    break;
+                case '\r':
+                    result += "\\r";
+                    break;
+                case '\t':
+                    result += "\\t";
+                    break;
+                default:
+                    result += c;
             }
         }
         return result;
     };
-    
+
     // Write fields
     oss << "  \"id\": \"" << escapeJson(id) << "\",\n";
     oss << "  \"name\": \"" << escapeJson(name) << "\",\n";
@@ -328,17 +347,18 @@ std::string ContentMetadata::toJson() const {
     oss << "  \"createdAt\": \"" << formatTime(createdAt) << "\",\n";
     oss << "  \"modifiedAt\": \"" << formatTime(modifiedAt) << "\",\n";
     oss << "  \"accessedAt\": \"" << formatTime(accessedAt) << "\",\n";
-    
+
     // Tags (as key-value pairs)
     oss << "  \"tags\": {\n";
     bool first = true;
     for (const auto& [key, value] : tags) {
-        if (!first) oss << ",\n";
+        if (!first)
+            oss << ",\n";
         oss << "    \"" << escapeJson(key) << "\": \"" << escapeJson(value) << "\"";
         first = false;
     }
     oss << "\n  }\n";
-    
+
     oss << "}";
     return oss.str();
 }
@@ -347,10 +367,10 @@ std::string ContentMetadata::toJson() const {
 Result<ContentMetadata> ContentMetadata::fromJson(const std::string& json) {
     try {
         ContentMetadata metadata;
-        
+
         // Simple regex-based parsing for test purposes
         // In production, use a proper JSON library
-        
+
         // Extract string fields
         auto extractString = [&json](const std::string& key) -> std::string {
             std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
@@ -360,7 +380,7 @@ Result<ContentMetadata> ContentMetadata::fromJson(const std::string& json) {
             }
             return "";
         };
-        
+
         // Extract number fields
         auto extractNumber = [&json](const std::string& key) -> uint64_t {
             std::regex pattern("\"" + key + "\"\\s*:\\s*(\\d+)");
@@ -370,14 +390,14 @@ Result<ContentMetadata> ContentMetadata::fromJson(const std::string& json) {
             }
             return 0;
         };
-        
+
         // Extract basic fields
         metadata.id = extractString("id");
         metadata.name = extractString("name");
         metadata.mimeType = extractString("mimeType");
         metadata.contentHash = extractString("contentHash");
         metadata.size = extractNumber("size");
-        
+
         // Extract timestamps (parse ISO format)
         auto parseTime = [&extractString](const std::string& key) {
             auto timeStr = extractString(key);
@@ -390,29 +410,29 @@ Result<ContentMetadata> ContentMetadata::fromJson(const std::string& json) {
             ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
             return std::chrono::system_clock::from_time_t(std::mktime(&tm));
         };
-        
+
         metadata.createdAt = parseTime("createdAt");
         metadata.modifiedAt = parseTime("modifiedAt");
         metadata.accessedAt = parseTime("accessedAt");
-        
+
         // Extract tags object
         std::regex tagsPattern("\"tags\"\\s*:\\s*\\{([^}]*)\\}");
         std::smatch tagsMatch;
         if (std::regex_search(json, tagsMatch, tagsPattern)) {
             std::string tagsContent = tagsMatch[1];
-            
+
             // Parse individual tag key-value pairs
             std::regex tagPattern("\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\"");
             std::sregex_iterator it(tagsContent.begin(), tagsContent.end(), tagPattern);
             std::sregex_iterator end;
-            
+
             for (; it != end; ++it) {
                 metadata.tags[(*it)[1]] = (*it)[2];
             }
         }
-        
+
         return metadata;
-        
+
     } catch (const std::exception& e) {
         spdlog::error("Failed to parse JSON metadata: {}", e.what());
         return Result<ContentMetadata>(ErrorCode::InvalidArgument);
@@ -425,7 +445,7 @@ bool MetadataQuery::matches(const ContentMetadata& metadata) const {
     if (mimeType && metadata.mimeType != *mimeType) {
         return false;
     }
-    
+
     // Check name pattern
     if (namePattern) {
         std::regex pattern(*namePattern);
@@ -433,14 +453,14 @@ bool MetadataQuery::matches(const ContentMetadata& metadata) const {
             return false;
         }
     }
-    
+
     // Check required tags (tags is now a map)
     for (const auto& tag : requiredTags) {
         if (metadata.tags.find(tag) == metadata.tags.end()) {
             return false;
         }
     }
-    
+
     // Check any tags
     if (!anyTags.empty()) {
         bool found = false;
@@ -454,14 +474,14 @@ bool MetadataQuery::matches(const ContentMetadata& metadata) const {
             return false;
         }
     }
-    
+
     // Check exclude tags
     for (const auto& tag : excludeTags) {
         if (metadata.tags.find(tag) != metadata.tags.end()) {
             return false;
         }
     }
-    
+
     // Check timestamps
     if (createdAfter && metadata.createdAt < *createdAfter) {
         return false;
@@ -475,7 +495,7 @@ bool MetadataQuery::matches(const ContentMetadata& metadata) const {
     if (modifiedBefore && metadata.modifiedAt > *modifiedBefore) {
         return false;
     }
-    
+
     // Check custom fields (now checking tags instead)
     for (const auto& [key, value] : customFieldMatches) {
         auto it = metadata.tags.find(key);
@@ -483,7 +503,7 @@ bool MetadataQuery::matches(const ContentMetadata& metadata) const {
             return false;
         }
     }
-    
+
     return true;
 }
 

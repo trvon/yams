@@ -5,6 +5,49 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.3] - 2025-08-15
+
+### Added
+- **MCP Server**
+  - Spec-compliant stdio framing (Content-Length + CRLF) with readiness notifications
+  - Tool schemas aligned with implementation and tests
+  - MCP tool handlers refactored into thin adapters that map JSON ↔ service DTOs
+  - CLI/MCP parity via shared service layer (Search, Grep, Document); MCP now delegates:
+    - grep_documents → GrepService
+    - list_documents, retrieve_document, update_document_metadata, get_by_name, cat_document, delete_by_name → DocumentService
+- **Tracy Profiling Support**
+- **List Command Enhancements**
+  - `--changes` flag to show documents with recent modifications (last 24h by default)
+  - `--since` option to show documents changed since specified time (ISO8601, relative, or natural formats)
+  - `--diff-tags` flag for grouped change visualization showing added/modified/deleted documents
+  - `--show-deleted` flag to include deleted documents in listings
+  - File type indicators in diff-tags output showing `[extension|bin/txt|category]` for all files
+- **Grep Command Enhancements**
+  - Support for searching specific file paths in addition to patterns
+  - Improved path matching with suffix lookup for partial paths
+  - `--paths-only` flag for LLM-friendly output (one file path per line)
+
+- **Code Quality**
+  - Added clang-format configuration for consistent code style
+  - Pre-commit hook for automatic code formatting
+  - Application services layer for shared CLI/MCP functionality
+
+### Fixed
+- **MCP Server Initialization**
+- **Vector Database**: Simplified embedding generation using existing repair command patterns
+- Stats no longer unconditionally recommends 'yams repair --embeddings' when embeddings already exist; guidance is shown only when count is zero
+- **Stats Display**: Improved embedding system status to show meaningful health info instead of misleading zero-activity counters
+- **Vector Index**: Fixed initialization with smart dimension detection from existing models and databases
+- **Async Processing**: Documents now get embeddings generated asynchronously in detached threads (non-blocking)
+- **Reliability**: Embedding generation now works by default, if it fails you will see ```yams repair --embeddings``` in ```yams status```
+- **Stats Command**: Replaced confusing worker activity counters with clear system capability status
+- **List Command Filtering**: Fixed diff-tags logic to properly skip change filters when showing diff visualization
+
+- **Security**
+  - Fixed command injection vulnerability in model_command.cpp by replacing system() calls with safe execvp()
+  - Added path validation and sanitization for user inputs
+  - Validate output paths to prevent directory traversal attacks
+
 ## [v0.3.2] - 2025-08-15
 
 ### Added
@@ -14,7 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CLI integration: enable via `yams init` or follow prompts shown in `yams stats --health`
 - **MCP Server**
   - Stdio transport only; HTTP framework dependencies removed
-
 ### Fixed
 - **Vector DB**
   - Embeddings now persist across restarts

@@ -20,6 +20,7 @@ set(CLI_SOURCES
     commands/delete_command.cpp
     commands/list_command.cpp
     commands/stats_command.cpp
+    commands/status_command.cpp
     commands/update_command.cpp
     commands/completion_command.cpp
     commands/repair_mime_command.cpp
@@ -39,7 +40,7 @@ endif()
 
 # Add serve command only if MCP is enabled
 if(YAMS_BUILD_MCP_SERVER)
-    list(APPEND CLI_SOURCES commands/serve_command.cpp)
+    list(APPEND CLI_SOURCES commands/serve_command.cpp commands/serve_http.cpp)
 endif()
 
 # Create CLI library

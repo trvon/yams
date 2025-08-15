@@ -16,6 +16,9 @@ add_subdirectory(search)
 add_subdirectory(vector)
 add_subdirectory(benchmarks)
 
+# Application services (for MCP and CLI)
+add_subdirectory(app)
+
 # CLI and MCP components (only if tools are being built)
 if(YAMS_BUILD_TOOLS)
     # MCP library only if MCP server is enabled

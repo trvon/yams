@@ -1,8 +1,8 @@
-#include <gtest/gtest.h>
-#include <gmock/gmock.h>
-#include <yams/mcp/mcp_server.h>
 #include <memory>
 #include <string>
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include <yams/mcp/mcp_server.h>
 
 using namespace yams::mcp;
 
@@ -17,10 +17,10 @@ public:
 TEST_F(TransportTest, StdioTransportBasics) {
     // Test basic StdioTransport functionality
     StdioTransport transport;
-    
+
     // Test that transport starts as connected
     EXPECT_TRUE(transport.isConnected());
-    
+
     // Test close functionality
     transport.close();
     EXPECT_FALSE(transport.isConnected());
@@ -32,7 +32,7 @@ TEST_F(TransportTest, WebSocketTransportConfig) {
     config.host = "test.example.com";
     config.port = 9999;
     config.path = "/test";
-    
+
     // Verify config values
     EXPECT_EQ(config.host, "test.example.com");
     EXPECT_EQ(config.port, 9999);
@@ -47,7 +47,7 @@ TEST(MCPTypesTest, BasicTypeAvailability) {
     EXPECT_EQ(wsConfig.port, 8080);
     EXPECT_EQ(wsConfig.path, "/mcp");
     EXPECT_FALSE(wsConfig.useSSL);
-    
+
     // Test basic types are available
     EXPECT_TRUE(true); // Basic compilation test
 }

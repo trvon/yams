@@ -11,6 +11,7 @@ target_link_libraries(mcp_tests
         GTest::gtest_main
         GTest::gmock
         yams_mcp
+        yams_app_services
         yams::api
         yams::search
         yams::metadata

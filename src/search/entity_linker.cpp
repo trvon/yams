@@ -10,4 +10,5 @@ namespace yams::search {
 
 // Basic compile-time sanity checks to ensure symbols are available.
 static_assert(sizeof(yams::search::EntityLinkerConfig) > 0, "EntityLinkerConfig must be defined");
-static_assert(sizeof(yams::search::SimpleHeuristicEntityLinker) > 0, "SimpleHeuristicEntityLinker must be defined");
+static_assert(sizeof(yams::search::SimpleHeuristicEntityLinker) > 0,
+              "SimpleHeuristicEntityLinker must be defined");

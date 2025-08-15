@@ -2,5 +2,5 @@
 #include <yams/core/types.h>
 
 namespace yams::wal {
-    // TODO: Implement WAL recovery
+// TODO: Implement WAL recovery
 }

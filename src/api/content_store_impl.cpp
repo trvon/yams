@@ -1,11 +1,11 @@
 #include <yams/api/content_store.h>
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
-#include <yams/storage/storage_engine.h>
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/storage_engine.h>
 
 #include <spdlog/spdlog.h>
 
@@ -19,70 +19,59 @@ namespace yams::api {
 // Implementation of the content store
 class ContentStore : public IContentStore {
 public:
-    ContentStore(
-        std::shared_ptr<storage::IStorageEngine> storage,
-        std::shared_ptr<chunking::IChunker> chunker,
-        std::shared_ptr<crypto::IHasher> hasher,
-        std::shared_ptr<manifest::IManifestManager> manifestManager,
-        std::shared_ptr<storage::IReferenceCounter> refCounter,
-        ContentStoreConfig config)
-        : storage_(std::move(storage))
-        , chunker_(std::move(chunker))
-        , hasher_(std::move(hasher))
-        , manifestManager_(std::move(manifestManager))
-        , refCounter_(std::move(refCounter))
-        , config_(std::move(config)) {
-        
-        spdlog::debug("ContentStore initialized with storage path: {}", 
-                     config_.storagePath.string());
+    ContentStore(std::shared_ptr<storage::IStorageEngine> storage,
+                 std::shared_ptr<chunking::IChunker> chunker,
+                 std::shared_ptr<crypto::IHasher> hasher,
+                 std::shared_ptr<manifest::IManifestManager> manifestManager,
+                 std::shared_ptr<storage::IReferenceCounter> refCounter, ContentStoreConfig config)
+        : storage_(std::move(storage)), chunker_(std::move(chunker)), hasher_(std::move(hasher)),
+          manifestManager_(std::move(manifestManager)), refCounter_(std::move(refCounter)),
+          config_(std::move(config)) {
+        spdlog::debug("ContentStore initialized with storage path: {}",
+                      config_.storagePath.string());
     }
-    
+
     // File-based store operation
-    Result<StoreResult> store(
-        const std::filesystem::path& path,
-        const ContentMetadata& metadata,
-        ProgressCallback progress) override {
-        
+    Result<StoreResult> store(const std::filesystem::path& path, const ContentMetadata& metadata,
+                              ProgressCallback progress) override {
         auto startTime = std::chrono::steady_clock::now();
-        
+
         // Validate file exists
         if (!std::filesystem::exists(path)) {
             spdlog::error("File not found: {}", path.string());
             return Result<StoreResult>(ErrorCode::FileNotFound);
         }
-        
+
         // Get file info
         uint64_t fileSize = std::filesystem::file_size(path);
         ProgressReporter reporter(fileSize);
         if (progress) {
             reporter.setCallback(progress);
         }
-        
+
         // Hash the complete file
         std::string fileHash = hasher_->hashFile(path);
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
-        
+
         // Create file info
-        FileInfo fileInfo{
-            .hash = fileHash,
-            .size = fileSize,
-            .mimeType = metadata.mimeType,
-            .createdAt = metadata.createdAt,
-            .originalName = metadata.name.empty() ? 
-                           path.filename().string() : metadata.name
-        };
-        
+        FileInfo fileInfo{.hash = fileHash,
+                          .size = fileSize,
+                          .mimeType = metadata.mimeType,
+                          .createdAt = metadata.createdAt,
+                          .originalName =
+                              metadata.name.empty() ? path.filename().string() : metadata.name};
+
         // Chunk the file
         auto chunks = chunker_->chunkFile(path);
         spdlog::debug("File chunked into {} chunks", chunks.size());
-        
+
         // Store chunks and track deduplication
         uint64_t bytesStored = 0;
         uint64_t bytesDeduped = 0;
-        
+
         // Begin reference counting transaction
         auto transaction = refCounter_->beginTransaction();
-        
+
         for (const auto& chunk : chunks) {
             // Check if chunk already exists
             auto existsResult = storage_->exists(chunk.hash);
@@ -90,7 +79,7 @@ public:
                 transaction->rollback();
                 return Result<StoreResult>(existsResult.error());
             }
-            
+
             if (existsResult.value()) {
                 // Chunk already exists, just increment reference
                 bytesDeduped += chunk.size;
@@ -101,15 +90,15 @@ public:
                 }
             } else {
                 // Store new chunk
-                auto storeResult = storage_->store(chunk.hash, 
-                    std::span<const std::byte>(chunk.data.data(), chunk.data.size()));
+                auto storeResult = storage_->store(
+                    chunk.hash, std::span<const std::byte>(chunk.data.data(), chunk.data.size()));
                 if (!storeResult) {
                     transaction->rollback();
                     return Result<StoreResult>(storeResult.error());
                 }
-                
+
                 bytesStored += chunk.size;
-                
+
                 // Add initial reference
                 auto incResult = refCounter_->increment(chunk.hash, chunk.size);
                 if (!incResult) {
@@ -117,113 +106,110 @@ public:
                     return Result<StoreResult>(incResult.error());
                 }
             }
-            
+
             // Report progress
             reporter.addProgress(chunk.size);
         }
-        
+
         // Convert Chunk vector to ChunkRef vector
         std::vector<manifest::ChunkRef> chunkRefs;
         chunkRefs.reserve(chunks.size());
         for (const auto& chunk : chunks) {
             chunkRefs.push_back({chunk.hash, chunk.offset, static_cast<uint32_t>(chunk.size)});
         }
-        
+
         // Create and store manifest
         auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
         if (!manifestResult) {
             transaction->rollback();
             return Result<StoreResult>(manifestResult.error());
         }
-        
+
         auto& manifest = manifestResult.value();
-        
+
         // Store manifest metadata
         {
             std::unique_lock lock(metadataMutex_);
             metadataStore_[fileHash] = metadata;
         }
-        
+
         // Store manifest
         auto manifestData = manifestManager_->serialize(manifest);
         if (!manifestData) {
             transaction->rollback();
             return Result<StoreResult>(manifestData.error());
         }
-        
+
         auto manifestHash = fileHash + ".manifest";
-        auto manifestStoreResult = storage_->store(manifestHash, 
-            std::span<const std::byte>(manifestData.value()));
+        auto manifestStoreResult =
+            storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
         if (!manifestStoreResult) {
             transaction->rollback();
             return Result<StoreResult>(manifestStoreResult.error());
         }
-        
+
         // Commit transaction
         auto commitResult = transaction->commit();
         if (!commitResult) {
             return Result<StoreResult>(commitResult.error());
         }
-        
+
         // Update statistics
         updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
-        
+
         auto endTime = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            endTime - startTime);
-        
-        StoreResult result{
-            .contentHash = fileHash,
-            .bytesStored = fileSize,
-            .bytesDeduped = bytesDeduped,
-            .duration = duration
-        };
-        
-        spdlog::debug("Stored file {} with hash {}, dedup ratio: {:.2f}%", 
-                    path.string(), fileHash, result.dedupRatio() * 100);
-        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        StoreResult result{.contentHash = fileHash,
+                           .bytesStored = fileSize,
+                           .bytesDeduped = bytesDeduped,
+                           .duration = duration};
+
+        spdlog::debug("Stored file {} with hash {}, dedup ratio: {:.2f}%", path.string(), fileHash,
+                      result.dedupRatio() * 100);
+
         return result;
     }
-    
+
     // File-based retrieve operation
-    Result<RetrieveResult> retrieve(
-        const std::string& hash,
-        const std::filesystem::path& outputPath,
-        ProgressCallback progress) override {
-        
+    Result<RetrieveResult> retrieve(const std::string& hash,
+                                    const std::filesystem::path& outputPath,
+                                    ProgressCallback progress) override {
         auto startTime = std::chrono::steady_clock::now();
-        
+
         // Validate hash format
         if (hash.length() != HASH_STRING_SIZE) {
-            spdlog::error("Invalid hash format for retrieve: expected {} characters, got {} for hash '{}'",
-                         HASH_STRING_SIZE, hash.length(), hash);
+            spdlog::error(
+                "Invalid hash format for retrieve: expected {} characters, got {} for hash '{}'",
+                HASH_STRING_SIZE, hash.length(), hash);
             return Result<RetrieveResult>(ErrorCode::InvalidArgument);
         }
-        
+
         // Retrieve manifest
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
         if (!manifestResult) {
             return Result<RetrieveResult>(manifestResult.error());
         }
-        
+
         // Deserialize manifest
-        auto manifest = manifestManager_->deserialize(
-            std::span<const std::byte>(manifestResult.value()));
+        auto manifest =
+            manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
         if (!manifest) {
             return Result<RetrieveResult>(manifest.error());
         }
-        
+
         // Setup progress reporting
         ProgressReporter reporter(manifest.value().fileSize);
         if (progress) {
             reporter.setCallback(progress);
         }
-        
+
         // Create chunk provider implementation
         class ChunkProvider : public manifest::IChunkProvider {
         private:
             const storage::IStorageEngine* storage_;
+
         public:
             explicit ChunkProvider(const storage::IStorageEngine* storage) : storage_(storage) {}
             Result<std::vector<std::byte>> getChunk(const std::string& hash) const override {
@@ -231,14 +217,14 @@ public:
             }
         };
         ChunkProvider chunkProvider(storage_.get());
-        
+
         // Reconstruct file
-        auto reconstructResult = manifestManager_->reconstructFile(
-            manifest.value(), outputPath, chunkProvider);
+        auto reconstructResult =
+            manifestManager_->reconstructFile(manifest.value(), outputPath, chunkProvider);
         if (!reconstructResult) {
             return Result<RetrieveResult>(reconstructResult.error());
         }
-        
+
         // Get metadata
         ContentMetadata metadata;
         {
@@ -249,143 +235,132 @@ public:
                 metadata.accessedAt = std::chrono::system_clock::now(); // Update access time
             }
         }
-        
+
         // Update statistics
         updateStats(0, 0, manifest.value().fileSize, 0, 0, 1, 0);
-        
+
         auto endTime = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            endTime - startTime);
-        
-        RetrieveResult result{
-            .found = true,
-            .size = manifest.value().fileSize,
-            .metadata = metadata,
-            .duration = duration
-        };
-        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        RetrieveResult result{.found = true,
+                              .size = manifest.value().fileSize,
+                              .metadata = metadata,
+                              .duration = duration};
+
         spdlog::debug("Retrieved file with hash {} to {}", hash, outputPath.string());
-        
+
         return result;
     }
-    
+
     // Stream-based store operation
-    Result<StoreResult> storeStream(
-        std::istream& stream,
-        const ContentMetadata& metadata,
-        ProgressCallback progress) override {
-        
+    Result<StoreResult> storeStream(std::istream& stream, const ContentMetadata& metadata,
+                                    ProgressCallback progress) override {
         // Create temporary file for streaming
-        auto tempPath = config_.storagePath / "temp" / 
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        auto tempPath = config_.storagePath / "temp" /
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         std::filesystem::create_directories(tempPath.parent_path());
-        
+
         // Write stream to temporary file
         std::ofstream tempFile(tempPath, std::ios::binary);
         if (!tempFile) {
             return Result<StoreResult>(ErrorCode::PermissionDenied);
         }
-        
+
         // Copy stream to file
         tempFile << stream.rdbuf();
         tempFile.close();
-        
+
         // Store using file-based method
         auto result = store(tempPath, metadata, progress);
-        
+
         // Clean up temporary file
         std::filesystem::remove(tempPath);
-        
+
         return result;
     }
-    
+
     // Stream-based retrieve operation
-    Result<RetrieveResult> retrieveStream(
-        const std::string& hash,
-        std::ostream& output,
-        ProgressCallback progress) override {
-        
+    Result<RetrieveResult> retrieveStream(const std::string& hash, std::ostream& output,
+                                          ProgressCallback progress) override {
         // Create temporary file for retrieval
-        auto tempPath = config_.storagePath / "temp" / 
-                       (hash + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        auto tempPath =
+            config_.storagePath / "temp" /
+            (hash + "_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(tempPath.parent_path());
-        
+
         // Retrieve to temporary file
         auto result = retrieve(hash, tempPath, progress);
         if (!result) {
             return result;
         }
-        
+
         // Stream file to output
         std::ifstream tempFile(tempPath, std::ios::binary);
         if (!tempFile) {
             std::filesystem::remove(tempPath);
             return Result<RetrieveResult>(ErrorCode::Unknown);
         }
-        
+
         output << tempFile.rdbuf();
         tempFile.close();
-        
+
         // Clean up temporary file
         std::filesystem::remove(tempPath);
-        
+
         return result;
     }
-    
+
     // Memory-based store operation
-    Result<StoreResult> storeBytes(
-        std::span<const std::byte> data,
-        const ContentMetadata& metadata) override {
-        
+    Result<StoreResult> storeBytes(std::span<const std::byte> data,
+                                   const ContentMetadata& metadata) override {
         auto startTime = std::chrono::steady_clock::now();
-        
+
         // Hash the data using stream interface
         hasher_->init();
         hasher_->update(data);
         std::string dataHash = hasher_->finalize();
-        
+
         // For small data, store directly without chunking
         if (data.size() <= config_.chunkSize) {
             auto storeResult = storage_->store(dataHash, data);
             if (!storeResult) {
                 return Result<StoreResult>(storeResult.error());
             }
-            
+
             // Store metadata
             {
                 std::unique_lock lock(metadataMutex_);
                 metadataStore_[dataHash] = metadata;
             }
-            
+
             updateStats(data.size(), 0, 0, 1, 1, 0, 0);
-            
+
             auto endTime = std::chrono::steady_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                endTime - startTime);
-            
-            return StoreResult{
-                .contentHash = dataHash,
-                .bytesStored = data.size(),
-                .bytesDeduped = 0,
-                .duration = duration
-            };
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+            return StoreResult{.contentHash = dataHash,
+                               .bytesStored = data.size(),
+                               .bytesDeduped = 0,
+                               .duration = duration};
         }
-        
+
         // For larger data, use chunking via temporary file
-        auto tempPath = config_.storagePath / "temp" / 
-                       (dataHash + "_mem");
+        auto tempPath = config_.storagePath / "temp" / (dataHash + "_mem");
         std::filesystem::create_directories(tempPath.parent_path());
-        
+
         std::ofstream tempFile(tempPath, std::ios::binary);
-        tempFile.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        tempFile.write(reinterpret_cast<const char*>(data.data()),
+                       static_cast<std::streamsize>(data.size()));
         tempFile.close();
-        
+
         auto result = store(tempPath, metadata, nullptr);
         std::filesystem::remove(tempPath);
-        
+
         return result;
     }
-    
+
     // Memory-based retrieve operation
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
         // Try direct retrieval first (for small files stored without chunking)
@@ -394,42 +369,41 @@ public:
             updateStats(0, 0, directResult.value().size(), 0, 0, 1, 0);
             return directResult;
         }
-        
+
         // Otherwise, retrieve via temporary file
-        auto tempPath = config_.storagePath / "temp" / 
-                       (hash + "_ret");
-        
+        auto tempPath = config_.storagePath / "temp" / (hash + "_ret");
+
         auto result = retrieve(hash, tempPath, nullptr);
         if (!result) {
             return Result<std::vector<std::byte>>(result.error());
         }
-        
+
         // Read file into memory
         std::ifstream file(tempPath, std::ios::binary | std::ios::ate);
         if (!file) {
             std::filesystem::remove(tempPath);
             return Result<std::vector<std::byte>>(ErrorCode::Unknown);
         }
-        
+
         size_t size = static_cast<size_t>(file.tellg());
         file.seekg(0);
-        
+
         std::vector<std::byte> data(size);
         file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
         file.close();
-        
+
         std::filesystem::remove(tempPath);
-        
+
         return data;
     }
-    
+
     // Check if content exists
     Result<bool> exists(const std::string& hash) const override {
         // Check for manifest
         auto manifestHash = hash + ".manifest";
         return storage_->exists(manifestHash);
     }
-    
+
     // Remove content
     Result<bool> remove(const std::string& hash) override {
         // Retrieve manifest first
@@ -438,17 +412,17 @@ public:
         if (!manifestResult) {
             return Result<bool>(false); // Not found
         }
-        
+
         // Deserialize manifest
-        auto manifest = manifestManager_->deserialize(
-            std::span<const std::byte>(manifestResult.value()));
+        auto manifest =
+            manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
         if (!manifest) {
             return Result<bool>(manifest.error());
         }
-        
+
         // Begin transaction
         auto transaction = refCounter_->beginTransaction();
-        
+
         // Decrement references for all chunks
         for (const auto& chunk : manifest.value().chunks) {
             auto decResult = refCounter_->decrement(chunk.hash);
@@ -457,33 +431,33 @@ public:
                 return Result<bool>(decResult.error());
             }
         }
-        
+
         // Remove manifest
         auto removeResult = storage_->remove(manifestHash);
         if (!removeResult) {
             transaction->rollback();
             return Result<bool>(removeResult.error());
         }
-        
+
         // Remove metadata
         {
             std::unique_lock lock(metadataMutex_);
             metadataStore_.erase(hash);
         }
-        
+
         // Commit transaction
         auto commitResult = transaction->commit();
         if (!commitResult) {
             return Result<bool>(commitResult.error());
         }
-        
+
         updateStats(0, 0, 0, 0, 0, 0, 1);
-        
+
         spdlog::info("Removed content with hash {}", hash);
-        
+
         return Result<bool>(true);
     }
-    
+
     // Get metadata
     Result<ContentMetadata> getMetadata(const std::string& hash) const override {
         std::shared_lock lock(metadataMutex_);
@@ -493,64 +467,57 @@ public:
         }
         return Result<ContentMetadata>(ErrorCode::FileNotFound);
     }
-    
+
     // Update metadata
-    Result<void> updateMetadata(
-        const std::string& hash,
-        const ContentMetadata& metadata) override {
-        
+    Result<void> updateMetadata(const std::string& hash, const ContentMetadata& metadata) override {
         // Verify content exists
         auto existsResult = exists(hash);
         if (!existsResult) {
             return Result<void>(existsResult.error());
         }
-        
+
         if (!existsResult.value()) {
             return Result<void>(ErrorCode::FileNotFound);
         }
-        
+
         std::unique_lock lock(metadataMutex_);
         metadataStore_[hash] = metadata;
-        
+
         return Result<void>();
     }
-    
+
     // Batch store operation
-    std::vector<Result<StoreResult>> storeBatch(
-        const std::vector<std::filesystem::path>& paths,
-        const std::vector<ContentMetadata>& metadata) override {
-        
+    std::vector<Result<StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>& paths,
+               const std::vector<ContentMetadata>& metadata) override {
         std::vector<Result<StoreResult>> results;
         results.reserve(paths.size());
-        
+
         for (size_t i = 0; i < paths.size(); ++i) {
-            ContentMetadata meta = (i < metadata.size()) ? 
-                metadata[i] : ContentMetadata{};
+            ContentMetadata meta = (i < metadata.size()) ? metadata[i] : ContentMetadata{};
             results.push_back(store(paths[i], meta, nullptr));
         }
-        
+
         return results;
     }
-    
+
     // Batch remove operation
-    std::vector<Result<bool>> removeBatch(
-        const std::vector<std::string>& hashes) override {
-        
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>& hashes) override {
         std::vector<Result<bool>> results;
         results.reserve(hashes.size());
-        
+
         for (const auto& hash : hashes) {
             results.push_back(remove(hash));
         }
-        
+
         return results;
     }
-    
+
     // Get statistics
     ContentStoreStats getStats() const override {
         std::shared_lock lock(statsMutex_);
         ContentStoreStats currentStats = stats_;
-        
+
         // If in-memory stats are zero, try to get actual counts
         if (currentStats.totalObjects == 0 || currentStats.totalBytes == 0) {
             // First try storage engine stats
@@ -559,20 +526,22 @@ public:
                 currentStats.totalObjects = storageStats.totalObjects.load();
                 currentStats.totalBytes = storageStats.totalBytes.load();
             }
-            
+
             // If still zero, count actual files on disk (more expensive)
             if (currentStats.totalObjects == 0) {
                 auto manifestPath = config_.storagePath / "manifests";
                 auto objectsPath = config_.storagePath / "objects";
-                
+
                 size_t fileCount = 0;
                 size_t totalSize = 0;
-                
+
                 // Count manifest files
                 if (std::filesystem::exists(manifestPath)) {
                     try {
-                        for (const auto& entry : std::filesystem::recursive_directory_iterator(manifestPath)) {
-                            if (entry.is_regular_file() && entry.path().extension() == ".manifest") {
+                        for (const auto& entry :
+                             std::filesystem::recursive_directory_iterator(manifestPath)) {
+                            if (entry.is_regular_file() &&
+                                entry.path().extension() == ".manifest") {
                                 fileCount++;
                             }
                         }
@@ -580,11 +549,12 @@ public:
                         spdlog::debug("Failed to count manifest files: {}", e.what());
                     }
                 }
-                
+
                 // If no manifests found, count object files as fallback
                 if (fileCount == 0 && std::filesystem::exists(objectsPath)) {
                     try {
-                        for (const auto& entry : std::filesystem::recursive_directory_iterator(objectsPath)) {
+                        for (const auto& entry :
+                             std::filesystem::recursive_directory_iterator(objectsPath)) {
                             if (entry.is_regular_file()) {
                                 fileCount++;
                                 totalSize += entry.file_size();
@@ -594,7 +564,7 @@ public:
                         spdlog::debug("Failed to count object files: {}", e.what());
                     }
                 }
-                
+
                 if (fileCount > 0) {
                     currentStats.totalObjects = fileCount;
                     if (totalSize > 0) {
@@ -603,7 +573,7 @@ public:
                 }
             }
         }
-        
+
         // Get unique block count and total bytes from reference counter
         if (refCounter_) {
             auto refStats = refCounter_->getStats();
@@ -615,36 +585,36 @@ public:
                 }
             }
         }
-        
+
         return currentStats;
     }
-    
+
     // Check health
     HealthStatus checkHealth() const override {
         HealthStatus status;
         status.lastCheck = std::chrono::system_clock::now();
-        
+
         // Check storage engine
         [[maybe_unused]] auto storageStats = storage_->getStats();
-        
+
         // Check available space
         auto spaceInfo = std::filesystem::space(config_.storagePath);
         uint64_t availableBytes = spaceInfo.available;
         uint64_t totalBytes = spaceInfo.capacity;
-        
+
         if (availableBytes < 1024 * 1024 * 100) { // Less than 100MB
             status.errors.push_back("Critical: Less than 100MB storage available");
             status.isHealthy = false;
         } else if (availableBytes < totalBytes * 0.1) { // Less than 10%
             status.warnings.push_back("Warning: Less than 10% storage available");
         }
-        
+
         // Check if storage path is accessible
         if (!std::filesystem::exists(config_.storagePath)) {
             status.errors.push_back("Storage path does not exist");
             status.isHealthy = false;
         }
-        
+
         if (status.isHealthy && status.warnings.empty()) {
             status.status = "Healthy";
         } else if (status.isHealthy) {
@@ -652,47 +622,48 @@ public:
         } else {
             status.status = "Unhealthy";
         }
-        
+
         return status;
     }
-    
+
     // Verify integrity
     Result<void> verify([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting content store verification");
-        
+
         // TODO: Implement full verification
         // This would involve:
         // 1. Checking all manifests
         // 2. Verifying all chunks exist and match their hashes
         // 3. Checking reference counts
-        
+
         return Result<void>();
     }
-    
+
     // Compact storage
     Result<void> compact([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting content store compaction");
-        
+
         // Delegate to storage engine (cast to concrete type)
         if (auto* concreteStorage = dynamic_cast<storage::StorageEngine*>(storage_.get())) {
             return concreteStorage->compact();
         }
-        
-        return Result<void>(Error{ErrorCode::NotSupported, "Compact not supported by this storage engine"});
+
+        return Result<void>(
+            Error{ErrorCode::NotSupported, "Compact not supported by this storage engine"});
     }
-    
+
     // Garbage collection
     Result<void> garbageCollect([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting garbage collection");
-        
+
         // TODO: Implement garbage collection
         // This would involve:
         // 1. Finding unreferenced chunks
         // 2. Removing them from storage
-        
+
         return Result<void>();
     }
-    
+
 private:
     // Components
     std::shared_ptr<storage::IStorageEngine> storage_;
@@ -701,20 +672,19 @@ private:
     std::shared_ptr<manifest::IManifestManager> manifestManager_;
     std::shared_ptr<storage::IReferenceCounter> refCounter_;
     ContentStoreConfig config_;
-    
+
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
     std::unordered_map<std::string, ContentMetadata> metadataStore_;
-    
+
     // Statistics
     mutable std::shared_mutex statsMutex_;
     ContentStoreStats stats_;
-    
+
     // Update statistics
     void updateStats(uint64_t bytesStored, uint64_t bytesDeduped,
-                    [[maybe_unused]] uint64_t bytesRetrieved, uint64_t objectsAdded,
-                    uint64_t storeOps, uint64_t retrieveOps,
-                    uint64_t deleteOps) {
+                     [[maybe_unused]] uint64_t bytesRetrieved, uint64_t objectsAdded,
+                     uint64_t storeOps, uint64_t retrieveOps, uint64_t deleteOps) {
         std::unique_lock lock(statsMutex_);
         stats_.totalBytes += bytesStored;
         stats_.deduplicatedBytes += bytesDeduped;
@@ -728,21 +698,13 @@ private:
 
 // Factory function implementation
 std::unique_ptr<IContentStore> createContentStore(
-    std::shared_ptr<storage::IStorageEngine> storage,
-    std::shared_ptr<chunking::IChunker> chunker,
+    std::shared_ptr<storage::IStorageEngine> storage, std::shared_ptr<chunking::IChunker> chunker,
     std::shared_ptr<crypto::IHasher> hasher,
     std::shared_ptr<manifest::IManifestManager> manifestManager,
-    std::shared_ptr<storage::IReferenceCounter> refCounter,
-    const ContentStoreConfig& config) {
-    
-    return std::make_unique<ContentStore>(
-        std::move(storage),
-        std::move(chunker),
-        std::move(hasher),
-        std::move(manifestManager),
-        std::move(refCounter),
-        config
-    );
+    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config) {
+    return std::make_unique<ContentStore>(std::move(storage), std::move(chunker), std::move(hasher),
+                                          std::move(manifestManager), std::move(refCounter),
+                                          config);
 }
 
 } // namespace yams::api

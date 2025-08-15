@@ -14,6 +14,7 @@ endif()
 add_library(yams_vector
     vector_database.cpp
     embedding_generator.cpp
+    embedding_service.cpp    # Simple embedding service (replaces complex worker)
     document_chunker.cpp
     vector_index_manager.cpp
     vector_index_optimizer.cpp
@@ -47,6 +48,7 @@ target_link_libraries(yams_vector
     PUBLIC
         yams::core
         yams::metadata  # Need access to database
+        yams::api       # Need IContentStore for worker
     PRIVATE
         spdlog::spdlog
         onnxruntime::onnxruntime

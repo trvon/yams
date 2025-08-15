@@ -1,26 +1,26 @@
-#include <benchmark/benchmark.h>
-#include <yams/search/search_executor.h>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/connection_pool.h>
-#include <string>
-#include <memory>
 #include <filesystem>
+#include <memory>
+#include <string>
+#include <benchmark/benchmark.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_executor.h>
 
 using namespace yams::search;
 using namespace yams::metadata;
 
 // Helper to generate a query string of approximately target_len characters
 static std::string MakeQuery(size_t target_len) {
-    static const char* terms[] = {
-        "database", "search", "engine", "vector", "semantic", "precision",
-        "recall", "index", "hybrid", "ranking", "token", "parser", "query"
-    };
+    static const char* terms[] = {"database",  "search", "engine", "vector", "semantic",
+                                  "precision", "recall", "index",  "hybrid", "ranking",
+                                  "token",     "parser", "query"};
     constexpr size_t terms_count = sizeof(terms) / sizeof(terms[0]);
     std::string q;
     q.reserve(target_len + 16);
     size_t i = 0;
     while (q.size() < target_len) {
-        if (!q.empty()) q.push_back(' ');
+        if (!q.empty())
+            q.push_back(' ');
         q.append(terms[i % terms_count]);
         ++i;
     }
@@ -88,8 +88,8 @@ static void BM_SearchExecutor_QueryLen_Limit(benchmark::State& state) {
         state.counters["avg_hits_per_query"] = benchmark::Counter(
             static_cast<double>(total_hits) / static_cast<double>(state.iterations()));
         // Report throughput as a rate (bytes per second)
-        state.counters["throughput_Bps"] = benchmark::Counter(
-            static_cast<double>(total_query_bytes), benchmark::Counter::kIsRate);
+        state.counters["throughput_Bps"] =
+            benchmark::Counter(static_cast<double>(total_query_bytes), benchmark::Counter::kIsRate);
     }
 
     // Cleanup on-disk DB files (outside timing)
@@ -99,14 +99,14 @@ static void BM_SearchExecutor_QueryLen_Limit(benchmark::State& state) {
     fs::remove(fs::path(dbPath.string() + "-wal"), ec);
     fs::remove(fs::path(dbPath.string() + "-shm"), ec);
     state.ResumeTiming();
-    }
-    BENCHMARK(BM_SearchExecutor_QueryLen_Limit)
-        ->Args({16, 10})
-        ->Args({64, 10})
-        ->Args({128, 10})
-        ->Args({16, 20})
-        ->Args({64, 20})
-        ->Args({128, 20})
-        ->UseRealTime();
+}
+BENCHMARK(BM_SearchExecutor_QueryLen_Limit)
+    ->Args({16, 10})
+    ->Args({64, 10})
+    ->Args({128, 10})
+    ->Args({16, 20})
+    ->Args({64, 20})
+    ->Args({128, 20})
+    ->UseRealTime();
 
 BENCHMARK_MAIN();

@@ -19,7 +19,7 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 - Compression: zstd and LZMA
 - Search: full‑text (SQLite FTS5) + semantic (vector)
 - Crash safety: WAL
-- Fast and portable CLI + MCP server
+- Fast and portable CLI + MCP server 
 
 ## Versioning
 

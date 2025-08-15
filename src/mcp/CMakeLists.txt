@@ -13,6 +13,7 @@ target_link_libraries(yams_mcp
     PUBLIC
         yams_api
         yams_search
+        yams_app_services
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::SSL

@@ -1,12 +1,12 @@
 #pragma once
 
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
 #include <yams/core/types.h>
 #include <yams/search/query_ast.h>
 #include <yams/search/query_tokenizer.h>
-#include <memory>
-#include <string>
-#include <vector>
-#include <unordered_set>
 
 namespace yams::search {
 
@@ -16,10 +16,10 @@ namespace yams::search {
 struct QueryParserConfig {
     // Default operator when none specified
     enum class DefaultOperator {
-        And,    // Terms are ANDed by default
-        Or      // Terms are ORed by default
+        And, // Terms are ANDed by default
+        Or   // Terms are ORed by default
     };
-    
+
     DefaultOperator defaultOperator = DefaultOperator::And;
     bool allowLeadingWildcard = false;
     bool enablePositionIncrements = true;
@@ -27,12 +27,11 @@ struct QueryParserConfig {
     int fuzzyMaxExpansions = 50;
     float fuzzyMinSimilarity = 0.5f;
     int phraseSlop = 0;
-    
+
     // Fields that can be searched
-    std::unordered_set<std::string> searchableFields = {
-        "content", "title", "author", "tags", "description"
-    };
-    
+    std::unordered_set<std::string> searchableFields = {"content", "title", "author", "tags",
+                                                        "description"};
+
     // Default field when none specified
     std::string defaultField = "content";
 };
@@ -44,11 +43,9 @@ struct QueryValidation {
     bool isValid;
     std::string error;
     size_t errorPosition;
-    
-    static QueryValidation valid() {
-        return {true, "", 0};
-    }
-    
+
+    static QueryValidation valid() { return {true, "", 0}; }
+
     static QueryValidation invalid(const std::string& error, size_t pos = 0) {
         return {false, error, pos};
     }
@@ -60,44 +57,44 @@ struct QueryValidation {
 class QueryParser {
 public:
     explicit QueryParser(const QueryParserConfig& config = {});
-    
+
     /**
      * @brief Parse a query string into an AST
      * @param query The query string to parse
      * @return Result containing the parsed AST or an error
      */
     Result<std::unique_ptr<QueryNode>> parse(const std::string& query);
-    
+
     /**
      * @brief Validate a query without fully parsing it
      * @param query The query string to validate
      * @return Validation result
      */
     QueryValidation validate(const std::string& query);
-    
+
     /**
      * @brief Convert AST to FTS5 query string
      * @param node The root node of the AST
      * @return FTS5 compatible query string
      */
     std::string toFTS5Query(const QueryNode* node);
-    
+
     /**
      * @brief Set parser configuration
      */
     void setConfig(const QueryParserConfig& config) { config_ = config; }
-    
+
     /**
      * @brief Get current configuration
      */
     const QueryParserConfig& getConfig() const { return config_; }
-    
+
 private:
     QueryParserConfig config_;
     QueryTokenizer tokenizer_;
     std::vector<Token> tokens_;
     size_t currentToken_;
-    
+
     /**
      * @brief Parse methods for different expression types
      */
@@ -113,7 +110,7 @@ private:
     std::unique_ptr<QueryNode> parseWildcard(const std::string& term);
     std::unique_ptr<QueryNode> parseFuzzy(const std::string& term);
     std::unique_ptr<QueryNode> parseRange();
-    
+
     /**
      * @brief Token navigation helpers
      */
@@ -123,12 +120,12 @@ private:
     bool check(TokenType type) const;
     bool match(TokenType type);
     bool isAtEnd() const;
-    
+
     /**
      * @brief Error handling
      */
     void throwError(const std::string& message);
-    
+
     /**
      * @brief FTS5 query generation helpers
      */
@@ -143,9 +140,9 @@ class QueryParserException : public std::runtime_error {
 public:
     QueryParserException(const std::string& message, size_t position)
         : std::runtime_error(message), position_(position) {}
-    
+
     size_t getPosition() const { return position_; }
-    
+
 private:
     size_t position_;
 };
@@ -161,7 +158,7 @@ public:
      * @return Optimized AST
      */
     std::unique_ptr<QueryNode> optimize(std::unique_ptr<QueryNode> node);
-    
+
 private:
     /**
      * @brief Optimization passes
@@ -188,14 +185,14 @@ public:
         std::vector<std::string> fields;
         std::vector<std::string> terms;
     };
-    
+
     /**
      * @brief Analyze a query AST
      * @param node The root node to analyze
      * @return Query statistics
      */
     QueryStats analyze(const QueryNode* node);
-    
+
 private:
     void analyzeNode(const QueryNode* node, QueryStats& stats, size_t depth);
 };

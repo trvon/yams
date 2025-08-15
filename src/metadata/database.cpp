@@ -1,6 +1,6 @@
-#include <yams/metadata/database.h>
-#include <sstream>
 #include <cstring>
+#include <sstream>
+#include <yams/metadata/database.h>
 
 namespace yams::metadata {
 
@@ -9,8 +9,7 @@ Statement::Statement(sqlite3* db, const std::string& sql) {
     const char* tail;
     int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt_, &tail);
     if (rc != SQLITE_OK) {
-        throw std::runtime_error("Failed to prepare statement: " + 
-                               std::string(sqlite3_errmsg(db)));
+        throw std::runtime_error("Failed to prepare statement: " + std::string(sqlite3_errmsg(db)));
     }
 }
 
@@ -20,8 +19,7 @@ Statement::~Statement() {
     }
 }
 
-Statement::Statement(Statement&& other) noexcept 
-    : stmt_(other.stmt_) {
+Statement::Statement(Statement&& other) noexcept : stmt_(other.stmt_) {
     other.stmt_ = nullptr;
 }
 
@@ -69,8 +67,8 @@ Result<void> Statement::bind(int index, double value) {
 }
 
 Result<void> Statement::bind(int index, const std::string& value) {
-    int rc = sqlite3_bind_text(stmt_, index, value.c_str(), 
-                             static_cast<int>(value.size()), SQLITE_TRANSIENT);
+    int rc = sqlite3_bind_text(stmt_, index, value.c_str(), static_cast<int>(value.size()),
+                               SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError, "Failed to bind string"};
     }
@@ -78,8 +76,8 @@ Result<void> Statement::bind(int index, const std::string& value) {
 }
 
 Result<void> Statement::bind(int index, std::string_view value) {
-    int rc = sqlite3_bind_text(stmt_, index, value.data(), 
-                             static_cast<int>(value.size()), SQLITE_TRANSIENT);
+    int rc = sqlite3_bind_text(stmt_, index, value.data(), static_cast<int>(value.size()),
+                               SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError, "Failed to bind string_view"};
     }
@@ -87,8 +85,8 @@ Result<void> Statement::bind(int index, std::string_view value) {
 }
 
 Result<void> Statement::bind(int index, std::span<const std::byte> blob) {
-    int rc = sqlite3_bind_blob(stmt_, index, blob.data(), 
-                             static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+    int rc = sqlite3_bind_blob(stmt_, index, blob.data(), static_cast<int>(blob.size()),
+                               SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError, "Failed to bind blob"};
     }
@@ -98,9 +96,8 @@ Result<void> Statement::bind(int index, std::span<const std::byte> blob) {
 Result<void> Statement::execute() {
     int rc = sqlite3_step(stmt_);
     if (rc != SQLITE_DONE) {
-        return Error{ErrorCode::DatabaseError, 
-                   "Failed to execute statement: " + 
-                   std::string(sqlite3_errstr(rc))};
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to execute statement: " + std::string(sqlite3_errstr(rc))};
     }
     return {};
 }
@@ -112,9 +109,8 @@ Result<bool> Statement::step() {
     } else if (rc == SQLITE_DONE) {
         return false;
     } else {
-        return Error{ErrorCode::DatabaseError, 
-                   "Failed to step statement: " + 
-                   std::string(sqlite3_errstr(rc))};
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to step statement: " + std::string(sqlite3_errstr(rc))};
     }
 }
 
@@ -131,17 +127,18 @@ double Statement::getDouble(int column) const {
 }
 
 std::string Statement::getString(int column) const {
-    const char* text = reinterpret_cast<const char*>(
-        sqlite3_column_text(stmt_, column));
-    if (!text) return "";
+    const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt_, column));
+    if (!text)
+        return "";
     return std::string(text);
 }
 
 std::vector<std::byte> Statement::getBlob(int column) const {
     const void* blob = sqlite3_column_blob(stmt_, column);
     int size = sqlite3_column_bytes(stmt_, column);
-    if (!blob || size <= 0) return {};
-    
+    if (!blob || size <= 0)
+        return {};
+
     std::vector<std::byte> result(size);
     std::memcpy(result.data(), blob, size);
     return result;
@@ -181,9 +178,8 @@ Database::~Database() {
     close();
 }
 
-Database::Database(Database&& other) noexcept 
-    : db_(other.db_), path_(std::move(other.path_)), 
-      inTransaction_(other.inTransaction_) {
+Database::Database(Database&& other) noexcept
+    : db_(other.db_), path_(std::move(other.path_)), inTransaction_(other.inTransaction_) {
     other.db_ = nullptr;
     other.inTransaction_ = false;
 }
@@ -216,7 +212,7 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
             flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MEMORY;
             break;
     }
-    
+
     int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
     if (rc != SQLITE_OK) {
         std::string error = db_ ? sqlite3_errmsg(db_) : "Unknown error";
@@ -224,10 +220,9 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
             sqlite3_close(db_);
             db_ = nullptr;
         }
-        return Error{ErrorCode::DatabaseError, 
-                   "Failed to open database: " + error};
+        return Error{ErrorCode::DatabaseError, "Failed to open database: " + error};
     }
-    
+
     path_ = path;
     return {};
 }
@@ -245,7 +240,7 @@ Result<Statement> Database::prepare(const std::string& sql) {
     if (!db_) {
         return Error{ErrorCode::InvalidState, "Database not open"};
     }
-    
+
     try {
         return Statement(db_, sql);
     } catch (const std::exception& e) {
@@ -257,14 +252,13 @@ Result<void> Database::execute(const std::string& sql) {
     if (!db_) {
         return Error{ErrorCode::InvalidState, "Database not open"};
     }
-    
+
     char* errMsg = nullptr;
     int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errMsg);
     if (rc != SQLITE_OK) {
         std::string error = errMsg ? errMsg : "Unknown error";
         sqlite3_free(errMsg);
-        return Error{ErrorCode::DatabaseError, 
-                   "Failed to execute SQL: " + error};
+        return Error{ErrorCode::DatabaseError, "Failed to execute SQL: " + error};
     }
     return {};
 }
@@ -273,7 +267,7 @@ Result<void> Database::beginTransaction() {
     if (inTransaction_) {
         return Error{ErrorCode::InvalidState, "Already in transaction"};
     }
-    
+
     auto result = execute("BEGIN");
     if (result) {
         inTransaction_ = true;
@@ -285,7 +279,7 @@ Result<void> Database::commit() {
     if (!inTransaction_) {
         return Error{ErrorCode::InvalidState, "Not in transaction"};
     }
-    
+
     auto result = execute("COMMIT");
     if (result) {
         inTransaction_ = false;
@@ -297,7 +291,7 @@ Result<void> Database::rollback() {
     if (!inTransaction_) {
         return Error{ErrorCode::InvalidState, "Not in transaction"};
     }
-    
+
     auto result = execute("ROLLBACK");
     inTransaction_ = false; // Always clear flag, even on error
     return result;
@@ -312,32 +306,33 @@ int Database::changes() const {
 }
 
 Result<bool> Database::tableExists(const std::string& table) {
-    auto stmtResult = prepare(
-        "SELECT COUNT(*) FROM sqlite_master "
-        "WHERE type='table' AND name=?"
-    );
-    if (!stmtResult) return stmtResult.error();
-    
+    auto stmtResult = prepare("SELECT COUNT(*) FROM sqlite_master "
+                              "WHERE type='table' AND name=?");
+    if (!stmtResult)
+        return stmtResult.error();
+
     Statement stmt = std::move(stmtResult).value();
     auto bindResult = stmt.bind(1, table);
-    if (!bindResult) return bindResult.error();
-    
+    if (!bindResult)
+        return bindResult.error();
+
     auto stepResult = stmt.step();
-    if (!stepResult) return stepResult.error();
-    
+    if (!stepResult)
+        return stepResult.error();
+
     return stmt.getInt(0) > 0;
 }
 
 Result<bool> Database::hasFTS5() {
-    auto stmtResult = prepare(
-        "SELECT sqlite_compileoption_used('ENABLE_FTS5')"
-    );
-    if (!stmtResult) return stmtResult.error();
-    
+    auto stmtResult = prepare("SELECT sqlite_compileoption_used('ENABLE_FTS5')");
+    if (!stmtResult)
+        return stmtResult.error();
+
     Statement stmt = std::move(stmtResult).value();
     auto stepResult = stmt.step();
-    if (!stepResult) return stepResult.error();
-    
+    if (!stepResult)
+        return stepResult.error();
+
     return stepResult.value() && stmt.getInt(0) == 1;
 }
 
@@ -345,7 +340,7 @@ Result<void> Database::setBusyTimeout(std::chrono::milliseconds timeout) {
     if (!db_) {
         return Error{ErrorCode::InvalidState, "Database not open"};
     }
-    
+
     int rc = sqlite3_busy_timeout(db_, static_cast<int>(timeout.count()));
     if (rc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError, "Failed to set busy timeout"};
@@ -481,7 +476,7 @@ QueryBuilder& QueryBuilder::deleteFrom(const std::string& table) {
 
 std::string QueryBuilder::build() const {
     std::stringstream sql;
-    
+
     switch (type_) {
         case QueryType::Select: {
             sql << "SELECT ";
@@ -489,98 +484,105 @@ std::string QueryBuilder::build() const {
                 sql << "*";
             } else {
                 for (size_t i = 0; i < selectColumns_.size(); ++i) {
-                    if (i > 0) sql << ", ";
+                    if (i > 0)
+                        sql << ", ";
                     sql << selectColumns_[i];
                 }
             }
             sql << " FROM " << table_;
-            
+
             for (const auto& join : joinClauses_) {
                 sql << " " << join;
             }
-            
+
             if (!whereClauses_.empty()) {
                 sql << " WHERE ";
                 for (size_t i = 0; i < whereClauses_.size(); ++i) {
-                    if (i > 0) sql << " ";
+                    if (i > 0)
+                        sql << " ";
                     sql << whereClauses_[i];
                 }
             }
-            
+
             if (!groupByClause_.empty()) {
                 sql << " GROUP BY " << groupByClause_;
             }
-            
+
             if (!havingClause_.empty()) {
                 sql << " HAVING " << havingClause_;
             }
-            
+
             if (!orderByClause_.empty()) {
                 sql << " ORDER BY " << orderByClause_;
             }
-            
+
             if (limit_ > 0) {
                 sql << " LIMIT " << limit_;
             }
-            
+
             if (offset_ > 0) {
                 sql << " OFFSET " << offset_;
             }
             break;
         }
-        
+
         case QueryType::Insert: {
             sql << "INSERT INTO " << table_;
             if (!insertColumns_.empty()) {
                 sql << " (";
                 for (size_t i = 0; i < insertColumns_.size(); ++i) {
-                    if (i > 0) sql << ", ";
+                    if (i > 0)
+                        sql << ", ";
                     sql << insertColumns_[i];
                 }
                 sql << ") VALUES (";
                 for (size_t i = 0; i < insertColumns_.size(); ++i) {
-                    if (i > 0) sql << ", ";
+                    if (i > 0)
+                        sql << ", ";
                     sql << "?";
                 }
                 sql << ")";
             }
             break;
         }
-        
+
         case QueryType::Update: {
             sql << "UPDATE " << table_ << " SET ";
             for (size_t i = 0; i < setClauses_.size(); ++i) {
-                if (i > 0) sql << ", ";
+                if (i > 0)
+                    sql << ", ";
                 sql << setClauses_[i].first << " = " << setClauses_[i].second;
             }
-            
+
             if (!whereClauses_.empty()) {
                 sql << " WHERE ";
                 for (size_t i = 0; i < whereClauses_.size(); ++i) {
-                    if (i > 0) sql << " ";
+                    if (i > 0)
+                        sql << " ";
                     sql << whereClauses_[i];
                 }
             }
             break;
         }
-        
+
         case QueryType::Delete: {
             sql << "DELETE FROM " << table_;
-            
+
             if (!whereClauses_.empty()) {
                 sql << " WHERE ";
                 for (size_t i = 0; i < whereClauses_.size(); ++i) {
-                    if (i > 0) sql << " ";
+                    if (i > 0)
+                        sql << " ";
                     sql << whereClauses_[i];
                 }
             }
             break;
         }
-        
+
         default:
             break;
     }
-    
+
     return sql.str();
 }
 

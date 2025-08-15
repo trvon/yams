@@ -1,0 +1,58 @@
+#pragma once
+
+/**
+ * Service Factory: constructs shared application services for CLI and MCP.
+ *
+ * This header declares a factory for creating a cohesive ServiceBundle and
+ * individual service instances from a shared AppContext. Implementations
+ * should live in the corresponding source files within src/app/services.
+ *
+ * The goal is strict parity between CLI commands and MCP tools by ensuring
+ * both call the same service layer for core behavior (search, grep, document
+ * operations, and restore), avoiding logic drift across front-ends.
+ */
+
+#include <memory>
+#include <yams/app/services/services.hpp>
+
+namespace yams::app::services {
+
+/**
+ * Aggregated services for convenience. Most callers should prefer constructing
+ * and using the whole bundle rather than instantiating services piecemeal.
+ */
+struct ServiceBundle {
+    std::shared_ptr<ISearchService> search;
+    std::shared_ptr<IGrepService> grep;
+    std::shared_ptr<IDocumentService> document;
+    std::shared_ptr<IRestoreService> restore;
+
+    // True if all services are non-null.
+    [[nodiscard]] bool valid() const noexcept {
+        return static_cast<bool>(search) && static_cast<bool>(grep) &&
+               static_cast<bool>(document) && static_cast<bool>(restore);
+    }
+};
+
+/**
+ * Construct the full bundle of services from the shared application context.
+ *
+ * Requirements:
+ * - ctx.store and ctx.metadataRepo are typically required by most services.
+ * - ctx.searchExecutor / ctx.hybridEngine are used by search implementations.
+ *
+ * Returns a ServiceBundle with all services constructed (or nullptr members if
+ * a particular service cannot be created due to missing dependencies).
+ */
+[[nodiscard]] ServiceBundle makeServices(const AppContext& ctx);
+
+/**
+ * Individual factories for consumers that only need a subset of services.
+ * These return nullptr when required dependencies are not present.
+ */
+[[nodiscard]] std::shared_ptr<ISearchService> makeSearchService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IRestoreService> makeRestoreService(const AppContext& ctx);
+
+} // namespace yams::app::services

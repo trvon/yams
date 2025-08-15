@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include <yams/search/hybrid_search_engine.h>
 #include <yams/core/types.h>
+#include <yams/search/hybrid_search_engine.h>
 
 #include <algorithm>
 #include <cctype>
@@ -40,41 +40,31 @@ public:
     }
 
     // The rest of the interface is not exercised by these tests; return trivial values.
-    Result<std::vector<KeywordSearchResult>> search(
-        const std::string&,
-        size_t,
-        const vector::SearchFilter*) override {
+    Result<std::vector<KeywordSearchResult>> search(const std::string&, size_t,
+                                                    const vector::SearchFilter*) override {
         return Result<std::vector<KeywordSearchResult>>(std::vector<KeywordSearchResult>{});
     }
 
-    Result<std::vector<std::vector<KeywordSearchResult>>> batchSearch(
-        const std::vector<std::string>&,
-        size_t,
-        const vector::SearchFilter*) override {
+    Result<std::vector<std::vector<KeywordSearchResult>>>
+    batchSearch(const std::vector<std::string>&, size_t, const vector::SearchFilter*) override {
         return Result<std::vector<std::vector<KeywordSearchResult>>>(
             std::vector<std::vector<KeywordSearchResult>>{});
     }
 
-    Result<void> addDocument(
-        const std::string&,
-        const std::string&,
-        const std::map<std::string, std::string>&) override {
+    Result<void> addDocument(const std::string&, const std::string&,
+                             const std::map<std::string, std::string>&) override {
         return Result<void>();
     }
 
     Result<void> removeDocument(const std::string&) override { return Result<void>(); }
 
-    Result<void> updateDocument(
-        const std::string&,
-        const std::string&,
-        const std::map<std::string, std::string>&) override {
+    Result<void> updateDocument(const std::string&, const std::string&,
+                                const std::map<std::string, std::string>&) override {
         return Result<void>();
     }
 
-    Result<void> addDocuments(
-        const std::vector<std::string>&,
-        const std::vector<std::string>&,
-        const std::vector<std::map<std::string, std::string>>&) override {
+    Result<void> addDocuments(const std::vector<std::string>&, const std::vector<std::string>&,
+                              const std::vector<std::map<std::string, std::string>>&) override {
         return Result<void>();
     }
 

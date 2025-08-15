@@ -1,8 +1,8 @@
-#include <gtest/gtest.h>
-#include <yams/compression/error_handler.h>
-#include <yams/compression/compressor_interface.h>
-#include <thread>
 #include <chrono>
+#include <thread>
+#include <gtest/gtest.h>
+#include <yams/compression/compressor_interface.h>
+#include <yams/compression/error_handler.h>
 
 using namespace yams;
 using namespace yams::compression;
@@ -15,14 +15,12 @@ protected:
         config_.retryDelay = std::chrono::milliseconds{100};
         config_.maxRetryDelay = std::chrono::milliseconds{5000};
         config_.enableIntegrityValidation = true;
-        
+
         handler_ = std::make_unique<CompressionErrorHandler>(config_);
     }
-    
-    void TearDown() override {
-        handler_.reset();
-    }
-    
+
+    void TearDown() override { handler_.reset(); }
+
     ErrorHandlingConfig config_;
     std::unique_ptr<CompressionErrorHandler> handler_;
 };
@@ -39,14 +37,14 @@ TEST_F(ErrorHandlerTest, BasicErrorHandling) {
     error.compressionLevel = 5;
     error.timestamp = std::chrono::system_clock::now();
     error.attemptNumber = 1;
-    
+
     int retryCount = 0;
     auto retryFunc = [&retryCount]() -> Result<CompressionResult> {
         retryCount++;
         if (retryCount < 3) {
             return Error{ErrorCode::CompressionError, "Still failing"};
         }
-        
+
         CompressionResult result;
         result.algorithm = CompressionAlgorithm::Zstandard;
         result.level = 5;
@@ -55,7 +53,7 @@ TEST_F(ErrorHandlerTest, BasicErrorHandling) {
         result.duration = std::chrono::microseconds{1000};
         return result;
     };
-    
+
     auto result = handler_->handleError(error, retryFunc);
     ASSERT_TRUE(result.isSuccessful());
     EXPECT_EQ(retryCount, 3);
@@ -68,11 +66,11 @@ TEST_F(ErrorHandlerTest, MaxRetriesExhausted) {
     error.recommendedStrategy = RecoveryStrategy::Retry;
     error.algorithm = CompressionAlgorithm::LZMA;
     error.attemptNumber = 1;
-    
+
     auto retryFunc = []() -> Result<CompressionResult> {
         return Error{ErrorCode::CompressionError, "Always fails"};
     };
-    
+
     auto result = handler_->handleError(error, retryFunc);
     ASSERT_FALSE(result.isSuccessful());
     EXPECT_EQ(result.strategy, RecoveryStrategy::Fallback);
@@ -84,11 +82,11 @@ TEST_F(ErrorHandlerTest, CriticalErrorHandling) {
     error.severity = ErrorSeverity::Critical;
     error.recommendedStrategy = RecoveryStrategy::None;
     error.algorithm = CompressionAlgorithm::Zstandard;
-    
+
     auto retryFunc = []() -> Result<CompressionResult> {
         return Error{ErrorCode::InternalError, "Critical error"};
     };
-    
+
     auto result = handler_->handleError(error, retryFunc);
     ASSERT_FALSE(result.isSuccessful());
     EXPECT_EQ(result.strategy, RecoveryStrategy::None);
@@ -96,10 +94,10 @@ TEST_F(ErrorHandlerTest, CriticalErrorHandling) {
 
 TEST_F(ErrorHandlerTest, DegradedModeActivation) {
     EXPECT_FALSE(handler_->isInDegradedMode());
-    
+
     handler_->setDegradedMode(true);
     EXPECT_TRUE(handler_->isInDegradedMode());
-    
+
     handler_->setDegradedMode(false);
     EXPECT_FALSE(handler_->isInDegradedMode());
 }
@@ -113,16 +111,16 @@ TEST_F(ErrorHandlerTest, ErrorStatistics) {
         error.recommendedStrategy = RecoveryStrategy::Retry;
         error.algorithm = CompressionAlgorithm::Zstandard;
         error.attemptNumber = 1;
-        
+
         auto retryFunc = []() -> Result<CompressionResult> {
             CompressionResult result;
             result.algorithm = CompressionAlgorithm::Zstandard;
             return result;
         };
-        
+
         handler_->handleError(error, retryFunc);
     }
-    
+
     auto stats = handler_->getErrorStats();
     EXPECT_EQ(stats.totalErrors, 5);
     EXPECT_EQ(stats.errorsByCode[ErrorCode::CompressionError], 5);
@@ -132,23 +130,23 @@ TEST_F(ErrorHandlerTest, ErrorStatistics) {
 TEST_F(ErrorHandlerTest, ErrorCallbacks) {
     bool callbackInvoked = false;
     ErrorCode capturedCode = ErrorCode::Success;
-    
+
     handler_->registerErrorCallback([&](const CompressionError& error) {
         callbackInvoked = true;
         capturedCode = error.code;
     });
-    
+
     CompressionError error;
     error.code = ErrorCode::CompressionError;
     error.severity = ErrorSeverity::Error;
     error.recommendedStrategy = RecoveryStrategy::None;
-    
+
     auto retryFunc = []() -> Result<CompressionResult> {
         return Error{ErrorCode::CompressionError, "Test error"};
     };
-    
+
     handler_->handleError(error, retryFunc);
-    
+
     EXPECT_TRUE(callbackInvoked);
     EXPECT_EQ(capturedCode, ErrorCode::CompressionError);
 }
@@ -158,17 +156,17 @@ TEST_F(ErrorHandlerTest, RecoveryStrategySelection) {
     error.code = ErrorCode::CompressionError;
     error.severity = ErrorSeverity::Error;
     error.algorithm = CompressionAlgorithm::Zstandard;
-    
+
     // Test different attempt numbers
     error.attemptNumber = 1;
     error.recommendedStrategy = RecoveryStrategy::Retry;
     auto strategy = handler_->selectRecoveryStrategy(error);
     EXPECT_EQ(strategy, RecoveryStrategy::Retry);
-    
+
     error.attemptNumber = 4;
     strategy = handler_->selectRecoveryStrategy(error);
     EXPECT_EQ(strategy, RecoveryStrategy::Fallback);
-    
+
     error.attemptNumber = 6;
     strategy = handler_->selectRecoveryStrategy(error);
     EXPECT_EQ(strategy, RecoveryStrategy::Uncompressed);
@@ -179,16 +177,16 @@ TEST_F(ErrorHandlerTest, ResetStatistics) {
     CompressionError error;
     error.code = ErrorCode::CompressionError;
     error.severity = ErrorSeverity::Error;
-    
+
     auto retryFunc = []() -> Result<CompressionResult> {
         return Error{ErrorCode::CompressionError, "Test"};
     };
-    
+
     handler_->handleError(error, retryFunc);
-    
+
     auto stats = handler_->getErrorStats();
     EXPECT_GT(stats.totalErrors, 0);
-    
+
     handler_->resetStats();
     stats = handler_->getErrorStats();
     EXPECT_EQ(stats.totalErrors, 0);
@@ -200,9 +198,9 @@ TEST_F(ErrorHandlerTest, ConfigurationUpdate) {
     newConfig.retryDelay = std::chrono::milliseconds{200};
     newConfig.maxRetryDelay = std::chrono::milliseconds{10000};
     newConfig.enableIntegrityValidation = false;
-    
+
     handler_->updateConfig(newConfig);
-    
+
     const auto& currentConfig = handler_->config();
     EXPECT_EQ(currentConfig.maxRetryAttempts, 5);
     EXPECT_EQ(currentConfig.retryDelay.count(), 200);
@@ -215,13 +213,13 @@ TEST_F(ErrorHandlerTest, DiagnosticsOutput) {
     error.code = ErrorCode::CompressionError;
     error.severity = ErrorSeverity::Error;
     error.algorithm = CompressionAlgorithm::Zstandard;
-    
+
     auto retryFunc = []() -> Result<CompressionResult> {
         return Error{ErrorCode::CompressionError, "Test"};
     };
-    
+
     handler_->handleError(error, retryFunc);
-    
+
     auto diagnostics = handler_->getDiagnostics();
     EXPECT_FALSE(diagnostics.empty());
     EXPECT_NE(diagnostics.find("Error Handler Diagnostics"), std::string::npos);
@@ -231,17 +229,17 @@ TEST_F(ErrorHandlerTest, DiagnosticsOutput) {
 // Test for ErrorScope RAII helper
 TEST_F(ErrorHandlerTest, ErrorScopeRAII) {
     bool errorHandled = false;
-    
+
     handler_->registerErrorCallback([&](const CompressionError& error) {
         errorHandled = true;
         EXPECT_EQ(error.code, ErrorCode::CompressionError);
     });
-    
+
     {
         ErrorScope scope(*handler_, CompressionAlgorithm::Zstandard);
         scope.setError(ErrorCode::CompressionError, "Test error in scope");
         // ErrorScope destructor should handle the error
     }
-    
+
     EXPECT_TRUE(errorHandled);
 }

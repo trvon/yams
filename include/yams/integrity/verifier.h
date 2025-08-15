@@ -1,8 +1,8 @@
 #pragma once
 
 #include <yams/core/types.h>
-#include <yams/storage/storage_engine.h>
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/storage_engine.h>
 
 #include <atomic>
 #include <chrono>
@@ -19,11 +19,11 @@ namespace yams::integrity {
  * Integrity verification status for individual blocks
  */
 enum class VerificationStatus {
-    Passed,      // Block verified successfully
-    Failed,      // Hash mismatch or read error
-    Missing,     // Block not found
-    Corrupted,   // Data corruption detected
-    Repaired     // Block was corrupted but successfully repaired
+    Passed,    // Block verified successfully
+    Failed,    // Hash mismatch or read error
+    Missing,   // Block not found
+    Corrupted, // Data corruption detected
+    Repaired   // Block was corrupted but successfully repaired
 };
 
 /**
@@ -35,10 +35,9 @@ struct VerificationResult {
     std::string errorDetails;
     std::chrono::system_clock::time_point timestamp;
     size_t blockSize = 0;
-    
+
     bool isSuccess() const {
-        return status == VerificationStatus::Passed || 
-               status == VerificationStatus::Repaired;
+        return status == VerificationStatus::Passed || status == VerificationStatus::Repaired;
     }
 };
 
@@ -48,8 +47,8 @@ struct VerificationResult {
 struct VerificationConfig {
     size_t maxConcurrentVerifications = 4;
     size_t blocksPerSecond = 1000;
-    std::chrono::hours fullScanInterval{24 * 7};  // Weekly full scan
-    double cpuThreshold = 0.25;                   // Max 25% CPU usage
+    std::chrono::hours fullScanInterval{24 * 7}; // Weekly full scan
+    double cpuThreshold = 0.25;                  // Max 25% CPU usage
     bool enableAutoRepair = true;
     size_t maxRepairAttempts = 3;
     std::chrono::minutes pauseBetweenScans{10};
@@ -68,15 +67,17 @@ struct IntegrityReport {
     std::chrono::milliseconds duration{0};
     std::chrono::system_clock::time_point generatedAt;
     std::vector<VerificationResult> failures;
-    
+
     double getSuccessRate() const {
-        return blocksVerified > 0 ? 
-            static_cast<double>(blocksPassed + blocksRepaired) / blocksVerified : 0.0;
+        return blocksVerified > 0
+                   ? static_cast<double>(blocksPassed + blocksRepaired) / blocksVerified
+                   : 0.0;
     }
-    
+
     double getErrorRate() const {
-        return blocksVerified > 0 ? 
-            static_cast<double>(blocksFailed + blocksMissing) / blocksVerified : 0.0;
+        return blocksVerified > 0
+                   ? static_cast<double>(blocksFailed + blocksMissing) / blocksVerified
+                   : 0.0;
     }
 };
 
@@ -89,14 +90,14 @@ struct BlockInfo {
     uint32_t failureCount = 0;
     uint64_t size = 0;
     uint32_t accessCount = 0;
-    
+
     // Priority calculation for verification scheduling
     uint64_t getPriority() const {
         auto now = std::chrono::system_clock::now();
         auto age = std::chrono::duration_cast<std::chrono::hours>(now - lastVerified).count();
         return (failureCount * 1000) + static_cast<uint64_t>(age / 24) + (accessCount / 10);
     }
-    
+
     bool operator<(const BlockInfo& other) const {
         return getPriority() < other.getPriority(); // Priority queue uses max-heap
     }
@@ -106,11 +107,11 @@ struct BlockInfo {
  * Scheduling strategies for verification
  */
 enum class SchedulingStrategy {
-    ByAge,         // Verify oldest blocks first
-    BySize,        // Verify largest blocks first
-    ByFailures,    // Verify blocks with most failures first
-    ByAccess,      // Verify most accessed blocks first
-    Balanced       // Balanced approach considering all factors
+    ByAge,      // Verify oldest blocks first
+    BySize,     // Verify largest blocks first
+    ByFailures, // Verify blocks with most failures first
+    ByAccess,   // Verify most accessed blocks first
+    Balanced    // Balanced approach considering all factors
 };
 
 /**
@@ -121,7 +122,7 @@ class VerificationMonitor;
 
 /**
  * Main integrity verification system
- * 
+ *
  * Provides background verification of stored content to detect corruption,
  * bit rot, and other storage failures. Supports automatic repair when possible.
  */
@@ -129,25 +130,24 @@ class IntegrityVerifier {
 public:
     using ProgressCallback = std::function<void(const VerificationResult&)>;
     using AlertCallback = std::function<void(const IntegrityReport&)>;
-    
+
     /**
      * Constructor
      * @param storage Reference to storage engine
      * @param refCounter Reference to reference counter
      * @param config Verification configuration
      */
-    IntegrityVerifier(storage::StorageEngine& storage,
-                     storage::ReferenceCounter& refCounter,
-                     VerificationConfig config = {});
-    
+    IntegrityVerifier(storage::StorageEngine& storage, storage::ReferenceCounter& refCounter,
+                      VerificationConfig config = {});
+
     ~IntegrityVerifier();
-    
+
     // Disable copy, allow move
     IntegrityVerifier(const IntegrityVerifier&) = delete;
     IntegrityVerifier& operator=(const IntegrityVerifier&) = delete;
     IntegrityVerifier(IntegrityVerifier&&) noexcept;
     IntegrityVerifier& operator=(IntegrityVerifier&&) noexcept;
-    
+
     /**
      * Background verification control
      */
@@ -155,15 +155,15 @@ public:
     [[nodiscard]] Result<void> stopBackgroundVerification();
     [[nodiscard]] Result<void> pauseVerification();
     [[nodiscard]] Result<void> resumeVerification();
-    
+
     /**
      * On-demand verification
      */
     [[nodiscard]] VerificationResult verifyBlock(const std::string& hash);
-    [[nodiscard]] std::vector<VerificationResult> verifyBlocks(
-        const std::vector<std::string>& hashes);
+    [[nodiscard]] std::vector<VerificationResult>
+    verifyBlocks(const std::vector<std::string>& hashes);
     [[nodiscard]] IntegrityReport verifyAll();
-    
+
     /**
      * Scheduling and configuration
      */
@@ -171,17 +171,16 @@ public:
     void setProgressCallback(ProgressCallback callback);
     void setAlertCallback(AlertCallback callback);
     void updateConfig(const VerificationConfig& newConfig);
-    
+
     /**
      * Status and reporting
      */
     [[nodiscard]] bool isRunning() const;
     [[nodiscard]] bool isPaused() const;
-    [[nodiscard]] IntegrityReport generateReport(
-        std::chrono::hours period = std::chrono::hours{24}) const;
-    [[nodiscard]] std::vector<VerificationResult> getRecentFailures(
-        size_t maxResults = 100) const;
-    
+    [[nodiscard]] IntegrityReport generateReport(std::chrono::hours period = std::chrono::hours{
+                                                     24}) const;
+    [[nodiscard]] std::vector<VerificationResult> getRecentFailures(size_t maxResults = 100) const;
+
     /**
      * Statistics
      */
@@ -191,18 +190,18 @@ public:
         std::atomic<uint64_t> repairsAttemptedTotal{0};
         std::atomic<uint64_t> repairsSuccessfulTotal{0};
         std::atomic<uint64_t> bytesVerifiedTotal{0};
-        
+
         std::chrono::system_clock::time_point startTime;
         std::chrono::milliseconds totalVerificationTime{0};
-        
+
         double getVerificationRate() const {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now() - startTime);
-            return elapsed.count() > 0 ? 
-                static_cast<double>(blocksVerifiedTotal) / elapsed.count() : 0.0;
+            return elapsed.count() > 0 ? static_cast<double>(blocksVerifiedTotal) / elapsed.count()
+                                       : 0.0;
         }
     };
-    
+
     [[nodiscard]] const Statistics& getStatistics() const;
     void resetStatistics();
 
@@ -219,19 +218,19 @@ class VerificationScheduler {
 public:
     explicit VerificationScheduler(SchedulingStrategy strategy = SchedulingStrategy::Balanced);
     ~VerificationScheduler();
-    
+
     // Add blocks to verification queue
     void addBlock(const BlockInfo& block);
     void addBlocks(const std::vector<BlockInfo>& blocks);
-    
+
     // Get next block to verify
     std::optional<BlockInfo> getNextBlock();
-    
+
     // Queue management
     size_t getQueueSize() const;
     void clearQueue();
     void setStrategy(SchedulingStrategy strategy);
-    
+
     // Update block information after verification
     void updateBlockInfo(const std::string& hash, const VerificationResult& result);
 
@@ -247,15 +246,15 @@ class VerificationMonitor {
 public:
     VerificationMonitor();
     ~VerificationMonitor();
-    
+
     // Record verification events
     void recordVerification(const VerificationResult& result);
     void recordRepairAttempt(const std::string& hash, bool success);
-    
+
     // Alerting
     void setErrorRateThreshold(double threshold);
     bool shouldAlert() const;
-    
+
     // Metrics export
     struct Metrics {
         uint64_t verificationsPerSecond = 0;
@@ -266,7 +265,7 @@ public:
         uint64_t repairAttempts = 0;
         uint64_t successfulRepairs = 0;
     };
-    
+
     Metrics getCurrentMetrics() const;
     void exportMetrics(std::ostream& out) const;
 

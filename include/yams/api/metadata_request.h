@@ -1,12 +1,12 @@
 #pragma once
 
+#include <chrono>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <yams/core/types.h>
 #include <yams/metadata/document_metadata.h>
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <optional>
-#include <chrono>
 
 namespace yams::api {
 
@@ -14,10 +14,10 @@ namespace yams::api {
  * @brief Base request for metadata operations
  */
 struct MetadataRequest {
-    std::string requestId;           // Unique request identifier
-    std::string clientId;            // Client identifier for tracking
+    std::string requestId; // Unique request identifier
+    std::string clientId;  // Client identifier for tracking
     std::chrono::system_clock::time_point timestamp;
-    
+
     MetadataRequest() : timestamp(std::chrono::system_clock::now()) {}
     virtual ~MetadataRequest() = default;
 };
@@ -27,8 +27,8 @@ struct MetadataRequest {
  */
 struct CreateMetadataRequest : public MetadataRequest {
     metadata::DocumentMetadata metadata;
-    bool validateUniqueness = true;  // Check if document already exists
-    bool indexImmediately = false;   // Trigger indexing after creation
+    bool validateUniqueness = true; // Check if document already exists
+    bool indexImmediately = false;  // Trigger indexing after creation
 };
 
 /**
@@ -38,8 +38,8 @@ struct GetMetadataRequest : public MetadataRequest {
     std::optional<DocumentId> documentId;
     std::optional<std::string> path;
     std::optional<std::string> contentHash;
-    bool includeHistory = false;     // Include version history
-    bool includeRelated = false;     // Include related documents
+    bool includeHistory = false; // Include version history
+    bool includeRelated = false; // Include related documents
 };
 
 /**
@@ -48,9 +48,9 @@ struct GetMetadataRequest : public MetadataRequest {
 struct UpdateMetadataRequest : public MetadataRequest {
     DocumentId documentId;
     metadata::DocumentMetadata metadata;
-    bool createIfNotExists = false;  // Create new if doesn't exist
-    bool preserveHistory = true;     // Keep version history
-    std::string updateReason;        // Reason for update (for audit)
+    bool createIfNotExists = false; // Create new if doesn't exist
+    bool preserveHistory = true;    // Keep version history
+    std::string updateReason;       // Reason for update (for audit)
 };
 
 /**
@@ -58,9 +58,9 @@ struct UpdateMetadataRequest : public MetadataRequest {
  */
 struct DeleteMetadataRequest : public MetadataRequest {
     DocumentId documentId;
-    bool softDelete = true;          // Soft delete (mark as deleted) vs hard delete
-    bool deleteRelated = false;      // Delete related metadata
-    std::string deleteReason;        // Reason for deletion (for audit)
+    bool softDelete = true;     // Soft delete (mark as deleted) vs hard delete
+    bool deleteRelated = false; // Delete related metadata
+    std::string deleteReason;   // Reason for deletion (for audit)
 };
 
 /**
@@ -68,9 +68,9 @@ struct DeleteMetadataRequest : public MetadataRequest {
  */
 struct BulkCreateRequest : public MetadataRequest {
     std::vector<metadata::DocumentMetadata> documents;
-    bool validateAll = true;         // Validate all before inserting any
-    bool continueOnError = false;    // Continue if some fail
-    bool indexAfterCreate = false;   // Trigger indexing after creation
+    bool validateAll = true;       // Validate all before inserting any
+    bool continueOnError = false;  // Continue if some fail
+    bool indexAfterCreate = false; // Trigger indexing after creation
 };
 
 /**
@@ -81,7 +81,7 @@ struct BulkUpdateRequest : public MetadataRequest {
         DocumentId documentId;
         metadata::DocumentMetadata metadata;
     };
-    
+
     std::vector<UpdateItem> updates;
     bool validateAll = true;
     bool continueOnError = false;
@@ -106,21 +106,21 @@ struct MetadataFilter {
     std::optional<std::string> author;
     std::optional<std::string> pathPrefix;
     std::vector<std::string> tags;
-    
+
     // Date range filters
     std::optional<std::chrono::system_clock::time_point> createdAfter;
     std::optional<std::chrono::system_clock::time_point> createdBefore;
     std::optional<std::chrono::system_clock::time_point> modifiedAfter;
     std::optional<std::chrono::system_clock::time_point> modifiedBefore;
-    
+
     // Size filters
     std::optional<size_t> minSize;
     std::optional<size_t> maxSize;
-    
+
     // Status filters
     bool includeDeleted = false;
     bool includeHidden = false;
-    
+
     // Custom metadata filters
     std::unordered_map<std::string, std::string> customFields;
 };
@@ -130,75 +130,58 @@ struct MetadataFilter {
  */
 struct QueryMetadataRequest : public MetadataRequest {
     MetadataFilter filter;
-    
+
     // Pagination
     size_t offset = 0;
     size_t limit = 100;
-    
+
     // Sorting
-    enum class SortField {
-        CreatedDate,
-        ModifiedDate,
-        Title,
-        Size,
-        ContentType,
-        Path
-    };
-    
+    enum class SortField { CreatedDate, ModifiedDate, Title, Size, ContentType, Path };
+
     SortField sortBy = SortField::ModifiedDate;
     bool ascending = false;
-    
+
     // Result options
-    bool includeCount = true;        // Include total count
-    bool includeStats = false;       // Include statistics
+    bool includeCount = true;  // Include total count
+    bool includeStats = false; // Include statistics
 };
 
 /**
  * @brief Request to export metadata
  */
 struct ExportMetadataRequest : public MetadataRequest {
-    enum class ExportFormat {
-        JSON,
-        CSV,
-        XML,
-        SQLite
-    };
-    
-    MetadataFilter filter;           // Filter what to export
+    enum class ExportFormat { JSON, CSV, XML, SQLite };
+
+    MetadataFilter filter; // Filter what to export
     ExportFormat format = ExportFormat::JSON;
-    bool includeContent = false;     // Include document content
-    bool compressOutput = false;     // Compress the export file
-    std::string outputPath;          // Where to save export
+    bool includeContent = false; // Include document content
+    bool compressOutput = false; // Compress the export file
+    std::string outputPath;      // Where to save export
 };
 
 /**
  * @brief Request to import metadata
  */
 struct ImportMetadataRequest : public MetadataRequest {
-    enum class ImportFormat {
-        JSON,
-        CSV,
-        XML,
-        SQLite
-    };
-    
-    std::string inputPath;           // Path to import file
+    enum class ImportFormat { JSON, CSV, XML, SQLite };
+
+    std::string inputPath; // Path to import file
     ImportFormat format = ImportFormat::JSON;
-    
+
     // Import options
     bool validateBeforeImport = true;
-    bool overwriteExisting = false;  // Overwrite if document exists
-    bool preserveIds = false;        // Keep original document IDs
+    bool overwriteExisting = false; // Overwrite if document exists
+    bool preserveIds = false;       // Keep original document IDs
     bool continueOnError = true;
-    
+
     // Conflict resolution
     enum class ConflictResolution {
-        Skip,         // Skip conflicting documents
-        Overwrite,    // Overwrite existing
-        Rename,       // Create with new name
-        Version       // Create as new version
+        Skip,      // Skip conflicting documents
+        Overwrite, // Overwrite existing
+        Rename,    // Create with new name
+        Version    // Create as new version
     };
-    
+
     ConflictResolution conflictResolution = ConflictResolution::Skip;
 };
 
@@ -207,7 +190,7 @@ struct ImportMetadataRequest : public MetadataRequest {
  */
 struct GetStatisticsRequest : public MetadataRequest {
     MetadataFilter filter;
-    
+
     // What statistics to include
     bool includeTypeCounts = true;
     bool includeSizeStats = true;
@@ -221,7 +204,7 @@ struct GetStatisticsRequest : public MetadataRequest {
  */
 struct ValidateMetadataRequest : public MetadataRequest {
     metadata::DocumentMetadata metadata;
-    
+
     // Validation options
     bool checkUniqueness = true;
     bool validatePaths = true;
@@ -235,7 +218,7 @@ struct ValidateMetadataRequest : public MetadataRequest {
  */
 struct GetHistoryRequest : public MetadataRequest {
     DocumentId documentId;
-    
+
     // History options
     size_t maxVersions = 10;
     std::optional<std::chrono::system_clock::time_point> since;

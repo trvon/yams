@@ -1,11 +1,11 @@
-#include <yams/tools/command.h>
-#include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
+#include <CLI/CLI.hpp>
+#include <yams/tools/command.h>
 
-#include <memory>
-#include <map>
-#include <iostream>
 #include <csignal>
+#include <iostream>
+#include <map>
+#include <memory>
 
 namespace yams::tools {
 
@@ -25,22 +25,22 @@ public:
         setupApp();
         registerCommands();
     }
-    
+
     int run(int argc, char** argv) {
         try {
             app_.parse(argc, argv);
-            
+
             // Execute the appropriate command
             for (auto& [name, cmd] : commands_) {
                 if (app_.got_subcommand(name)) {
                     return cmd->execute();
                 }
             }
-            
+
             // No subcommand specified, show help
             std::cout << app_.help() << std::endl;
             return 0;
-            
+
         } catch (const CLI::ParseError& e) {
             return app_.exit(e);
         } catch (const std::exception& e) {
@@ -48,31 +48,32 @@ public:
             return 1;
         }
     }
-    
+
 private:
     void setupApp() {
         app_.set_version_flag("-V,--version", "1.0.0");
         app_.require_subcommand(0, 1);
-        
+
         // Global options
         app_.add_flag("--debug", debug_, "Enable debug logging");
     }
-    
+
     void registerCommands() {
         // Register each command
         registerCommand(createGCCommand());
         registerCommand(createStatsCommand());
         registerCommand(createVerifyCommand());
     }
-    
+
     void registerCommand(std::unique_ptr<Command> cmd) {
-        if (!cmd) return;
-        
+        if (!cmd)
+            return;
+
         const std::string& name = cmd->getName();
         cmd->setupOptions(app_);
         commands_[name] = std::move(cmd);
     }
-    
+
     CLI::App app_;
     std::map<std::string, std::unique_ptr<Command>> commands_;
     bool debug_ = false;
@@ -119,10 +120,10 @@ int main(int argc, char** argv) {
     // Set up signal handling
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
-    
+
     // Initialize logging
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
-    
+
     // Run the application
     yams::tools::YamsTools app;
     return app.run(argc, argv);

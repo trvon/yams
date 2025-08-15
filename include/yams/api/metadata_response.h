@@ -1,12 +1,12 @@
 #pragma once
 
+#include <chrono>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <yams/core/types.h>
 #include <yams/metadata/document_metadata.h>
-#include <string>
-#include <vector>
-#include <optional>
-#include <chrono>
-#include <unordered_map>
 
 namespace yams::api {
 
@@ -14,22 +14,22 @@ namespace yams::api {
  * @brief Base response for metadata operations
  */
 struct MetadataResponse {
-    std::string requestId;           // Matches request ID
+    std::string requestId; // Matches request ID
     bool success = false;
     std::string message;
     ErrorCode errorCode = ErrorCode::Success;
     std::chrono::system_clock::time_point timestamp;
     std::chrono::milliseconds processingTime{0};
-    
+
     MetadataResponse() : timestamp(std::chrono::system_clock::now()) {}
     virtual ~MetadataResponse() = default;
-    
+
     void setError(ErrorCode code, const std::string& msg) {
         success = false;
         errorCode = code;
         message = msg;
     }
-    
+
     void setSuccess(const std::string& msg = "") {
         success = true;
         errorCode = ErrorCode::Success;
@@ -52,14 +52,14 @@ struct CreateMetadataResponse : public MetadataResponse {
 struct GetMetadataResponse : public MetadataResponse {
     metadata::DocumentMetadata metadata;
     std::vector<metadata::DocumentMetadata> relatedDocuments;
-    
+
     struct VersionInfo {
         int version;
         std::chrono::system_clock::time_point timestamp;
         std::string author;
         std::string comment;
     };
-    
+
     std::vector<VersionInfo> history;
 };
 
@@ -69,7 +69,7 @@ struct GetMetadataResponse : public MetadataResponse {
 struct UpdateMetadataResponse : public MetadataResponse {
     metadata::DocumentMetadata updatedMetadata;
     metadata::DocumentMetadata previousMetadata;
-    bool wasCreated = false;  // True if created instead of updated
+    bool wasCreated = false; // True if created instead of updated
     int newVersion = 1;
 };
 
@@ -92,7 +92,7 @@ struct BulkCreateResponse : public MetadataResponse {
         std::string path;
         std::string error;
     };
-    
+
     std::vector<CreateResult> results;
     size_t successCount = 0;
     size_t failureCount = 0;
@@ -109,7 +109,7 @@ struct BulkUpdateResponse : public MetadataResponse {
         std::string error;
         int newVersion;
     };
-    
+
     std::vector<UpdateResult> results;
     size_t successCount = 0;
     size_t failureCount = 0;
@@ -125,7 +125,7 @@ struct BulkDeleteResponse : public MetadataResponse {
         DocumentId documentId;
         std::string error;
     };
-    
+
     std::vector<DeleteResult> results;
     size_t successCount = 0;
     size_t failureCount = 0;
@@ -137,12 +137,12 @@ struct BulkDeleteResponse : public MetadataResponse {
  */
 struct QueryMetadataResponse : public MetadataResponse {
     std::vector<metadata::DocumentMetadata> documents;
-    size_t totalCount = 0;      // Total matching documents
-    size_t returnedCount = 0;   // Number returned (after pagination)
+    size_t totalCount = 0;    // Total matching documents
+    size_t returnedCount = 0; // Number returned (after pagination)
     size_t offset = 0;
     size_t limit = 0;
     bool hasMore = false;
-    
+
     // Optional statistics
     struct Statistics {
         size_t totalSize = 0;
@@ -151,7 +151,7 @@ struct QueryMetadataResponse : public MetadataResponse {
         std::chrono::system_clock::time_point oldestDocument;
         std::chrono::system_clock::time_point newestDocument;
     };
-    
+
     std::optional<Statistics> stats;
 };
 
@@ -163,14 +163,14 @@ struct ExportMetadataResponse : public MetadataResponse {
     size_t documentsExported = 0;
     size_t totalSize = 0;
     bool wasCompressed = false;
-    std::string checksum;        // Checksum of export file
-    
+    std::string checksum; // Checksum of export file
+
     struct ExportStats {
         std::chrono::milliseconds exportTime{0};
         size_t compressedSize = 0;
         float compressionRatio = 0.0f;
     };
-    
+
     ExportStats stats;
 };
 
@@ -182,21 +182,21 @@ struct ImportMetadataResponse : public MetadataResponse {
     size_t documentsSkipped = 0;
     size_t documentsUpdated = 0;
     size_t documentsFailed = 0;
-    
+
     struct ImportError {
         std::string documentPath;
         std::string error;
-        size_t lineNumber = 0;  // For CSV imports
+        size_t lineNumber = 0; // For CSV imports
     };
-    
+
     std::vector<ImportError> errors;
-    
+
     struct ImportStats {
         std::chrono::milliseconds importTime{0};
         size_t totalBytesProcessed = 0;
         std::unordered_map<std::string, size_t> typeCount;
     };
-    
+
     ImportStats stats;
 };
 
@@ -206,11 +206,11 @@ struct ImportMetadataResponse : public MetadataResponse {
 struct GetStatisticsResponse : public MetadataResponse {
     size_t totalDocuments = 0;
     size_t totalSize = 0;
-    
+
     // Type statistics
     std::unordered_map<std::string, size_t> documentsByType;
     std::unordered_map<std::string, size_t> sizeByType;
-    
+
     // Date statistics
     struct DateStats {
         std::chrono::system_clock::time_point oldest;
@@ -220,7 +220,7 @@ struct GetStatisticsResponse : public MetadataResponse {
         size_t documentsLastMonth = 0;
     };
     DateStats dateStats;
-    
+
     // Size statistics
     struct SizeStats {
         size_t minSize = 0;
@@ -229,10 +229,10 @@ struct GetStatisticsResponse : public MetadataResponse {
         size_t medianSize = 0;
     };
     SizeStats sizeStats;
-    
+
     // Tag statistics
     std::unordered_map<std::string, size_t> tagFrequency;
-    
+
     // Author statistics
     std::unordered_map<std::string, size_t> documentsByAuthor;
 };
@@ -242,16 +242,16 @@ struct GetStatisticsResponse : public MetadataResponse {
  */
 struct ValidateMetadataResponse : public MetadataResponse {
     bool isValid = false;
-    
+
     struct ValidationError {
         std::string field;
         std::string error;
         std::string suggestion;
     };
-    
+
     std::vector<ValidationError> errors;
     std::vector<std::string> warnings;
-    
+
     // Validation details
     bool pathValid = true;
     bool hashValid = true;
@@ -265,16 +265,16 @@ struct ValidateMetadataResponse : public MetadataResponse {
  */
 struct GetHistoryResponse : public MetadataResponse {
     DocumentId documentId;
-    
+
     struct HistoryEntry {
         int version;
         std::chrono::system_clock::time_point timestamp;
         std::string author;
-        std::string operation;  // create, update, delete
+        std::string operation; // create, update, delete
         std::string comment;
-        metadata::DocumentMetadata metadata;  // Optional full metadata
+        metadata::DocumentMetadata metadata; // Optional full metadata
     };
-    
+
     std::vector<HistoryEntry> history;
     size_t totalVersions = 0;
     int currentVersion = 0;
@@ -285,12 +285,12 @@ struct GetHistoryResponse : public MetadataResponse {
  */
 struct BatchMetadataResponse : public MetadataResponse {
     struct OperationResult {
-        std::string operationType;  // create, update, delete, query
+        std::string operationType; // create, update, delete, query
         bool success;
         std::string error;
         std::chrono::milliseconds duration{0};
     };
-    
+
     std::vector<OperationResult> operations;
     size_t totalOperations = 0;
     size_t successfulOperations = 0;

@@ -1,11 +1,11 @@
 #pragma once
 
-#include <yams/cli/command.h>
-#include <yams/core/types.h>
-#include <CLI/CLI.hpp>
 #include <memory>
 #include <string>
 #include <vector>
+#include <CLI/CLI.hpp>
+#include <yams/cli/command.h>
+#include <yams/core/types.h>
 
 namespace yams::cli {
 
@@ -26,15 +26,15 @@ public:
 private:
     YamsCLI* cli_ = nullptr;
     std::string shell_; // bash, zsh, fish
-    
+
     // Shell-specific completion script generators
     std::string generateBashCompletion() const;
     std::string generateZshCompletion() const;
     std::string generateFishCompletion() const;
-    
+
     // Helper to get list of available commands dynamically
     std::vector<std::string> getAvailableCommands() const;
-    
+
     // Helper to get common global flags
     std::vector<std::string> getGlobalFlags() const;
 };

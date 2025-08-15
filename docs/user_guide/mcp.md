@@ -18,14 +18,14 @@ The YAMS MCP server exposes content-addressable storage and search capabilities 
 # Stdio transport (for Claude Desktop and similar)
 yams serve
 
-# WebSocket transport (for network access)
-yams serve --transport websocket --port 8080
+# HTTP transport (for direct network access)
+yams serve --transport http --host 127.0.0.1 --port 8777 --path /mcp
 
 # Docker (stdio transport)
 docker run -i ghcr.io/trvon/yams:latest serve
 
-# Docker (websocket transport)
-docker run -p 8080:8080 ghcr.io/trvon/yams:latest serve --transport websocket --host 0.0.0.0
+# Docker (HTTP transport)
+docker run -p 8777:8777 ghcr.io/trvon/yams:latest serve --transport http --host 0.0.0.0 --path /mcp
 ```
 
 ## Transport Options
@@ -44,20 +44,22 @@ The stdio transport uses standard input/output for JSON-RPC communication. This 
 - Secure by default
 - Simple configuration
 
-### WebSocket Transport
+### HTTP Transport (Streamable HTTP)
 
-WebSocket transport enables network-based communication, useful for remote or containerized deployments.
+HTTP transport enables direct, network-based communication (no subprocess/stdio). This is useful for local apps that POST JSON-RPC to an MCP endpoint.
 
 **When to use:**
-- Remote AI assistants
+- Apps that connect to a URL (localhost) instead of launching a subprocess
 - Container deployments
 - Multi-client scenarios
 
 **Options:**
 - `--host <address>`: Bind address (default: 127.0.0.1)
-- `--port <number>`: Port number (default: 8080)
-- `--path <path>`: WebSocket path (default: /mcp)
-- `--ssl`: Enable TLS/WSS
+- `--port <number>`: Port number (default: 8777)
+- `--path <path>`: Endpoint path (default: /mcp)
+**Security:**
+- Origin allow-list (CORS) defaults to http://localhost, http://127.0.0.1, and null. Override with `YAMS_MCP_ALLOW_ORIGINS`.
+- Bind to 127.0.0.1 unless external access is needed.
 
 ## Claude Desktop Integration
 
@@ -116,13 +118,13 @@ docker run -i --rm \
   -e YAMS_STORAGE=/data \
   ghcr.io/trvon/yams:latest serve
 
-# WebSocket server accessible from network
+# HTTP server accessible from network
 docker run -d --name yams-mcp \
-  -p 8080:8080 \
+  -p 8777:8777 \
   -v ~/.local/share/yams:/data \
   -e YAMS_STORAGE=/data \
   ghcr.io/trvon/yams:latest \
-  serve --transport websocket --host 0.0.0.0
+  serve --transport http --host 0.0.0.0 --path /mcp
 
 # With custom configuration
 docker run -i --rm \
@@ -240,15 +242,33 @@ echo '{"jsonrpc":"2.0","method":"tools/list","id":2}' | yams serve
 echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_documents","arguments":{"query":"test"}},"id":3}' | yams serve
 ```
 
-### Using curl with WebSocket
+### Using curl with HTTP
 
 ```bash
-# Start WebSocket server
-yams serve --transport websocket &
+# Initialize
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"curl","version":"test"}}}' \
+  http://127.0.0.1:8777/mcp
 
-# Send requests via curl (requires wscat or similar)
-wscat -c ws://localhost:8080/mcp
-> {"jsonrpc":"2.0","method":"initialize","params":{},"id":1}
+# List tools
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  http://127.0.0.1:8777/mcp
+
+# Call a tool
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_documents","arguments":{"query":"test"}}}' \
+  http://127.0.0.1:8777/mcp
+
+# Notification (expect HTTP 202, no body)
+curl -i -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  http://127.0.0.1:8777/mcp
+
+# Batch (mixed)
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '[{"jsonrpc":"2.0","method":"notifications/logging/setLevel","params":{"level":"warn"}},{"jsonrpc":"2.0","id":4,"method":"tools/list"}]' \
+  http://127.0.0.1:8777/mcp
 ```
 
 ### Test Script
@@ -365,7 +385,7 @@ Press Ctrl+C to stop the server
 If not visible:
 1. Check stderr isn't being redirected
 2. Ensure you're not in a non-interactive environment
-3. Try `--transport websocket` for testing
+3. Try `--transport http` for testing
 
 ### Claude Desktop doesn't show YAMS tools
 
@@ -382,12 +402,18 @@ docker run -i ghcr.io/trvon/yams:latest serve  # Correct
 docker run ghcr.io/trvon/yams:latest serve     # Wrong - will exit
 ```
 
-### WebSocket connection refused
+### HTTP connection issues
 
-1. Check the port isn't already in use
-2. Use `--host 0.0.0.0` for external access (not just 127.0.0.1)
-3. Verify firewall/security group rules
-4. Check Docker port mapping with `-p`
+- 405 on GET /mcp
+  - Expected in Phase 1 (SSE not enabled). Use POST for requests.
+- 403 Forbidden
+  - Origin not allowed. Set `YAMS_MCP_ALLOW_ORIGINS` or call from http://localhost or http://127.0.0.1.
+- 400 Bad Request
+  - Invalid JSON or missing Content-Length (curl sets it for you).
+- Connection refused
+  - Ensure server is running on the expected host/port and Docker port mapping (`-p 8777:8777`) is correct.
+- External access
+  - Use `--host 0.0.0.0` only if you understand the risks; prefer `127.0.0.1` for local.
 
 ## Security Considerations
 

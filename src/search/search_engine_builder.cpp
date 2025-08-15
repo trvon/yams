@@ -1,18 +1,18 @@
 #include <yams/search/search_engine_builder.h>
 
+#include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/search/hybrid_search_factory.h>
 #include <yams/search/kg_scorer.h>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/vector/vector_index_manager.h>
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <regex>
 #include <sstream>
-#include <map>
 #include <unordered_set>
 
 namespace yams::search {
@@ -25,14 +25,13 @@ makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store);
 // MetadataKeywordAdapter
 // ------------------------------
 
-MetadataKeywordAdapter::MetadataKeywordAdapter(std::shared_ptr<yams::metadata::MetadataRepository> repo)
+MetadataKeywordAdapter::MetadataKeywordAdapter(
+    std::shared_ptr<yams::metadata::MetadataRepository> repo)
     : repo_(std::move(repo)) {}
 
-Result<std::vector<KeywordSearchResult>> MetadataKeywordAdapter::search(
-    const std::string& query,
-    size_t k,
-    const yams::vector::SearchFilter* filter)
-{
+Result<std::vector<KeywordSearchResult>>
+MetadataKeywordAdapter::search(const std::string& query, size_t k,
+                               const yams::vector::SearchFilter* filter) {
     if (!repo_) {
         return Error{ErrorCode::InvalidState, "MetadataKeywordAdapter: repository not set"};
     }
@@ -110,11 +109,9 @@ Result<std::vector<KeywordSearchResult>> MetadataKeywordAdapter::search(
     return out;
 }
 
-Result<std::vector<std::vector<KeywordSearchResult>>> MetadataKeywordAdapter::batchSearch(
-    const std::vector<std::string>& queries,
-    size_t k,
-    const yams::vector::SearchFilter* filter)
-{
+Result<std::vector<std::vector<KeywordSearchResult>>>
+MetadataKeywordAdapter::batchSearch(const std::vector<std::string>& queries, size_t k,
+                                    const yams::vector::SearchFilter* filter) {
     std::vector<std::vector<KeywordSearchResult>> results;
     results.reserve(queries.size());
     for (const auto& q : queries) {
@@ -128,11 +125,9 @@ Result<std::vector<std::vector<KeywordSearchResult>>> MetadataKeywordAdapter::ba
 }
 
 // Index management is delegated to the DB FTS index; treat as no-ops.
-Result<void> MetadataKeywordAdapter::addDocument(
-    const std::string& /*id*/,
-    const std::string& /*content*/,
-    const std::map<std::string, std::string>& /*metadata*/)
-{
+Result<void>
+MetadataKeywordAdapter::addDocument(const std::string& /*id*/, const std::string& /*content*/,
+                                    const std::map<std::string, std::string>& /*metadata*/) {
     return Result<void>(); // no-op
 }
 
@@ -140,25 +135,27 @@ Result<void> MetadataKeywordAdapter::removeDocument(const std::string& /*id*/) {
     return Result<void>(); // no-op
 }
 
-Result<void> MetadataKeywordAdapter::updateDocument(
-    const std::string& /*id*/,
-    const std::string& /*content*/,
-    const std::map<std::string, std::string>& /*metadata*/)
-{
+Result<void>
+MetadataKeywordAdapter::updateDocument(const std::string& /*id*/, const std::string& /*content*/,
+                                       const std::map<std::string, std::string>& /*metadata*/) {
     return Result<void>(); // no-op
 }
 
 Result<void> MetadataKeywordAdapter::addDocuments(
-    const std::vector<std::string>& /*ids*/,
-    const std::vector<std::string>& /*contents*/,
-    const std::vector<std::map<std::string, std::string>>& /*metadata*/)
-{
+    const std::vector<std::string>& /*ids*/, const std::vector<std::string>& /*contents*/,
+    const std::vector<std::map<std::string, std::string>>& /*metadata*/) {
     return Result<void>(); // no-op
 }
 
-Result<void> MetadataKeywordAdapter::buildIndex() { return Result<void>(); }      // no-op
-Result<void> MetadataKeywordAdapter::optimizeIndex() { return Result<void>(); }   // no-op
-Result<void> MetadataKeywordAdapter::clearIndex() { return Result<void>(); }      // no-op
+Result<void> MetadataKeywordAdapter::buildIndex() {
+    return Result<void>();
+} // no-op
+Result<void> MetadataKeywordAdapter::optimizeIndex() {
+    return Result<void>();
+} // no-op
+Result<void> MetadataKeywordAdapter::clearIndex() {
+    return Result<void>();
+} // no-op
 
 Result<void> MetadataKeywordAdapter::saveIndex(const std::string& /*path*/) {
     return Error{ErrorCode::InvalidOperation, "MetadataKeywordAdapter: saveIndex not supported"};
@@ -169,14 +166,20 @@ Result<void> MetadataKeywordAdapter::loadIndex(const std::string& /*path*/) {
 }
 
 size_t MetadataKeywordAdapter::getDocumentCount() const {
-    if (!repo_) return 0;
+    if (!repo_)
+        return 0;
     auto rc = repo_->getDocumentCount();
-    if (!rc) return 0;
+    if (!rc)
+        return 0;
     return static_cast<size_t>(std::max<int64_t>(0, rc.value()));
 }
 
-size_t MetadataKeywordAdapter::getTermCount() const { return 0; }   // Not exposed by repo
-size_t MetadataKeywordAdapter::getIndexSize() const { return 0; }   // Not exposed by repo
+size_t MetadataKeywordAdapter::getTermCount() const {
+    return 0;
+} // Not exposed by repo
+size_t MetadataKeywordAdapter::getIndexSize() const {
+    return 0;
+} // Not exposed by repo
 
 std::vector<std::string> MetadataKeywordAdapter::analyzeQuery(const std::string& query) const {
     // Very simple tokenization to mirror other keyword engines
@@ -198,26 +201,29 @@ std::vector<std::string> MetadataKeywordAdapter::extractKeywords(const std::stri
     return std::vector<std::string>(uniq.begin(), uniq.end());
 }
 
-
 // ------------------------------
 // SearchEngineBuilder
 // ------------------------------
 
 Result<std::shared_ptr<KeywordSearchEngine>> SearchEngineBuilder::makeKeywordEngine() {
     if (!metadataRepo_) {
-        return Error{ErrorCode::InvalidArgument, "SearchEngineBuilder: MetadataRepository not provided"};
+        return Error{ErrorCode::InvalidArgument,
+                     "SearchEngineBuilder: MetadataRepository not provided"};
     }
-    std::shared_ptr<KeywordSearchEngine> engine = std::make_shared<MetadataKeywordAdapter>(metadataRepo_);
+    std::shared_ptr<KeywordSearchEngine> engine =
+        std::make_shared<MetadataKeywordAdapter>(metadataRepo_);
     return engine;
 }
 
-Result<std::shared_ptr<KGScorer>> SearchEngineBuilder::makeKGScorerIfEnabled(const HybridSearchConfig& cfg) {
+Result<std::shared_ptr<KGScorer>>
+SearchEngineBuilder::makeKGScorerIfEnabled(const HybridSearchConfig& cfg) {
     if (!cfg.enable_kg) {
         return std::shared_ptr<KGScorer>{}; // KG disabled => null scorer is fine
     }
     if (!kgStore_) {
         // KG requested but store not available; return null and let caller decide how to proceed
-        spdlog::warn("KG enabled in config, but no KnowledgeGraphStore provided; proceeding without KG scorer");
+        spdlog::warn("KG enabled in config, but no KnowledgeGraphStore provided; proceeding "
+                     "without KG scorer");
         return std::shared_ptr<KGScorer>{};
     }
     auto scorer = makeSimpleKGScorer(kgStore_);
@@ -227,10 +233,12 @@ Result<std::shared_ptr<KGScorer>> SearchEngineBuilder::makeKGScorerIfEnabled(con
 Result<std::shared_ptr<HybridSearchEngine>>
 SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     if (!vectorIndex_) {
-        return Error{ErrorCode::InvalidArgument, "SearchEngineBuilder: VectorIndexManager not provided"};
+        return Error{ErrorCode::InvalidArgument,
+                     "SearchEngineBuilder: VectorIndexManager not provided"};
     }
     if (!metadataRepo_) {
-        return Error{ErrorCode::InvalidArgument, "SearchEngineBuilder: MetadataRepository not provided"};
+        return Error{ErrorCode::InvalidArgument,
+                     "SearchEngineBuilder: MetadataRepository not provided"};
     }
 
     // Prepare hybrid config
@@ -251,8 +259,8 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     // Compose HybridSearchEngine
     if (cfg.enable_kg && kgStore_) {
         // Create engine with KG store; factory will attach a default KG scorer
-        auto engRes = HybridSearchFactory::createWithKGStore(
-            vectorIndex_, keywordEngine, cfg, kgStore_);
+        auto engRes =
+            HybridSearchFactory::createWithKGStore(vectorIndex_, keywordEngine, cfg, kgStore_);
         if (!engRes) {
             // Fail open: attempt without KG
             spdlog::warn("HybridSearchFactory::createWithKGStore failed: {}. Retrying without KG.",

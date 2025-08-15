@@ -1,6 +1,6 @@
-#include <yams/crypto/hasher.h>
-#include <openssl/evp.h>
 #include <spdlog/spdlog.h>
+#include <openssl/evp.h>
+#include <yams/crypto/hasher.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
 namespace yamsfmt = std;
@@ -8,36 +8,34 @@ namespace yamsfmt = std;
 #include <spdlog/fmt/fmt.h>
 namespace yamsfmt = fmt;
 #endif
-#include <fstream>
 #include <array>
+#include <fstream>
 
 namespace yams::crypto {
 
 struct SHA256Hasher::Impl {
     EVP_MD_CTX* ctx = nullptr;
     ProgressCallback progressCallback;
-    
+
     Impl() : ctx(EVP_MD_CTX_new()) {
         if (!ctx) {
             throw std::runtime_error("Failed to create EVP_MD_CTX");
         }
     }
-    
+
     ~Impl() {
         if (ctx) {
             EVP_MD_CTX_free(ctx);
         }
     }
-    
+
     // Delete copy operations
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
-    
+
     // Move operations
-    Impl(Impl&& other) noexcept : ctx(other.ctx) {
-        other.ctx = nullptr;
-    }
-    
+    Impl(Impl&& other) noexcept : ctx(other.ctx) { other.ctx = nullptr; }
+
     Impl& operator=(Impl&& other) noexcept {
         if (this != &other) {
             if (ctx) {
@@ -74,22 +72,22 @@ void SHA256Hasher::update(std::span<const std::byte> data) {
 std::string SHA256Hasher::finalize() {
     std::array<unsigned char, EVP_MAX_MD_SIZE> hash{};
     unsigned int hashLen = 0;
-    
+
     if (EVP_DigestFinal_ex(pImpl->ctx, hash.data(), &hashLen) != 1) {
         throw std::runtime_error("Failed to finalize SHA256");
     }
-    
+
     // Convert to hex string
     std::string result;
     result.reserve(hashLen * 2);
-    
+
     for (unsigned int i = 0; i < hashLen; ++i) {
         result += yamsfmt::format("{:02x}", hash[i]);
     }
-    
+
     // Reset for potential reuse
     init();
-    
+
     return result;
 }
 
@@ -98,35 +96,33 @@ std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
     if (!file) {
         throw std::runtime_error(yamsfmt::format("Failed to open file: {}", path.string()));
     }
-    
+
     init();
-    
+
     constexpr size_t bufferSize = DEFAULT_BUFFER_SIZE;
     std::vector<std::byte> buffer(bufferSize);
-    
+
     auto fileSize = std::filesystem::file_size(path);
     uint64_t processed = 0;
-    
+
     while (file) {
         file.read(reinterpret_cast<char*>(buffer.data()), bufferSize);
         auto bytesRead = file.gcount();
-        
+
         if (bytesRead > 0) {
             update(std::span{buffer.data(), static_cast<size_t>(bytesRead)});
             processed += static_cast<uint64_t>(bytesRead);
-            
+
             if (pImpl->progressCallback) {
                 pImpl->progressCallback(processed, fileSize);
             }
         }
     }
-    
+
     return finalize();
 }
 
-std::future<Result<std::string>> SHA256Hasher::hashFileAsync(
-    const std::filesystem::path& path) {
-    
+std::future<Result<std::string>> SHA256Hasher::hashFileAsync(const std::filesystem::path& path) {
     return std::async(std::launch::async, [this, path]() -> Result<std::string> {
         try {
             return hashFile(path);

@@ -1,8 +1,8 @@
 #pragma once
 
-#include <yams/cli/command.h>
 #include <memory>
 #include <string>
+#include <yams/cli/command.h>
 
 namespace yams::cli {
 
@@ -14,14 +14,14 @@ class BrowseCommand : public ICommand {
 public:
     BrowseCommand();
     ~BrowseCommand();
-    
+
     std::string getName() const override;
     std::string getDescription() const override;
-    
+
     void registerCommand(CLI::App& app, YamsCLI* cli) override;
-    
+
     Result<void> execute() override;
-    
+
 private:
     // Forward declaration for implementation
     class Impl;

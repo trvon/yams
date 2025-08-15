@@ -37,7 +37,8 @@ struct CommandActions {
  * Recognized commands (baseline):
  * - q, quit, wq       : Exit the TUI (exit_requested = true)
  * - help              : Show help overlay
- * - open              : Open selected document in external pager (uses actions.openPager if provided)
+ * - open              : Open selected document in external pager (uses actions.openPager if
+ * provided)
  * - hex               : Switch preview mode to Hex
  * - text              : Switch preview mode to Text
  * - refresh           : Refresh listings (uses actions.refresh if provided)
@@ -58,9 +59,7 @@ public:
      * @param actions         Optional side-effect implementations for commands that need I/O.
      * @return                true if a known command was executed; false if unknown.
      */
-    bool execute(const std::string& cmd,
-                 BrowseState& state,
-                 bool& exit_requested,
+    bool execute(const std::string& cmd, BrowseState& state, bool& exit_requested,
                  const CommandActions& actions = {});
 };
 

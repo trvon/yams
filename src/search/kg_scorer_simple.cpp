@@ -1,26 +1,26 @@
-#include <yams/search/kg_scorer.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/kg_scorer.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace yams::search {
 
-using yams::metadata::KnowledgeGraphStore;
 using yams::metadata::AliasResolution;
 using yams::metadata::DocEntity;
+using yams::metadata::KnowledgeGraphStore;
 
 // A very simple local-first KG scorer.
 // - Extracts alias-like tokens from the query
@@ -37,10 +37,8 @@ public:
     void setConfig(const KGScoringConfig& cfg) override { cfg_ = cfg; }
     const KGScoringConfig& getConfig() const override { return cfg_; }
 
-    Result<std::unordered_map<std::string, KGScore>> score(
-        const std::string& query_text,
-        const std::vector<std::string>& candidate_ids) override
-    {
+    Result<std::unordered_map<std::string, KGScore>>
+    score(const std::string& query_text, const std::vector<std::string>& candidate_ids) override {
         last_expl_.clear();
 
         if (!store_) {
@@ -55,16 +53,19 @@ public:
 
         // Resolve aliases to nodes (budget-aware)
         for (const auto& a : query_aliases) {
-            if (timedOut(t0)) break;
+            if (timedOut(t0))
+                break;
 
             // Try exact first
             auto exact = store_->resolveAliasExact(a, 16);
-            if (!exact) return exact.error();
+            if (!exact)
+                return exact.error();
 
             if (exact.value().empty()) {
                 // Fallback to fuzzy/FTS if enabled by store config
                 auto fuzzy = store_->resolveAliasFuzzy(a, 16);
-                if (!fuzzy) return fuzzy.error();
+                if (!fuzzy)
+                    return fuzzy.error();
                 for (const auto& ar : fuzzy.value()) {
                     query_nodes.insert(ar.nodeId);
                 }
@@ -78,9 +79,11 @@ public:
         // Pre-compute 1-hop neighbor set for structural scoring (budget-aware)
         std::unordered_set<std::int64_t> query_neighbor_union;
         for (auto nid : query_nodes) {
-            if (timedOut(t0)) break;
+            if (timedOut(t0))
+                break;
             auto nb = store_->neighbors(nid, cfg_.max_neighbors);
-            if (!nb) return nb.error();
+            if (!nb)
+                return nb.error();
             for (auto v : nb.value()) {
                 query_neighbor_union.insert(v);
             }
@@ -92,7 +95,8 @@ public:
         last_expl_.reserve(candidate_ids.size());
 
         for (const auto& cid : candidate_ids) {
-            if (timedOut(t0)) break;
+            if (timedOut(t0))
+                break;
 
             KGScore s{};
             KGExplain expl;
@@ -143,7 +147,8 @@ public:
                     expl.reasons.emplace_back("Shares linked entities with query");
                 }
                 if (s.structural > 0.0f) {
-                    expl.reasons.emplace_back("Candidate entities are neighbors of query-linked entities");
+                    expl.reasons.emplace_back(
+                        "Candidate entities are neighbors of query-linked entities");
                 }
             }
             last_expl_.push_back(std::move(expl));
@@ -152,15 +157,15 @@ public:
         return out;
     }
 
-    std::vector<KGExplain> getLastExplanations() const override {
-        return last_expl_;
-    }
+    std::vector<KGExplain> getLastExplanations() const override { return last_expl_; }
 
 private:
     // Helpers
     static float clamp01(float v) {
-        if (v < 0.0f) return 0.0f;
-        if (v > 1.0f) return 1.0f;
+        if (v < 0.0f)
+            return 0.0f;
+        if (v > 1.0f)
+            return 1.0f;
         return v;
     }
 
@@ -170,17 +175,20 @@ private:
             s.remove_prefix(4);
         }
         // Reject empty
-        if (s.empty()) return std::nullopt;
+        if (s.empty())
+            return std::nullopt;
         bool neg = false;
         if (s[0] == '-') {
             neg = true;
             s.remove_prefix(1);
         }
-        if (s.empty()) return std::nullopt;
+        if (s.empty())
+            return std::nullopt;
 
         std::int64_t val = 0;
         for (char c : s) {
-            if (c < '0' || c > '9') return std::nullopt;
+            if (c < '0' || c > '9')
+                return std::nullopt;
             int d = c - '0';
             // Basic overflow check
             if (val > (std::numeric_limits<std::int64_t>::max() - d) / 10) {
@@ -193,7 +201,8 @@ private:
 
     static float jaccard(const std::unordered_set<std::int64_t>& a,
                          const std::unordered_set<std::int64_t>& b) {
-        if (a.empty() || b.empty()) return 0.0f;
+        if (a.empty() || b.empty())
+            return 0.0f;
 
         // Iterate over smaller set
         const auto* small = &a;
@@ -209,13 +218,15 @@ private:
             }
         }
         const std::size_t uni = a.size() + b.size() - inter;
-        if (uni == 0) return 0.0f;
+        if (uni == 0)
+            return 0.0f;
         return static_cast<float>(inter) / static_cast<float>(uni);
     }
 
     static float structuralOverlap(const std::unordered_set<std::int64_t>& neighbor_union,
                                    const std::unordered_set<std::int64_t>& cand_nodes) {
-        if (neighbor_union.empty() || cand_nodes.empty()) return 0.0f;
+        if (neighbor_union.empty() || cand_nodes.empty())
+            return 0.0f;
 
         std::size_t overlap = 0;
         for (auto x : cand_nodes) {
@@ -224,9 +235,9 @@ private:
             }
         }
         // Normalize by candidate cardinality (bounded to [0,1])
-        return cand_nodes.empty()
-                   ? 0.0f
-                   : std::min(1.0f, static_cast<float>(overlap) / static_cast<float>(cand_nodes.size()));
+        return cand_nodes.empty() ? 0.0f
+                                  : std::min(1.0f, static_cast<float>(overlap) /
+                                                       static_cast<float>(cand_nodes.size()));
     }
 
     // Very simple tokenizer: lowercase alnum sequences as aliases + join bigrams
@@ -244,7 +255,8 @@ private:
                 }
             }
         }
-        if (!cur.empty()) tokens.push_back(cur);
+        if (!cur.empty())
+            tokens.push_back(cur);
 
         // Merge in bigrams to capture simple phrases like "new york"
         std::vector<std::string> out = tokens;
@@ -259,7 +271,8 @@ private:
     }
 
     bool timedOut(const std::chrono::steady_clock::time_point& t0) const {
-        if (cfg_.budget.count() <= 0) return false;
+        if (cfg_.budget.count() <= 0)
+            return false;
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0);
         return elapsed > cfg_.budget;

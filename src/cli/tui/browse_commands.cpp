@@ -12,12 +12,13 @@ namespace {
 
 // Trim helpers
 inline void ltrim(std::string& s) {
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(),
-        [](unsigned char ch) { return !std::isspace(ch); }));
+    s.erase(s.begin(),
+            std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
 }
 inline void rtrim(std::string& s) {
-    s.erase(std::find_if(s.rbegin(), s.rend(),
-        [](unsigned char ch) { return !std::isspace(ch); }).base(), s.end());
+    s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); })
+                .base(),
+            s.end());
 }
 inline void trim(std::string& s) {
     ltrim(s);
@@ -27,15 +28,14 @@ inline void trim(std::string& s) {
 inline std::string toLower(std::string_view sv) {
     std::string out;
     out.reserve(sv.size());
-    for (char c : sv) out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    for (char c : sv)
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     return out;
 }
 
 } // namespace
 
-bool BrowseCommands::execute(const std::string& raw_cmd,
-                             BrowseState& state,
-                             bool& exit_requested,
+bool BrowseCommands::execute(const std::string& raw_cmd, BrowseState& state, bool& exit_requested,
                              const CommandActions& actions) {
     exit_requested = false;
 

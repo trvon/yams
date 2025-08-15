@@ -1,10 +1,10 @@
 #pragma once
 
-#include <yams/core/types.h>
-#include <yams/compression/compressor_interface.h>
 #include <cstdint>
 #include <span>
 #include <string>
+#include <yams/compression/compressor_interface.h>
+#include <yams/core/types.h>
 
 namespace yams::compression {
 
@@ -36,9 +36,8 @@ namespace yams::compression {
  * @param algorithm Compression algorithm
  * @return Estimated compression ratio (e.g., 3 means 3:1)
  */
-[[nodiscard]] size_t estimateCompressionRatio(
-    std::span<const std::byte> data, 
-    CompressionAlgorithm algorithm);
+[[nodiscard]] size_t estimateCompressionRatio(std::span<const std::byte> data,
+                                              CompressionAlgorithm algorithm);
 
 /**
  * @brief Format compression statistics for display

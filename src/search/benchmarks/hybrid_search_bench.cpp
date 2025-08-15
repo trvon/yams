@@ -49,9 +49,9 @@
 #include <vector>
 
 #if defined(_WIN32)
-  #include <windows.h>
+#include <windows.h>
 #else
-  #include <unistd.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -109,14 +109,16 @@ public:
             }
         }
         keys_.reserve(vars.size());
-        for (auto& [k, _] : vars) keys_.push_back(k);
+        for (auto& [k, _] : vars)
+            keys_.push_back(k);
     }
 
     ~ScopedEnv() {
         // Restore previous values
         for (const auto& k : keys_) {
             auto it = previous_.find(k);
-            if (it == previous_.end()) continue;
+            if (it == previous_.end())
+                continue;
             if (it->second.has_value()) {
                 setEnv(k.c_str(), it->second->c_str());
             } else {
@@ -130,19 +132,19 @@ public:
 
 private:
     static void setEnv(const char* key, const char* value) {
-    #if defined(_WIN32)
+#if defined(_WIN32)
         _putenv_s(key, value);
-    #else
+#else
         ::setenv(key, value, 1);
-    #endif
+#endif
     }
 
     static void unsetEnv(const char* key) {
-    #if defined(_WIN32)
+#if defined(_WIN32)
         _putenv_s(key, "");
-    #else
+#else
         ::unsetenv(key);
-    #endif
+#endif
     }
 
     std::vector<std::string> keys_;
@@ -155,7 +157,8 @@ bool execCommand(const std::string& cmd) {
 #if defined(_WIN32)
     // On Windows, use _popen/_pclose
     FILE* pipe = _popen(cmd.c_str(), "rt");
-    if (!pipe) return false;
+    if (!pipe)
+        return false;
     char buffer[256];
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         // Discard or capture output if needed
@@ -165,14 +168,16 @@ bool execCommand(const std::string& cmd) {
 #else
     // On POSIX, use popen/pclose
     FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return false;
+    if (!pipe)
+        return false;
     char buffer[256];
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         // Discard or capture output if needed
     }
     int status = pclose(pipe);
     // If pclose returns -1, we treat as failure
-    if (status == -1) return false;
+    if (status == -1)
+        return false;
     // WEXITSTATUS only meaningful if WIFEXITED(status); be tolerant
     return status == 0;
 #endif
@@ -180,19 +185,14 @@ bool execCommand(const std::string& cmd) {
 
 // Time a single CLI search invocation with specific ablation toggles.
 // Returns elapsed milliseconds.
-double timeSearchCLI(const std::string& cliPath,
-                     const std::string& query,
-                     int topK,
-                     bool verbose,
-                     const std::string& extraArgs,
-                     bool disableKeyword,
-                     bool disableVector,
+double timeSearchCLI(const std::string& cliPath, const std::string& query, int topK, bool verbose,
+                     const std::string& extraArgs, bool disableKeyword, bool disableVector,
                      bool disableKG) {
     // Prepare environment toggles for the child process
     ScopedEnv env({
         {"YAMS_DISABLE_KEYWORD", disableKeyword ? std::optional<std::string>("1") : std::nullopt},
-        {"YAMS_DISABLE_VECTOR",  disableVector  ? std::optional<std::string>("1") : std::nullopt},
-        {"YAMS_DISABLE_KG",      disableKG      ? std::optional<std::string>("1") : std::nullopt},
+        {"YAMS_DISABLE_VECTOR", disableVector ? std::optional<std::string>("1") : std::nullopt},
+        {"YAMS_DISABLE_KG", disableKG ? std::optional<std::string>("1") : std::nullopt},
     });
 
     // Build command
@@ -200,37 +200,42 @@ double timeSearchCLI(const std::string& cliPath,
 #if defined(_WIN32)
     // Basic Windows quoting (best effort)
     cmd << "\"" << cliPath << "\" ";
-    if (verbose) cmd << "--json --verbose ";
+    if (verbose)
+        cmd << "--json --verbose ";
     cmd << "search ";
-    if (!extraArgs.empty()) cmd << extraArgs << " ";
+    if (!extraArgs.empty())
+        cmd << extraArgs << " ";
     cmd << "\"" << query << "\" ";
     cmd << "--limit " << topK;
 #else
     const std::string q = shellEscapeSingleQuoted(query);
     // Prefer absolute/relative path as-is; rely on PATH otherwise
     cmd << cliPath << " ";
-    if (verbose) cmd << "--json --verbose ";
+    if (verbose)
+        cmd << "--json --verbose ";
     cmd << "search ";
-    if (!extraArgs.empty()) cmd << extraArgs << " ";
+    if (!extraArgs.empty())
+        cmd << extraArgs << " ";
     cmd << q << " ";
     cmd << "--limit " << topK;
 #endif
 
     const auto start = std::chrono::steady_clock::now();
     (void)execCommand(cmd.str()); // We don't fail the benchmark if the command fails
-    const auto end   = std::chrono::steady_clock::now();
+    const auto end = std::chrono::steady_clock::now();
 
-    const auto ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - start).count();
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - start).count();
     return ms;
 }
 
 struct BenchConfig {
     std::string cliPath = getEnvOr("YAMS_CLI_PATH", "yams");
-    std::string query   = getEnvOr("YAMS_BENCH_QUERY", "PBI");
-    int topK            = toIntOr(getEnvOr("YAMS_BENCH_TOPK", "10"), 10);
+    std::string query = getEnvOr("YAMS_BENCH_QUERY", "PBI");
+    int topK = toIntOr(getEnvOr("YAMS_BENCH_TOPK", "10"), 10);
     std::string extraArgs = getEnvOr("YAMS_BENCH_ARGS", "");
-    bool verbose        = (getEnvOr("YAMS_BENCH_VERBOSE", "1") != "0");
-    int warmup          = toIntOr(getEnvOr("YAMS_BENCH_WARMUP", "1"), 1);
+    bool verbose = (getEnvOr("YAMS_BENCH_VERBOSE", "1") != "0");
+    int warmup = toIntOr(getEnvOr("YAMS_BENCH_WARMUP", "1"), 1);
 };
 
 BenchConfig getBenchConfig() {
@@ -253,15 +258,18 @@ static void BM_Query_Hybrid(benchmark::State& state) {
     }
 
     for (auto _ : state) {
-        const double ms = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                        /*disableKeyword=*/false, /*disableVector=*/false, /*disableKG=*/false);
+        const double ms =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/false, /*disableVector=*/false, /*disableKG=*/false);
         benchmark::DoNotOptimize(ms);
-        state.SetIterationTime(ms / 1000.0); // seconds for ManualTime? (not using ManualTime; counter will show avg)
+        state.SetIterationTime(
+            ms / 1000.0); // seconds for ManualTime? (not using ManualTime; counter will show avg)
     }
 
     // Report average ms per iteration as a counter
     // (Google Benchmark reports wall time already; we include a counter for convenient export)
-    state.counters["hybrid_ms"] = benchmark::Counter( state.iterations(), benchmark::Counter::kIsRate) * 0.0; // placeholder
+    state.counters["hybrid_ms"] =
+        benchmark::Counter(state.iterations(), benchmark::Counter::kIsRate) * 0.0; // placeholder
 }
 BENCHMARK(BM_Query_Hybrid)->Unit(benchmark::kMillisecond);
 
@@ -275,8 +283,9 @@ static void BM_Query_KeywordOnly(benchmark::State& state) {
     }
 
     for (auto _ : state) {
-        const double ms = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                        /*disableKeyword=*/false, /*disableVector=*/true, /*disableKG=*/true);
+        const double ms =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/false, /*disableVector=*/true, /*disableKG=*/true);
         benchmark::DoNotOptimize(ms);
         state.SetIterationTime(ms / 1000.0);
     }
@@ -293,8 +302,9 @@ static void BM_Query_VectorOnly(benchmark::State& state) {
     }
 
     for (auto _ : state) {
-        const double ms = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                        /*disableKeyword=*/true, /*disableVector=*/false, /*disableKG=*/true);
+        const double ms =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/true, /*disableVector=*/false, /*disableKG=*/true);
         benchmark::DoNotOptimize(ms);
         state.SetIterationTime(ms / 1000.0);
     }
@@ -311,8 +321,9 @@ static void BM_Query_KGOnly(benchmark::State& state) {
     }
 
     for (auto _ : state) {
-        const double ms = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                        /*disableKeyword=*/true, /*disableVector=*/true, /*disableKG=*/false);
+        const double ms =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/true, /*disableVector=*/true, /*disableKG=*/false);
         benchmark::DoNotOptimize(ms);
         state.SetIterationTime(ms / 1000.0);
     }
@@ -338,19 +349,23 @@ static void BM_Query_Breakdown(benchmark::State& state) {
     double sumHybridMs = 0.0, sumKeywordMs = 0.0, sumVectorMs = 0.0, sumKgMs = 0.0;
 
     for (auto _ : state) {
-        const double hybridMs  = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                               /*disableKeyword=*/false, /*disableVector=*/false, /*disableKG=*/false);
-        const double keywordMs = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                               /*disableKeyword=*/false, /*disableVector=*/true, /*disableKG=*/true);
-        const double vectorMs  = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                               /*disableKeyword=*/true, /*disableVector=*/false, /*disableKG=*/true);
-        const double kgMs      = timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
-                                               /*disableKeyword=*/true, /*disableVector=*/true, /*disableKG=*/false);
+        const double hybridMs =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/false, /*disableVector=*/false, /*disableKG=*/false);
+        const double keywordMs =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/false, /*disableVector=*/true, /*disableKG=*/true);
+        const double vectorMs =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/true, /*disableVector=*/false, /*disableKG=*/true);
+        const double kgMs =
+            timeSearchCLI(cfg.cliPath, cfg.query, cfg.topK, cfg.verbose, cfg.extraArgs,
+                          /*disableKeyword=*/true, /*disableVector=*/true, /*disableKG=*/false);
 
-        sumHybridMs  += hybridMs;
+        sumHybridMs += hybridMs;
         sumKeywordMs += keywordMs;
-        sumVectorMs  += vectorMs;
-        sumKgMs      += kgMs;
+        sumVectorMs += vectorMs;
+        sumKgMs += kgMs;
 
         // The iteration's wall time will roughly include the sum; report hybrid timing here.
         state.SetIterationTime(hybridMs / 1000.0);
@@ -362,10 +377,10 @@ static void BM_Query_Breakdown(benchmark::State& state) {
 
     const double iters = static_cast<double>(state.iterations());
     if (iters > 0.0) {
-        state.counters["hybrid_ms_avg"]  = sumHybridMs  / iters;
+        state.counters["hybrid_ms_avg"] = sumHybridMs / iters;
         state.counters["keyword_ms_avg"] = sumKeywordMs / iters;
-        state.counters["vector_ms_avg"]  = sumVectorMs  / iters;
-        state.counters["kg_ms_avg"]      = sumKgMs      / iters;
+        state.counters["vector_ms_avg"] = sumVectorMs / iters;
+        state.counters["kg_ms_avg"] = sumKgMs / iters;
     }
 }
 BENCHMARK(BM_Query_Breakdown)->Unit(benchmark::kMillisecond);

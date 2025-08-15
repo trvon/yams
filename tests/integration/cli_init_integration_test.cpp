@@ -13,9 +13,9 @@
 #include <vector>
 
 #if defined(_WIN32)
-  #include <windows.h>
+#include <windows.h>
 #else
-  #include <sys/wait.h>
+#include <sys/wait.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -27,8 +27,10 @@ static std::string shellQuote(const std::string& s) {
     // Basic quoting for Windows cmd - not used in CI for this project (macOS/Linux primarily)
     std::string out = "\"";
     for (char c : s) {
-        if (c == '"') out += "\\\"";
-        else out += c;
+        if (c == '"')
+            out += "\\\"";
+        else
+            out += c;
     }
     out += "\"";
     return out;
@@ -107,7 +109,8 @@ static std::string getEnvVar(const char* name) {
 static std::string getYamsBinary() {
     // Allow override via environment; fallback to "yams" in PATH
     auto fromEnv = getEnvVar("YAMS_CLI");
-    if (!fromEnv.empty()) return fromEnv;
+    if (!fromEnv.empty())
+        return fromEnv;
 #if defined(_WIN32)
     return "yams.exe";
 #else
@@ -148,7 +151,7 @@ TEST(CLIInitIntegration, CreatesXDGLayoutAndMasksSecrets) {
     // Arrange
     const auto tmp = makeTempDir("yams_cli_it_xdg_");
     const fs::path xdg_config = tmp / "config";
-    const fs::path xdg_data   = tmp / "data";
+    const fs::path xdg_data = tmp / "data";
     fs::create_directories(xdg_config);
     fs::create_directories(xdg_data);
 
@@ -176,9 +179,9 @@ TEST(CLIInitIntegration, CreatesXDGLayoutAndMasksSecrets) {
 
     // Assert XDG layout artifacts
     const fs::path config_toml = xdg_config / "yams" / "config.toml";
-    const fs::path keys_dir    = xdg_config / "yams" / "keys";
-    const fs::path priv_key    = keys_dir / "ed25519.pem";
-    const fs::path pub_key     = keys_dir / "ed25519.pub";
+    const fs::path keys_dir = xdg_config / "yams" / "keys";
+    const fs::path priv_key = keys_dir / "ed25519.pem";
+    const fs::path pub_key = keys_dir / "ed25519.pub";
 
     EXPECT_TRUE(fs::exists(config_toml)) << "Expected config at: " << config_toml;
     EXPECT_TRUE(fs::exists(keys_dir) && fs::is_directory(keys_dir)) << "Expected keys dir";
@@ -189,7 +192,8 @@ TEST(CLIInitIntegration, CreatesXDGLayoutAndMasksSecrets) {
     const fs::path db_file = storage_dir / "yams.db";
     const fs::path storage_path = storage_dir / "storage";
     EXPECT_TRUE(fs::exists(db_file)) << "Expected DB file at: " << db_file;
-    EXPECT_TRUE(fs::exists(storage_path) && fs::is_directory(storage_path)) << "Expected storage dir";
+    EXPECT_TRUE(fs::exists(storage_path) && fs::is_directory(storage_path))
+        << "Expected storage dir";
 
     // Cleanup
     fs::remove_all(tmp);
@@ -199,7 +203,7 @@ TEST(CLIInitIntegration, IdempotentWithoutForcePreservesFiles) {
     // Arrange
     const auto tmp = makeTempDir("yams_cli_it_idem_");
     const fs::path xdg_config = tmp / "config";
-    const fs::path xdg_data   = tmp / "data";
+    const fs::path xdg_data = tmp / "data";
     fs::create_directories(xdg_config);
     fs::create_directories(xdg_data);
     ASSERT_TRUE(setEnvVar("XDG_CONFIG_HOME", xdg_config.string()));
@@ -221,17 +225,17 @@ TEST(CLIInitIntegration, IdempotentWithoutForcePreservesFiles) {
     }
 
     const fs::path config_toml = xdg_config / "yams" / "config.toml";
-    const fs::path keys_dir    = xdg_config / "yams" / "keys";
-    const fs::path priv_key    = keys_dir / "ed25519.pem";
-    const fs::path pub_key     = keys_dir / "ed25519.pub";
+    const fs::path keys_dir = xdg_config / "yams" / "keys";
+    const fs::path priv_key = keys_dir / "ed25519.pem";
+    const fs::path pub_key = keys_dir / "ed25519.pub";
 
     ASSERT_TRUE(fs::exists(config_toml));
     ASSERT_TRUE(fs::exists(priv_key));
     ASSERT_TRUE(fs::exists(pub_key));
 
     auto t_config_before = lastWriteTime(config_toml);
-    auto t_priv_before   = lastWriteTime(priv_key);
-    auto t_pub_before    = lastWriteTime(pub_key);
+    auto t_priv_before = lastWriteTime(priv_key);
+    auto t_pub_before = lastWriteTime(pub_key);
 
     // Sleep to guarantee mtime resolution differences if files were changed
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -243,16 +247,17 @@ TEST(CLIInitIntegration, IdempotentWithoutForcePreservesFiles) {
             << "--storage " << shellQuote(storage_dir.string()) << " "
             << "init --non-interactive";
         const auto res = runCommandCapture(cmd.str());
-        ASSERT_EQ(res.exit_code, 0) << "Second init (idempotent) failed. stdout:\n" << res.stdout_str;
+        ASSERT_EQ(res.exit_code, 0) << "Second init (idempotent) failed. stdout:\n"
+                                    << res.stdout_str;
     }
 
     auto t_config_after = lastWriteTime(config_toml);
-    auto t_priv_after   = lastWriteTime(priv_key);
-    auto t_pub_after    = lastWriteTime(pub_key);
+    auto t_priv_after = lastWriteTime(priv_key);
+    auto t_pub_after = lastWriteTime(pub_key);
 
     EXPECT_EQ(t_config_before, t_config_after) << "Config should not change without --force";
-    EXPECT_EQ(t_priv_before, t_priv_after)     << "Private key should not change without --force";
-    EXPECT_EQ(t_pub_before, t_pub_after)       << "Public key should not change without --force";
+    EXPECT_EQ(t_priv_before, t_priv_after) << "Private key should not change without --force";
+    EXPECT_EQ(t_pub_before, t_pub_after) << "Public key should not change without --force";
 
     // Cleanup
     fs::remove_all(tmp);
@@ -262,7 +267,7 @@ TEST(CLIInitIntegration, ForceOverwritesAndChangesTimestamps) {
     // Arrange
     const auto tmp = makeTempDir("yams_cli_it_force_");
     const fs::path xdg_config = tmp / "config";
-    const fs::path xdg_data   = tmp / "data";
+    const fs::path xdg_data = tmp / "data";
     fs::create_directories(xdg_config);
     fs::create_directories(xdg_data);
     ASSERT_TRUE(setEnvVar("XDG_CONFIG_HOME", xdg_config.string()));
@@ -284,17 +289,17 @@ TEST(CLIInitIntegration, ForceOverwritesAndChangesTimestamps) {
     }
 
     const fs::path config_toml = xdg_config / "yams" / "config.toml";
-    const fs::path keys_dir    = xdg_config / "yams" / "keys";
-    const fs::path priv_key    = keys_dir / "ed25519.pem";
-    const fs::path pub_key     = keys_dir / "ed25519.pub";
+    const fs::path keys_dir = xdg_config / "yams" / "keys";
+    const fs::path priv_key = keys_dir / "ed25519.pem";
+    const fs::path pub_key = keys_dir / "ed25519.pub";
 
     ASSERT_TRUE(fs::exists(config_toml));
     ASSERT_TRUE(fs::exists(priv_key));
     ASSERT_TRUE(fs::exists(pub_key));
 
     auto t_config_before = lastWriteTime(config_toml);
-    auto t_priv_before   = lastWriteTime(priv_key);
-    auto t_pub_before    = lastWriteTime(pub_key);
+    auto t_priv_before = lastWriteTime(priv_key);
+    auto t_pub_before = lastWriteTime(pub_key);
 
     // Sleep to guarantee mtime resolution differences
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -308,16 +313,17 @@ TEST(CLIInitIntegration, ForceOverwritesAndChangesTimestamps) {
         const auto res = runCommandCapture(cmd.str());
         ASSERT_EQ(res.exit_code, 0) << "Forced init failed. stdout:\n" << res.stdout_str;
         // As part of force run, ensure masked keys are printed
-        EXPECT_TRUE(isMaskedApiKeyPresent(res.stdout_str)) << "Forced init --print should mask API keys";
+        EXPECT_TRUE(isMaskedApiKeyPresent(res.stdout_str))
+            << "Forced init --print should mask API keys";
     }
 
     auto t_config_after = lastWriteTime(config_toml);
-    auto t_priv_after   = lastWriteTime(priv_key);
-    auto t_pub_after    = lastWriteTime(pub_key);
+    auto t_priv_after = lastWriteTime(priv_key);
+    auto t_pub_after = lastWriteTime(pub_key);
 
     EXPECT_NE(t_config_before, t_config_after) << "Config should change with --force";
-    EXPECT_NE(t_priv_before, t_priv_after)     << "Private key should change with --force";
-    EXPECT_NE(t_pub_before, t_pub_after)       << "Public key should change with --force";
+    EXPECT_NE(t_priv_before, t_priv_after) << "Private key should change with --force";
+    EXPECT_NE(t_pub_before, t_pub_after) << "Public key should change with --force";
 
     // Cleanup
     fs::remove_all(tmp);

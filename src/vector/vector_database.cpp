@@ -1,17 +1,17 @@
-#include <yams/vector/vector_database.h>
-#include <yams/vector/vector_backend.h>
-#include <yams/vector/sqlite_vec_backend.h>
-#include <yams/profiling.h>
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
+#include <yams/vector/sqlite_vec_backend.h>
+#include <yams/vector/vector_backend.h>
+#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <cmath>
-#include <sstream>
 #include <iomanip>
+#include <mutex>
 #include <random>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
-#include <mutex>
 
 namespace yams::vector {
 
@@ -22,9 +22,7 @@ namespace yams::vector {
 class VectorDatabase::Impl {
 public:
     explicit Impl(const VectorDatabaseConfig& config)
-        : config_(config)
-        , initialized_(false)
-        , has_error_(false) {
+        : config_(config), initialized_(false), has_error_(false) {
         // Create backend based on configuration
         // For now, always use sqlite-vec for persistence
         backend_ = std::make_unique<SqliteVecBackend>();
@@ -32,7 +30,7 @@ public:
 
     bool initialize() {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         if (initialized_) {
             return true;
         }
@@ -44,7 +42,7 @@ public:
                 setError("Failed to initialize backend: " + result.error().message);
                 return false;
             }
-            
+
             // Create tables if they don't exist
             if (!backend_->tablesExist()) {
                 auto createResult = backend_->createTables(config_.embedding_dim);
@@ -85,9 +83,7 @@ public:
         return backend_->tablesExist();
     }
 
-    bool tableExists() const {
-        return backend_->tablesExist();
-    }
+    bool tableExists() const { return backend_->tablesExist(); }
 
     void dropTable() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -124,7 +120,7 @@ public:
                 setError("Insert failed: " + result.error().message);
                 return false;
             }
-            
+
             has_error_ = false;
             return true;
 
@@ -136,7 +132,7 @@ public:
 
     bool insertVectorsBatch(const std::vector<VectorRecord>& records) {
         spdlog::debug("VectorDatabase::insertVectorsBatch called with {} records", records.size());
-        
+
         if (records.empty()) {
             return true;
         }
@@ -250,10 +246,8 @@ public:
         }
     }
 
-    std::vector<VectorRecord> searchSimilar(
-        const std::vector<float>& query_embedding,
-        const VectorSearchParams& params) const {
-        
+    std::vector<VectorRecord> searchSimilar(const std::vector<float>& query_embedding,
+                                            const VectorSearchParams& params) const {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (!initialized_) {
@@ -265,7 +259,9 @@ public:
         }
 
         try {
-            auto result = backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold, params.document_hash, params.metadata_filters);
+            auto result =
+                backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold,
+                                        params.document_hash, params.metadata_filters);
             if (!result) {
                 // Can't modify has_error_ from const method
                 return {};
@@ -300,7 +296,7 @@ public:
 
         return result.value();
     }
-    
+
     bool hasEmbedding(const std::string& document_hash) const {
         std::lock_guard<std::mutex> lock(mutex_);
         auto result = backend_->hasEmbedding(document_hash);
@@ -309,7 +305,7 @@ public:
 
     bool buildIndex() {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         if (!initialized_) {
             setError("Database not initialized");
             return false;
@@ -328,7 +324,7 @@ public:
 
     bool optimizeIndex() {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         if (!initialized_) {
             setError("Database not initialized");
             return false;
@@ -349,11 +345,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         VectorDatabase::DatabaseStats stats;
-        
+
         // Get basic stats from backend
         auto countResult = backend_->getVectorCount();
         stats.total_vectors = countResult ? countResult.value() : 0;
-        
+
         // Get document count (estimate based on unique document hashes)
         stats.total_documents = 0; // TODO: implement document counting in backend
 
@@ -366,15 +362,13 @@ public:
             // Estimate index size
             stats.index_size_bytes = stats.total_vectors * config_.embedding_dim * sizeof(float);
         }
-        
+
         stats.last_optimized = std::chrono::system_clock::now();
 
         return stats;
     }
 
-    const VectorDatabaseConfig& getConfig() const {
-        return config_;
-    }
+    const VectorDatabaseConfig& getConfig() const { return config_; }
 
     std::string getLastError() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -485,26 +479,26 @@ bool VectorDatabase::deleteVectorsByDocument(const std::string& document_hash) {
     return pImpl->deleteVectorsByDocument(document_hash);
 }
 
-std::vector<VectorRecord> VectorDatabase::searchSimilar(
-    const std::vector<float>& query_embedding,
-    const VectorSearchParams& params) const {
+std::vector<VectorRecord> VectorDatabase::searchSimilar(const std::vector<float>& query_embedding,
+                                                        const VectorSearchParams& params) const {
     YAMS_ZONE_SCOPED_N("VectorDB::searchSimilar");
     return pImpl->searchSimilar(query_embedding, params);
 }
 
-std::vector<VectorRecord> VectorDatabase::searchSimilarToDocument(
-    const std::string& document_hash,
-    const VectorSearchParams& params) const {
-    
+std::vector<VectorRecord>
+VectorDatabase::searchSimilarToDocument(const std::string& document_hash,
+                                        const VectorSearchParams& params) const {
     auto document_vectors = pImpl->getVectorsByDocument(document_hash);
-    spdlog::info("searchSimilarToDocument: Found {} vectors for document {}", document_vectors.size(), document_hash);
-    
+    spdlog::info("searchSimilarToDocument: Found {} vectors for document {}",
+                 document_vectors.size(), document_hash);
+
     if (document_vectors.empty()) {
         return {};
     }
 
-    spdlog::info("searchSimilarToDocument: Using embedding of size {} from first chunk", document_vectors[0].embedding.size());
-    
+    spdlog::info("searchSimilarToDocument: Using embedding of size {} from first chunk",
+                 document_vectors[0].embedding.size());
+
     // Use the first chunk's embedding as the query
     // TODO: Could implement more sophisticated document-level embeddings
     return searchSimilar(document_vectors[0].embedding, params);
@@ -514,7 +508,8 @@ std::optional<VectorRecord> VectorDatabase::getVector(const std::string& chunk_i
     return pImpl->getVector(chunk_id);
 }
 
-std::vector<VectorRecord> VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
+std::vector<VectorRecord>
+VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
     return pImpl->getVectorsByDocument(document_hash);
 }
 
@@ -559,22 +554,21 @@ Result<void> VectorDatabase::updateEmbeddings(const std::vector<VectorRecord>& r
     // TODO: Implement batch update of embeddings
     for (const auto& record : records) {
         if (!updateVector(record.chunk_id, record)) {
-            return Error{ErrorCode::DatabaseError, "Failed to update embedding: " + record.chunk_id};
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to update embedding: " + record.chunk_id};
         }
     }
     return {};
 }
 
-Result<std::vector<std::string>> VectorDatabase::getStaleEmbeddings(
-    const std::string& model_id,
-    const std::string& model_version) {
+Result<std::vector<std::string>>
+VectorDatabase::getStaleEmbeddings(const std::string& model_id, const std::string& model_version) {
     // TODO: Implement stale embedding detection
     return std::vector<std::string>{};
 }
 
-Result<std::vector<VectorRecord>> VectorDatabase::getEmbeddingsByVersion(
-    const std::string& model_version,
-    size_t limit) {
+Result<std::vector<VectorRecord>>
+VectorDatabase::getEmbeddingsByVersion(const std::string& model_version, size_t limit) {
     // TODO: Implement version filtering
     return std::vector<VectorRecord>{};
 }
@@ -609,7 +603,8 @@ bool VectorDatabase::isValidEmbedding(const std::vector<float>& embedding, size_
     return true;
 }
 
-double VectorDatabase::computeCosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) {
+double VectorDatabase::computeCosineSimilarity(const std::vector<float>& a,
+                                               const std::vector<float>& b) {
     if (a.size() != b.size()) {
         return 0.0;
     }

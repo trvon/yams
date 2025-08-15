@@ -7,6 +7,7 @@ add_executable(yams-mcp-server
 target_link_libraries(yams-mcp-server
     PRIVATE
         yams_mcp
+        yams_app_services
         yams_api
         yams_storage
         yams_search

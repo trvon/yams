@@ -1,16 +1,16 @@
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 // Access MCPServer internals for white-box schema validation in tests via friend declarations
 #include <yams/mcp/mcp_server.h>
 
 #include <nlohmann/json.hpp>
-#include <memory>
-#include <string>
-#include <vector>
-#include <optional>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 #include <yams/api/content_store_builder.h>
 #include <yams/metadata/connection_pool.h>
 
@@ -38,17 +38,19 @@ struct ServerUnderTest {
     // Construct MCPServer with null dependencies that aren't needed for listTools schema checks
     static std::unique_ptr<yams::mcp::MCPServer> make() {
         auto transport = std::make_unique<NullTransport>();
-        std::shared_ptr<yams::api::IContentStore> store;           // nullptr ok for schema tests
-        std::shared_ptr<yams::search::SearchExecutor> searchExec;  // nullptr ok for schema tests
-        std::shared_ptr<yams::metadata::MetadataRepository> repo;   // nullptr ok for schema tests
-        std::shared_ptr<yams::search::HybridSearchEngine> hybrid;   // nullptr ok for schema tests
-        return std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid, std::move(transport));
+        std::shared_ptr<yams::api::IContentStore> store;          // nullptr ok for schema tests
+        std::shared_ptr<yams::search::SearchExecutor> searchExec; // nullptr ok for schema tests
+        std::shared_ptr<yams::metadata::MetadataRepository> repo; // nullptr ok for schema tests
+        std::shared_ptr<yams::search::HybridSearchEngine> hybrid; // nullptr ok for schema tests
+        return std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid,
+                                                      std::move(transport));
     }
 };
 
 // Helper: find a tool by name within listTools() response
 std::optional<json> findTool(const json& listToolsResult, const std::string& toolName) {
-    if (!listToolsResult.is_object() || !listToolsResult.contains("tools") || !listToolsResult["tools"].is_array()) {
+    if (!listToolsResult.is_object() || !listToolsResult.contains("tools") ||
+        !listToolsResult["tools"].is_array()) {
         return std::nullopt;
     }
     for (const auto& t : listToolsResult["tools"]) {
@@ -61,11 +63,15 @@ std::optional<json> findTool(const json& listToolsResult, const std::string& too
 
 // Helper: fetch inputSchema.properties object for a tool
 std::optional<json> toolProps(const json& tool) {
-    if (!tool.is_object()) return std::nullopt;
-    if (!tool.contains("inputSchema")) return std::nullopt;
+    if (!tool.is_object())
+        return std::nullopt;
+    if (!tool.contains("inputSchema"))
+        return std::nullopt;
     const auto& schema = tool["inputSchema"];
-    if (!schema.is_object()) return std::nullopt;
-    if (!schema.contains("properties") || !schema["properties"].is_object()) return std::nullopt;
+    if (!schema.is_object())
+        return std::nullopt;
+    if (!schema.contains("properties") || !schema["properties"].is_object())
+        return std::nullopt;
     return schema["properties"];
 }
 
@@ -96,22 +102,10 @@ TEST(MCPSchemaTest, ListTools_ContainsAllExpectedTools) {
 
     // Expected set of core tools per CHANGELOG and implementation
     std::vector<std::string> expected = {
-        "search_documents",
-        "grep_documents",
-        "store_document",
-        "retrieve_document",
-        "get_stats",
-        "update_metadata",
-        "delete_by_name",
-        "get_by_name",
-        "cat_document",
-        "list_documents",
-        "add_directory",
-        "restore_collection",
-        "restore_snapshot",
-        "list_collections",
-        "list_snapshots"
-    };
+        "search_documents", "grep_documents",   "store_document", "retrieve_document",
+        "get_stats",        "update_metadata",  "delete_by_name", "get_by_name",
+        "cat_document",     "list_documents",   "add_directory",  "restore_collection",
+        "restore_snapshot", "list_collections", "list_snapshots"};
 
     // Gather actual names
     std::vector<std::string> actual;
@@ -284,7 +278,8 @@ protected:
         std::shared_ptr<yams::search::SearchExecutor> searchExec;
         std::shared_ptr<yams::metadata::MetadataRepository> repo;
         std::shared_ptr<yams::search::HybridSearchEngine> hybrid;
-        server = std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid, std::move(transport));
+        server = std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid,
+                                                        std::move(transport));
     }
 
     std::unique_ptr<yams::mcp::MCPServer> server;
@@ -293,14 +288,8 @@ protected:
 TEST_F(MCPSmokeTest, SearchDocuments_AcceptsErgonomicFlags_NoCrash) {
     // NOTE: Backend dependencies are not wired here; this is an API-level smoke test.
     // It verifies the method accepts the documented parameters and returns a JSON object.
-    json args = {
-        {"query", "MCP"},
-        {"paths_only", true},
-        {"line_numbers", true},
-        {"context", 2},
-        {"color", "never"},
-        {"limit", 5}
-    };
+    json args = {{"query", "MCP"}, {"paths_only", true}, {"line_numbers", true},
+                 {"context", 2},   {"color", "never"},   {"limit", 5}};
 
     // Using white-box access to private method via macro above
     json response = server->testSearchDocuments(args);
@@ -312,24 +301,23 @@ TEST_F(MCPSmokeTest, SearchDocuments_AcceptsErgonomicFlags_NoCrash) {
 }
 
 TEST_F(MCPSmokeTest, GrepDocuments_AcceptsKeyFlags_NoCrash) {
-    json args = {
-        {"pattern", "TODO|MCP"},
-        {"line_numbers", true},
-        {"context", 1},
-        {"ignore_case", true},
-        {"word", false},
-        {"invert", false},
-        {"count", false},
-        {"files_with_matches", false},
-        {"files_without_match", false},
-        {"color", "never"},
-        {"max_count", 1}
-    };
+    json args = {{"pattern", "TODO|MCP"},
+                 {"line_numbers", true},
+                 {"context", 1},
+                 {"ignore_case", true},
+                 {"word", false},
+                 {"invert", false},
+                 {"count", false},
+                 {"files_with_matches", false},
+                 {"files_without_match", false},
+                 {"color", "never"},
+                 {"max_count", 1}};
 
     json response = server->testGrepDocuments(args);
 
     ASSERT_TRUE(response.is_object());
-    EXPECT_TRUE(response.contains("matches") || response.contains("error") || response.contains("results"));
+    EXPECT_TRUE(response.contains("matches") || response.contains("error") ||
+                response.contains("results"));
 }
 
 // ============================================================================
@@ -337,47 +325,36 @@ TEST_F(MCPSmokeTest, GrepDocuments_AcceptsKeyFlags_NoCrash) {
 // ============================================================================
 
 TEST_F(MCPSmokeTest, DISABLED_RetrieveDocument_WithGraph_Stub) {
-    GTEST_SKIP() << "TODO: Wire a temporary metadata repository and content to validate graph, depth, include_content.";
-    json args = {
-        {"hash", "deadbeef"},
-        {"graph", true},
-        {"depth", 2},
-        {"include_content", false}
-    };
+    GTEST_SKIP() << "TODO: Wire a temporary metadata repository and content to validate graph, "
+                    "depth, include_content.";
+    json args = {{"hash", "deadbeef"}, {"graph", true}, {"depth", 2}, {"include_content", false}};
     json response = server->testRetrieveDocument(args);
     (void)response;
 }
 
 TEST_F(MCPSmokeTest, DISABLED_UpdateMetadata_Stub) {
-    GTEST_SKIP() << "TODO: Wire a temporary metadata repository and validate multi key=value updates by name/hash.";
-    json args = {
-        {"name", "CHANGELOG.md"},
-        {"metadata", json::array({"pbi=123", "status=active"})},
-        {"verbose", true}
-    };
+    GTEST_SKIP() << "TODO: Wire a temporary metadata repository and validate multi key=value "
+                    "updates by name/hash.";
+    json args = {{"name", "CHANGELOG.md"},
+                 {"metadata", json::array({"pbi=123", "status=active"})},
+                 {"verbose", true}};
     json response = server->testUpdateDocumentMetadata(args);
     (void)response;
 }
 
 TEST_F(MCPSmokeTest, DISABLED_ListDocuments_Stub) {
-    GTEST_SKIP() << "TODO: Populate temp store with files and validate type/mime/extension/time filters and sorting.";
-    json args = {
-        {"limit", 10},
-        {"pattern", "*.md"},
-        {"text", true},
-        {"recent", 5},
-        {"sort_by", "indexed"},
-        {"sort_order", "desc"}
-    };
+    GTEST_SKIP() << "TODO: Populate temp store with files and validate type/mime/extension/time "
+                    "filters and sorting.";
+    json args = {{"limit", 10}, {"pattern", "*.md"},    {"text", true},
+                 {"recent", 5}, {"sort_by", "indexed"}, {"sort_order", "desc"}};
     json response = server->testListDocuments(args);
     (void)response;
 }
 
 TEST_F(MCPSmokeTest, DISABLED_GetStats_FileTypesBreakdown_Stub) {
-    GTEST_SKIP() << "TODO: Populate temp store with several types and validate file_types breakdown and top mime/extensions.";
-    json args = {
-        {"file_types", true}
-    };
+    GTEST_SKIP() << "TODO: Populate temp store with several types and validate file_types "
+                    "breakdown and top mime/extensions.";
+    json args = {{"file_types", true}};
     json response = server->testGetStats(args);
     (void)response;
 }
@@ -482,7 +459,8 @@ protected:
 
     void SetUp() override {
         tmpDir = std::filesystem::temp_directory_path() /
-                 ("yams_mcp_e2e_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                 ("yams_mcp_e2e_" +
+                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         filesDir = tmpDir / "files";
         storageDir = tmpDir / "storage";
         std::filesystem::create_directories(filesDir);
@@ -505,9 +483,11 @@ protected:
 
         // Construct server with working store + repo
         auto transport = std::make_unique<NullTransport>();
-        std::shared_ptr<yams::search::SearchExecutor> searchExec;      // not required for these tests
-        std::shared_ptr<yams::search::HybridSearchEngine> hybrid;      // null -> fallback to repo fuzzy/fts
-        server = std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid, std::move(transport));
+        std::shared_ptr<yams::search::SearchExecutor> searchExec; // not required for these tests
+        std::shared_ptr<yams::search::HybridSearchEngine>
+            hybrid; // null -> fallback to repo fuzzy/fts
+        server = std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid,
+                                                        std::move(transport));
     }
 
     void TearDown() override {
@@ -519,7 +499,8 @@ protected:
         std::filesystem::remove_all(tmpDir, ec);
     }
 
-    CreatedDoc addTextDoc(const std::string& name, const std::string& content, const std::string& mime) {
+    CreatedDoc addTextDoc(const std::string& name, const std::string& content,
+                          const std::string& mime) {
         auto p = filesDir / name;
         {
             std::ofstream f(p, std::ios::binary);
@@ -560,11 +541,13 @@ protected:
     }
 
     // Helper to create a binary doc
-    CreatedDoc addBinaryDoc(const std::string& name, const std::vector<std::byte>& data, const std::string& mime) {
+    CreatedDoc addBinaryDoc(const std::string& name, const std::vector<std::byte>& data,
+                            const std::string& mime) {
         auto p = filesDir / name;
         {
             std::ofstream f(p, std::ios::binary);
-            f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            f.write(reinterpret_cast<const char*>(data.data()),
+                    static_cast<std::streamsize>(data.size()));
         }
 
         yams::api::ContentMetadata meta;
@@ -604,11 +587,7 @@ protected:
 TEST_F(MCPE2ETest, SearchDocuments_PathsOnly_ReturnsStoredPath) {
     auto doc = addTextDoc("alpha.md", "# Title\nalpha beta gamma\n", "text/markdown");
 
-    json args = {
-        {"query", "alpha"},
-        {"paths_only", true},
-        {"limit", 10}
-    };
+    json args = {{"query", "alpha"}, {"paths_only", true}, {"limit", 10}};
 
     auto resp = server->testSearchDocuments(args);
     ASSERT_TRUE(resp.is_object());
@@ -628,11 +607,7 @@ TEST_F(MCPE2ETest, SearchDocuments_PathsOnly_ReturnsStoredPath) {
 TEST_F(MCPE2ETest, GrepDocuments_FindsTODO_WithContextAndLineNumbers) {
     auto doc = addTextDoc("notes.md", "line1\nTODO: something\nline3\n", "text/markdown");
 
-    json args = {
-        {"pattern", "TODO"},
-        {"context", 1},
-        {"line_numbers", true}
-    };
+    json args = {{"pattern", "TODO"}, {"context", 1}, {"line_numbers", true}};
 
     auto resp = server->testGrepDocuments(args);
     ASSERT_TRUE(resp.is_object());
@@ -660,13 +635,11 @@ TEST_F(MCPE2ETest, ListDocuments_FilterByExtensionTypeAndSorting) {
     std::vector<std::byte> bin(16, std::byte{0x01});
     auto d3 = addBinaryDoc("blob.bin", bin, "application/octet-stream");
 
-    json args = {
-        {"limit", 10},
-        {"extension", "md"},
-        {"type", "text"},
-        {"sort_by", "name"},
-        {"sort_order", "asc"}
-    };
+    json args = {{"limit", 10},
+                 {"extension", "md"},
+                 {"type", "text"},
+                 {"sort_by", "name"},
+                 {"sort_order", "asc"}};
 
     auto resp = server->testListDocuments(args);
     ASSERT_TRUE(resp.is_object());
@@ -692,12 +665,7 @@ TEST_F(MCPE2ETest, RetrieveDocument_GraphTraversal_DepthBounded) {
     auto a = addTextDoc("docA.txt", "A content", "text/plain");
     auto b = addTextDoc("docB.txt", "B content", "text/plain"); // same dir -> related
 
-    json args = {
-        {"hash", a.hash},
-        {"graph", true},
-        {"depth", 2},
-        {"include_content", false}
-    };
+    json args = {{"hash", a.hash}, {"graph", true}, {"depth", 2}, {"include_content", false}};
 
     auto resp = server->testRetrieveDocument(args);
     ASSERT_TRUE(resp.is_object());
@@ -722,11 +690,9 @@ TEST_F(MCPE2ETest, RetrieveDocument_GraphTraversal_DepthBounded) {
 TEST_F(MCPE2ETest, UpdateMetadata_ByHash_MultiplePairs) {
     auto a = addTextDoc("meta.md", "metadata test", "text/markdown");
 
-    json args = {
-        {"hash", a.hash},
-        {"metadata", json::array({"status=active", "owner=tester"})},
-        {"verbose", true}
-    };
+    json args = {{"hash", a.hash},
+                 {"metadata", json::array({"status=active", "owner=tester"})},
+                 {"verbose", true}};
 
     auto resp = server->testUpdateDocumentMetadata(args);
     ASSERT_TRUE(resp.is_object());
@@ -747,10 +713,7 @@ TEST_F(MCPE2ETest, GetStats_FileTypesBreakdown_ReturnsData) {
     std::vector<std::byte> bin(8, std::byte{0x02});
     (void)addBinaryDoc("stats.bin", bin, "application/octet-stream");
 
-    json args = {
-        {"file_types", true},
-        {"detailed", true}
-    };
+    json args = {{"file_types", true}, {"detailed", true}};
 
     auto resp = server->testGetStats(args);
     ASSERT_TRUE(resp.is_object());

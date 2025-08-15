@@ -1,18 +1,19 @@
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <regex>
+#include <sstream>
+#include <yams/api/content_metadata.h>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/api/content_metadata.h>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/document_metadata.h>
 #include <yams/detection/file_type_detector.h>
-#include <spdlog/spdlog.h>
-#include <nlohmann/json.hpp>
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <chrono>
-#include <random>
-#include <iomanip>
-#include <regex>
+#include <yams/metadata/document_metadata.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/vector/embedding_service.h>
 
 namespace yams::cli {
 
@@ -21,35 +22,40 @@ using json = nlohmann::json;
 class AddCommand : public ICommand {
 public:
     std::string getName() const override { return "add"; }
-    
-    std::string getDescription() const override { 
+
+    std::string getDescription() const override {
         return "Add document(s) or directory to the content store";
     }
-    
+
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
-        
+
         auto* cmd = app.add_subcommand("add", getDescription());
         cmd->add_option("path", targetPath_, "Path to file/directory to add (use '-' for stdin)")
             ->default_val("-");
-        
-        cmd->add_option("-n,--name", documentName_, "Name for the document (especially useful for stdin)");
+
+        cmd->add_option("-n,--name", documentName_,
+                        "Name for the document (especially useful for stdin)");
         cmd->add_option("-t,--tags", tags_, "Tags for the document (comma-separated)");
         cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs");
         cmd->add_option("--mime-type", mimeType_, "MIME type of the document");
         cmd->add_flag("--no-auto-mime", disableAutoMime_, "Disable automatic MIME type detection");
-        
+        cmd->add_flag("--no-embeddings", noEmbeddings_,
+                      "Disable automatic embedding generation for added documents");
+
         // Collection and snapshot options
         cmd->add_option("-c,--collection", collection_, "Collection name for organizing documents");
         cmd->add_option("--snapshot-id", snapshotId_, "Unique snapshot identifier");
         cmd->add_option("--snapshot-label", snapshotLabel_, "User-friendly snapshot label");
-        
+
         // Directory options
         cmd->add_flag("-r,--recursive", recursive_, "Recursively add files from directories");
-        cmd->add_option("--include", includePatterns_, "File patterns to include (e.g., '*.txt,*.md')");
-        cmd->add_option("--exclude", excludePatterns_, "File patterns to exclude (e.g., '*.tmp,*.log')");
-        
-        cmd->callback([this]() { 
+        cmd->add_option("--include", includePatterns_,
+                        "File patterns to include (e.g., '*.txt,*.md')");
+        cmd->add_option("--exclude", excludePatterns_,
+                        "File patterns to exclude (e.g., '*.tmp,*.log')");
+
+        cmd->callback([this]() {
             auto result = execute();
             if (!result) {
                 spdlog::error("Command failed: {}", result.error().message);
@@ -57,7 +63,7 @@ public:
             }
         });
     }
-    
+
     Result<void> execute() override {
         try {
             auto ensured = cli_->ensureStorageInitialized();
@@ -68,34 +74,34 @@ public:
             if (!store) {
                 return Error{ErrorCode::NotInitialized, "Content store not initialized"};
             }
-            
+
             // Check if reading from stdin
             if (targetPath_.string() == "-") {
                 return storeFromStdin(store);
             }
-            
+
             // Validate path exists
             if (!std::filesystem::exists(targetPath_)) {
                 return Error{ErrorCode::FileNotFound, "Path not found: " + targetPath_.string()};
             }
-            
+
             // Generate snapshot ID if not provided but snapshot label is given
             if (snapshotId_.empty() && !snapshotLabel_.empty()) {
                 snapshotId_ = generateSnapshotId();
             }
-            
+
             // Handle directory vs file
             if (std::filesystem::is_directory(targetPath_)) {
                 return storeDirectory(store);
             } else {
                 return storeFile(store, targetPath_);
             }
-            
+
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
     }
-    
+
 private:
     Result<void> storeFromStdin(std::shared_ptr<api::IContentStore> store) {
         // Read all content from stdin
@@ -104,60 +110,67 @@ private:
         while (std::getline(std::cin, line)) {
             content += line + "\n";
         }
-        
+
         if (content.empty()) {
             return Error{ErrorCode::InvalidArgument, "No content received from stdin"};
         }
-        
+
         // Create a temporary file
-        std::filesystem::path tempPath = std::filesystem::temp_directory_path() / 
-                                        ("yams_stdin_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
-        
+        std::filesystem::path tempPath =
+            std::filesystem::temp_directory_path() /
+            ("yams_stdin_" +
+             std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+
         std::ofstream tempFile(tempPath, std::ios::binary);
         if (!tempFile) {
             return Error{ErrorCode::FileNotFound, "Failed to create temporary file"};
         }
         tempFile.write(content.data(), static_cast<std::streamsize>(content.size()));
         tempFile.close();
-        
+
         // Build metadata using helper (will auto-detect MIME from temp file if enabled)
         api::ContentMetadata metadata = buildMetadata("stdin", tempPath);
-        
+
+        // Set current file info for embedding worker
+        currentFilePath_ = documentName_.empty() ? "stdin" : documentName_;
+        currentMimeType_ = metadata.mimeType;
+
         // Store the file
         auto result = store->store(tempPath, metadata);
-        
+
         // Clean up temp file
         std::filesystem::remove(tempPath);
-        
+
         if (!result) {
             return Error{result.error().code, result.error().message};
         }
-        
+
         // Store metadata in database
         auto metadataRepo = cli_->getMetadataRepository();
         if (metadataRepo) {
             int64_t docId = -1;
             bool isNewDocument = true;
-            
+
             // Check if document already exists (100% dedup case)
-            if (result.value().dedupRatio() >= 0.99) {  // Near 100% dedup
+            if (result.value().dedupRatio() >= 0.99) { // Near 100% dedup
                 auto existingDoc = metadataRepo->getDocumentByHash(result.value().contentHash);
                 if (existingDoc && existingDoc.value().has_value()) {
                     // Document already exists, update it
                     isNewDocument = false;
                     docId = existingDoc.value()->id;
-                    
+
                     // Update indexed time (make a copy since it's const)
                     auto doc = existingDoc.value().value();
                     doc.indexedTime = std::chrono::system_clock::now();
                     metadataRepo->updateDocument(doc);
-                    
+
                     if (cli_->getVerbose()) {
-                        spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
+                        spdlog::debug("Document already exists with ID: {}, updating metadata",
+                                      docId);
                     }
                 }
             }
-            
+
             // Insert new document if it doesn't exist
             if (isNewDocument) {
                 metadata::DocumentInfo docInfo;
@@ -167,12 +180,12 @@ private:
                 docInfo.fileSize = static_cast<int64_t>(content.size());
                 docInfo.sha256Hash = result.value().contentHash;
                 docInfo.mimeType = metadata.mimeType;
-                
+
                 auto now = std::chrono::system_clock::now();
                 docInfo.createdTime = now;
                 docInfo.modifiedTime = now;
                 docInfo.indexedTime = now;
-                
+
                 auto insertResult = metadataRepo->insertDocument(docInfo);
                 if (insertResult) {
                     docId = insertResult.value();
@@ -180,17 +193,18 @@ private:
                         spdlog::debug("Stored new stdin document with ID: {}", docId);
                     }
                 } else {
-                    spdlog::warn("Failed to store metadata for stdin: {}", insertResult.error().message);
+                    spdlog::warn("Failed to store metadata for stdin: {}",
+                                 insertResult.error().message);
                 }
             }
-            
+
             // Add tags and metadata for both new and existing documents
             if (docId > 0) {
                 // Add tags as metadata
                 for (const auto& tag : tags_) {
                     metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
                 }
-                
+
                 // Add custom metadata
                 for (const auto& kv : metadata_) {
                     auto pos = kv.find('=');
@@ -200,87 +214,93 @@ private:
                         metadataRepo->setMetadata(docId, key, metadata::MetadataValue(value));
                     }
                 }
-                
+
                 // Index document content for full-text search (only for new documents)
                 if (isNewDocument) {
                     auto indexResult = metadataRepo->indexDocumentContent(
-                        docId,
-                        documentName_.empty() ? "stdin" : documentName_,
-                        content,  // We already have the content from stdin
-                        metadata.mimeType
-                    );
+                        docId, documentName_.empty() ? "stdin" : documentName_,
+                        content, // We already have the content from stdin
+                        metadata.mimeType);
                     if (!indexResult) {
-                        spdlog::warn("Failed to index stdin content: {}", 
-                                   indexResult.error().message);
+                        spdlog::warn("Failed to index stdin content: {}",
+                                     indexResult.error().message);
                     }
                 }
-                
+
                 // Update fuzzy index
                 metadataRepo->updateFuzzyIndex(docId);
             }
         }
-        
+
         outputResult(result.value());
         return Result<void>();
     }
-    
-    Result<void> storeFile(std::shared_ptr<api::IContentStore> store, const std::filesystem::path& filePath) {
+
+    Result<void> storeFile(std::shared_ptr<api::IContentStore> store,
+                           const std::filesystem::path& filePath) {
         // Build metadata
         api::ContentMetadata metadata = buildMetadata(filePath.filename().string(), filePath);
-        
+
+        // Set current file info for embedding worker
+        currentFilePath_ = filePath;
+        currentMimeType_ = metadata.mimeType;
+
         // Store the file
         auto result = store->store(filePath, metadata);
         if (!result) {
             return Error{result.error().code, result.error().message};
         }
-        
+
         // Store metadata in database
         auto storeMetadataResult = storeFileMetadata(filePath, result.value());
         if (!storeMetadataResult) {
             spdlog::warn("Failed to store metadata: {}", storeMetadataResult.error().message);
         }
-        
+
         outputResult(result.value());
         return Result<void>();
     }
-    
+
     Result<void> storeDirectory(std::shared_ptr<api::IContentStore> store) {
         if (!recursive_) {
             return Error{ErrorCode::InvalidArgument, "Directory specified but --recursive not set"};
         }
-        
+
         std::vector<std::filesystem::path> filesToAdd;
-        
+
         // Collect files to add
         try {
             for (const auto& entry : std::filesystem::recursive_directory_iterator(targetPath_)) {
-                if (!entry.is_regular_file()) continue;
-                
+                if (!entry.is_regular_file())
+                    continue;
+
                 // Check include/exclude patterns
-                if (!shouldIncludeFile(entry.path())) continue;
-                
+                if (!shouldIncludeFile(entry.path()))
+                    continue;
+
                 filesToAdd.push_back(entry.path());
             }
         } catch (const std::filesystem::filesystem_error& e) {
-            return Error{ErrorCode::FileNotFound, "Failed to traverse directory: " + std::string(e.what())};
+            return Error{ErrorCode::FileNotFound,
+                         "Failed to traverse directory: " + std::string(e.what())};
         }
-        
+
         if (filesToAdd.empty()) {
             return Error{ErrorCode::InvalidArgument, "No files found to add in directory"};
         }
-        
+
         // Process each file
         size_t successCount = 0;
         size_t failureCount = 0;
-        
+
         for (const auto& filePath : filesToAdd) {
             if (cli_->getVerbose()) {
                 spdlog::debug("Adding: {}", filePath.string());
             }
-            
+
             // Build metadata with collection/snapshot info
             api::ContentMetadata metadata = buildMetadata(filePath.filename().string(), filePath);
-            
+
             // Store the file
             auto result = store->store(filePath, metadata);
             if (!result) {
@@ -288,17 +308,17 @@ private:
                 failureCount++;
                 continue;
             }
-            
+
             // Store metadata in database
             auto storeMetadataResult = storeFileMetadata(filePath, result.value());
             if (!storeMetadataResult) {
-                spdlog::warn("Failed to store metadata for {}: {}", 
-                           filePath.string(), storeMetadataResult.error().message);
+                spdlog::warn("Failed to store metadata for {}: {}", filePath.string(),
+                             storeMetadataResult.error().message);
             }
-            
+
             successCount++;
         }
-        
+
         // Output summary
         if (cli_->getJsonOutput() || cli_->getVerbose()) {
             json output;
@@ -313,18 +333,22 @@ private:
             std::cout << "Directory processing complete!" << std::endl;
             std::cout << "Files added: " << successCount << std::endl;
             std::cout << "Files failed: " << failureCount << std::endl;
-            if (!collection_.empty()) std::cout << "Collection: " << collection_ << std::endl;
-            if (!snapshotId_.empty()) std::cout << "Snapshot ID: " << snapshotId_ << std::endl;
-            if (!snapshotLabel_.empty()) std::cout << "Snapshot Label: " << snapshotLabel_ << std::endl;
+            if (!collection_.empty())
+                std::cout << "Collection: " << collection_ << std::endl;
+            if (!snapshotId_.empty())
+                std::cout << "Snapshot ID: " << snapshotId_ << std::endl;
+            if (!snapshotLabel_.empty())
+                std::cout << "Snapshot Label: " << snapshotLabel_ << std::endl;
         }
-        
+
         return Result<void>();
     }
-    
-    api::ContentMetadata buildMetadata(const std::string& defaultName, const std::filesystem::path& filePath = {}) {
+
+    api::ContentMetadata buildMetadata(const std::string& defaultName,
+                                       const std::filesystem::path& filePath = {}) {
         api::ContentMetadata metadata;
         metadata.name = documentName_.empty() ? defaultName : documentName_;
-        
+
         // Set MIME type with auto-detection fallback
         if (!mimeType_.empty()) {
             // User explicitly provided MIME type
@@ -334,12 +358,12 @@ private:
             metadata.mimeType = detectMimeType(filePath, defaultName);
         }
         // If both user MIME type and auto-detection are disabled, leave empty
-        
+
         // Convert vector tags to unordered_map
         for (const auto& tag : tags_) {
             metadata.tags[tag] = "";
         }
-        
+
         // Add custom metadata
         for (const auto& kv : metadata_) {
             auto pos = kv.find('=');
@@ -349,7 +373,7 @@ private:
                 metadata.tags[key] = value;
             }
         }
-        
+
         // Add collection and snapshot metadata
         if (!collection_.empty()) {
             metadata.tags["collection"] = collection_;
@@ -360,10 +384,10 @@ private:
         if (!snapshotLabel_.empty()) {
             metadata.tags["snapshot_label"] = snapshotLabel_;
         }
-        
+
         return metadata;
     }
-    
+
     std::string detectMimeType(const std::filesystem::path& filePath, const std::string& fileName) {
         // Try signature-based detection first (if we have a file path)
         if (!filePath.empty() && std::filesystem::exists(filePath)) {
@@ -371,19 +395,20 @@ private:
                 auto detection = detection::FileTypeDetector::instance().detectFromFile(filePath);
                 if (detection && !detection.value().mimeType.empty()) {
                     if (cli_->getVerbose()) {
-                        spdlog::debug("Detected MIME type '{}' for file '{}'", 
-                                     detection.value().mimeType, filePath.string());
+                        spdlog::debug("Detected MIME type '{}' for file '{}'",
+                                      detection.value().mimeType, filePath.string());
                     }
                     return detection.value().mimeType;
                 }
             } catch (const std::exception& e) {
                 if (cli_->getVerbose()) {
-                    spdlog::debug("Signature detection failed for '{}': {}", filePath.string(), e.what());
+                    spdlog::debug("Signature detection failed for '{}': {}", filePath.string(),
+                                  e.what());
                 }
                 // Continue to extension-based detection
             }
         }
-        
+
         // Fallback to extension-based detection
         std::string extension;
         if (!filePath.empty()) {
@@ -395,52 +420,54 @@ private:
                 extension = fileName.substr(pos);
             }
         }
-        
+
         if (!extension.empty()) {
             std::string mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(extension);
             if (cli_->getVerbose()) {
-                spdlog::debug("Detected MIME type '{}' from extension '{}' for '{}'", 
-                             mimeType, extension, fileName);
+                spdlog::debug("Detected MIME type '{}' from extension '{}' for '{}'", mimeType,
+                              extension, fileName);
             }
             return mimeType;
         }
-        
+
         // Default fallback - use text/plain for stdin, application/octet-stream for files
         std::string defaultMime = (fileName == "stdin") ? "text/plain" : "application/octet-stream";
         if (cli_->getVerbose()) {
-            spdlog::debug("No MIME type detected for '{}', using default '{}'", fileName, defaultMime);
+            spdlog::debug("No MIME type detected for '{}', using default '{}'", fileName,
+                          defaultMime);
         }
         return defaultMime;
     }
-    
-    Result<void> storeFileMetadata(const std::filesystem::path& filePath, const api::StoreResult& storeResult) {
+
+    Result<void> storeFileMetadata(const std::filesystem::path& filePath,
+                                   const api::StoreResult& storeResult) {
         auto metadataRepo = cli_->getMetadataRepository();
         if (!metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
         }
-        
+
         int64_t docId = -1;
         bool isNewDocument = true;
-        
+
         // Check if document already exists (high dedup case)
-        if (storeResult.dedupRatio() >= 0.99) {  // Near 100% dedup
+        if (storeResult.dedupRatio() >= 0.99) { // Near 100% dedup
             auto existingDoc = metadataRepo->getDocumentByHash(storeResult.contentHash);
             if (existingDoc && existingDoc.value().has_value()) {
                 // Document already exists, update it
                 isNewDocument = false;
                 docId = existingDoc.value()->id;
-                
+
                 // Update indexed time (make a copy since it's const)
                 auto doc = existingDoc.value().value();
                 doc.indexedTime = std::chrono::system_clock::now();
                 metadataRepo->updateDocument(doc);
-                
+
                 if (cli_->getVerbose()) {
                     spdlog::debug("Document already exists with ID: {}, updating metadata", docId);
                 }
             }
         }
-        
+
         // Insert new document if it doesn't exist
         if (isNewDocument) {
             metadata::DocumentInfo docInfo;
@@ -450,37 +477,38 @@ private:
             docInfo.fileSize = static_cast<int64_t>(std::filesystem::file_size(filePath));
             docInfo.sha256Hash = storeResult.contentHash;
             docInfo.mimeType = mimeType_.empty() ? "application/octet-stream" : mimeType_;
-            
+
             auto now = std::chrono::system_clock::now();
             docInfo.createdTime = now;
-            
+
             // Convert file_time_type to system_clock::time_point
             auto ftime = std::filesystem::last_write_time(filePath);
             auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+                ftime - std::filesystem::file_time_type::clock::now() +
+                std::chrono::system_clock::now());
             docInfo.modifiedTime = sctp;
             docInfo.indexedTime = now;
-            
+
             auto insertResult = metadataRepo->insertDocument(docInfo);
             if (!insertResult) {
                 return insertResult.error();
             }
-            
+
             docId = insertResult.value();
             if (cli_->getVerbose()) {
                 spdlog::debug("Stored new document with ID: {}", docId);
             }
         }
-        
+
         if (docId < 0) {
             return Error{ErrorCode::Unknown, "Failed to get document ID"};
         }
-        
+
         // Add tags as metadata
         for (const auto& tag : tags_) {
             metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
         }
-        
+
         // Add custom metadata
         for (const auto& kv : metadata_) {
             auto pos = kv.find('=');
@@ -490,7 +518,7 @@ private:
                 metadataRepo->setMetadata(docId, key, metadata::MetadataValue(value));
             }
         }
-        
+
         // Add collection and snapshot metadata
         if (!collection_.empty()) {
             metadataRepo->setMetadata(docId, "collection", metadata::MetadataValue(collection_));
@@ -499,15 +527,17 @@ private:
             metadataRepo->setMetadata(docId, "snapshot_id", metadata::MetadataValue(snapshotId_));
         }
         if (!snapshotLabel_.empty()) {
-            metadataRepo->setMetadata(docId, "snapshot_label", metadata::MetadataValue(snapshotLabel_));
+            metadataRepo->setMetadata(docId, "snapshot_label",
+                                      metadata::MetadataValue(snapshotLabel_));
         }
-        
+
         // Add relative path metadata for directory operations
         if (std::filesystem::is_directory(targetPath_)) {
             auto relativePath = std::filesystem::relative(filePath, targetPath_);
-            metadataRepo->setMetadata(docId, "path", metadata::MetadataValue(relativePath.string()));
+            metadataRepo->setMetadata(docId, "path",
+                                      metadata::MetadataValue(relativePath.string()));
         }
-        
+
         // Read file content for indexing (only for new documents)
         if (isNewDocument) {
             std::string fileContent;
@@ -517,33 +547,30 @@ private:
                     std::stringstream buffer;
                     buffer << file.rdbuf();
                     fileContent = buffer.str();
-                    
+
                     // Index document content for full-text search
                     auto indexResult = metadataRepo->indexDocumentContent(
-                        docId, 
-                        filePath.filename().string(),
-                        fileContent,
-                        mimeType_.empty() ? "application/octet-stream" : mimeType_
-                    );
+                        docId, filePath.filename().string(), fileContent,
+                        mimeType_.empty() ? "application/octet-stream" : mimeType_);
                     if (!indexResult) {
-                        spdlog::warn("Failed to index document content: {}", 
-                                   indexResult.error().message);
+                        spdlog::warn("Failed to index document content: {}",
+                                     indexResult.error().message);
                     }
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Failed to read file for indexing: {}", e.what());
             }
         }
-        
+
         // Update fuzzy index
         metadataRepo->updateFuzzyIndex(docId);
-        
+
         return Result<void>();
     }
-    
+
     bool shouldIncludeFile(const std::filesystem::path& filePath) {
         std::string fileName = filePath.filename().string();
-        
+
         // Split comma-separated patterns
         auto splitPatterns = [](const std::vector<std::string>& patterns) {
             std::vector<std::string> result;
@@ -561,37 +588,37 @@ private:
             }
             return result;
         };
-        
+
         auto expandedExcludePatterns = splitPatterns(excludePatterns_);
         auto expandedIncludePatterns = splitPatterns(includePatterns_);
-        
+
         // Check exclude patterns first
         for (const auto& pattern : expandedExcludePatterns) {
             if (matchesPattern(fileName, pattern)) {
                 return false;
             }
         }
-        
+
         // If no include patterns specified, include all files (that weren't excluded)
         if (expandedIncludePatterns.empty()) {
             return true;
         }
-        
+
         // Check include patterns
         for (const auto& pattern : expandedIncludePatterns) {
             if (matchesPattern(fileName, pattern)) {
                 return true;
             }
         }
-        
+
         return false;
     }
-    
+
     bool matchesPattern(const std::string& text, const std::string& pattern) {
         // Simple wildcard matching (* and ?)
         std::regex regexPattern;
         std::string regexString = pattern;
-        
+
         // Convert wildcards to regex
         size_t pos = 0;
         while ((pos = regexString.find('*', pos)) != std::string::npos) {
@@ -603,7 +630,7 @@ private:
             regexString.replace(pos, 1, ".");
             pos += 1;
         }
-        
+
         try {
             regexPattern = std::regex(regexString, std::regex_constants::icase);
             return std::regex_match(text, regexPattern);
@@ -612,23 +639,42 @@ private:
             return text == pattern;
         }
     }
-    
+
     std::string generateSnapshotId() {
         auto now = std::chrono::system_clock::now();
-        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()).count();
-        
+        auto timestamp =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
         // Generate random component
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dis(1000, 9999);
-        
+
         std::stringstream ss;
         ss << "snapshot_" << timestamp << "_" << dis(gen);
         return ss.str();
     }
-    
+
     void outputResult(const api::StoreResult& storeResult) {
+        // Generate embedding asynchronously if not disabled
+        if (!noEmbeddings_) {
+            auto store = cli_->getContentStore();
+            auto metadataRepo = cli_->getMetadataRepository();
+
+            if (store && metadataRepo) {
+                auto embeddingService = std::make_unique<vector::EmbeddingService>(
+                    store, metadataRepo, cli_->getDataPath());
+
+                if (embeddingService->isAvailable()) {
+                    // Trigger repair if there are missing embeddings
+                    // This spawns a single detached thread only if needed
+                    embeddingService->triggerRepairIfNeeded();
+                } else if (cli_->getVerbose()) {
+                    spdlog::debug("Embedding generation not available (no models found)");
+                }
+            }
+        }
+
         // Output in JSON if --json flag is set, or if --verbose is set
         if (cli_->getJsonOutput() || cli_->getVerbose()) {
             json output;
@@ -637,7 +683,7 @@ private:
             output["bytes_deduped"] = storeResult.bytesDeduped;
             output["dedup_ratio"] = storeResult.dedupRatio();
             output["duration_ms"] = storeResult.duration.count();
-            
+
             std::cout << output.dump(2) << std::endl;
         } else {
             // Simple, concise output by default
@@ -648,7 +694,7 @@ private:
             std::cout << "Dedup ratio: " << (storeResult.dedupRatio() * 100) << "%" << std::endl;
         }
     }
-    
+
 private:
     YamsCLI* cli_ = nullptr;
     std::filesystem::path targetPath_;
@@ -657,12 +703,17 @@ private:
     std::vector<std::string> metadata_;
     std::string mimeType_;
     bool disableAutoMime_ = false;
-    
+    bool noEmbeddings_ = false;
+
+    // Current file being processed (for embedding worker)
+    std::filesystem::path currentFilePath_;
+    std::string currentMimeType_;
+
     // Collection and snapshot options
     std::string collection_;
     std::string snapshotId_;
     std::string snapshotLabel_;
-    
+
     // Directory options
     bool recursive_ = false;
     std::vector<std::string> includePatterns_;

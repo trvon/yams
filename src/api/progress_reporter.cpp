@@ -1,5 +1,5 @@
-#include <yams/api/progress_reporter.h>
 #include <yams/api/content_store_error.h>
+#include <yams/api/progress_reporter.h>
 
 #include <spdlog/spdlog.h>
 
@@ -18,43 +18,44 @@ struct ProgressReporter::Impl {
     mutable std::mutex mutex;
     ProgressCallback callback;
     std::string currentOperation;
-    
+
     Impl() : startTime(std::chrono::steady_clock::now()) {}
-    
-    explicit Impl(uint64_t total) 
-        : totalBytes(total)
-        , startTime(std::chrono::steady_clock::now()) {}
-    
+
+    explicit Impl(uint64_t total)
+        : totalBytes(total), startTime(std::chrono::steady_clock::now()) {}
+
     void notifyProgress() {
-        if (!callback) return;
-        
+        if (!callback)
+            return;
+
         Progress progress;
         progress.bytesProcessed = bytesProcessed.load();
         progress.totalBytes = totalBytes.load();
-        progress.percentage = (progress.totalBytes > 0) ? 
-            (static_cast<double>(progress.bytesProcessed) / progress.totalBytes * 100.0) : 0.0;
+        progress.percentage =
+            (progress.totalBytes > 0)
+                ? (static_cast<double>(progress.bytesProcessed) / progress.totalBytes * 100.0)
+                : 0.0;
         progress.startTime = startTime;
         progress.isCancelled = cancelled.load();
-        
+
         // Calculate estimated remaining time
         auto elapsed = std::chrono::steady_clock::now() - startTime;
         if (progress.bytesProcessed > 0 && progress.percentage > 0) {
             auto totalEstimate = elapsed / (progress.percentage / 100.0);
-            progress.estimatedRemaining = std::chrono::duration_cast<std::chrono::seconds>(
-                totalEstimate - elapsed);
+            progress.estimatedRemaining =
+                std::chrono::duration_cast<std::chrono::seconds>(totalEstimate - elapsed);
         }
-        
+
         {
             std::lock_guard lock(mutex);
             progress.currentOperation = currentOperation;
         }
-        
+
         callback(progress);
     }
 };
 
-ProgressReporter::ProgressReporter() 
-    : pImpl(std::make_unique<Impl>()) {}
+ProgressReporter::ProgressReporter() : pImpl(std::make_unique<Impl>()) {}
 
 ProgressReporter::ProgressReporter(uint64_t totalBytes)
     : pImpl(std::make_unique<Impl>(totalBytes)) {}
@@ -97,23 +98,25 @@ Progress ProgressReporter::getProgress() const {
     Progress progress;
     progress.bytesProcessed = pImpl->bytesProcessed.load();
     progress.totalBytes = pImpl->totalBytes.load();
-    progress.percentage = (progress.totalBytes > 0) ? 
-        (static_cast<double>(progress.bytesProcessed) / progress.totalBytes * 100.0) : 0.0;
+    progress.percentage =
+        (progress.totalBytes > 0)
+            ? (static_cast<double>(progress.bytesProcessed) / progress.totalBytes * 100.0)
+            : 0.0;
     progress.startTime = pImpl->startTime;
     progress.isCancelled = pImpl->cancelled.load();
-    
+
     auto elapsed = std::chrono::steady_clock::now() - pImpl->startTime;
     if (progress.bytesProcessed > 0 && progress.percentage > 0) {
         auto totalEstimate = elapsed / (progress.percentage / 100.0);
-        progress.estimatedRemaining = std::chrono::duration_cast<std::chrono::seconds>(
-            totalEstimate - elapsed);
+        progress.estimatedRemaining =
+            std::chrono::duration_cast<std::chrono::seconds>(totalEstimate - elapsed);
     }
-    
+
     {
         std::lock_guard lock(pImpl->mutex);
         progress.currentOperation = pImpl->currentOperation;
     }
-    
+
     return progress;
 }
 
@@ -127,7 +130,8 @@ uint64_t ProgressReporter::getTotalBytes() const {
 
 double ProgressReporter::getPercentage() const {
     uint64_t total = pImpl->totalBytes.load();
-    if (total == 0) return 0.0;
+    if (total == 0)
+        return 0.0;
     return static_cast<double>(pImpl->bytesProcessed.load()) / total * 100.0;
 }
 
@@ -178,33 +182,33 @@ void ProgressReporter::reset(uint64_t totalBytes) {
 std::chrono::seconds ProgressReporter::estimateRemaining() const {
     auto elapsed = getElapsedTime();
     double percentage = getPercentage();
-    
+
     if (percentage <= 0 || percentage >= 100) {
         return std::chrono::seconds(0);
     }
-    
+
     auto totalEstimate = elapsed / (percentage / 100.0);
     auto remaining = totalEstimate - elapsed;
-    
+
     return std::chrono::duration_cast<std::chrono::seconds>(remaining);
 }
 
 std::chrono::milliseconds ProgressReporter::getElapsedTime() const {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - pImpl->startTime);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                 pImpl->startTime);
 }
 
 double ProgressReporter::getBytesPerSecond() const {
     auto elapsed = getElapsedTime();
-    if (elapsed.count() == 0) return 0.0;
-    
-    return static_cast<double>(pImpl->bytesProcessed.load()) / 
-           (elapsed.count() / 1000.0);
+    if (elapsed.count() == 0)
+        return 0.0;
+
+    return static_cast<double>(pImpl->bytesProcessed.load()) / (elapsed.count() / 1000.0);
 }
 
 std::unique_ptr<ProgressReporter> ProgressReporter::createSubReporter(uint64_t subTotalBytes) {
     auto subReporter = std::make_unique<ProgressReporter>(subTotalBytes);
-    
+
     // Set up callback to forward progress to parent
     auto parentPtr = this;
     subReporter->setCallback([parentPtr, subTotalBytes](const Progress& subProgress) {
@@ -216,7 +220,7 @@ std::unique_ptr<ProgressReporter> ProgressReporter::createSubReporter(uint64_t s
             parentPtr->addProgress(parentBytes);
         }
     });
-    
+
     return subReporter;
 }
 
@@ -227,47 +231,47 @@ struct MultiProgressTracker::Impl {
         std::shared_ptr<ProgressReporter> reporter;
         uint64_t totalBytes;
     };
-    
+
     mutable std::mutex mutex;
     std::vector<Operation> operations;
     ProgressCallback overallCallback;
-    
+
     Progress calculateOverallProgress() const {
         std::lock_guard lock(mutex);
-        
+
         Progress overall;
         overall.startTime = std::chrono::steady_clock::now();
-        
+
         for (const auto& op : operations) {
             auto progress = op.reporter->getProgress();
             overall.bytesProcessed += progress.bytesProcessed;
             overall.totalBytes += progress.totalBytes;
-            
+
             if (progress.isCancelled) {
                 overall.isCancelled = true;
             }
-            
+
             // Use earliest start time
             if (progress.startTime < overall.startTime) {
                 overall.startTime = progress.startTime;
             }
         }
-        
+
         if (overall.totalBytes > 0) {
-            overall.percentage = static_cast<double>(overall.bytesProcessed) / 
-                               overall.totalBytes * 100.0;
-            
+            overall.percentage =
+                static_cast<double>(overall.bytesProcessed) / overall.totalBytes * 100.0;
+
             auto elapsed = std::chrono::steady_clock::now() - overall.startTime;
             if (overall.percentage > 0) {
                 auto totalEstimate = elapsed / (overall.percentage / 100.0);
-                overall.estimatedRemaining = std::chrono::duration_cast<std::chrono::seconds>(
-                    totalEstimate - elapsed);
+                overall.estimatedRemaining =
+                    std::chrono::duration_cast<std::chrono::seconds>(totalEstimate - elapsed);
             }
         }
-        
+
         return overall;
     }
-    
+
     void notifyOverallProgress() {
         if (overallCallback) {
             overallCallback(calculateOverallProgress());
@@ -275,27 +279,23 @@ struct MultiProgressTracker::Impl {
     }
 };
 
-MultiProgressTracker::MultiProgressTracker()
-    : pImpl(std::make_unique<Impl>()) {}
+MultiProgressTracker::MultiProgressTracker() : pImpl(std::make_unique<Impl>()) {}
 
 MultiProgressTracker::~MultiProgressTracker() = default;
 
-std::shared_ptr<ProgressReporter> MultiProgressTracker::addOperation(
-    const std::string& name, uint64_t totalBytes) {
-    
+std::shared_ptr<ProgressReporter> MultiProgressTracker::addOperation(const std::string& name,
+                                                                     uint64_t totalBytes) {
     auto reporter = std::make_shared<ProgressReporter>(totalBytes);
-    
+
     {
         std::lock_guard lock(pImpl->mutex);
         pImpl->operations.push_back({name, reporter, totalBytes});
     }
-    
+
     // Set up callback to notify overall progress
     auto tracker = this;
-    reporter->setCallback([tracker](const Progress&) {
-        tracker->pImpl->notifyOverallProgress();
-    });
-    
+    reporter->setCallback([tracker](const Progress&) { tracker->pImpl->notifyOverallProgress(); });
+
     return reporter;
 }
 
@@ -316,7 +316,7 @@ size_t MultiProgressTracker::getOperationCount() const {
 size_t MultiProgressTracker::getCompletedOperations() const {
     std::lock_guard lock(pImpl->mutex);
     return std::count_if(pImpl->operations.begin(), pImpl->operations.end(),
-        [](const auto& op) { return op.reporter->isComplete(); });
+                         [](const auto& op) { return op.reporter->isComplete(); });
 }
 
 void MultiProgressTracker::cancelAll() {

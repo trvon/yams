@@ -41,15 +41,12 @@ public:
      * Fuzzy search using the metadata repository (if available). Returns converted entries.
      * min_similarity in [0,1], limit caps number of entries returned.
      */
-    std::vector<DocEntry> fuzzySearch(std::string_view query,
-                                      float min_similarity,
-                                      int limit);
+    std::vector<DocEntry> fuzzySearch(std::string_view query, float min_similarity, int limit);
 
     /**
      * Case-insensitive basic filter on the provided list by name or hash substring.
      */
-    std::vector<DocEntry> filterBasic(const std::vector<DocEntry>& all,
-                                      std::string_view needle);
+    std::vector<DocEntry> filterBasic(const std::vector<DocEntry>& all, std::string_view needle);
 
     // ------------- Content loading -------------
 
@@ -76,29 +73,26 @@ public:
      * Split text into lines, normalizing CRLF and trimming trailing CR.
      * Caps the number of lines to max_lines.
      */
-    std::vector<std::string> splitLines(const std::string& content,
-                                        size_t max_lines) const;
+    std::vector<std::string> splitLines(const std::string& content, size_t max_lines) const;
 
     /**
      * Create a classic hex dump with ASCII gutter.
      * bytes_per_line typically 16. Caps total lines to max_lines.
      */
-    std::vector<std::string> toHexDump(const std::vector<std::byte>& bytes,
-                                       size_t bytes_per_line,
+    std::vector<std::string> toHexDump(const std::vector<std::byte>& bytes, size_t bytes_per_line,
                                        size_t max_lines) const;
 
     /**
      * Convenience function to build preview lines based on the selected mode.
-     * - PreviewMode::Auto: prefer metadata text; fallback to bytes (text-like) else "Binary content..."
+     * - PreviewMode::Auto: prefer metadata text; fallback to bytes (text-like) else "Binary
+     * content..."
      * - PreviewMode::Text: force text view (fall back to message if binary)
      * - PreviewMode::Hex: hex dump
      *
      * max_bytes caps raw bytes retrieval; max_lines caps resulting lines.
      */
-    std::vector<std::string> makePreviewLines(const DocEntry& doc,
-                                              PreviewMode mode,
-                                              size_t max_bytes,
-                                              size_t max_lines);
+    std::vector<std::string> makePreviewLines(const DocEntry& doc, PreviewMode mode,
+                                              size_t max_bytes, size_t max_lines);
 
     // ------------- External pager -------------
 
@@ -110,20 +104,16 @@ public:
      *
      * Note: This variant does NOT suspend the TUI. Prefer openInPagerWithSuspend when possible.
      */
-    bool openInPager(const std::string& name,
-                     const std::optional<std::string>& text,
-                     const std::vector<std::byte>& raw_bytes,
-                     std::string* error_message);
+    bool openInPager(const std::string& name, const std::optional<std::string>& text,
+                     const std::vector<std::byte>& raw_bytes, std::string* error_message);
 
     /**
      * Open content in an external pager while suspending the TUI via the provided suspend callback.
      * The suspend callback is responsible for restoring terminal state after pager exits.
      */
-    bool openInPagerWithSuspend(const std::string& name,
-                                const std::optional<std::string>& text,
+    bool openInPagerWithSuspend(const std::string& name, const std::optional<std::string>& text,
                                 const std::vector<std::byte>& raw_bytes,
-                                const SuspendRunner& suspend,
-                                std::string* error_message);
+                                const SuspendRunner& suspend, std::string* error_message);
 
 private:
     yams::cli::YamsCLI* _cli; // non-owning

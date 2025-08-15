@@ -1,7 +1,7 @@
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
-#include "reference_db.cpp"  // Include DB wrappers
+#include "reference_db.cpp" // Include DB wrappers
 
 #include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
@@ -11,11 +11,11 @@ namespace yamsfmt = std;
 #include <spdlog/fmt/fmt.h>
 namespace yamsfmt = fmt;
 #endif
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <thread>
-#include <chrono>
-#include <cstdlib>
 
 #ifdef __linux__
 #include <unistd.h>
@@ -33,7 +33,7 @@ struct ReferenceCounter::Impl {
     std::unique_ptr<StatementCache> stmtCache;
     mutable std::shared_mutex dbMutex;
     // Transaction IDs now managed by database AUTOINCREMENT
-    
+
     // Prepared statement keys
     static constexpr auto INCREMENT_STMT = "increment";
     static constexpr auto DECREMENT_STMT = "decrement";
@@ -43,12 +43,12 @@ struct ReferenceCounter::Impl {
     static constexpr auto INSERT_TRANSACTION_STMT = "insert_transaction";
     static constexpr auto UPDATE_TRANSACTION_STMT = "update_transaction";
     static constexpr auto INSERT_OP_STMT = "insert_op";
-    
+
     explicit Impl(Config cfg) : config(std::move(cfg)) {}
 };
 
 // Constructor
-ReferenceCounter::ReferenceCounter(Config config) 
+ReferenceCounter::ReferenceCounter(Config config)
     : pImpl(std::make_unique<Impl>(std::move(config))) {
     auto result = initializeDatabase();
     if (!result) {
@@ -68,54 +68,57 @@ ReferenceCounter& ReferenceCounter::operator=(ReferenceCounter&&) noexcept = def
 // Helper function to find reference_schema.sql
 static std::filesystem::path findReferenceSchemaSql() {
     namespace fs = std::filesystem;
-    
+
     std::vector<fs::path> searchPaths;
-    
+
     // 1. Check environment variable
     if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
         searchPaths.push_back(fs::path(dataDir) / "reference_schema.sql");
         searchPaths.push_back(fs::path(dataDir) / "sql" / "reference_schema.sql");
     }
-    
+
     // 2. Check relative to executable location (for installed binaries)
     try {
-        #ifdef __linux__
-            char result[PATH_MAX];
-            ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
-            if (count != -1) {
-                fs::path exePath(std::string(result, count));
-                // Check ../share/yams/sql relative to binary
-                searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" / "reference_schema.sql");
-            }
-        #elif defined(__APPLE__)
-            char path[1024];
-            uint32_t size = sizeof(path);
-            if (_NSGetExecutablePath(path, &size) == 0) {
-                fs::path exePath(path);
-                // Check ../share/yams/sql relative to binary
-                searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" / "reference_schema.sql");
-            }
-        #endif
+#ifdef __linux__
+        char result[PATH_MAX];
+        ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
+        if (count != -1) {
+            fs::path exePath(std::string(result, count));
+            // Check ../share/yams/sql relative to binary
+            searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" /
+                                  "reference_schema.sql");
+        }
+#elif defined(__APPLE__)
+        char path[1024];
+        uint32_t size = sizeof(path);
+        if (_NSGetExecutablePath(path, &size) == 0) {
+            fs::path exePath(path);
+            // Check ../share/yams/sql relative to binary
+            searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" /
+                                  "reference_schema.sql");
+        }
+#endif
     } catch (...) {
         // Ignore errors in getting executable path
     }
-    
+
     // 3. Check common installation paths
     searchPaths.push_back("/usr/local/share/yams/sql/reference_schema.sql");
     searchPaths.push_back("/usr/share/yams/sql/reference_schema.sql");
     searchPaths.push_back("/opt/yams/share/sql/reference_schema.sql");
-    
+
     // 4. Check relative to current working directory (for development)
     searchPaths.push_back("sql/reference_schema.sql");
     searchPaths.push_back("../sql/reference_schema.sql");
     searchPaths.push_back("../../sql/reference_schema.sql");
     searchPaths.push_back("../../../sql/reference_schema.sql");
-    
+
     // 5. Check in home directory
     if (const char* home = std::getenv("HOME")) {
-        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "sql" / "reference_schema.sql");
+        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "sql" /
+                              "reference_schema.sql");
     }
-    
+
     // Search for the file
     for (const auto& path : searchPaths) {
         if (fs::exists(path) && fs::is_regular_file(path)) {
@@ -123,7 +126,7 @@ static std::filesystem::path findReferenceSchemaSql() {
             return path;
         }
     }
-    
+
     spdlog::debug("reference_schema.sql not found in any search path");
     return {};
 }
@@ -133,20 +136,20 @@ Result<void> ReferenceCounter::initializeDatabase() {
     try {
         // Create database directory if needed
         std::filesystem::create_directories(pImpl->config.databasePath.parent_path());
-        
+
         // Open database
         pImpl->db = std::make_unique<Database>(pImpl->config.databasePath);
-        
+
         // Configure database
         if (pImpl->config.enableWAL) {
             pImpl->db->execute("PRAGMA journal_mode = WAL");
         }
-        
+
         pImpl->db->execute(yamsfmt::format("PRAGMA cache_size = {}", pImpl->config.cacheSize));
         pImpl->db->execute(yamsfmt::format("PRAGMA busy_timeout = {}", pImpl->config.busyTimeout));
         pImpl->db->execute("PRAGMA synchronous = NORMAL");
         pImpl->db->execute("PRAGMA temp_store = MEMORY");
-        
+
         // Execute schema - use proper path discovery
         auto schemaPath = findReferenceSchemaSql();
         if (!schemaPath.empty() && std::filesystem::exists(schemaPath)) {
@@ -154,7 +157,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
             pImpl->db->executeFile(schemaPath);
         } else {
             // Fallback: execute complete inline schema
-            spdlog::warn("reference_schema.sql not found at {}, using inline schema", schemaPath.string());
+            spdlog::warn("reference_schema.sql not found at {}, using inline schema",
+                         schemaPath.string());
             pImpl->db->execute(R"(
                 -- Enable foreign key constraints
                 PRAGMA foreign_keys = ON;
@@ -274,10 +278,10 @@ Result<void> ReferenceCounter::initializeDatabase() {
                 ORDER BY t.start_timestamp DESC;
             )");
         }
-        
+
         // Create statement cache
         pImpl->stmtCache = std::make_unique<StatementCache>(*pImpl->db);
-        
+
         // Prepare common statements
         pImpl->stmtCache->get(Impl::INCREMENT_STMT, R"(
             INSERT INTO block_references (block_hash, ref_count, block_size, created_at, last_accessed)
@@ -286,17 +290,17 @@ Result<void> ReferenceCounter::initializeDatabase() {
                 ref_count = ref_count + 1,
                 last_accessed = strftime('%s', 'now')
         )");
-        
+
         pImpl->stmtCache->get(Impl::DECREMENT_STMT, R"(
             UPDATE block_references 
             SET ref_count = ref_count - 1,
                 last_accessed = strftime('%s', 'now')
             WHERE block_hash = ? AND ref_count > 0
         )");
-        
-        pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT, 
-            "SELECT ref_count FROM block_references WHERE block_hash = ?");
-        
+
+        pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT,
+                              "SELECT ref_count FROM block_references WHERE block_hash = ?");
+
         pImpl->stmtCache->get(Impl::GET_UNREFERENCED_STMT, R"(
             SELECT block_hash, block_size FROM block_references 
             WHERE ref_count = 0 
@@ -304,13 +308,13 @@ Result<void> ReferenceCounter::initializeDatabase() {
             ORDER BY last_accessed ASC
             LIMIT ?
         )");
-        
+
         // Transaction IDs are now managed by SQLite AUTOINCREMENT
         // No need to manually track nextTransactionId
-        
-        spdlog::debug("Reference counter database initialized at {}", 
+
+        spdlog::debug("Reference counter database initialized at {}",
                       pImpl->config.databasePath.string());
-        
+
         return {};
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize reference counter database: {}", e.what());
@@ -322,12 +326,12 @@ Result<void> ReferenceCounter::initializeDatabase() {
 Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t blockSize) {
     try {
         std::unique_lock lock(pImpl->dbMutex);
-        
+
         auto& stmt = pImpl->stmtCache->get(Impl::INCREMENT_STMT, "");
         stmt.bind(1, blockHash);
         stmt.bind(2, static_cast<int64_t>(blockSize));
         stmt.execute();
-        
+
         return {};
     } catch (const std::exception& e) {
         spdlog::error("Failed to increment reference count for {}: {}", blockHash, e.what());
@@ -339,16 +343,16 @@ Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t bloc
 Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
     try {
         std::unique_lock lock(pImpl->dbMutex);
-        
+
         auto& stmt = pImpl->stmtCache->get(Impl::DECREMENT_STMT, "");
         stmt.bind(1, blockHash);
         stmt.execute();
-        
+
         if (pImpl->db->changes() == 0) {
-            spdlog::warn("Attempted to decrement non-existent or zero reference count for {}", 
+            spdlog::warn("Attempted to decrement non-existent or zero reference count for {}",
                          blockHash);
         }
-        
+
         return {};
     } catch (const std::exception& e) {
         spdlog::error("Failed to decrement reference count for {}: {}", blockHash, e.what());
@@ -360,15 +364,15 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
 Result<uint64_t> ReferenceCounter::getRefCount(std::string_view blockHash) const {
     try {
         std::shared_lock lock(pImpl->dbMutex);
-        
+
         auto& stmt = pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT, "");
         stmt.bind(1, blockHash);
-        
+
         if (stmt.step()) {
             return static_cast<uint64_t>(stmt.getInt64(0));
         }
-        
-        return 0;  // Block not found
+
+        return 0; // Block not found
     } catch (const std::exception& e) {
         spdlog::error("Failed to get reference count for {}: {}", blockHash, e.what());
         return Result<uint64_t>(ErrorCode::DatabaseError);
@@ -388,9 +392,9 @@ Result<bool> ReferenceCounter::hasReferences(std::string_view blockHash) const {
 Result<RefCountStats> ReferenceCounter::getStats() const {
     try {
         std::shared_lock lock(pImpl->dbMutex);
-        
+
         RefCountStats stats{};
-        
+
         // Use the block_statistics view
         auto stmt = pImpl->db->prepare(R"(
             SELECT 
@@ -401,7 +405,7 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
                 unreferenced_bytes
             FROM block_statistics
         )");
-        
+
         if (stmt.step()) {
             stats.totalBlocks = static_cast<uint64_t>(stmt.getInt64(0));
             stats.totalReferences = static_cast<uint64_t>(stmt.getInt64(1));
@@ -409,19 +413,19 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
             stats.unreferencedBlocks = static_cast<uint64_t>(stmt.getInt64(3));
             stats.unreferencedBytes = static_cast<uint64_t>(stmt.getInt64(4));
         }
-        
+
         // Get transaction stats
         auto txnStmt = pImpl->db->prepare(R"(
             SELECT 
                 (SELECT stat_value FROM ref_statistics WHERE stat_name = 'transactions_completed'),
                 (SELECT stat_value FROM ref_statistics WHERE stat_name = 'transactions_rolled_back')
         )");
-        
+
         if (txnStmt.step()) {
             stats.transactions = static_cast<uint64_t>(txnStmt.getInt64(0));
             stats.rollbacks = static_cast<uint64_t>(txnStmt.getInt64(1));
         }
-        
+
         return stats;
     } catch (const std::exception& e) {
         spdlog::error("Failed to get statistics: {}", e.what());
@@ -430,22 +434,22 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
 }
 
 // Get unreferenced blocks
-Result<std::vector<std::string>> ReferenceCounter::getUnreferencedBlocks(
-    size_t limit, std::chrono::seconds minAge) const {
+Result<std::vector<std::string>>
+ReferenceCounter::getUnreferencedBlocks(size_t limit, std::chrono::seconds minAge) const {
     try {
         std::shared_lock lock(pImpl->dbMutex);
-        
+
         std::vector<std::string> blocks;
         blocks.reserve(limit);
-        
+
         auto& stmt = pImpl->stmtCache->get(Impl::GET_UNREFERENCED_STMT, "");
         stmt.bind(1, static_cast<int64_t>(minAge.count()));
         stmt.bind(2, static_cast<int64_t>(limit));
-        
+
         while (stmt.step()) {
             blocks.emplace_back(stmt.getString(0));
         }
-        
+
         return blocks;
     } catch (const std::exception& e) {
         spdlog::error("Failed to get unreferenced blocks: {}", e.what());
@@ -456,13 +460,13 @@ Result<std::vector<std::string>> ReferenceCounter::getUnreferencedBlocks(
 // Begin transaction
 std::unique_ptr<IReferenceCounter::ITransaction> ReferenceCounter::beginTransaction() {
     // Transaction ID will be assigned by database AUTOINCREMENT
-    return std::unique_ptr<ITransaction>(new Transaction(this, -1));  // -1 indicates ID not yet assigned
+    return std::unique_ptr<ITransaction>(
+        new Transaction(this, -1)); // -1 indicates ID not yet assigned
 }
 
 // Transaction implementation
 ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id)
     : counter_(counter), transactionId_(id), active_(true), committed_(false) {
-    
     try {
         // Record transaction start - let database assign ID via AUTOINCREMENT
         // Don't start SQLite transaction yet - operations will be batched and applied during commit
@@ -473,11 +477,11 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
                 VALUES (strftime('%s', 'now'), 'PENDING')
             )");
             stmt.execute();
-            
+
             // Get the assigned transaction ID
             transactionId_ = counter_->pImpl->db->lastInsertRowId();
         }
-        
+
         spdlog::debug("Started reference counting transaction {}", transactionId_);
     } catch (const std::exception& e) {
         active_ = false;
@@ -497,30 +501,29 @@ ReferenceCounter::Transaction::~Transaction() {
 
 // Move constructor
 ReferenceCounter::Transaction::Transaction(Transaction&& other) noexcept
-    : counter_(other.counter_), 
-      transactionId_(other.transactionId_),
-      active_(other.active_),
-      committed_(other.committed_),
-      operations_(std::move(other.operations_)) {
+    : counter_(other.counter_), transactionId_(other.transactionId_), active_(other.active_),
+      committed_(other.committed_), operations_(std::move(other.operations_)) {
     other.active_ = false;
     other.counter_ = nullptr;
 }
 
 // Move assignment
-ReferenceCounter::Transaction& ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
+ReferenceCounter::Transaction&
+ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
     if (this != &other) {
         if (active_ && !committed_) {
             try {
                 rollback();
-            } catch (...) {}
+            } catch (...) {
+            }
         }
-        
+
         counter_ = other.counter_;
         transactionId_ = other.transactionId_;
         active_ = other.active_;
         committed_ = other.committed_;
         operations_ = std::move(other.operations_);
-        
+
         other.active_ = false;
         other.counter_ = nullptr;
     }
@@ -532,14 +535,12 @@ void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
-    
-    operations_.push_back({
-        .type = Operation::Type::Increment,
-        .blockHash = std::string(blockHash),
-        .blockSize = blockSize,
-        .delta = 1
-    });
-    
+
+    operations_.push_back({.type = Operation::Type::Increment,
+                           .blockHash = std::string(blockHash),
+                           .blockSize = blockSize,
+                           .delta = 1});
+
     // Operations are recorded only in-memory during queue phase
     // Database writes will occur only during commit() for true atomic behavior
 }
@@ -549,14 +550,12 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
-    
-    operations_.push_back({
-        .type = Operation::Type::Decrement,
-        .blockHash = std::string(blockHash),
-        .blockSize = 0,
-        .delta = -1
-    });
-    
+
+    operations_.push_back({.type = Operation::Type::Decrement,
+                           .blockHash = std::string(blockHash),
+                           .blockSize = 0,
+                           .delta = -1});
+
     // Operations are recorded only in-memory during queue phase
     // Database writes will occur only during commit() for true atomic behavior
 }
@@ -566,28 +565,30 @@ Result<void> ReferenceCounter::Transaction::commit() {
     if (!active_) {
         return Result<void>(ErrorCode::TransactionFailed);
     }
-    
+
     try {
         std::unique_lock lock(counter_->pImpl->dbMutex);
-        
+
         // Start SQLite transaction for atomic operation application
         counter_->pImpl->db->beginTransaction();
-        
+
         try {
             // Apply all queued operations atomically
             for (const auto& op : operations_) {
                 if (op.type == Operation::Type::Increment) {
-                    auto& stmt = counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INCREMENT_STMT, "");
+                    auto& stmt =
+                        counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INCREMENT_STMT, "");
                     stmt.bind(1, op.blockHash);
                     stmt.bind(2, static_cast<int64_t>(op.blockSize));
                     stmt.execute();
                 } else {
-                    auto& stmt = counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::DECREMENT_STMT, "");
+                    auto& stmt =
+                        counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::DECREMENT_STMT, "");
                     stmt.bind(1, op.blockHash);
                     stmt.execute();
                 }
             }
-            
+
             // Record all operations in audit log during commit
             for (const auto& op : operations_) {
                 auto stmt = counter_->pImpl->db->prepare(R"(
@@ -597,12 +598,14 @@ Result<void> ReferenceCounter::Transaction::commit() {
                 )");
                 stmt.bind(1, transactionId_);
                 stmt.bind(2, op.blockHash);
-                stmt.bind(3, std::string(op.type == Operation::Type::Increment ? "INCREMENT" : "DECREMENT"));
-                stmt.bind(4, 1); // Schema requires positive delta - operation type indicates direction
+                stmt.bind(3, std::string(op.type == Operation::Type::Increment ? "INCREMENT"
+                                                                               : "DECREMENT"));
+                stmt.bind(4,
+                          1); // Schema requires positive delta - operation type indicates direction
                 stmt.bind(5, static_cast<int64_t>(op.blockSize));
                 stmt.execute();
             }
-            
+
             // Update transaction state
             auto stmt = counter_->pImpl->db->prepare(R"(
                 UPDATE ref_transactions 
@@ -611,27 +614,27 @@ Result<void> ReferenceCounter::Transaction::commit() {
             )");
             stmt.bind(1, transactionId_);
             stmt.execute();
-            
+
             // Update statistics
             counter_->updateStatistics("transactions_completed", 1);
-            
+
             // Commit SQLite transaction
             counter_->pImpl->db->commit();
-            
+
             active_ = false;
             committed_ = true;
-            
-            spdlog::debug("Committed transaction {} with {} operations", 
-                          transactionId_, operations_.size());
-            
+
+            spdlog::debug("Committed transaction {} with {} operations", transactionId_,
+                          operations_.size());
+
             return {};
-            
+
         } catch (const std::exception& e) {
             // Rollback SQLite transaction on any error
             counter_->pImpl->db->rollback();
             throw;
         }
-        
+
     } catch (const std::exception& e) {
         spdlog::error("Failed to commit transaction {}: {}", transactionId_, e.what());
         // Mark logical transaction as failed
@@ -645,10 +648,10 @@ void ReferenceCounter::Transaction::rollback() {
     if (!active_) {
         return;
     }
-    
+
     try {
         std::unique_lock lock(counter_->pImpl->dbMutex);
-        
+
         // Update transaction state (no SQLite transaction to rollback since operations were queued)
         auto stmt = counter_->pImpl->db->prepare(R"(
             UPDATE ref_transactions 
@@ -657,17 +660,17 @@ void ReferenceCounter::Transaction::rollback() {
         )");
         stmt.bind(1, transactionId_);
         stmt.execute();
-        
+
         // Update statistics
         counter_->updateStatistics("transactions_rolled_back", 1);
-        
+
         // Log and clear queued operations, then mark as inactive
         size_t operationCount = operations_.size();
         operations_.clear();
         active_ = false;
-        
-        spdlog::debug("Rolled back transaction {} (cleared {} queued operations)", 
-                      transactionId_, operationCount);
+
+        spdlog::debug("Rolled back transaction {} (cleared {} queued operations)", transactionId_,
+                      operationCount);
     } catch (const std::exception& e) {
         spdlog::error("Error during rollback of transaction {}: {}", transactionId_, e.what());
         // Force inactive state even if update failed
@@ -687,7 +690,7 @@ Result<void> ReferenceCounter::updateStatistics(const std::string& statName, int
         stmt.bind(1, delta);
         stmt.bind(2, statName);
         stmt.execute();
-        
+
         return {};
     } catch (const std::exception& e) {
         spdlog::error("Failed to update statistic {}: {}", statName, e.what());
@@ -748,15 +751,15 @@ Result<void> ReferenceCounter::backup(const std::filesystem::path& destPath) {
 Result<void> ReferenceCounter::restore(const std::filesystem::path& srcPath) {
     try {
         std::unique_lock lock(pImpl->dbMutex);
-        
+
         // Close current database
         pImpl->stmtCache.reset();
         pImpl->db.reset();
-        
+
         // Copy backup to database path
         std::filesystem::copy_file(srcPath, pImpl->config.databasePath,
-                                  std::filesystem::copy_options::overwrite_existing);
-        
+                                   std::filesystem::copy_options::overwrite_existing);
+
         // Re-initialize
         return initializeDatabase();
     } catch (const std::exception& e) {

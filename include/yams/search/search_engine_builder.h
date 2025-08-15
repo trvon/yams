@@ -3,12 +3,12 @@
 #include <yams/core/types.h>
 #include <yams/search/hybrid_search_engine.h>
 
-#include <memory>
-#include <string>
-#include <optional>
 #include <chrono>
-#include <vector>
 #include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace yams {
 namespace metadata {
@@ -42,33 +42,26 @@ public:
     ~MetadataKeywordAdapter() override = default;
 
     // Search interface
-    Result<std::vector<KeywordSearchResult>> search(
-        const std::string& query,
-        size_t k,
-        const yams::vector::SearchFilter* filter = nullptr) override;
+    Result<std::vector<KeywordSearchResult>>
+    search(const std::string& query, size_t k,
+           const yams::vector::SearchFilter* filter = nullptr) override;
 
-    Result<std::vector<std::vector<KeywordSearchResult>>> batchSearch(
-        const std::vector<std::string>& queries,
-        size_t k,
-        const yams::vector::SearchFilter* filter = nullptr) override;
+    Result<std::vector<std::vector<KeywordSearchResult>>>
+    batchSearch(const std::vector<std::string>& queries, size_t k,
+                const yams::vector::SearchFilter* filter = nullptr) override;
 
     // Index management ops are no-ops for the adapter (backed by DB index)
-    Result<void> addDocument(
-        const std::string& id,
-        const std::string& content,
-        const std::map<std::string, std::string>& metadata = {}) override;
+    Result<void> addDocument(const std::string& id, const std::string& content,
+                             const std::map<std::string, std::string>& metadata = {}) override;
 
     Result<void> removeDocument(const std::string& id) override;
 
-    Result<void> updateDocument(
-        const std::string& id,
-        const std::string& content,
-        const std::map<std::string, std::string>& metadata = {}) override;
+    Result<void> updateDocument(const std::string& id, const std::string& content,
+                                const std::map<std::string, std::string>& metadata = {}) override;
 
-    Result<void> addDocuments(
-        const std::vector<std::string>& ids,
-        const std::vector<std::string>& contents,
-        const std::vector<std::map<std::string, std::string>>& metadata = {}) override;
+    Result<void>
+    addDocuments(const std::vector<std::string>& ids, const std::vector<std::string>& contents,
+                 const std::vector<std::map<std::string, std::string>>& metadata = {}) override;
 
     Result<void> buildIndex() override;
     Result<void> optimizeIndex() override;
@@ -89,7 +82,6 @@ private:
     std::shared_ptr<yams::metadata::MetadataRepository> repo_;
 };
 
-
 /**
  * SearchEngineBuilder
  *
@@ -105,9 +97,9 @@ private:
 class SearchEngineBuilder {
 public:
     enum class Mode {
-        Embedded,   // Always use in-process HybridSearchEngine
-        Remote,     // Always call remote search service
-        Hybrid      // Prefer embedded; fail over to remote
+        Embedded, // Always use in-process HybridSearchEngine
+        Remote,   // Always call remote search service
+        Hybrid    // Prefer embedded; fail over to remote
     };
 
     struct RemoteConfig {
@@ -127,15 +119,15 @@ public:
         static BuildOptions makeDefault() {
             BuildOptions o{};
             // Vector/keyword weights dominate; KG contributes small but non-zero
-            o.hybrid.vector_weight     = 0.60f;
-            o.hybrid.keyword_weight    = 0.35f;
-            o.hybrid.kg_entity_weight  = 0.03f;
+            o.hybrid.vector_weight = 0.60f;
+            o.hybrid.keyword_weight = 0.35f;
+            o.hybrid.kg_entity_weight = 0.03f;
             o.hybrid.structural_weight = 0.02f;
 
-            o.hybrid.enable_kg         = true;
-            o.hybrid.kg_max_neighbors  = 32;
-            o.hybrid.kg_max_hops       = 1;
-            o.hybrid.kg_budget_ms      = std::chrono::milliseconds{20};
+            o.hybrid.enable_kg = true;
+            o.hybrid.kg_max_neighbors = 32;
+            o.hybrid.kg_max_hops = 1;
+            o.hybrid.kg_budget_ms = std::chrono::milliseconds{20};
             o.hybrid.generate_explanations = true;
 
             // Normalize to ensure weights sum to 1.0
@@ -152,7 +144,8 @@ public:
         return *this;
     }
 
-    SearchEngineBuilder& withMetadataRepo(std::shared_ptr<yams::metadata::MetadataRepository> repo) {
+    SearchEngineBuilder&
+    withMetadataRepo(std::shared_ptr<yams::metadata::MetadataRepository> repo) {
         metadataRepo_ = std::move(repo);
         return *this;
     }
@@ -166,8 +159,8 @@ public:
     Result<std::shared_ptr<HybridSearchEngine>>
     buildEmbedded(const BuildOptions& options = BuildOptions::makeDefault());
 
-    // Build according to requested mode. For Remote/Hybrid, returns an embedded engine when possible.
-    // A remote client/facade can be layered on top by the caller if desired.
+    // Build according to requested mode. For Remote/Hybrid, returns an embedded engine when
+    // possible. A remote client/facade can be layered on top by the caller if desired.
     Result<std::shared_ptr<HybridSearchEngine>>
     buildWithMode(const BuildOptions& options = BuildOptions::makeDefault()) {
         // For now, builder returns the embedded engine even in Hybrid/Remote modes.

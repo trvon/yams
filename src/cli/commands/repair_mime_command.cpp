@@ -1,18 +1,18 @@
+#include <spdlog/spdlog.h>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
-#include <spdlog/spdlog.h>
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <filesystem>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <iostream>
-#include <algorithm>
 
 namespace yams::cli {
 
@@ -32,11 +32,15 @@ public:
 
         auto* cmd = app.add_subcommand(getName(), getDescription());
 
-        cmd->add_flag("--all", processAll_, "Repair all documents (not just those with application/octet-stream or empty MIME)");
-        cmd->add_flag("--dry-run", dryRun_, "Analyze and report changes without modifying the database");
+        cmd->add_flag(
+            "--all", processAll_,
+            "Repair all documents (not just those with application/octet-stream or empty MIME)");
+        cmd->add_flag("--dry-run", dryRun_,
+                      "Analyze and report changes without modifying the database");
         cmd->add_option("--limit", limit_, "Maximum number of documents to process (0 = no limit)")
             ->default_val(0);
-        cmd->add_option("--path-contains", pathFilter_, "Only consider documents whose file_path contains this substring");
+        cmd->add_option("--path-contains", pathFilter_,
+                        "Only consider documents whose file_path contains this substring");
         cmd->add_flag("--verbose", verbose_, "Verbose per-document logging");
 
         cmd->callback([this]() {
@@ -51,7 +55,8 @@ public:
     Result<void> execute() override {
         // 1) Ensure storage/DB is ready
         auto ensured = cli_->ensureStorageInitialized();
-        if (!ensured) return ensured;
+        if (!ensured)
+            return ensured;
 
         auto metadataRepo = cli_->getMetadataRepository();
         if (!metadataRepo) {
@@ -76,7 +81,8 @@ public:
                 like = "%" + pathFilter_ + "%";
             }
             auto res = metadataRepo->findDocumentsByPath(like);
-            if (!res) return res.error();
+            if (!res)
+                return res.error();
             docs = std::move(res.value());
         }
 
@@ -88,9 +94,12 @@ public:
         uint64_t failed = 0;
 
         auto needsRepair = [this](const metadata::DocumentInfo& d) -> bool {
-            if (processAll_) return true;
-            if (d.mimeType.empty()) return true;
-            if (d.mimeType == "application/octet-stream") return true;
+            if (processAll_)
+                return true;
+            if (d.mimeType.empty())
+                return true;
+            if (d.mimeType == "application/octet-stream")
+                return true;
             return false;
         };
 
@@ -118,7 +127,8 @@ public:
             if (!d.fileName.empty()) {
                 auto pos = d.fileName.rfind('.');
                 if (pos != std::string::npos) {
-                    return detection::FileTypeDetector::getMimeTypeFromExtension(d.fileName.substr(pos));
+                    return detection::FileTypeDetector::getMimeTypeFromExtension(
+                        d.fileName.substr(pos));
                 }
             }
 
@@ -138,15 +148,16 @@ public:
 
             // If nothing better than octet-stream, only update when original was empty
             bool isImprovement = (doc.mimeType.empty() && !newMime.empty()) ||
-                                 (!newMime.empty() && newMime != "application/octet-stream" && newMime != doc.mimeType);
+                                 (!newMime.empty() && newMime != "application/octet-stream" &&
+                                  newMime != doc.mimeType);
 
             if (dryRun_) {
                 if (isImprovement) {
                     wouldUpdate++;
                     if (verbose_) {
                         std::cout << "[DRY-RUN] " << doc.filePath << " : "
-                                  << (doc.mimeType.empty() ? "(empty)" : doc.mimeType)
-                                  << " -> " << newMime << "\n";
+                                  << (doc.mimeType.empty() ? "(empty)" : doc.mimeType) << " -> "
+                                  << newMime << "\n";
                     }
                 } else {
                     if (verbose_) {
@@ -163,14 +174,15 @@ public:
                         updated++;
                         if (verbose_) {
                             std::cout << "[UPDATED] " << updatedDoc.filePath << " : "
-                                      << (doc.mimeType.empty() ? "(empty)" : doc.mimeType)
-                                      << " -> " << newMime << "\n";
+                                      << (doc.mimeType.empty() ? "(empty)" : doc.mimeType) << " -> "
+                                      << newMime << "\n";
                         }
                         // Refresh fuzzy index metadata for this doc
                         metadataRepo->updateFuzzyIndex(updatedDoc.id);
                     } else {
                         failed++;
-                        spdlog::warn("Failed to update MIME for {}: {}", doc.filePath, r.error().message);
+                        spdlog::warn("Failed to update MIME for {}: {}", doc.filePath,
+                                     r.error().message);
                     }
                 } else {
                     skipped++;
@@ -180,7 +192,8 @@ public:
                 }
             }
 
-            if (limit_ > 0 && (updated + skipped + failed + wouldUpdate) >= static_cast<uint64_t>(limit_)) {
+            if (limit_ > 0 &&
+                (updated + skipped + failed + wouldUpdate) >= static_cast<uint64_t>(limit_)) {
                 break;
             }
         }
@@ -201,7 +214,8 @@ public:
         } else {
             std::cout << "repair-mime summary\n";
             std::cout << "  Mode        : " << (dryRun_ ? "DRY-RUN" : "APPLY") << "\n";
-            std::cout << "  Scope       : " << (processAll_ ? "all documents" : "empty or octet-stream only") << "\n";
+            std::cout << "  Scope       : "
+                      << (processAll_ ? "all documents" : "empty or octet-stream only") << "\n";
             if (!pathFilter_.empty()) {
                 std::cout << "  Path filter : " << pathFilter_ << "\n";
             }

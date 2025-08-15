@@ -36,20 +36,18 @@ inline constexpr std::size_t DEFAULT_API_KEY_BYTES = 32;
  */
 struct JwtClaims {
     // Registered claims
-    std::string issuer;   // iss
-    std::string subject;  // sub
-    std::vector<std::string> audience;  // aud (multi-valued supported)
+    std::string issuer;                // iss
+    std::string subject;               // sub
+    std::vector<std::string> audience; // aud (multi-valued supported)
 
     // Timestamps
-    std::chrono::system_clock::time_point issuedAt;              // iat (default: now if not set)
-    std::optional<std::chrono::system_clock::time_point> nbf;    // nbf
-    std::chrono::seconds ttl{0};                                 // used to compute exp
-    std::optional<std::string> jti;                              // jti
+    std::chrono::system_clock::time_point issuedAt;           // iat (default: now if not set)
+    std::optional<std::chrono::system_clock::time_point> nbf; // nbf
+    std::chrono::seconds ttl{0};                              // used to compute exp
+    std::optional<std::string> jti;                           // jti
 
     // Helper: returns computed exp (issuedAt + ttl)
-    [[nodiscard]] std::chrono::system_clock::time_point expiresAt() const {
-        return issuedAt + ttl;
-    }
+    [[nodiscard]] std::chrono::system_clock::time_point expiresAt() const { return issuedAt + ttl; }
 };
 
 /**
@@ -58,8 +56,7 @@ struct JwtClaims {
  * @return pair {private_key_pem, public_key_pem} on success
  *         ErrorCode::InternalError on crypto failures
  */
-[[nodiscard]] Result<std::pair<std::string, std::string>>
-generateEd25519KeypairPem();
+[[nodiscard]] Result<std::pair<std::string, std::string>> generateEd25519KeypairPem();
 
 /**
  * Generate an Ed25519 keypair and write to files.
@@ -76,17 +73,16 @@ generateEd25519KeypairPem();
  */
 [[nodiscard]] Result<void>
 generateEd25519KeypairToFiles(const std::filesystem::path& privateKeyPath,
-                              const std::filesystem::path& publicKeyPath,
-                              bool overwrite = false);
+                              const std::filesystem::path& publicKeyPath, bool overwrite = false);
 
 /**
  * Generate a cryptographically random API key and encode as lowercase hex.
  *
  * @param numBytes number of random bytes (DEFAULT_API_KEY_BYTES recommended)
- * @return Hex string length = 2*numBytes. If RNG fails, implementation must fall back to a secure alternative.
+ * @return Hex string length = 2*numBytes. If RNG fails, implementation must fall back to a secure
+ * alternative.
  */
-[[nodiscard]] std::string
-generateApiKeyHex(std::size_t numBytes = DEFAULT_API_KEY_BYTES);
+[[nodiscard]] std::string generateApiKeyHex(std::size_t numBytes = DEFAULT_API_KEY_BYTES);
 
 /**
  * Sign a JWT using EdDSA (Ed25519).
@@ -106,10 +102,8 @@ generateApiKeyHex(std::size_t numBytes = DEFAULT_API_KEY_BYTES);
  *         ErrorCode::InvalidArgument if inputs are malformed (e.g., empty issuer/subject or ttl==0)
  *         ErrorCode::InternalError on signing/encoding failures
  */
-[[nodiscard]] Result<std::string>
-signJwtEd25519(const std::string& privateKeyPem,
-               const std::string& kid,
-               JwtClaims claims);
+[[nodiscard]] Result<std::string> signJwtEd25519(const std::string& privateKeyPem,
+                                                 const std::string& kid, JwtClaims claims);
 
 /**
  * Validate an Ed25519 public key PEM.
@@ -121,8 +115,7 @@ signJwtEd25519(const std::string& privateKeyPem,
  *         ErrorCode::InvalidArgument if not a valid Ed25519 public key
  *         ErrorCode::InternalError on decoding/parsing failures
  */
-[[nodiscard]] Result<void>
-validateEd25519PublicKeyPem(const std::string& publicKeyPem);
+[[nodiscard]] Result<void> validateEd25519PublicKeyPem(const std::string& publicKeyPem);
 
 /**
  * Validate an Ed25519 private key PEM (PKCS#8, unencrypted).
@@ -132,7 +125,6 @@ validateEd25519PublicKeyPem(const std::string& publicKeyPem);
  *         ErrorCode::InvalidArgument if not a valid Ed25519 private key
  *         ErrorCode::InternalError on decoding/parsing failures
  */
-[[nodiscard]] Result<void>
-validateEd25519PrivateKeyPem(const std::string& privateKeyPem);
+[[nodiscard]] Result<void> validateEd25519PrivateKeyPem(const std::string& privateKeyPem);
 
 } // namespace yams::cli::crypto

@@ -39,16 +39,15 @@ struct EntityLinkerConfig {
 
     // Validate config
     bool is_valid() const {
-        return min_confidence >= 0.0f && min_confidence <= 1.0f &&
-               max_ngram >= 1;
+        return min_confidence >= 0.0f && min_confidence <= 1.0f && max_ngram >= 1;
     }
 };
 
 // A surface mention in text
 struct EntityMention {
-    std::string text;   // Mention text as it appears
-    std::size_t start;  // Byte start offset in the original text
-    std::size_t end;    // Byte end offset (exclusive) in the original text
+    std::string text;  // Mention text as it appears
+    std::size_t start; // Byte start offset in the original text
+    std::size_t end;   // Byte end offset (exclusive) in the original text
 };
 
 // Result of linking a mention to a KG node
@@ -64,9 +63,9 @@ struct LinkedEntity {
 
 // Alias entry used to build the dictionary
 struct AliasEntry {
-    std::string alias;       // surface form, e.g., "NYC"
-    std::string node_key;    // canonical KG node key, e.g., "geo:Q60"
-    float prior = 1.0f;      // prior confidence for this mapping in [0,1]
+    std::string alias;    // surface form, e.g., "NYC"
+    std::string node_key; // canonical KG node key, e.g., "geo:Q60"
+    float prior = 1.0f;   // prior confidence for this mapping in [0,1]
 };
 
 // Interface for entity linking
@@ -87,7 +86,11 @@ public:
     virtual Result<std::vector<LinkedEntity>> linkText(const std::string& text) = 0;
 
     // Optional: link pre-tokenized input (token, start, end)
-    struct TokenSpan { std::string token; std::size_t start; std::size_t end; };
+    struct TokenSpan {
+        std::string token;
+        std::size_t start;
+        std::size_t end;
+    };
     virtual Result<std::vector<LinkedEntity>> linkTokens(const std::vector<TokenSpan>& tokens) = 0;
 };
 
@@ -149,7 +152,8 @@ public:
             return Error{ErrorCode::InvalidArgument, "Invalid EntityLinkerConfig"};
         }
         std::vector<LinkedEntity> out;
-        if (tokens.empty()) return out;
+        if (tokens.empty())
+            return out;
 
         // Longest-first matching to avoid overlapping shorter phrases
         const std::size_t max_n = std::max<std::size_t>(1, _config.max_ngram);
@@ -157,17 +161,20 @@ public:
 
         for (std::size_t n = max_n; n >= 1; --n) {
             if (n > tokens.size()) {
-                if (n == 1) break; // guard size_t underflow
+                if (n == 1)
+                    break; // guard size_t underflow
                 continue;
             }
             for (std::size_t i = 0; i + n <= tokens.size(); ++i) {
-                if (anyUsed(used, i, i + n)) continue;
+                if (anyUsed(used, i, i + n))
+                    continue;
 
                 // Build phrase
                 std::string phrase;
                 phrase.reserve(n * 8);
                 for (std::size_t j = 0; j < n; ++j) {
-                    if (j) phrase.push_back(' ');
+                    if (j)
+                        phrase.push_back(' ');
                     phrase.append(tokens[i + j].token);
                 }
 
@@ -190,11 +197,11 @@ public:
                 conf = clamp01(conf + 0.03f * static_cast<float>(n - 1));
 
                 // Heuristic: tiny boost for longer surface mentions
-                const std::size_t surface_len =
-                    tokens[i].start < tokens[i + n - 1].end
-                        ? (tokens[i + n - 1].end - tokens[i].start)
-                        : 0;
-                conf = clamp01(conf + 0.0015f * static_cast<float>(std::min<std::size_t>(surface_len, 200)));
+                const std::size_t surface_len = tokens[i].start < tokens[i + n - 1].end
+                                                    ? (tokens[i + n - 1].end - tokens[i].start)
+                                                    : 0;
+                conf = clamp01(
+                    conf + 0.0015f * static_cast<float>(std::min<std::size_t>(surface_len, 200)));
 
                 if (conf < _config.min_confidence) {
                     continue;
@@ -215,7 +222,8 @@ public:
                 }
             }
 
-            if (n == 1) break; // guard size_t underflow
+            if (n == 1)
+                break; // guard size_t underflow
         }
 
         return out;
@@ -229,9 +237,7 @@ private:
     std::unordered_map<std::string, std::vector<NodePrior>> _alias_map;
     mutable std::mutex _mutex;
 
-    static bool isWordChar(unsigned char c) {
-        return std::isalnum(c) != 0 || c == '_' || c == '-';
-    }
+    static bool isWordChar(unsigned char c) { return std::isalnum(c) != 0 || c == '_' || c == '-'; }
 
     static std::string toLower(std::string s) {
         std::transform(s.begin(), s.end(), s.begin(),
@@ -242,14 +248,17 @@ private:
     static std::string_view trimPunctView(std::string_view sv) {
         auto l = sv.begin();
         auto r = sv.end();
-        while (l < r && !std::isalnum(static_cast<unsigned char>(*l))) ++l;
-        while (r > l && !std::isalnum(static_cast<unsigned char>(*(r - 1)))) --r;
+        while (l < r && !std::isalnum(static_cast<unsigned char>(*l)))
+            ++l;
+        while (r > l && !std::isalnum(static_cast<unsigned char>(*(r - 1))))
+            --r;
         return std::string_view(l, static_cast<std::size_t>(r - l));
     }
 
     std::string normalize(std::string s) const {
         std::string out = s;
-        if (_config.case_insensitive) out = toLower(std::move(out));
+        if (_config.case_insensitive)
+            out = toLower(std::move(out));
         auto view = trimPunctView(out);
         return std::string(view);
     }
@@ -273,8 +282,10 @@ private:
     }
 
     static float clamp01(float v) {
-        if (v < 0.0f) return 0.0f;
-        if (v > 1.0f) return 1.0f;
+        if (v < 0.0f)
+            return 0.0f;
+        if (v > 1.0f)
+            return 1.0f;
         return v;
     }
 
@@ -288,17 +299,17 @@ private:
             while (i < text.size() && !isWordChar(static_cast<unsigned char>(text[i]))) {
                 ++i;
             }
-            if (i >= text.size()) break;
+            if (i >= text.size())
+                break;
             const std::size_t start = i;
             std::string tok;
             while (i < text.size() && isWordChar(static_cast<unsigned char>(text[i]))) {
-                tok.push_back(_config.case_insensitive
-                                  ? static_cast<char>(std::tolower(static_cast<unsigned char>(text[i++])))
-                                  : text[i++]);
+                tok.push_back(_config.case_insensitive ? static_cast<char>(std::tolower(
+                                                             static_cast<unsigned char>(text[i++])))
+                                                       : text[i++]);
             }
             const std::size_t end = i;
-            if (!_config.stopwords.empty() &&
-                _config.stopwords.count(tok) > 0) {
+            if (!_config.stopwords.empty() && _config.stopwords.count(tok) > 0) {
                 continue;
             }
             tokens.push_back({std::move(tok), start, end});
@@ -308,17 +319,19 @@ private:
 
     static bool anyUsed(const std::vector<bool>& used, std::size_t b, std::size_t e) {
         for (std::size_t i = b; i < e; ++i) {
-            if (used[i]) return true;
+            if (used[i])
+                return true;
         }
         return false;
     }
 
-    static std::string reconstructSurface(const std::vector<TokenSpan>& tokens,
-                                          std::size_t b, std::size_t e) {
+    static std::string reconstructSurface(const std::vector<TokenSpan>& tokens, std::size_t b,
+                                          std::size_t e) {
         // Concatenate original tokens with spaces (best-effort)
         std::string s;
         for (std::size_t i = b; i < e; ++i) {
-            if (i != b) s.push_back(' ');
+            if (i != b)
+                s.push_back(' ');
             s.append(tokens[i].token);
         }
         return s;
@@ -326,16 +339,18 @@ private:
 
     // Return the best (node_key, prior) for a normalized alias, if any
     std::optional<NodePrior> lookupBest(const std::string& norm_alias) const {
-        if (!_config.enable_alias_lookup) return std::nullopt;
+        if (!_config.enable_alias_lookup)
+            return std::nullopt;
         std::lock_guard<std::mutex> lock(_mutex);
         auto it = _alias_map.find(norm_alias);
-        if (it == _alias_map.end() || it->second.empty()) return std::nullopt;
+        if (it == _alias_map.end() || it->second.empty())
+            return std::nullopt;
 
         const auto& vec = it->second;
-        const auto best_it = std::max_element(vec.begin(), vec.end(),
-                                              [](const NodePrior& a, const NodePrior& b) {
-                                                  return a.second < b.second;
-                                              });
+        const auto best_it =
+            std::max_element(vec.begin(), vec.end(), [](const NodePrior& a, const NodePrior& b) {
+                return a.second < b.second;
+            });
         return *best_it;
     }
 };

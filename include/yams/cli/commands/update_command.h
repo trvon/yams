@@ -1,17 +1,17 @@
 #pragma once
 
-#include <yams/cli/command.h>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/core/types.h>
 #include <memory>
 #include <string>
 #include <vector>
+#include <yams/cli/command.h>
+#include <yams/core/types.h>
+#include <yams/metadata/metadata_repository.h>
 
 namespace yams {
 namespace api {
-    class ContentStore;  // Forward declaration
+class ContentStore; // Forward declaration
 }
-}
+} // namespace yams
 
 namespace yams::cli {
 
@@ -24,13 +24,13 @@ public:
     UpdateCommand(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                   std::shared_ptr<api::ContentStore> contentStore)
         : metadataRepo_(metadataRepo), contentStore_(contentStore) {}
-    
+
     // ICommand interface
     std::string getName() const override;
     std::string getDescription() const override;
     void registerCommand(CLI::App& app, YamsCLI* cli) override;
     Result<void> execute() override;
-    
+
     // Testing interface
     void setHash(const std::string& hash) { hash_ = hash; }
     void setName(const std::string& name) { name_ = name; }
@@ -41,18 +41,18 @@ public:
         }
     }
     void parseArguments(const std::vector<std::string>& args);
-    
+
 private:
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
     std::vector<std::string> metadata_;
     bool verbose_ = false;
-    
+
     // Dependencies for testing
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<api::ContentStore> contentStore_;
-    
+
     Result<metadata::MetadataValue> parseMetadataValue(const std::string& value);
     Result<metadata::DocumentInfo> resolveNameToDocument(const std::string& name);
 };

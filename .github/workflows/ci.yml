@@ -30,7 +30,7 @@ jobs:
             build_type: conan
           - os: macos-github-x64
             platform: macos-x64
-            runs_on: '"macos-13"'  # GitHub hosted Intel runner
+            runs_on: '"macos-13"' # GitHub hosted Intel runner
             build_type: conan
 
     env:
@@ -58,16 +58,16 @@ jobs:
             pip3 install conan || python3 -m pip install conan || python -m pip install conan
           fi
           conan --version
-          
+
           # Configure Conan for robustness
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf
-          
+
           # Ensure profile exists
           if [ ! -f ~/.conan2/profiles/default ]; then
             conan profile detect --force
           fi
-          
+
           # Ensure C++20 is set in the profile
           if [[ "$OSTYPE" == "darwin"* ]]; then
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
@@ -87,14 +87,14 @@ jobs:
             # Also try to clean the download cache
             find ~/.conan2/p -name "*${package%%/*}*" -type f -name "*.tgz" -delete 2>/dev/null || true
           }
-          
+
           # Test if cache has issues by trying to list packages
           if ! conan list "*" 2>/dev/null; then
             echo "Conan cache appears corrupted, cleaning locks and temp files..."
             conan cache clean --locks --temp 2>/dev/null || true
             echo "Conan cache locks/temp cleaned"
           fi
-          
+
           # Known problematic packages that often get corrupted
           for pkg in "gtest/1.14.0" "boost/1.83.0"; do
             # More aggressive cleaning for problematic packages
@@ -105,7 +105,7 @@ jobs:
                 rm -rf ~/.conan2/p/gtest* 2>/dev/null || true
                 rm -rf ~/.conan2/p/b/gtest* 2>/dev/null || true
               fi
-              
+
               # Check for corrupted archives
               if find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null | grep -q .; then
                 for tgz in $(find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null); do
@@ -126,7 +126,7 @@ jobs:
           NATIVE_ARCH=$(uname -m)
           echo "Native architecture: $NATIVE_ARCH"
           echo "Platform: ${{ matrix.platform }}"
-          
+
           # For macOS, always do native builds since runner can be dual-labeled
           # The runner might have both X64 and ARM64 labels but is actually ARM64
           if [[ "${{ matrix.platform }}" == "macos" ]] && [[ "$NATIVE_ARCH" == "arm64" ]]; then
@@ -200,23 +200,77 @@ jobs:
           fi
           echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 
+      - name: Configure Debug with Conan (with tests enabled)
+        shell: bash
+        run: |
+          # Create/refresh Debug lockfile with tests enabled
+          conan lock create . -s build_type=Debug --options "yams/*:build_tests=True" --lockfile-out=conan-debug.lock --build=missing || true
+
+          # Install dependencies for Debug to preset build folder
+          conan install . \
+            --output-folder=build/conan-debug \
+            -s build_type=Debug \
+            --options "yams/*:build_tests=True" \
+            --lockfile=conan-debug.lock \
+            --build=missing \
+            -o "boost/*:without_locale=True" \
+            -o "boost/*:without_stacktrace=True" || true
+
+          # Configure Debug with CMake using Conan presets (tests will be built)
+          if ! cmake --preset conan-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON; then
+            echo "CMake (Debug) configuration failed! Showing CMakeError.log:"
+            find . -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
+            echo "Showing CMakeOutput.log tail:"
+            find . -name "CMakeOutput.log" -exec tail -100 {} \; 2>/dev/null || true
+            exit 1
+          fi
+          echo "DEBUG_BUILD_DIR=build/conan-debug/build/Debug" >> $GITHUB_ENV
+
+      - name: Build with Conan (Debug)
+        shell: bash
+        run: |
+          cmake --build --preset conan-debug
+
       - name: Build with Conan
         shell: bash
         run: |
           cmake --build --preset conan-release
+
+      - name: Build test executables (Debug)
+        shell: bash
+        run: |
+          echo "Building test executables (Debug)..."
+          cd "$DEBUG_BUILD_DIR"
+
+          # Build individual test targets
+          TEST_TARGETS="chunking_tests compression_tests crypto_tests detection_tests
+                       extraction_tests indexing_tests integrity_unit_tests metadata_tests
+                       search_tests reference_counter_unit_tests vector_database_tests
+                       wal_manager_unit_tests test_content_api test_tui_services"
+
+          for target in $TEST_TARGETS; do
+            echo "Building $target (Debug)..."
+            if cmake --build . --target $target 2>/dev/null; then
+              echo "✅ $target built successfully (Debug)"
+            else
+              echo "⚠️ $target failed to build in Debug (may not exist or have compilation errors)"
+            fi
+          done
+
+          cd -
 
       - name: Build test executables
         shell: bash
         run: |
           echo "Building test executables..."
           cd "$BUILD_DIR"
-          
+
           # Build individual test targets
-          TEST_TARGETS="chunking_tests compression_tests crypto_tests detection_tests 
-                       extraction_tests indexing_tests integrity_unit_tests metadata_tests 
-                       search_tests reference_counter_unit_tests vector_database_tests 
+          TEST_TARGETS="chunking_tests compression_tests crypto_tests detection_tests
+                       extraction_tests indexing_tests integrity_unit_tests metadata_tests
+                       search_tests reference_counter_unit_tests vector_database_tests
                        wal_manager_unit_tests test_content_api test_tui_services"
-          
+
           for target in $TEST_TARGETS; do
             echo "Building $target..."
             if cmake --build . --target $target 2>/dev/null; then
@@ -225,8 +279,32 @@ jobs:
               echo "⚠️ $target failed to build (may not exist or have compilation errors)"
             fi
           done
-          
+
           cd -
+
+      - name: Verify test executables (Debug)
+        shell: bash
+        run: |
+          echo "Checking for test executables in $DEBUG_BUILD_DIR..."
+          test_count=$(find "$DEBUG_BUILD_DIR" -type f \( -name "*_test" -o -name "*_tests" \) -executable 2>/dev/null | wc -l || echo "0")
+          echo "Found $test_count test executables (Debug)"
+          if [ "$test_count" -eq 0 ]; then
+            echo "WARNING: No Debug test executables found!"
+            echo "Checking CMakeCache for YAMS_BUILD_TESTS..."
+            grep -i "YAMS_BUILD_TESTS" "$DEBUG_BUILD_DIR/CMakeCache.txt" 2>/dev/null || echo "CMakeCache.txt not found"
+            echo "Listing directories that might contain tests:"
+            find "$DEBUG_BUILD_DIR" -type d -name "*test*" 2>/dev/null | head -10 || echo "No test directories found"
+          else
+            echo "Debug test executables found:"
+            find "$DEBUG_BUILD_DIR" -type f \( -name "*_test" -o -name "*_tests" \) -executable 2>/dev/null | head -10
+          fi
+
+          # Check for test compilation failures
+          if [ -f "$DEBUG_BUILD_DIR/CTestTestfile.cmake" ] && grep -q "_NOT_BUILT" "$DEBUG_BUILD_DIR/CTestTestfile.cmake" 2>/dev/null; then
+            echo "WARNING: Some Debug tests failed to build!"
+            echo "Failed test targets (Debug):"
+            grep "_NOT_BUILT" "$DEBUG_BUILD_DIR/CTestTestfile.cmake" | head -10
+          fi
 
       - name: Verify test executables
         shell: bash
@@ -244,13 +322,50 @@ jobs:
             echo "Test executables found:"
             find "$BUILD_DIR" -type f \( -name "*_test" -o -name "*_tests" \) -executable 2>/dev/null | head -10
           fi
-          
+
           # Check for test compilation failures
           if [ -f "$BUILD_DIR/CTestTestfile.cmake" ] && grep -q "_NOT_BUILT" "$BUILD_DIR/CTestTestfile.cmake" 2>/dev/null; then
             echo "WARNING: Some tests failed to build!"
             echo "Failed test targets:"
             grep "_NOT_BUILT" "$BUILD_DIR/CTestTestfile.cmake" | head -10
             # Don't exit with error - we'll handle this in test run step
+          fi
+
+      - name: Run tests (Debug)
+        shell: bash
+        run: |
+          if [ -f "$DEBUG_BUILD_DIR/CTestTestfile.cmake" ]; then
+            echo "Running tests with ctest (Debug)..."
+            # Set ASAN options to be less strict for CI
+            export ASAN_OPTIONS=detect_container_overflow=0:detect_stack_use_after_return=0
+            # Run ctest but don't fail the build if some tests fail
+            ctest --preset conan-debug --output-on-failure || true
+
+            # Also run tests individually for better error reporting
+            echo ""
+            echo "Running individual Debug test executables for detailed results..."
+            cd "$DEBUG_BUILD_DIR"
+            PASSED=0
+            FAILED=0
+            for test_exe in $(find . -type f \( -name "*_test" -o -name "*_tests" \) -executable 2>/dev/null); do
+              echo ""
+              echo "=== Running $(basename $test_exe) (Debug) ==="
+              if ASAN_OPTIONS=detect_container_overflow=0:detect_stack_use_after_return=0 $test_exe --gtest_brief=1 2>&1; then
+                echo "✅ $(basename $test_exe) passed (Debug)"
+                PASSED=$((PASSED + 1))
+              else
+                echo "❌ $(basename $test_exe) failed (Debug)"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+            cd -
+
+            echo ""
+            echo "Debug Test Summary: $PASSED passed, $FAILED failed"
+          else
+            echo "No CTest configuration found for Debug. Checking for test executables..."
+            test_count=$(find "$DEBUG_BUILD_DIR" -type f \( -name "*_test" -o -name "*_tests" \) -executable 2>/dev/null | wc -l)
+            echo "Found $test_count test executables (Debug)"
           fi
 
       - name: Run tests
@@ -262,7 +377,7 @@ jobs:
             export ASAN_OPTIONS=detect_container_overflow=0:detect_stack_use_after_return=0
             # Run ctest but don't fail the build if some tests fail
             ctest --preset conan-release --output-on-failure || true
-            
+
             # Also run tests individually for better error reporting
             echo ""
             echo "Running individual test executables for detailed results..."
@@ -281,7 +396,7 @@ jobs:
               fi
             done
             cd -
-            
+
             echo ""
             echo "Test Summary: $PASSED passed, $FAILED failed"
             # For now, don't fail the build on test failures
@@ -307,7 +422,7 @@ jobs:
           while IFS= read -r exe; do
             [ -n "$exe" ] && benches+=("$exe")
           done < <(find "$BUILD_DIR" -type f \( -name "*_bench" -o -name "*_bench.exe" -o -name "*_benchmark*" \) -executable 2>/dev/null | sort)
-          
+
           if [ ${#benches[@]} -eq 0 ]; then
             echo "No benchmark executables found."
           else
@@ -364,13 +479,13 @@ jobs:
           # Make install prefix absolute path to avoid confusion
           ABSOLUTE_PREFIX="$GITHUB_WORKSPACE/${{ env.INSTALL_PREFIX }}"
           echo "Installing to: $ABSOLUTE_PREFIX"
-          
+
           # Debug: Check CMake install variables
           echo "Debug: Checking CMake cache for install paths..."
           grep -E "CMAKE_INSTALL|SPDLOG" "$BUILD_DIR/CMakeCache.txt" | head -20 || true
-          
+
           cmake --install "$BUILD_DIR" --config Release --prefix "$ABSOLUTE_PREFIX"
-          
+
           # Verify installation succeeded
           if [ ! -d "$ABSOLUTE_PREFIX" ]; then
             echo "ERROR: Install prefix directory does not exist at: $ABSOLUTE_PREFIX"
@@ -383,7 +498,7 @@ jobs:
           fi
           echo "Installation contents at $ABSOLUTE_PREFIX:"
           ls -la "$ABSOLUTE_PREFIX" || true
-          
+
           # Update environment variable for subsequent steps
           echo "INSTALL_PREFIX=$ABSOLUTE_PREFIX" >> $GITHUB_ENV
 
@@ -423,7 +538,7 @@ jobs:
               exit 1
             fi
             echo "✅ PDFium correctly linked with @rpath/libpdfium.dylib"
-            
+
             # Also verify LC_RPATH contains @loader_path/../lib when PDFium is linked
             if ! otool -l "$BIN" | awk '/LC_RPATH/{flag=1} flag&&/path/{print $2} /LC_/&&$0!~/LC_RPATH/{flag=0}' | grep -q '@loader_path/../lib'; then
               echo "ERROR: @loader_path/../lib not present in LC_RPATH of yams binary (required for PDFium)"

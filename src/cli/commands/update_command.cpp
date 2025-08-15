@@ -1,16 +1,16 @@
-#include <yams/cli/commands/update_command.h>
-#include <yams/cli/yams_cli.h>
-#include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <iostream>
 #include <sstream>
+#include <yams/cli/commands/update_command.h>
+#include <yams/cli/yams_cli.h>
 
 namespace yams::cli {
 
 using json = nlohmann::json;
 
-std::string UpdateCommand::getName() const { 
-    return "update"; 
+std::string UpdateCommand::getName() const {
+    return "update";
 }
 
 std::string UpdateCommand::getDescription() const {
@@ -18,135 +18,132 @@ std::string UpdateCommand::getDescription() const {
 }
 
 void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
-        cli_ = cli;
-        
-        auto* cmd = app.add_subcommand("update", getDescription());
-        
-        // Add option group for document selection (hash or name)
-        auto* group = cmd->add_option_group("document_selection");
-        group->add_option("hash", hash_, "Hash of the document to update");
-        group->add_option("--name", name_, "Name of the document to update");
-        group->require_option(1);
-        
-        // Metadata options
-        cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs")
-            ->required();
-        
-        // Flags
-        cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
-        
-        cmd->callback([this]() { 
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
-        });
+    cli_ = cli;
+
+    auto* cmd = app.add_subcommand("update", getDescription());
+
+    // Add option group for document selection (hash or name)
+    auto* group = cmd->add_option_group("document_selection");
+    group->add_option("hash", hash_, "Hash of the document to update");
+    group->add_option("--name", name_, "Name of the document to update");
+    group->require_option(1);
+
+    // Metadata options
+    cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs")->required();
+
+    // Flags
+    cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+
+    cmd->callback([this]() {
+        auto result = execute();
+        if (!result) {
+            spdlog::error("Command failed: {}", result.error().message);
+            throw CLI::RuntimeError(1);
+        }
+    });
 }
 
 Result<void> UpdateCommand::execute() {
-        try {
-            // Use injected repository if available (for testing)
-            auto metadataRepo = metadataRepo_;
-            
-            // Otherwise get from CLI
-            if (!metadataRepo && cli_) {
-                // Ensure storage is initialized
-                auto ensured = cli_->ensureStorageInitialized();
-                if (!ensured) {
-                    return ensured;
-                }
-                
-                metadataRepo = cli_->getMetadataRepository();
+    try {
+        // Use injected repository if available (for testing)
+        auto metadataRepo = metadataRepo_;
+
+        // Otherwise get from CLI
+        if (!metadataRepo && cli_) {
+            // Ensure storage is initialized
+            auto ensured = cli_->ensureStorageInitialized();
+            if (!ensured) {
+                return ensured;
             }
-            
-            if (!metadataRepo) {
-                return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+
+            metadataRepo = cli_->getMetadataRepository();
+        }
+
+        if (!metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        // Determine document to update
+        std::string docHash;
+        int64_t docId = -1;
+
+        if (!hash_.empty()) {
+            docHash = hash_;
+            // Get document by hash to get its ID
+            auto docResult = metadataRepo->getDocumentByHash(docHash);
+            if (!docResult) {
+                return Error{docResult.error().code, docResult.error().message};
             }
-            
-            // Determine document to update
-            std::string docHash;
-            int64_t docId = -1;
-            
-            if (!hash_.empty()) {
-                docHash = hash_;
-                // Get document by hash to get its ID
-                auto docResult = metadataRepo->getDocumentByHash(docHash);
-                if (!docResult) {
-                    return Error{docResult.error().code, docResult.error().message};
-                }
-                if (!docResult.value().has_value()) {
-                    return Error{ErrorCode::NotFound, "Document not found with hash: " + docHash};
-                }
-                docId = docResult.value()->id;
-            } else if (!name_.empty()) {
-                // Resolve name to document
-                auto resolveResult = resolveNameToDocument(name_);
-                if (!resolveResult) {
-                    return resolveResult.error();
-                }
-                docId = resolveResult.value().id;
-                docHash = resolveResult.value().sha256Hash;
-            } else {
-                return Error{ErrorCode::InvalidArgument, "No document identifier specified"};
+            if (!docResult.value().has_value()) {
+                return Error{ErrorCode::NotFound, "Document not found with hash: " + docHash};
             }
-            
-            // Apply metadata updates
-            size_t successCount = 0;
-            size_t failureCount = 0;
-            
-            for (const auto& kv : metadata_) {
-                auto pos = kv.find('=');
-                if (pos != std::string::npos) {
-                    std::string key = kv.substr(0, pos);
-                    std::string value = kv.substr(pos + 1);
-                    
-                    // Set the metadata
-                    auto setResult = metadataRepo->setMetadata(docId, key, 
-                                                              metadata::MetadataValue(value));
-                    if (setResult) {
-                        successCount++;
-                        if (verbose_ || (cli_ && cli_->getVerbose())) {
-                            std::cout << "Set " << key << " = " << value << std::endl;
-                        }
-                    } else {
-                        failureCount++;
-                        spdlog::warn("Failed to set metadata {}: {}", key, 
-                                   setResult.error().message);
+            docId = docResult.value()->id;
+        } else if (!name_.empty()) {
+            // Resolve name to document
+            auto resolveResult = resolveNameToDocument(name_);
+            if (!resolveResult) {
+                return resolveResult.error();
+            }
+            docId = resolveResult.value().id;
+            docHash = resolveResult.value().sha256Hash;
+        } else {
+            return Error{ErrorCode::InvalidArgument, "No document identifier specified"};
+        }
+
+        // Apply metadata updates
+        size_t successCount = 0;
+        size_t failureCount = 0;
+
+        for (const auto& kv : metadata_) {
+            auto pos = kv.find('=');
+            if (pos != std::string::npos) {
+                std::string key = kv.substr(0, pos);
+                std::string value = kv.substr(pos + 1);
+
+                // Set the metadata
+                auto setResult =
+                    metadataRepo->setMetadata(docId, key, metadata::MetadataValue(value));
+                if (setResult) {
+                    successCount++;
+                    if (verbose_ || (cli_ && cli_->getVerbose())) {
+                        std::cout << "Set " << key << " = " << value << std::endl;
                     }
                 } else {
-                    spdlog::warn("Invalid metadata format: {} (expected key=value)", kv);
                     failureCount++;
+                    spdlog::warn("Failed to set metadata {}: {}", key, setResult.error().message);
                 }
-            }
-            
-            // Update fuzzy index if needed
-            metadataRepo->updateFuzzyIndex(docId);
-            
-            // Output results
-            if (cli_ && (cli_->getJsonOutput() || cli_->getVerbose())) {
-                json output;
-                output["document_hash"] = docHash;
-                output["document_id"] = docId;
-                output["metadata_updated"] = successCount;
-                output["metadata_failed"] = failureCount;
-                std::cout << output.dump(2) << std::endl;
             } else {
-                std::cout << "Document metadata updated successfully!" << std::endl;
-                std::cout << "Hash: " << docHash.substr(0, 12) << "..." << std::endl;
-                std::cout << "Metadata updated: " << successCount << std::endl;
-                if (failureCount > 0) {
-                    std::cout << "Metadata failed: " << failureCount << std::endl;
-                }
+                spdlog::warn("Invalid metadata format: {} (expected key=value)", kv);
+                failureCount++;
             }
-            
-            return Result<void>();
-            
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
-    }
 
+        // Update fuzzy index if needed
+        metadataRepo->updateFuzzyIndex(docId);
+
+        // Output results
+        if (cli_ && (cli_->getJsonOutput() || cli_->getVerbose())) {
+            json output;
+            output["document_hash"] = docHash;
+            output["document_id"] = docId;
+            output["metadata_updated"] = successCount;
+            output["metadata_failed"] = failureCount;
+            std::cout << output.dump(2) << std::endl;
+        } else {
+            std::cout << "Document metadata updated successfully!" << std::endl;
+            std::cout << "Hash: " << docHash.substr(0, 12) << "..." << std::endl;
+            std::cout << "Metadata updated: " << successCount << std::endl;
+            if (failureCount > 0) {
+                std::cout << "Metadata failed: " << failureCount << std::endl;
+            }
+        }
+
+        return Result<void>();
+
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+    }
+}
 
 Result<metadata::MetadataValue> UpdateCommand::parseMetadataValue(const std::string& value) {
     // Simple implementation - in reality this might parse JSON or other formats
@@ -170,72 +167,74 @@ void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
 }
 
 Result<metadata::DocumentInfo> UpdateCommand::resolveNameToDocument(const std::string& name) {
-        // Use injected repository if available (for testing)
-        auto metadataRepo = metadataRepo_;
-        if (!metadataRepo && cli_) {
-            metadataRepo = cli_->getMetadataRepository();
+    // Use injected repository if available (for testing)
+    auto metadataRepo = metadataRepo_;
+    if (!metadataRepo && cli_) {
+        metadataRepo = cli_->getMetadataRepository();
+    }
+    if (!metadataRepo) {
+        return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+    }
+
+    // First try as a path suffix (for real files)
+    auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
+    if (documentsResult && !documentsResult.value().empty()) {
+        const auto& results = documentsResult.value();
+        if (results.size() > 1) {
+            // Multiple documents with the same name
+            std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
+            for (const auto& doc : results) {
+                std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
+                          << std::endl;
+            }
+            return Error{
+                ErrorCode::InvalidOperation,
+                "Multiple documents with the same name. Please use hash to specify which one."};
         }
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        return results[0];
+    }
+
+    // Try exact path match
+    documentsResult = metadataRepo->findDocumentsByPath(name);
+    if (documentsResult && !documentsResult.value().empty()) {
+        return documentsResult.value()[0];
+    }
+
+    // For stdin documents or when path search fails, search all documents and match by fileName
+    auto allDocsResult = metadataRepo->getDocumentCount();
+    if (!allDocsResult) {
+        return Error{allDocsResult.error().code, allDocsResult.error().message};
+    }
+
+    // Use search to find by name (works for both file and stdin documents)
+    auto searchResult = metadataRepo->search(name, 100, 0);
+    if (searchResult) {
+        std::vector<metadata::DocumentInfo> matchingDocs;
+        for (const auto& result : searchResult.value().results) {
+            // SearchResult contains document directly
+            const auto& doc = result.document;
+            // Check if fileName matches exactly
+            if (doc.fileName == name) {
+                matchingDocs.push_back(doc);
+            }
         }
-        
-        // First try as a path suffix (for real files)
-        auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
-        if (documentsResult && !documentsResult.value().empty()) {
-            const auto& results = documentsResult.value();
-            if (results.size() > 1) {
-                // Multiple documents with the same name
+
+        if (!matchingDocs.empty()) {
+            if (matchingDocs.size() > 1) {
                 std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-                for (const auto& doc : results) {
-                    std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " 
-                             << doc.filePath << std::endl;
+                for (const auto& doc : matchingDocs) {
+                    std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
+                              << std::endl;
                 }
-                return Error{ErrorCode::InvalidOperation, 
-                            "Multiple documents with the same name. Please use hash to specify which one."};
+                return Error{
+                    ErrorCode::InvalidOperation,
+                    "Multiple documents with the same name. Please use hash to specify which one."};
             }
-            return results[0];
+            return matchingDocs[0];
         }
-        
-        // Try exact path match
-        documentsResult = metadataRepo->findDocumentsByPath(name);
-        if (documentsResult && !documentsResult.value().empty()) {
-            return documentsResult.value()[0];
-        }
-        
-        // For stdin documents or when path search fails, search all documents and match by fileName
-        auto allDocsResult = metadataRepo->getDocumentCount();
-        if (!allDocsResult) {
-            return Error{allDocsResult.error().code, allDocsResult.error().message};
-        }
-        
-        // Use search to find by name (works for both file and stdin documents)
-        auto searchResult = metadataRepo->search(name, 100, 0);
-        if (searchResult) {
-            std::vector<metadata::DocumentInfo> matchingDocs;
-            for (const auto& result : searchResult.value().results) {
-                // SearchResult contains document directly
-                const auto& doc = result.document;
-                // Check if fileName matches exactly
-                if (doc.fileName == name) {
-                    matchingDocs.push_back(doc);
-                }
-            }
-            
-            if (!matchingDocs.empty()) {
-                if (matchingDocs.size() > 1) {
-                    std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-                    for (const auto& doc : matchingDocs) {
-                        std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " 
-                                 << doc.filePath << std::endl;
-                    }
-                    return Error{ErrorCode::InvalidOperation, 
-                                "Multiple documents with the same name. Please use hash to specify which one."};
-                }
-                return matchingDocs[0];
-            }
-        }
-        
-        return Error{ErrorCode::NotFound, "No document found with name: " + name};
+    }
+
+    return Error{ErrorCode::NotFound, "No document found with name: " + name};
 }
 
 // Factory function

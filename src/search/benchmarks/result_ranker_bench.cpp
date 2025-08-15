@@ -1,12 +1,13 @@
 #if __has_include(<benchmark/benchmark.h>)
-#include <benchmark/benchmark.h>
 #include <algorithm>
 #include <random>
-#include <vector>
 #include <string>
+#include <vector>
+#include <benchmark/benchmark.h>
 
 // Optional includes (not strictly required by this file, but present to align with module context)
-// If the headers are available, the build system will find them; otherwise, these aren't used directly.
+// If the headers are available, the build system will find them; otherwise, these aren't used
+// directly.
 #if __has_include(<yams/search/result_ranker.h>)
 #include <yams/search/result_ranker.h>
 #endif
@@ -48,7 +49,7 @@ static void BM_ResultRanker_FullSort(benchmark::State& state) {
 
     std::size_t itemsProcessed = 0;
     for (auto _ : state) {
-        auto scores = base;  // copy to avoid mutating base
+        auto scores = base; // copy to avoid mutating base
         // Sort descending
         std::sort(scores.begin(), scores.end(), std::greater<double>());
 
@@ -61,8 +62,8 @@ static void BM_ResultRanker_FullSort(benchmark::State& state) {
 
     state.SetItemsProcessed(itemsProcessed);
     // Items/sec reported as a rate
-    state.counters["items_per_sec"] = benchmark::Counter(
-        static_cast<double>(itemsProcessed), benchmark::Counter::kIsRate);
+    state.counters["items_per_sec"] =
+        benchmark::Counter(static_cast<double>(itemsProcessed), benchmark::Counter::kIsRate);
 }
 BENCHMARK(BM_ResultRanker_FullSort)
     ->Args({100, 10})
@@ -99,8 +100,8 @@ static void BM_ResultRanker_NthElementThenSortTopK(benchmark::State& state) {
     }
 
     state.SetItemsProcessed(itemsProcessed);
-    state.counters["items_per_sec"] = benchmark::Counter(
-        static_cast<double>(itemsProcessed), benchmark::Counter::kIsRate);
+    state.counters["items_per_sec"] =
+        benchmark::Counter(static_cast<double>(itemsProcessed), benchmark::Counter::kIsRate);
 }
 BENCHMARK(BM_ResultRanker_NthElementThenSortTopK)
     ->Args({100, 10})
@@ -125,10 +126,8 @@ static void BM_ResultRanker_PartialSort(benchmark::State& state) {
 
         const std::size_t take = std::min(K, scores.size());
         // partial_sort ensures the first 'take' elements are sorted and are the top ones
-        std::partial_sort(scores.begin(),
-                          scores.begin() + static_cast<std::ptrdiff_t>(take),
-                          scores.end(),
-                          std::greater<double>());
+        std::partial_sort(scores.begin(), scores.begin() + static_cast<std::ptrdiff_t>(take),
+                          scores.end(), std::greater<double>());
 
         benchmark::DoNotOptimize(scores.data());
         benchmark::DoNotOptimize(take);
@@ -136,8 +135,8 @@ static void BM_ResultRanker_PartialSort(benchmark::State& state) {
     }
 
     state.SetItemsProcessed(itemsProcessed);
-    state.counters["items_per_sec"] = benchmark::Counter(
-        static_cast<double>(itemsProcessed), benchmark::Counter::kIsRate);
+    state.counters["items_per_sec"] =
+        benchmark::Counter(static_cast<double>(itemsProcessed), benchmark::Counter::kIsRate);
 }
 BENCHMARK(BM_ResultRanker_PartialSort)
     ->Args({100, 10})

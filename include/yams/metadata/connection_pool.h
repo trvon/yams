@@ -1,14 +1,14 @@
 #pragma once
 
-#include <yams/metadata/database.h>
-#include <memory>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <queue>
 #include <type_traits>
+#include <yams/metadata/database.h>
 
 namespace yams::metadata {
 
@@ -16,13 +16,13 @@ namespace yams::metadata {
  * @brief Configuration for connection pool
  */
 struct ConnectionPoolConfig {
-    size_t minConnections = 2;          ///< Minimum connections to maintain
-    size_t maxConnections = 10;         ///< Maximum connections allowed
-    std::chrono::seconds idleTimeout{300};  ///< Idle connection timeout
-    std::chrono::seconds connectTimeout{5}; ///< Connection establishment timeout
+    size_t minConnections = 2;                   ///< Minimum connections to maintain
+    size_t maxConnections = 10;                  ///< Maximum connections allowed
+    std::chrono::seconds idleTimeout{300};       ///< Idle connection timeout
+    std::chrono::seconds connectTimeout{5};      ///< Connection establishment timeout
     std::chrono::milliseconds busyTimeout{5000}; ///< SQLite busy timeout
-    bool enableWAL = true;              ///< Enable WAL mode
-    bool enableForeignKeys = true;      ///< Enable foreign key constraints
+    bool enableWAL = true;                       ///< Enable WAL mode
+    bool enableForeignKeys = true;               ///< Enable foreign key constraints
 };
 
 /**
@@ -30,16 +30,16 @@ struct ConnectionPoolConfig {
  */
 class PooledConnection {
 public:
-    explicit PooledConnection(std::unique_ptr<Database> db, 
-                            std::function<void(PooledConnection*)> returnFunc);
+    explicit PooledConnection(std::unique_ptr<Database> db,
+                              std::function<void(PooledConnection*)> returnFunc);
     ~PooledConnection();
-    
+
     // Move-only
     PooledConnection(PooledConnection&& other) noexcept;
     PooledConnection& operator=(PooledConnection&& other) noexcept;
     PooledConnection(const PooledConnection&) = delete;
     PooledConnection& operator=(const PooledConnection&) = delete;
-    
+
     /**
      * @brief Access the underlying database
      */
@@ -47,29 +47,27 @@ public:
     const Database* operator->() const { return db_.get(); }
     Database& operator*() { return *db_; }
     const Database& operator*() const { return *db_; }
-    
+
     /**
      * @brief Check if connection is valid
      */
     [[nodiscard]] bool isValid() const { return db_ != nullptr; }
-    
+
     /**
      * @brief Get last access time
      */
     [[nodiscard]] std::chrono::steady_clock::time_point lastAccessed() const {
         return lastAccessed_;
     }
-    
+
     /**
      * @brief Mark connection as accessed
      */
-    void touch() {
-        lastAccessed_ = std::chrono::steady_clock::now();
-    }
-    
+    void touch() { lastAccessed_ = std::chrono::steady_clock::now(); }
+
 private:
-    friend class ConnectionPool;  // Allow ConnectionPool to access private members
-    
+    friend class ConnectionPool; // Allow ConnectionPool to access private members
+
     std::unique_ptr<Database> db_;
     std::function<void(PooledConnection*)> returnFunc_;
     std::chrono::steady_clock::time_point lastAccessed_;
@@ -81,55 +79,51 @@ private:
  */
 class ConnectionPool {
 public:
-    explicit ConnectionPool(const std::string& dbPath, 
-                           const ConnectionPoolConfig& config = {});
+    explicit ConnectionPool(const std::string& dbPath, const ConnectionPoolConfig& config = {});
     ~ConnectionPool();
-    
+
     // Non-copyable, non-movable
     ConnectionPool(const ConnectionPool&) = delete;
     ConnectionPool& operator=(const ConnectionPool&) = delete;
     ConnectionPool(ConnectionPool&&) = delete;
     ConnectionPool& operator=(ConnectionPool&&) = delete;
-    
+
     /**
      * @brief Initialize the connection pool
      */
     Result<void> initialize();
-    
+
     /**
      * @brief Shutdown the connection pool
      */
     void shutdown();
-    
+
     /**
      * @brief Acquire a connection from the pool
      */
-    Result<std::unique_ptr<PooledConnection>> acquire(
-        std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
-    
+    Result<std::unique_ptr<PooledConnection>>
+    acquire(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+
     /**
      * @brief Execute a function with a connection
      */
-    template<typename Func>
-    auto withConnection(Func&& func)
-        -> std::invoke_result_t<Func, Database&> {
-        
+    template <typename Func>
+    auto withConnection(Func&& func) -> std::invoke_result_t<Func, Database&> {
         auto connResult = acquire();
         if (!connResult) {
-            return Error{ErrorCode::ResourceExhausted, 
-                        "Failed to acquire database connection"};
+            return Error{ErrorCode::ResourceExhausted, "Failed to acquire database connection"};
         }
-        
+
         auto conn = std::move(connResult).value();
         conn->touch();
-        
+
         try {
             return func(**conn);
         } catch (const std::exception& e) {
             return Error{ErrorCode::DatabaseError, e.what()};
         }
     }
-    
+
     /**
      * @brief Get current pool statistics
      */
@@ -142,23 +136,23 @@ public:
         size_t totalReleased;
         size_t failedAcquisitions;
     };
-    
+
     [[nodiscard]] Stats getStats() const;
-    
+
     /**
      * @brief Health check for all connections
      */
     Result<void> healthCheck();
-    
+
     /**
      * @brief Prune idle connections
      */
     void pruneIdleConnections();
-    
+
 private:
     std::string dbPath_;
     ConnectionPoolConfig config_;
-    
+
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::queue<std::unique_ptr<PooledConnection>> available_;
@@ -169,22 +163,22 @@ private:
     std::atomic<size_t> totalReleased_{0};
     std::atomic<size_t> failedAcquisitions_{0};
     std::atomic<bool> shutdown_{false};
-    
+
     /**
      * @brief Create a new connection
      */
     Result<std::unique_ptr<Database>> createConnection();
-    
+
     /**
      * @brief Configure a new connection
      */
     Result<void> configureConnection(Database& db);
-    
+
     /**
      * @brief Return a connection to the pool
      */
     void returnConnection(PooledConnection* conn);
-    
+
     /**
      * @brief Check if a connection is still valid
      */
@@ -196,48 +190,37 @@ private:
  */
 class ScopedConnection {
 public:
-    explicit ScopedConnection(ConnectionPool& pool)
-        : pool_(pool) {
+    explicit ScopedConnection(ConnectionPool& pool) : pool_(pool) {
         auto result = pool_.acquire();
         if (result) {
             conn_ = std::move(result).value();
         }
     }
-    
+
     ~ScopedConnection() = default;
-    
+
     // Non-copyable, movable
     ScopedConnection(const ScopedConnection&) = delete;
     ScopedConnection& operator=(const ScopedConnection&) = delete;
     ScopedConnection(ScopedConnection&&) = default;
     ScopedConnection& operator=(ScopedConnection&&) = delete;
-    
+
     /**
      * @brief Check if connection was acquired successfully
      */
-    [[nodiscard]] bool isValid() const { 
-        return conn_ && conn_->isValid(); 
-    }
-    
+    [[nodiscard]] bool isValid() const { return conn_ && conn_->isValid(); }
+
     /**
      * @brief Access the database connection
      */
-    Database* operator->() { 
-        return conn_ ? &(**conn_) : nullptr; 
-    }
-    
-    const Database* operator->() const { 
-        return conn_ ? &(**conn_) : nullptr; 
-    }
-    
-    Database& operator*() { 
-        return **conn_; 
-    }
-    
-    const Database& operator*() const { 
-        return **conn_; 
-    }
-    
+    Database* operator->() { return conn_ ? &(**conn_) : nullptr; }
+
+    const Database* operator->() const { return conn_ ? &(**conn_) : nullptr; }
+
+    Database& operator*() { return **conn_; }
+
+    const Database& operator*() const { return **conn_; }
+
 private:
     ConnectionPool& pool_;
     std::unique_ptr<PooledConnection> conn_;

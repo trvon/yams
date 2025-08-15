@@ -47,11 +47,10 @@ public:
      *
      * The returned engine will be initialized() on success.
      */
-    static Result<std::shared_ptr<HybridSearchEngine>> create(
-        std::shared_ptr<vector::VectorIndexManager> vectorIndex,
-        std::shared_ptr<KeywordSearchEngine> keywordEngine,
-        const HybridSearchConfig& config,
-        std::shared_ptr<KGScorer> kgScorer = nullptr);
+    static Result<std::shared_ptr<HybridSearchEngine>>
+    create(std::shared_ptr<vector::VectorIndexManager> vectorIndex,
+           std::shared_ptr<KeywordSearchEngine> keywordEngine, const HybridSearchConfig& config,
+           std::shared_ptr<KGScorer> kgScorer = nullptr);
 
     /**
      * Build a HybridSearchEngine and attach a default KG scorer backed by the given KG store.
@@ -59,11 +58,11 @@ public:
      *
      * The returned engine will be initialized() on success.
      */
-    static Result<std::shared_ptr<HybridSearchEngine>> createWithKGStore(
-        std::shared_ptr<vector::VectorIndexManager> vectorIndex,
-        std::shared_ptr<KeywordSearchEngine> keywordEngine,
-        const HybridSearchConfig& config,
-        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore);
+    static Result<std::shared_ptr<HybridSearchEngine>>
+    createWithKGStore(std::shared_ptr<vector::VectorIndexManager> vectorIndex,
+                      std::shared_ptr<KeywordSearchEngine> keywordEngine,
+                      const HybridSearchConfig& config,
+                      std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore);
 };
 
 } // namespace yams::search

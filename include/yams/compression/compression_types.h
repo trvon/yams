@@ -1,10 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
-#include <span>
-#include <optional>
 
 namespace yams::compression {
 
@@ -23,35 +23,33 @@ struct CompressionDictionary {
     uint64_t id{0};
     std::string name;
     CompressionAlgorithm algorithm{CompressionAlgorithm::None};
-    
+
     /**
      * @brief Check if dictionary is valid
      * @return True if dictionary has data
      */
-    [[nodiscard]] bool isValid() const noexcept {
-        return !data.empty() && id != 0;
-    }
+    [[nodiscard]] bool isValid() const noexcept { return !data.empty() && id != 0; }
 };
 
 /**
  * @brief Chunk for streaming compression
  */
 struct CompressionChunk {
-    size_t uncompressedOffset{0};    ///< Offset in original stream
-    size_t uncompressedSize{0};      ///< Size of uncompressed chunk
-    size_t compressedSize{0};        ///< Size after compression
-    std::vector<std::byte> data;     ///< Compressed data
+    size_t uncompressedOffset{0}; ///< Offset in original stream
+    size_t uncompressedSize{0};   ///< Size of uncompressed chunk
+    size_t compressedSize{0};     ///< Size after compression
+    std::vector<std::byte> data;  ///< Compressed data
 };
 
 /**
  * @brief Options for compression operations
  */
 struct CompressionOptions {
-    uint8_t level{0};                              ///< Compression level (0=default)
+    uint8_t level{0};                                ///< Compression level (0=default)
     std::optional<CompressionDictionary> dictionary; ///< Optional dictionary
-    bool enableChecksum{true};                     ///< Calculate checksums
-    size_t chunkSize{0};                          ///< Chunk size for streaming (0=no chunking)
-    size_t maxOutputSize{0};                      ///< Max output size (0=unlimited)
+    bool enableChecksum{true};                       ///< Calculate checksums
+    size_t chunkSize{0};                             ///< Chunk size for streaming (0=no chunking)
+    size_t maxOutputSize{0};                         ///< Max output size (0=unlimited)
 };
 
 /**
@@ -85,20 +83,34 @@ enum class CompressionError {
  */
 [[nodiscard]] inline const char* compressionErrorToString(CompressionError error) {
     switch (error) {
-        case CompressionError::None: return "No error";
-        case CompressionError::InvalidInput: return "Invalid input data";
-        case CompressionError::InvalidOutput: return "Invalid output buffer";
-        case CompressionError::CompressionFailed: return "Compression failed";
-        case CompressionError::DecompressionFailed: return "Decompression failed";
-        case CompressionError::UnsupportedAlgorithm: return "Unsupported algorithm";
-        case CompressionError::UnsupportedLevel: return "Unsupported compression level";
-        case CompressionError::DictionaryError: return "Dictionary error";
-        case CompressionError::ChecksumMismatch: return "Checksum mismatch";
-        case CompressionError::OutputTooLarge: return "Output too large";
-        case CompressionError::CorruptedData: return "Corrupted compressed data";
-        case CompressionError::InsufficientMemory: return "Insufficient memory";
-        case CompressionError::SystemResourceError: return "System resource error";
-        default: return "Unknown compression error";
+        case CompressionError::None:
+            return "No error";
+        case CompressionError::InvalidInput:
+            return "Invalid input data";
+        case CompressionError::InvalidOutput:
+            return "Invalid output buffer";
+        case CompressionError::CompressionFailed:
+            return "Compression failed";
+        case CompressionError::DecompressionFailed:
+            return "Decompression failed";
+        case CompressionError::UnsupportedAlgorithm:
+            return "Unsupported algorithm";
+        case CompressionError::UnsupportedLevel:
+            return "Unsupported compression level";
+        case CompressionError::DictionaryError:
+            return "Dictionary error";
+        case CompressionError::ChecksumMismatch:
+            return "Checksum mismatch";
+        case CompressionError::OutputTooLarge:
+            return "Output too large";
+        case CompressionError::CorruptedData:
+            return "Corrupted compressed data";
+        case CompressionError::InsufficientMemory:
+            return "Insufficient memory";
+        case CompressionError::SystemResourceError:
+            return "System resource error";
+        default:
+            return "Unknown compression error";
     }
 }
 
@@ -121,10 +133,8 @@ namespace util {
  * @param level Compression level
  * @return Estimated compressed size
  */
-[[nodiscard]] size_t estimateCompressedSize(
-    CompressionAlgorithm algo, 
-    size_t inputSize,
-    uint8_t level = 0);
+[[nodiscard]] size_t estimateCompressedSize(CompressionAlgorithm algo, size_t inputSize,
+                                            uint8_t level = 0);
 
 /**
  * @brief Check if data appears to be compressed
@@ -139,9 +149,7 @@ namespace util {
  * @param totalSize Total data size
  * @return Recommended chunk size
  */
-[[nodiscard]] size_t recommendedChunkSize(
-    CompressionAlgorithm algo,
-    size_t totalSize);
+[[nodiscard]] size_t recommendedChunkSize(CompressionAlgorithm algo, size_t totalSize);
 
 } // namespace util
 

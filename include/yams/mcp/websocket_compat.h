@@ -3,10 +3,10 @@
 // WebSocketPP compatibility with newer Boost.Asio (1.70.0+)
 // This header provides compatibility shims for WebSocketPP with modern Boost versions
 
-#include <boost/version.hpp>
-#include <boost/asio.hpp>
-#include <memory>
 #include <chrono>
+#include <memory>
+#include <boost/asio.hpp>
+#include <boost/version.hpp>
 
 // Only apply compatibility fixes for Boost 1.70.0 and later
 #if BOOST_VERSION >= 107000
@@ -25,29 +25,26 @@ using io_service = io_context;
 
 // 2. Fix strand_ptr definition for WebSocketPP
 // WebSocketPP expects strand_ptr to be a shared_ptr to strand
-template<typename Executor>
-using strand_ptr = std::shared_ptr<strand<Executor>>;
+template <typename Executor> using strand_ptr = std::shared_ptr<strand<Executor>>;
 
 // For backward compatibility, define the old strand_ptr as int
 // This is what WebSocketPP transport code expects to see
 namespace transport {
 namespace asio {
-using strand_ptr = int;  // WebSocketPP uses this as a flag/type indicator
+using strand_ptr = int; // WebSocketPP uses this as a flag/type indicator
 } // namespace asio
 } // namespace transport
 
 // 3. Timer compatibility - expires_from_now() was deprecated
 // Create a wrapper function that WebSocketPP can use
-template<typename Timer>
-auto expires_from_now(Timer& timer) -> typename Timer::duration {
+template <typename Timer> auto expires_from_now(Timer& timer) -> typename Timer::duration {
     auto now = Timer::clock_type::now();
     auto expiry = timer.expiry();
     return std::chrono::duration_cast<typename Timer::duration>(expiry - now);
 }
 
 // 4. is_neg function for WebSocketPP timer handling
-template<typename Duration>
-bool is_neg(const Duration& d) {
+template <typename Duration> bool is_neg(const Duration& d) {
     return d.count() < 0;
 }
 
