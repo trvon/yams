@@ -49,7 +49,7 @@ jobs:
 
       - name: Download CI benchmark artifacts (if available)
         if: github.event_name == 'workflow_run'
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         continue-on-error: true
         with:
           workflow: ci.yml
@@ -60,7 +60,7 @@ jobs:
 
       - name: Download CI coverage (if available)
         if: github.event_name == 'workflow_run' && matrix.os == 'linux-self-hosted'
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         continue-on-error: true
         with:
           workflow: ci.yml
