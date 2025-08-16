@@ -61,6 +61,7 @@ coverage/
 .git/index.lock
 
 docs/delivery
+docs/pbi
 docs/operations
 .cache/
 paper

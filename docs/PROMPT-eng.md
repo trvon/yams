@@ -117,10 +117,16 @@ This document establishes a unified, machine-readable, and authoritative policy 
 ## 3. Product Backlog Item (PBI) Management
 ### 3.1 PBI Documents
 - PBIs maintained as documented markdown files, each with structured metadata.
-- **Naming:** `pbi-XXX-feature-name.md` where `XXX` is zero-padded.
+- **Standard Directory:** `docs/pbi/` (create if not exists)
+- **Naming:** `pbi-XXX-feature-name.md` where `XXX` is zero-padded (001, 002, etc.)
+- **Initial Indexing:**
+  ```bash
+  # Index all PBIs when starting work
+  yams add docs/pbi/ --recursive --include="*.md" --tags "pbi,backlog"
+  ```
 - **Metadata Example:**
   ```bash
-  yams add pbi-001-enhanced-search.md \
+  yams add docs/pbi/pbi-001-enhanced-search.md \
     --tags "pbi,backlog,feature" \
     --metadata "status=draft|active|completed|cancelled" \
     --metadata "priority=high|medium|low" \
@@ -129,14 +135,107 @@ This document establishes a unified, machine-readable, and authoritative policy 
     --metadata "created=$(date -Iseconds)"
   ```
 
-### 3.2 PBI Lifecycle
-- **Before new PBI work:** Use YAMS to find similar/related PBIs or decisions.
-- **Traceability:** All findings & research are stored/tagged for provenance.
-- **Updates:** Any PBI state change must be mirrored into YAMS.
+### 3.2 PBI Retrieval Patterns
+**Critical for finding and working with PBIs:**
+```bash
+# Find specific PBI by ID (most reliable method)
+yams get --name "docs/pbi/pbi-001-universal-content-handlers.md"
 
-### 3.3 PBI-Task Integration
+# Search PBIs by content keywords
+yams search "universal content handler" --paths-only | grep "pbi-"
+
+# List all PBIs in the system
+yams list --name "docs/pbi/*.md" --recent 50
+
+# Get PBI by partial name match
+yams get --name "*pbi-001*" | head -200
+
+# Search for PBIs by status
+for pbi in docs/pbi/pbi-*.md; do
+  echo "=== $(basename $pbi) ==="
+  cat "$pbi" | grep -A 1 "Status:"
+done
+
+# Find active PBIs
+yams search "Status: active" --paths-only | grep "pbi-"
+```
+
+### 3.3 PBI Lifecycle & Updates
+- **Before new PBI work:** Use YAMS to find similar/related PBIs or decisions.
+  ```bash
+  # Search for related PBIs before creating new ones
+  yams search "content handler OR file type" --fuzzy --similarity 0.7
+  ```
+- **Traceability:** All findings & research are stored/tagged for provenance.
+- **Status Updates:** Any PBI state change must be reflected in both file and YAMS:
+  ```bash
+  # After updating PBI status in file
+  yams update --name "docs/pbi/pbi-001-*.md" \
+    --metadata "status=active" \
+    --metadata "updated=$(date -Iseconds)"
+  ```
+
+### 3.4 PBI Progress Tracking
+**Track implementation phases and checklist items:**
+```bash
+# Check Phase 1 completion status
+yams get --name "docs/pbi/pbi-001-*.md" | grep -A 30 "Phase 1"
+
+# Count completed vs pending items
+yams get --name "docs/pbi/pbi-001-*.md" | grep -c "\[x\]"  # Completed
+yams get --name "docs/pbi/pbi-001-*.md" | grep -c "\[ \]"  # Pending
+
+# Update PBI after phase completion
+yams update --name "docs/pbi/pbi-001-*.md" \
+  --metadata "phase1_complete=true" \
+  --metadata "phase1_date=$(date -Iseconds)"
+
+# Track acceptance criteria progress
+yams get --name "docs/pbi/pbi-001-*.md" | sed -n '/## Acceptance Criteria/,/## /p'
+```
+
+### 3.5 PBI Status Reporting
+**Generate status summaries and reports:**
+```bash
+# Quick PBI status summary
+for pbi in docs/pbi/pbi-*.md; do
+  if [ -f "$pbi" ]; then
+    echo "=== $(basename $pbi) ==="
+    grep -E "^- \*\*Status\*\*:|^- \*\*Priority\*\*:|^- \*\*Sprint\*\*:" "$pbi"
+    echo "Checklist Progress:"
+    echo "  Completed: $(grep -c "\[x\]" "$pbi")"
+    echo "  Pending: $(grep -c "\[ \]" "$pbi")"
+    echo ""
+  fi
+done
+
+# Export PBI for review
+yams get --name "docs/pbi/pbi-001-*.md" > /tmp/pbi-review.md
+
+# Find PBIs by sprint
+yams search "sprint=2024-Q1" --paths-only
+```
+
+### 3.6 PBI-Task Integration
 - Track PBI progress through associated tasks.
-- Example: count tasks by status, and check readiness for completion through scripted YAMS queries.
+- Link tasks to PBIs using metadata:
+  ```bash
+  # Create task linked to PBI
+  yams add task-001-implement-handler.md \
+    --tags "task,pbi-001" \
+    --metadata "pbi=001" \
+    --metadata "status=in_progress"
+  
+  # Find all tasks for a PBI
+  yams search "pbi=001" --paths-only | grep "task-"
+  ```
+- Example: count tasks by status for PBI readiness:
+  ```bash
+  # Check if all tasks for PBI-001 are complete
+  yams search "pbi=001" --paths-only | while read task; do
+    yams get --name "$task" | grep "status="
+  done
+  ```
 
 ---
 
