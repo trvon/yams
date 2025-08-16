@@ -1,6 +1,8 @@
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/kg_scorer.h>
+#include <yams/vector/embedding_generator.h>
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cmath>
 #include <future>
@@ -336,9 +338,10 @@ private:
 class HybridSearchEngine::Impl {
 public:
     Impl(std::shared_ptr<vector::VectorIndexManager> vector_index,
-         std::shared_ptr<KeywordSearchEngine> keyword_engine, const HybridSearchConfig& config)
+         std::shared_ptr<KeywordSearchEngine> keyword_engine, const HybridSearchConfig& config,
+         std::shared_ptr<vector::EmbeddingGenerator> embedding_generator = nullptr)
         : vector_index_(std::move(vector_index)), keyword_engine_(std::move(keyword_engine)),
-          config_(config) {
+          config_(config), embedding_generator_(std::move(embedding_generator)) {
         config_.normalizeWeights();
     }
 
@@ -359,8 +362,36 @@ public:
             }
         }
 
+        // Initialize embedding generator if provided
+        if (embedding_generator_ && !embedding_generator_->isInitialized()) {
+            if (!embedding_generator_->initialize()) {
+                // Log warning but don't fail - fallback to zero vectors
+                spdlog::warn("Failed to initialize embedding generator, vector search will use "
+                             "placeholders");
+            }
+        }
+
         initialized_ = true;
         return Result<void>();
+    }
+
+    std::vector<float> generateQueryEmbedding(const std::string& query) {
+        // Generate actual embedding if generator is available
+        if (embedding_generator_ && embedding_generator_->isInitialized()) {
+            try {
+                auto embedding = embedding_generator_->generateEmbedding(query);
+                if (!embedding.empty()) {
+                    return embedding;
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("Failed to generate query embedding: {}", e.what());
+            }
+        }
+
+        // Fallback to placeholder vector
+        // Use 384 dimensions (all-MiniLM-L6-v2) or detect from config
+        size_t dim = config_.vector_top_k > 0 ? 384 : 768; // Default dims for common models
+        return std::vector<float>(dim, 0.0f);
     }
 
     bool isInitialized() const { return initialized_; }
@@ -429,8 +460,8 @@ public:
             // Launch searches in parallel honoring gates
             if (!env_disable_vector) {
                 vector_future = std::async(std::launch::async, [this, &query, &filter]() {
-                    // TODO: Generate embedding for query
-                    std::vector<float> query_vector(384, 0.0f); // Placeholder
+                    // Generate embedding for query
+                    auto query_vector = generateQueryEmbedding(query);
                     return vector_index_->search(query_vector, config_.vector_top_k, filter);
                 });
             }
@@ -461,8 +492,8 @@ public:
         } else {
             // Sequential search honoring gates
             if (!env_disable_vector) {
-                // TODO: Generate embedding for query
-                std::vector<float> query_vector(384, 0.0f); // Placeholder
+                // Generate embedding for query
+                auto query_vector = generateQueryEmbedding(query);
                 auto vector_result =
                     vector_index_->search(query_vector, config_.vector_top_k, filter);
                 if (vector_result.has_value()) {
@@ -712,6 +743,7 @@ public:
 private:
     std::shared_ptr<vector::VectorIndexManager> vector_index_;
     std::shared_ptr<KeywordSearchEngine> keyword_engine_;
+    std::shared_ptr<vector::EmbeddingGenerator> embedding_generator_;
     HybridSearchConfig config_;
     std::shared_ptr<KGScorer> kg_scorer_;
     std::unordered_map<std::string, KGScore> last_kg_scores_;
@@ -881,10 +913,12 @@ private:
 // HybridSearchEngine Public Interface
 // =============================================================================
 
-HybridSearchEngine::HybridSearchEngine(std::shared_ptr<vector::VectorIndexManager> vector_index,
-                                       std::shared_ptr<KeywordSearchEngine> keyword_engine,
-                                       const HybridSearchConfig& config)
-    : pImpl(std::make_unique<Impl>(std::move(vector_index), std::move(keyword_engine), config)) {}
+HybridSearchEngine::HybridSearchEngine(
+    std::shared_ptr<vector::VectorIndexManager> vector_index,
+    std::shared_ptr<KeywordSearchEngine> keyword_engine, const HybridSearchConfig& config,
+    std::shared_ptr<vector::EmbeddingGenerator> embedding_generator)
+    : pImpl(std::make_unique<Impl>(std::move(vector_index), std::move(keyword_engine), config,
+                                   std::move(embedding_generator))) {}
 
 HybridSearchEngine::~HybridSearchEngine() = default;
 HybridSearchEngine::HybridSearchEngine(HybridSearchEngine&&) noexcept = default;

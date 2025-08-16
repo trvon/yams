@@ -161,21 +161,62 @@ jobs:
             fi
           done
 
-      - name: Configure with Conan
+      - name: Configure with Conan (Validation Build)
         shell: bash
         run: |
-          # Simple native build for all platforms
-          echo "Native build for ${{ matrix.suffix }}"
+          echo "Phase 1: Validation build with tests and benchmarks for ${{ matrix.suffix }}"
 
           # Install dependencies with Conan
+          conan install . \
+            --output-folder=build/conan-validation \
+            -s build_type=Release \
+            --build=missing \
+            -o "boost/*:without_locale=True" \
+            -o "boost/*:without_stacktrace=True"
+
+          # Configure with tests and benchmarks for validation
+          cmake -B build/conan-validation/build/Release -S . \
+            -DCMAKE_TOOLCHAIN_FILE="$(pwd)/build/conan-validation/conan_toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYAMS_BUILD_PROFILE=release \
+            -DYAMS_BUILD_DOCS=OFF \
+            -DYAMS_BUILD_TESTS=ON \
+            -DYAMS_BUILD_BENCHMARKS=ON \
+            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
+            ${{ matrix.cmake_args}}
+
+      - name: Build and Test (Validation)
+        shell: bash
+        run: |
+          echo "Building with tests and benchmarks for validation..."
+          cmake --build build/conan-validation/build/Release --parallel
+          
+          echo "Running tests..."
+          cd build/conan-validation/build/Release
+          ctest --output-on-failure --timeout 300 || true
+          
+          echo "Running benchmarks..."
+          if [ -f "benchmarks/yams_benchmarks" ]; then
+            ./benchmarks/yams_benchmarks --benchmark_format=json --benchmark_out=bench_results.json || true
+          fi
+          cd "$GITHUB_WORKSPACE"
+          
+          echo "Validation complete, now building optimized release..."
+
+      - name: Configure and Build Release (Optimized)
+        shell: bash  
+        run: |
+          echo "Phase 2: Optimized release build without tests for ${{ matrix.suffix }}"
+          
+          # Reuse Conan dependencies
           conan install . \
             --output-folder=build/conan-release \
             -s build_type=Release \
             --build=missing \
             -o "boost/*:without_locale=True" \
             -o "boost/*:without_stacktrace=True"
-
-          # Configure with CMake using Conan presets
+          
+          # Configure without tests/benchmarks for smaller binary
           cmake --preset conan-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_BUILD_DOCS=OFF \
@@ -183,29 +224,27 @@ jobs:
             -DYAMS_BUILD_BENCHMARKS=OFF \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
-            ${{ matrix.cmake_args }}
-
-          # Update BUILD_DIR to point to Conan build directory
+            ${{ matrix.cmake_args}}
+          
+          # Build optimized release
+          cmake --build --preset conan-release --parallel
+          
           echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 
-      - name: Build
-        shell: bash
-        run: |
-          cmake --build --preset conan-release --parallel
-
-      - name: Collect benchmark results from CI
+      - name: Collect benchmark results
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
-
-          # Check if we have CI benchmark artifacts
+          
+          # Collect from validation build
+          if [ -f "build/conan-validation/build/Release/bench_results.json" ]; then
+            cp build/conan-validation/build/Release/bench_results.json "$BUILD_DIR/bench_results/"
+            echo "Collected benchmark results from validation build"
+          fi
+          
+          # Also check CI artifacts if available
           if [ -d "ci-artifacts/benchmarks" ] && [ "$(ls -A ci-artifacts/benchmarks/*.json 2>/dev/null)" ]; then
-            echo "Using benchmark results from CI workflow"
             cp ci-artifacts/benchmarks/*.json "$BUILD_DIR/bench_results/" || true
-            echo "Found $(ls -1 $BUILD_DIR/bench_results/*.json | wc -l) benchmark files from CI"
-          else
-            echo "No CI benchmark results available (release builds don't include benchmarks)"
-            touch "$BUILD_DIR/bench_results/.empty"
           fi
 
       - name: Install
@@ -323,13 +362,97 @@ jobs:
           echo "Combined release notes:"
           cat "$COMBINED_NOTES"
 
-      - name: Create GitHub Release and Upload Assets
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: |
+            ${{ steps.pkg.outputs.asset_path }}
+            ${{ env.BUILD_DIR }}/release_summary.md
+            ${{ env.BUILD_DIR }}/bench_results/*.json
+          retention-days: 1
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    if: success()
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Extract version from tag
+        id: v
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+          
+      - name: Extract release notes from CHANGELOG.md
+        id: changelog
+        uses: ffurrer2/extract-release-notes@v2
+        with:
+          changelog_file: CHANGELOG.md
+          
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: release-*
+          
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p assets
+          
+          # Collect all release files
+          for dir in release-artifacts/release-*; do
+            if [ -d "$dir" ]; then
+              # Move main archive
+              mv $dir/*.{tar.gz,zip} assets/ 2>/dev/null || true
+              # Collect benchmark results
+              cp $dir/bench_results/*.json assets/ 2>/dev/null || true
+            fi
+          done
+          
+          echo "Collected assets:"
+          ls -la assets/
+          
+      - name: Combine release notes
+        shell: bash
+        run: |
+          COMBINED_NOTES="combined_release_notes.md"
+          echo "${{ steps.changelog.outputs.release_notes }}" > "$COMBINED_NOTES"
+          echo "" >> "$COMBINED_NOTES"
+          echo "## Platform Builds" >> "$COMBINED_NOTES"
+          echo "" >> "$COMBINED_NOTES"
+          
+          # Add summaries from each platform
+          for summary in release-artifacts/release-*/release_summary.md; do
+            if [ -f "$summary" ]; then
+              # Extract platform name from path
+              platform=$(basename $(dirname "$summary") | sed 's/release-//')
+              echo "### $platform" >> "$COMBINED_NOTES"
+              # Skip the title line from summary
+              tail -n +2 "$summary" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+            fi
+          done
+          
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          body_path: ${{ env.BUILD_DIR }}/combined_release_notes.md
-          files: |
-            ${{ steps.pkg.outputs.asset_path }}
-            ${{ env.BUILD_DIR }}/bench_results/*.json
+          name: YAMS ${{ steps.v.outputs.version }}
+          body_path: combined_release_notes.md
+          files: assets/*
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

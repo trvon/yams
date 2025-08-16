@@ -256,23 +256,25 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     }
     auto keywordEngine = kwRes.value();
 
-    // Compose HybridSearchEngine
+    // Pass embedding generator to factory (will create default if null)
     if (cfg.enable_kg && kgStore_) {
         // Create engine with KG store; factory will attach a default KG scorer
-        auto engRes =
-            HybridSearchFactory::createWithKGStore(vectorIndex_, keywordEngine, cfg, kgStore_);
+        auto engRes = HybridSearchFactory::createWithKGStore(vectorIndex_, keywordEngine, cfg,
+                                                             kgStore_, embeddingGenerator_);
         if (!engRes) {
             // Fail open: attempt without KG
             spdlog::warn("HybridSearchFactory::createWithKGStore failed: {}. Retrying without KG.",
                          engRes.error().message);
             HybridSearchConfig fallback = cfg;
             fallback.enable_kg = false;
-            return HybridSearchFactory::create(vectorIndex_, keywordEngine, fallback, nullptr);
+            return HybridSearchFactory::create(vectorIndex_, keywordEngine, fallback, nullptr,
+                                               embeddingGenerator_);
         }
         return engRes;
     } else {
         // Either KG disabled or no store; build without KG
-        return HybridSearchFactory::create(vectorIndex_, keywordEngine, cfg, nullptr);
+        return HybridSearchFactory::create(vectorIndex_, keywordEngine, cfg, nullptr,
+                                           embeddingGenerator_);
     }
 }
 

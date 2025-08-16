@@ -5,6 +5,41 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.4] - 2025-08-16
+
+### Added
+- **Hybrid Grep Command**
+  - Semantic search capability integrated into grep command
+  - Shows both "Text Matches" (regex) and "Semantic Matches" sections
+  - `--regex-only` flag to disable semantic search when needed
+  - `--semantic-limit` option to control number of semantic results (default: 3)
+  - Automatic parallel execution of regex and semantic searches for better performance
+
+- **Enhanced Vector Search**
+  - Query embedding generation for accurate semantic search
+  - Automatic embedding generator creation based on available models
+  - Improved search accuracy with actual query vectors instead of placeholders
+  - Default embedding support through factory pattern
+
+- **Automatic Embedding Generation**
+  - Vector database auto-creation on initialization
+  - Repair thread auto-starts when missing embeddings detected
+  - Background embedding generation without manual intervention
+  - Proactive database initialization to avoid "Not found" messages
+
+### Fixed
+- **Vector Database Initialization**
+  - Fixed auto-creation of vectors.db on first run
+  - Repair thread now triggers during storage initialization
+  - Improved embedding health detection with better sampling
+  - Correct variable names in initialization code (metadataRepo_ vs metadataRepository_)
+
+### Changed
+- **Search Command**
+  - Now uses hybrid search by default with vector and keyword fusion
+  - Ignores --type flag for better ergonomics (hybrid is always best)
+  - Automatic fallback to keyword search if vector search unavailable
+
 ## [v0.3.3] - 2025-08-15
 
 ### Added

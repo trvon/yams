@@ -94,21 +94,37 @@ void EmbeddingService::triggerRepairIfNeeded() {
             return;
         }
 
-        // Quick sample: check first 10 documents
-        bool hasMissing = false;
-        size_t checkCount = std::min(size_t(10), docsResult.value().size());
-        for (size_t i = 0; i < checkCount; ++i) {
+        // Check a better sample of documents for missing embeddings
+        size_t totalDocs = docsResult.value().size();
+        size_t missingCount = 0;
+        size_t checkedCount = 0;
+
+        // For efficiency, check up to 50 documents spread across the collection
+        size_t checkLimit = std::min(size_t(50), totalDocs);
+        size_t step = std::max(size_t(1), totalDocs / checkLimit);
+
+        for (size_t i = 0; i < totalDocs && checkedCount < checkLimit; i += step) {
+            checkedCount++;
             if (!vectorDb->hasEmbedding(docsResult.value()[i].sha256Hash)) {
-                hasMissing = true;
-                break;
+                missingCount++;
             }
         }
 
-        if (!hasMissing) {
-            spdlog::debug("Sample check found no missing embeddings");
+        // Extrapolate missing count if we only checked a sample
+        if (checkedCount < totalDocs && missingCount > 0) {
+            float missingRate = static_cast<float>(missingCount) / checkedCount;
+            missingCount = static_cast<size_t>(missingRate * totalDocs);
+        }
+
+        if (missingCount == 0) {
+            spdlog::debug("Health check found no missing embeddings (sampled {} of {} docs)",
+                          checkedCount, totalDocs);
             repairInProgress_ = false;
             return;
         }
+
+        spdlog::info("Detected ~{} documents missing embeddings (sampled {} of {})", missingCount,
+                     checkedCount, totalDocs);
 
         spdlog::info("Starting background repair thread for missing embeddings");
 

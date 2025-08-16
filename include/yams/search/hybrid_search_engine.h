@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace yams::vector {
+class EmbeddingGenerator;
+}
+
 namespace yams::search {
 
 // Forward declarations
@@ -235,7 +239,8 @@ class HybridSearchEngine {
 public:
     HybridSearchEngine(std::shared_ptr<vector::VectorIndexManager> vector_index,
                        std::shared_ptr<KeywordSearchEngine> keyword_engine,
-                       const HybridSearchConfig& config = {});
+                       const HybridSearchConfig& config = {},
+                       std::shared_ptr<vector::EmbeddingGenerator> embedding_generator = nullptr);
 
     ~HybridSearchEngine();
 

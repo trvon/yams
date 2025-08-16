@@ -18,6 +18,7 @@ class KnowledgeGraphStore;
 
 namespace vector {
 class VectorIndexManager;
+class EmbeddingGenerator;
 } // namespace vector
 } // namespace yams
 
@@ -155,6 +156,12 @@ public:
         return *this;
     }
 
+    SearchEngineBuilder&
+    withEmbeddingGenerator(std::shared_ptr<yams::vector::EmbeddingGenerator> gen) {
+        embeddingGenerator_ = std::move(gen);
+        return *this;
+    }
+
     // Build embedded engine only (no remote fallback)
     Result<std::shared_ptr<HybridSearchEngine>>
     buildEmbedded(const BuildOptions& options = BuildOptions::makeDefault());
@@ -179,6 +186,7 @@ private:
     std::shared_ptr<yams::vector::VectorIndexManager> vectorIndex_;
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
+    std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGenerator_;
 };
 
 } // namespace yams::search

@@ -11,6 +11,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/hybrid_search_factory.h>
+#include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
@@ -439,10 +440,48 @@ Result<void> YamsCLI::initializeStorage() {
                              indexConfig.dimension);
             }
 
-            // Simplified approach: EmbeddingService will be created on-demand
-            // No complex worker infrastructure needed
+            // Initialize vector database proactively to avoid "Not found" messages
+            try {
+                vector::VectorDatabaseConfig vdbConfig;
+                vdbConfig.database_path = (dataPath_ / "vectors.db").string();
+                vdbConfig.embedding_dim = vectorDimension;
+
+                auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
+                if (vectorDb->initialize()) {
+                    if (verbose_) {
+                        spdlog::info("Vector database initialized at: {}", vdbConfig.database_path);
+                    }
+                } else {
+                    spdlog::debug("Vector database initialization deferred");
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("Vector database initialization failed: {}", e.what());
+            }
+
+            // Check and trigger embedding repair if needed
+            // This ensures embeddings are generated for existing documents
+            if (contentStore_ && metadataRepo_) {
+                try {
+                    auto embeddingService = std::make_unique<vector::EmbeddingService>(
+                        contentStore_, metadataRepo_, dataPath_);
+
+                    if (embeddingService->isAvailable()) {
+                        // Trigger repair thread if there are missing embeddings
+                        embeddingService->triggerRepairIfNeeded();
+                        if (verbose_) {
+                            spdlog::info("Checking for missing embeddings...");
+                        }
+                    } else if (verbose_) {
+                        spdlog::info("Embedding generation not available (no models found)");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("Failed to initialize embedding service: {}", e.what());
+                }
+            }
+
             if (verbose_) {
-                spdlog::info("Vector support initialized - embeddings will be generated on-demand");
+                spdlog::info(
+                    "Vector support initialized - embeddings will be generated automatically");
             }
         } catch (const std::exception& e) {
             spdlog::warn("Failed to initialize vector support: {}", e.what());

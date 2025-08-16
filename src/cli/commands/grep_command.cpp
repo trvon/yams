@@ -11,6 +11,8 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_engine_builder.h>
+#include <yams/vector/vector_index_manager.h>
 
 namespace yams::cli {
 
@@ -55,6 +57,11 @@ public:
         cmd->add_flag("-L,--files-without-match", filesWithoutMatch_,
                       "Show only filenames without matches");
         cmd->add_flag("--paths-only", pathsOnly_, "Show only file paths (no content)");
+
+        // Hybrid search options
+        cmd->add_flag("--regex-only", regexOnly_, "Disable semantic search, use regex only");
+        cmd->add_option("--semantic-limit", semanticLimit_, "Number of semantic results to show")
+            ->default_val(3);
 
         // Output options
         cmd->add_option("--color", colorMode_, "Color mode: always, never, auto")
@@ -187,10 +194,11 @@ public:
                 return Result<void>();
             }
 
-            // Process each document
+            // Process each document for regex matches
             // size_t totalMatches = 0;  // Currently only incremented but not used
             std::vector<std::string> matchingFiles;
             std::vector<std::string> nonMatchingFiles;
+            std::map<std::string, std::vector<Match>> allRegexMatches;
 
             for (const auto& doc : documents) {
                 // Retrieve document content
@@ -202,37 +210,153 @@ public:
                 std::string content(reinterpret_cast<const char*>(contentResult.value().data()),
                                     contentResult.value().size());
 
-                // Process the file
+                // Process the file for regex matches
                 auto matches = processFile(doc.filePath, content, regex);
-                // Per-file limit: trim matches to maxCount_ if specified
-                if (maxCount_ > 0 && matches.size() > static_cast<size_t>(maxCount_)) {
-                    matches.resize(maxCount_);
-                }
 
                 if (!matches.empty()) {
+                    allRegexMatches[doc.filePath] = matches;
                     matchingFiles.push_back(doc.filePath);
-                    // totalMatches += matches.size();
-
-                    if (filesOnly_ || pathsOnly_) {
-                        std::cout << doc.filePath << std::endl;
-                    } else if (countOnly_) {
-                        if (showFilename_) {
-                            std::cout << doc.filePath << ":";
-                        }
-                        std::cout << matches.size() << std::endl;
-                    } else if (!filesWithoutMatch_) {
-                        printMatches(doc.filePath, content, matches);
-                    }
-
                 } else {
                     nonMatchingFiles.push_back(doc.filePath);
                 }
             }
 
-            // Handle files-without-match option
-            if (filesWithoutMatch_) {
+            // If not regex-only mode and not in special output modes, also perform semantic search
+            std::vector<search::HybridSearchResult> semanticResults;
+            if (!regexOnly_ && !filesOnly_ && !pathsOnly_ && !countOnly_ && !filesWithoutMatch_) {
+                try {
+                    // Build HybridSearchEngine for semantic search
+                    auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                    yams::search::SearchEngineBuilder builder;
+                    builder.withVectorIndex(vecMgr)
+                        .withMetadataRepo(metadataRepo)
+                        .withKGStore(cli_->getKnowledgeGraphStore());
+
+                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                    opts.hybrid.final_top_k = semanticLimit_;
+                    opts.hybrid.vector_weight = 0.8f; // Prioritize semantic similarity
+                    opts.hybrid.keyword_weight = 0.2f;
+
+                    auto engRes = builder.buildEmbedded(opts);
+                    if (engRes) {
+                        auto eng = engRes.value();
+                        auto hres = eng->search(pattern_, semanticLimit_);
+                        if (hres) {
+                            semanticResults = hres.value();
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("Semantic search failed (falling back to regex only): {}",
+                                  e.what());
+                }
+            }
+
+            // Output results based on mode
+            if (filesOnly_ || pathsOnly_) {
+                // Just output file paths
+                for (const auto& file : matchingFiles) {
+                    std::cout << file << std::endl;
+                }
+            } else if (countOnly_) {
+                // Output counts
+                for (const auto& [filePath, matches] : allRegexMatches) {
+                    if (showFilename_) {
+                        std::cout << filePath << ":";
+                    }
+                    std::cout << matches.size() << std::endl;
+                }
+            } else if (filesWithoutMatch_) {
+                // Handle files-without-match option
                 for (const auto& file : nonMatchingFiles) {
                     std::cout << file << std::endl;
+                }
+            } else {
+                // Hybrid output mode - show both regex and semantic results
+                bool hasRegexMatches = !allRegexMatches.empty();
+                bool hasSemanticResults = !semanticResults.empty() && !regexOnly_;
+
+                if (hasRegexMatches) {
+                    if (hasSemanticResults) {
+                        std::cout << "=== Text Matches ===" << std::endl;
+                        std::cout << std::endl;
+                    }
+
+                    // Show top regex matches (limit to 3 files for balance)
+                    size_t fileCount = 0;
+                    for (const auto& [filePath, matches] : allRegexMatches) {
+                        if (fileCount >= 3 && hasSemanticResults)
+                            break; // Limit when showing both
+
+                        // Retrieve content for printing
+                        auto doc = std::find_if(
+                            documents.begin(), documents.end(),
+                            [&filePath](const auto& d) { return d.filePath == filePath; });
+
+                        if (doc != documents.end()) {
+                            auto contentResult = store->retrieveBytes(doc->sha256Hash);
+                            if (contentResult) {
+                                std::string content(
+                                    reinterpret_cast<const char*>(contentResult.value().data()),
+                                    contentResult.value().size());
+
+                                // Apply per-file limit
+                                auto limitedMatches = matches;
+                                if (maxCount_ > 0 &&
+                                    limitedMatches.size() > static_cast<size_t>(maxCount_)) {
+                                    limitedMatches.resize(maxCount_);
+                                }
+
+                                printMatches(filePath, content, limitedMatches);
+                            }
+                        }
+                        fileCount++;
+                    }
+                }
+
+                if (hasSemanticResults) {
+                    if (hasRegexMatches) {
+                        std::cout << std::endl;
+                    }
+                    std::cout << "=== Semantic Matches ===" << std::endl;
+                    std::cout << std::endl;
+
+                    // Show semantic results
+                    for (size_t i = 0; i < semanticResults.size() && i < semanticLimit_; i++) {
+                        const auto& result = semanticResults[i];
+
+                        // Extract path from metadata
+                        auto pathIt = result.metadata.find("path");
+                        std::string path = (pathIt != result.metadata.end()) ? pathIt->second : "";
+
+                        // Skip if this file already shown in regex matches
+                        if (allRegexMatches.find(path) != allRegexMatches.end()) {
+                            continue;
+                        }
+
+                        std::cout << (i + 1) << ". ";
+                        auto titleIt = result.metadata.find("title");
+                        if (titleIt != result.metadata.end()) {
+                            std::cout << titleIt->second;
+                        } else {
+                            std::cout << result.id;
+                        }
+
+                        if (!path.empty()) {
+                            std::cout << " (" << path << ")";
+                        }
+                        std::cout << std::endl;
+
+                        // Show snippet if available
+                        if (!result.content.empty()) {
+                            std::string snippet = truncateSnippet(result.content, 200);
+                            std::cout << "   " << snippet << std::endl;
+                        }
+                        std::cout << std::endl;
+                    }
+                }
+
+                if (!hasRegexMatches && !hasSemanticResults) {
+                    std::cout << "No matches found for pattern: " << pattern_ << std::endl;
                 }
             }
 
@@ -389,6 +513,43 @@ private:
         return result;
     }
 
+    // Helper function to truncate snippet to a maximum length at word boundary
+    std::string truncateSnippet(const std::string& snippet, size_t maxLength) {
+        // Remove newlines and multiple spaces
+        std::string cleaned;
+        bool lastWasSpace = false;
+        for (char c : snippet) {
+            if (c == '\n' || c == '\r' || c == '\t') {
+                if (!lastWasSpace) {
+                    cleaned += ' ';
+                    lastWasSpace = true;
+                }
+            } else if (c == ' ') {
+                if (!lastWasSpace) {
+                    cleaned += c;
+                    lastWasSpace = true;
+                }
+            } else {
+                cleaned += c;
+                lastWasSpace = false;
+            }
+        }
+
+        // Trim to max length at word boundary
+        if (cleaned.length() <= maxLength) {
+            return cleaned;
+        }
+
+        // Find last space before maxLength
+        size_t lastSpace = cleaned.rfind(' ', maxLength);
+        if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
+            return cleaned.substr(0, lastSpace) + "...";
+        }
+
+        // No good word boundary, just truncate
+        return cleaned.substr(0, maxLength) + "...";
+    }
+
     bool matchesPattern(const std::string& text, const std::string& pattern) {
         // Simple wildcard matching (* and ?)
         std::string regexString = pattern;
@@ -446,6 +607,10 @@ private:
 
     // Pattern filtering
     std::vector<std::string> includePatterns_;
+
+    // Hybrid search options
+    bool regexOnly_ = false;
+    size_t semanticLimit_ = 3;
 };
 
 // Factory function

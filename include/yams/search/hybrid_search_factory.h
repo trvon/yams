@@ -9,6 +9,10 @@ namespace yams {
 namespace metadata {
 class KnowledgeGraphStore; // forward declaration to avoid heavy includes
 } // namespace metadata
+
+namespace vector {
+class EmbeddingGenerator; // forward declaration
+} // namespace vector
 } // namespace yams
 
 namespace yams::search {
@@ -43,18 +47,21 @@ public:
 
     /**
      * Build a HybridSearchEngine with provided vector and keyword engines.
-     * Optionally attaches a pre-constructed KG scorer.
+     * Optionally attaches a pre-constructed KG scorer and embedding generator.
+     * If no embedding generator is provided, attempts to create a default one.
      *
      * The returned engine will be initialized() on success.
      */
     static Result<std::shared_ptr<HybridSearchEngine>>
     create(std::shared_ptr<vector::VectorIndexManager> vectorIndex,
            std::shared_ptr<KeywordSearchEngine> keywordEngine, const HybridSearchConfig& config,
-           std::shared_ptr<KGScorer> kgScorer = nullptr);
+           std::shared_ptr<KGScorer> kgScorer = nullptr,
+           std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator = nullptr);
 
     /**
      * Build a HybridSearchEngine and attach a default KG scorer backed by the given KG store.
      * Implementations may use a simple local-first scorer for entity overlap + 1-hop prior.
+     * If no embedding generator is provided, attempts to create a default one.
      *
      * The returned engine will be initialized() on success.
      */
@@ -62,7 +69,15 @@ public:
     createWithKGStore(std::shared_ptr<vector::VectorIndexManager> vectorIndex,
                       std::shared_ptr<KeywordSearchEngine> keywordEngine,
                       const HybridSearchConfig& config,
-                      std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore);
+                      std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
+                      std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator = nullptr);
+
+private:
+    /**
+     * Create a default embedding generator based on available models.
+     * Returns nullptr if no models are available.
+     */
+    static std::shared_ptr<vector::EmbeddingGenerator> createDefaultEmbeddingGenerator();
 };
 
 } // namespace yams::search
