@@ -43,7 +43,7 @@ struct MetadataValue {
     std::string value;
     MetadataValueType type;
 
-    MetadataValue() = default;
+    MetadataValue() : type(MetadataValueType::String) {}
 
     // Constructors for different types
     explicit MetadataValue(const std::string& str) : value(str), type(MetadataValueType::String) {}

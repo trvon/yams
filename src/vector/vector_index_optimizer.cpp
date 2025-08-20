@@ -22,9 +22,8 @@ namespace yams::vector {
 class VectorIndexOptimizer::Impl {
 public:
     explicit Impl(std::shared_ptr<VectorIndexManager> index_manager)
-        : index_manager_(std::move(index_manager)), optimization_thread_(),
-          stop_optimization_(false), is_optimizing_(false), optimization_paused_(false),
-          optimization_progress_(0.0) {
+        : index_manager_(std::move(index_manager)), is_optimizing_(false),
+          optimization_progress_(0.0), optimization_thread_(), stop_optimization_(false) {
         // Initialize statistics
         updateStatistics();
     }

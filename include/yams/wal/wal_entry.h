@@ -57,7 +57,7 @@ struct WALEntry {
     std::vector<std::byte> data;
 
     // Constructors
-    WALEntry() = default;
+    WALEntry() : header{} {}
 
     WALEntry(OpType op, uint64_t seqNum, uint64_t txnId, std::span<const std::byte> payload = {})
         : header{.sequenceNum = seqNum,

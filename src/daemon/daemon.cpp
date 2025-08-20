@@ -625,8 +625,14 @@ Result<void> YamsDaemon::start() {
                             ModelStatusResponse::ModelDetails details;
                             details.name = r.modelName;
                             details.loaded = true;
-                            details.isHot = true; // TODO: Get actual hot status
-                            // TODO: Fill in other details
+                            details.isHot = true;          // TODO: Get actual hot status
+                            details.memoryMb = 0;          // TODO: Get actual memory usage
+                            details.embeddingDim = 0;      // TODO: Get actual embedding dimension
+                            details.maxSequenceLength = 0; // TODO: Get actual max sequence length
+                            details.requestCount = 0;      // TODO: Get actual request count
+                            details.errorCount = 0;        // TODO: Get actual error count
+                            details.loadTime =
+                                std::chrono::system_clock::now(); // TODO: Get actual load time
                             res.models.push_back(details);
                         }
                     }

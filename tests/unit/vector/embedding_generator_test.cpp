@@ -385,7 +385,8 @@ TEST_F(EmbeddingGeneratorTest, ModelInformation) {
 
     auto model_info = generator_->getModelInfo();
     EXPECT_FALSE(model_info.empty());
-    EXPECT_TRUE(model_info.find("test-model") != std::string::npos);
+    EXPECT_TRUE(model_info.find("all-MiniLM-L6-v2") != std::string::npos ||
+                model_info.find("MiniLM") != std::string::npos);
     EXPECT_TRUE(model_info.find("384") != std::string::npos);
     EXPECT_TRUE(model_info.find("512") != std::string::npos);
 }
@@ -394,6 +395,8 @@ TEST_F(EmbeddingGeneratorTest, ErrorHandling) {
     // Test with invalid model path
     EmbeddingConfig bad_config;
     bad_config.model_path = "non_existent_model.onnx";
+    bad_config.backend =
+        EmbeddingConfig::Backend::Local; // Force local backend to test error handling
 
     EmbeddingGenerator bad_generator(bad_config);
     EXPECT_FALSE(bad_generator.initialize());
@@ -619,6 +622,8 @@ TEST(EmbeddingGeneratorFactoryTest, CreateEmbeddingGenerator) {
 TEST(EmbeddingGeneratorFactoryTest, CreateWithInvalidConfig) {
     EmbeddingConfig config;
     config.model_path = "non_existent_model.onnx";
+    config.backend =
+        EmbeddingConfig::Backend::Local; // Force local backend to test model validation
 
     auto generator = createEmbeddingGenerator(config);
     EXPECT_EQ(generator, nullptr);

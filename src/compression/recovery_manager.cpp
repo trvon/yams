@@ -515,6 +515,7 @@ private:
         if (!compressor) {
             result.status = RecoveryStatus::Failed;
             result.message = "Failed to create compressor";
+            result.attemptsUsed = 0;
             return result;
         }
 
@@ -627,6 +628,7 @@ private:
         if (!compressor) {
             result.status = RecoveryStatus::Failed;
             result.message = "Failed to create decompressor";
+            result.attemptsUsed = 0;
             return result;
         }
 
@@ -710,6 +712,7 @@ private:
                 CompressionResult compressionResult;
                 compressionResult.data = repaired.value();
                 compressionResult.algorithm = request.originalAlgorithm;
+                compressionResult.level = 3; // Default level per performance report recommendation
                 compressionResult.originalSize = 0; // Unknown
                 compressionResult.compressedSize = repaired.value().size();
                 result.compressionResult = compressionResult;
@@ -822,6 +825,10 @@ std::string RecoveryManager::getDiagnostics() const {
 RecoveryScope::RecoveryScope(RecoveryManager& manager, RecoveryOperation operation)
     : manager_(manager), operation_(operation) {
     request_.operation = operation;
+    result_.status = RecoveryStatus::InProgress;
+    result_.operationPerformed = operation;
+    result_.attemptsUsed = 0;
+    result_.duration = std::chrono::milliseconds{0};
 }
 
 RecoveryScope::~RecoveryScope() noexcept {

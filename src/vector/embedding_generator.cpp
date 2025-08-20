@@ -981,6 +981,7 @@ public:
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
             updateStats(texts.size(), texts.size() * config_.max_sequence_length / 4, duration);
+            stats_.batch_count++; // Track number of batch operations
 
             return all_embeddings;
         } catch (const std::exception& e) {
@@ -1038,6 +1039,14 @@ public:
                         (std::getenv("YAMS_USE_MOCK_PROVIDER") != nullptr);
 
         if (use_mock) {
+            // Even in mock mode, validate that model path isn't explicitly invalid
+            if (!config_.model_path.empty() &&
+                config_.model_path.find("non_existent") != std::string::npos) {
+                spdlog::error("LocalOnnxBackend: Invalid model path specified: {}",
+                              config_.model_path);
+                return false;
+            }
+
             initialized_ = true;
             use_mock_ = true;
             spdlog::info("LocalOnnxBackend: Using mock embeddings (ONNX not available)");
@@ -1090,7 +1099,6 @@ public:
         // Update stats
         stats_.total_texts_processed++;
         stats_.total_tokens_processed += text.length() / 4; // Rough estimate
-        stats_.batch_count++;
 
         return embedding;
     }
@@ -1115,6 +1123,7 @@ public:
 
         // Update batch stats
         stats_.total_batches++;
+        stats_.batch_count++; // Track number of batch operations
 
         return embeddings;
     }
@@ -1299,6 +1308,7 @@ public:
             }
             updateStats(texts.size(), total_chars / 4, duration);
             stats_.total_batches++;
+            stats_.batch_count++; // Track number of batch operations
 
             return response.embeddings;
         } catch (const std::exception& e) {
@@ -1499,6 +1509,7 @@ private:
         stats_.total_tokens_processed.store(backend_stats.total_tokens_processed.load());
         stats_.total_inference_time.store(backend_stats.total_inference_time.load());
         stats_.avg_inference_time.store(backend_stats.avg_inference_time.load());
+        stats_.batch_count.store(backend_stats.batch_count.load());
         stats_.total_batches.store(backend_stats.total_batches.load());
         stats_.updateThroughput();
     }

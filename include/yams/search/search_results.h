@@ -14,7 +14,7 @@ namespace yams::search {
  */
 struct SearchHighlight {
     // Default constructors and assignment operators
-    SearchHighlight() = default;
+    SearchHighlight() : startOffset(0), endOffset(0) {}
     SearchHighlight(const SearchHighlight&) = default;
     SearchHighlight(SearchHighlight&&) = default;
     SearchHighlight& operator=(const SearchHighlight&) = default;
@@ -31,7 +31,7 @@ struct SearchHighlight {
  */
 struct SearchResultItem {
     // Default constructors and assignment operators
-    SearchResultItem() = default;
+    SearchResultItem() : documentId(0), fileSize(0) {}
     SearchResultItem(const SearchResultItem&) = default;
     SearchResultItem(SearchResultItem&&) = default;
     SearchResultItem& operator=(const SearchResultItem&) = default;

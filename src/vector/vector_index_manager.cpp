@@ -146,7 +146,9 @@ public:
 
         // Sort by distance and take top k
         size_t result_size = std::min(k, distances.size());
-        std::partial_sort(distances.begin(), distances.begin() + result_size, distances.end());
+        if (result_size > 0) {
+            std::partial_sort(distances.begin(), distances.begin() + result_size, distances.end());
+        }
 
         // Build results
         std::vector<SearchResult> results;

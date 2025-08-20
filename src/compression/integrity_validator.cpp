@@ -73,6 +73,11 @@ ValidationResult ValidationResult::success(ValidationType type, std::chrono::mic
     result.isValid = true;
     result.type = type;
     result.validationTime = time;
+    result.originalSize = 0;
+    result.compressedSize = 0;
+    result.originalChecksum = 0;
+    result.validationChecksum = 0;
+    result.compressionRatio = 0.0;
     return result;
 }
 
@@ -81,6 +86,12 @@ ValidationResult ValidationResult::failure(ValidationType type, const std::strin
     result.isValid = false;
     result.type = type;
     result.errorMessage = error;
+    result.validationTime = std::chrono::microseconds{0};
+    result.originalSize = 0;
+    result.compressedSize = 0;
+    result.originalChecksum = 0;
+    result.validationChecksum = 0;
+    result.compressionRatio = 0.0;
     return result;
 }
 
@@ -386,8 +397,13 @@ public:
 
         try {
             ValidationResult result;
+            result.isValid = false; // Will be set to true if validation passes
             result.type = ValidationType::Deep;
+            result.originalSize = 0; // Unknown for deep analysis
             result.compressedSize = compressed.size();
+            result.originalChecksum = 0;   // Unknown for deep analysis
+            result.validationChecksum = 0; // Will be calculated if needed
+            result.compressionRatio = 0.0; // Unknown without original size
 
             // Validate compression format
             bool formatValid = integrity_utils::validateCompressionFormat(compressed, algorithm);
@@ -484,6 +500,8 @@ private:
         validationResult.compressedSize = result.data.size();
         validationResult.compressionRatio = result.ratio();
         validationResult.originalChecksum = calculateChecksum(original);
+        validationResult.validationChecksum =
+            calculateChecksum(result.data); // Checksum of compressed data
         validationResult.isValid = true;
 
         return validationResult;
@@ -497,6 +515,9 @@ private:
         validationResult.compressedSize = result.data.size();
         validationResult.compressionRatio = result.ratio();
         validationResult.originalChecksum = calculateChecksum(original);
+        validationResult.validationChecksum =
+            calculateChecksum(result.data); // Checksum of compressed data
+        validationResult.isValid = false;   // Will be set based on analysis
 
         // Perform deep analysis
         bool formatValid =
@@ -611,7 +632,8 @@ ValidationResult IntegrityValidator::performDeepAnalysis(std::span<const std::by
 //-----------------------------------------------------------------------------
 
 ValidationScope::ValidationScope(IntegrityValidator& validator, ValidationType type)
-    : validator_(validator), type_(type) {}
+    : validator_(validator), type_(type),
+      result_(ValidationResult::failure(type, "Not completed")) {}
 
 ValidationScope::~ValidationScope() noexcept {
     if (type_ != ValidationType::None && hasOriginal_) {

@@ -18,6 +18,9 @@ protected:
         config_.distance_metric = DistanceMetric::COSINE;
 
         manager_ = std::make_unique<VectorIndexManager>(config_);
+        auto init_result = manager_->initialize();
+        ASSERT_TRUE(init_result.has_value())
+            << "Failed to initialize VectorIndexManager: " << init_result.error().message;
     }
 
     // Generate random normalized vector
@@ -63,7 +66,8 @@ TEST_F(VectorIndexManagerTest, AddSingleVector) {
     std::string id = "test_vector_1";
 
     auto result = manager_->addVector(id, vec);
-    EXPECT_TRUE(result.has_value());
+    EXPECT_TRUE(result.has_value())
+        << "Failed to add vector: " << (result.has_value() ? "Success" : result.error().message);
 }
 
 // Test adding multiple vectors

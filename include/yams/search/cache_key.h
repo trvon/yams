@@ -29,7 +29,7 @@ public:
     /**
      * @brief Default constructor
      */
-    CacheKey() = default;
+    CacheKey() : components_{{}, {}, 0, 10} {}
 
     /**
      * @brief Get the hash value of the key

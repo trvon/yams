@@ -5,68 +5,98 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.4.0] - Unreleased
+## [v0.4.1] - 2025-08-20 (Unreleased)
 
 ### Added
-- **Downloader** new download module with libcurl adapter, repo-local staging, SHA-256 integrity verification, rate limiting, and atomic finalize into CAS (store-only by default).
-  - new `yams download` command returning JSON {hash, stored_path, size_bytes}; progress output (human/json); no user-path writes unless export is requested.
-- **Daemon Command Suite**
+- **Code Quality Analysis System** (PBI-001 related)
+  - Comprehensive `scripts/check-quality.sh` with multiple quality profiles
+  - cppcheck integration with `.cppcheck-suppressions` configuration
+  - CMake integration for quality targets
+  - Profile-based analysis (strict, normal, quick, ci)
+
+### Fixed
+- **Critical Compilation Errors**
+  - Fixed `ChunkingStrategy` enum reference mismatch in document chunker (FixedSize → FIXED_SIZE)
+  - Fixed constructor initialization order in VectorIndexOptimizer to match member declaration order
+  - Fixed compression level configuration in RecoveryManager (now uses level 3 per performance benchmarks)
+- **Code Quality Issues**
+  - Fixed hundreds of uninitialized variable errors identified by cppcheck analysis
+  - Eliminated critical errors in recovery_manager.cpp, error_handler.cpp, and metadata_api.cpp
+  - Added proper RAII initialization patterns across vector and compression components
+- **Build System Stability**
+  - All modules now compile successfully without errors
+  - Fixed warning configurations that were breaking dependency builds
+  - Improved cross-platform compilation compatibility
+
+### Changed
+- **Development Workflow**
+  - Conservative, manual approach to code quality fixes to prevent build breakage
+  - Systematic error classification and targeted fixes
+  - Build validation after each major fix to ensure stability
+
+## [v0.4.0] - 2025-08-20
+
+### Added
+- **Universal Content Handler System**
+  - New `IContentHandler` interface supporting all file types with metadata extraction
+  - `ContentHandlerRegistry` with thread-safe handler management
+  - `TextContentHandler` adapter wrapping existing PlainTextExtractor
+  - `PdfContentHandler` wrapper for existing PdfExtractor
+  - `BinaryContentHandler` as universal fallback for unknown file types
+  - Updated DocumentIndexer to use new ContentHandlerRegistry system
+  - Maintained backward compatibility with legacy TextExtractor system
+- **High-Performance Daemon Architecture**
   - New `yams-daemon` background service for persistent resource management
+  - Unix domain socket IPC with zero-copy transfers for large payloads
   - Automatic daemon lifecycle management with configurable policies
-  - `yams daemon start` - Start background service
-  - `yams daemon stop` - Graceful shutdown with pending request completion
-  - `yams daemon status` - Health monitoring and resource usage
-  - `yams daemon restart` - Restart with configuration reload
+  - `yams daemon start/stop/status/restart` command suite
   - Auto-start on first command if daemon enabled in config
-- **Configuration v2**
+  - Shared EmbeddingGenerator across all operations eliminates model loading overhead
+  - VectorIndexManager cached in daemon memory
+- **Robust Downloader Module**
+  - New download module with libcurl adapter, repo-local staging
+  - SHA-256 integrity verification and rate limiting
+  - Atomic finalize into CAS (store-only by default)
+  - New `yams download` command returning JSON {hash, stored_path, size_bytes}
+  - Progress output (human/json) with no user-path writes unless export requested
+- **Configuration v2 Architecture**
   - New `[daemon]` section for service configuration
   - `[daemon.models]` for model lifecycle management
   - `[daemon.lifecycle]` for auto-start and shutdown policies
   - `[daemon.ipc]` for communication tuning
   - Backward compatible with direct mode (no daemon)
-- **Literal Text Search Support**
+- **Enhanced Search Capabilities**
   - `--literal-text` flag for search and grep commands
   - Treats query patterns as literal text instead of regex/operators
-  - Example: `yams search "call(" --literal-text` safely searches for parentheses
   - Works across all search engines (fuzzy, hybrid, metadata, vector)
-- **Metadata Storage from ContentHandlers**
-  - ContentHandler metadata now properly stored in database
-  - Previously metadata was only logged, not persisted
-  - Enables rich metadata search and filtering for all file types
-  - Supports universal content handler system
+  - Example: `yams search "call(" --literal-text` safely searches for parentheses
 
 ### Changed
-- Search command now uses daemon client
-- All CLI commands can leverage shared daemon resources
-- VectorIndexManager cached in daemon memory
-- EmbeddingGenerator shared across all operations
-- Shared result renderer system
-- **MCP Server Simplified**: Removed HTTP transport support, now stdio-only for cleaner local integration
-- **Improved EmbeddingGenerator Lifecycle**
-  - Deferred initialization until actual use to prevent startup overhead
-  - Lazy loading eliminates daemon connection attempts during stats/info commands
+- **Performance Architecture**
+  - All CLI commands can leverage shared daemon resources
+  - Shared result renderer system across CLI and daemon
+  - Deferred initialization eliminates startup overhead
+- **MCP Integration Improvements**
+  - Removed HTTP transport support, now stdio-only for cleaner local integration
+  - Improved EmbeddingGenerator lifecycle with lazy loading
   - Better resource management with on-demand initialization
 
 ### Fixed
-- **Eliminated "Failed to preload model" Warning**
-  - Implemented lazy initialization of EmbeddingGenerator in YamsCLI
+- **Daemon Integration Issues**
+  - Eliminated "Failed to preload model" warnings
   - Fixed daemon configuration defaults for missing config sections
   - Daemon now gracefully handles missing `[daemon]` sections in config files
-- **Configuration Migration Robustness**
-  - ConfigMigrator now properly handles v1 to v2 migrations without breaking existing configs
-- **MCP Tools Schema Validation**: Fixed "Expected object, received null" error in tool definitions
-  - Removed empty `properties: {}` fields from tools with no parameters (`list_collections`)
+- **Configuration System**
+  - ConfigMigrator properly handles v1 to v2 migrations without breaking existing configs
+- **MCP Schema Compliance**
+  - Fixed "Expected object, received null" error in tool definitions
+  - Removed empty `properties: {}` fields from tools with no parameters
   - MCP server now loads correctly without schema validation errors
-  - Improved tool schema compliance with MCP specification
-- **FTS5 Query Safety**
+- **Search Engine Robustness**
   - Special characters in search queries no longer break FTS5
   - Automatic sanitization prevents syntax errors from `()[]{}*"` characters
-  - Maintains regex functionality for normal searches while protecting database
-  - Simplified architecture removes unnecessary interface complexity
-- **Search Engine Integration**
   - All search paths (fuzzy, hybrid, metadata) handle special characters safely
   - Raw query strings flow through pipeline unchanged until FTS5 level
-  - Removed routing complexity that excluded literal text from hybrid search
 
 ## [v0.3.4] - 2025-08-16
 

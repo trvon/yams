@@ -26,20 +26,24 @@ jobs:
             packaging: tgz
             cmake_args: ""
             suffix: linux-x86_64
+            hosted: false
           - os: macos-self-hosted-arm64
             runs_on: '["self-hosted", "macOS", "ARM64"]'
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
             suffix: macos-arm64
+            hosted: false
           - os: macos-hosted-x64
             runs_on: '"macos-13"' # GitHub hosted Intel runner
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
+            hosted: true
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     env:
       BUILD_DIR: build/conan-release/build/Release
       STAGE_DIR: stage
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,79 +98,56 @@ jobs:
         with:
           changelog_file: CHANGELOG.md
 
-      - name: Install Conan
+      # Hosted-only: install and configure Conan (self-hosted must already be configured)
+      - name: Install Conan (hosted only)
+        if: ${{ matrix.hosted }}
         shell: bash
         run: |
           pip3 install conan || python3 -m pip install conan || python -m pip install conan
           conan --version
-
-          # Configure Conan for robustness
           mkdir -p ~/.conan2
-          cp .conan/global.conf ~/.conan2/global.conf
+          # Best-effort: global.conf may not exist in repo for hosted macOS
+          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
       - name: Setup Conan Profile (hosted macOS)
-        if: matrix.os == 'macos-hosted-x64'
+        if: ${{ matrix.hosted && matrix.os == 'macos-hosted-x64' }}
         shell: bash
         run: |
-          # Hosted-only: do not modify Conan profiles on self-hosted runners
           conan profile detect --force
-
-          # Ensure C++20 support
           if [[ "$OSTYPE" == "darwin"* ]]; then
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           else
             sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           fi
-          # Show profile for debugging (to stderr to avoid contaminating outputs)
           echo "Conan profile configured:" >&2
           conan profile show >&2
 
-      - name: Clean corrupted Conan cache if needed
+      - name: Check Conan (self-hosted sanity)
+        if: ${{ !matrix.hosted }}
+        shell: bash
+        run: conan --version || echo "Conan is expected to be pre-installed and configured on self-hosted runners"
+
+      # Hosted-only: clean corrupted cache if needed
+      - name: Clean corrupted Conan cache if needed (hosted only)
+        if: ${{ matrix.hosted }}
         shell: bash
         run: |
-          # Function to remove corrupted package
-          clean_corrupted_package() {
-            local package="$1"
-            echo "Cleaning corrupted package: $package"
-            # Try to remove the specific package
-            conan remove "$package" -c 2>/dev/null || true
-            # Also try to clean the download cache
-            find ~/.conan2/p -name "*${package%%/*}*" -type f -name "*.tgz" -delete 2>/dev/null || true
-          }
-
-          # Test if cache has issues by trying to list packages
           if ! conan list "*" 2>/dev/null; then
             echo "Conan cache appears corrupted, cleaning locks and temp files..."
             conan cache clean --locks --temp 2>/dev/null || true
             echo "Conan cache locks/temp cleaned"
           fi
 
-          # Known problematic packages that often get corrupted
-          for pkg in "gtest/1.14.0" "boost/1.83.0"; do
-            if [ -d ~/.conan2/p ] && find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null | grep -q .; then
-              # Check if the tgz files are valid
-              for tgz in $(find ~/.conan2/p -name "*${pkg%%/*}*" -name "*.tgz" 2>/dev/null); do
-                if ! tar -tzf "$tgz" >/dev/null 2>&1; then
-                  echo "Found corrupted archive: $tgz"
-                  rm -f "$tgz"
-                  clean_corrupted_package "$pkg"
-                fi
-              done
-            fi
-          done
-
-      - name: Configure with Conan (Validation Build)
+      # Hosted-only: Validation build (tests + benchmarks)
+      - name: Configure with Conan (Validation Build) [hosted only]
+        if: ${{ matrix.hosted }}
         shell: bash
         run: |
           echo "Phase 1: Validation build with tests and benchmarks for ${{ matrix.suffix }}"
-
-          # Install dependencies with Conan
           conan install . \
             --output-folder=build/conan-validation \
             -s build_type=Release \
-            --build=missing \
-
-          # Configure with tests and benchmarks for validation
+            --build=missing
           cmake -B build/conan-validation/build/Release -S . \
             -DCMAKE_TOOLCHAIN_FILE="$(pwd)/build/conan-validation/conan_toolchain.cmake" \
             -DYAMS_BUILD_TESTS=ON \
@@ -174,58 +155,44 @@ jobs:
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             ${{ matrix.cmake_args}}
 
-      - name: Build and Test (Validation)
+      - name: Build and Test (Validation) [hosted only]
+        if: ${{ matrix.hosted }}
         shell: bash
         run: |
           echo "Building with tests and benchmarks for validation..."
           cmake --build build/conan-validation/build/Release --parallel
-
           echo "Running tests..."
           cd build/conan-validation/build/Release/tests
           ctest --output-on-failure --timeout 300 || true
-
-          echo "Running benchmarks..."
-          if [ -f "benchmarks/yams_benchmarks" ]; then
-            ./benchmarks/yams_benchmarks --benchmark_format=json --benchmark_out=bench_results.json || true
-          fi
           cd "$GITHUB_WORKSPACE"
-
           echo "Validation complete, now building optimized release..."
 
+      # Release build for ALL targets (self-hosted + hosted)
       - name: Configure and Build Release (Optimized)
         shell: bash
         run: |
-          echo "Phase 2: Optimized release build without tests for ${{ matrix.suffix }}"
-
-          # Reuse Conan dependencies
+          echo "Phase 2: Optimized release build for ${{ matrix.suffix }}"
           conan install . \
             --output-folder=build/conan-release \
             -s build_type=Release \
-            --build=missing \
-
-          # Configure without tests/benchmarks for smaller binary
+            --build=missing
           cmake --preset conan-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args}}
-
-          # Build optimized release
           cmake --build --preset conan-release --parallel
-
           echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
 
       - name: Collect benchmark results
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
-
           # Collect from validation build
           if [ -f "build/conan-validation/build/Release/bench_results.json" ]; then
             cp build/conan-validation/build/Release/bench_results.json "$BUILD_DIR/bench_results/"
             echo "Collected benchmark results from validation build"
           fi
-
           # Also check CI artifacts if available
           if [ -d "ci-artifacts/benchmarks" ] && [ "$(ls -A ci-artifacts/benchmarks/*.json 2>/dev/null)" ]; then
             cp ci-artifacts/benchmarks/*.json "$BUILD_DIR/bench_results/" || true
@@ -264,47 +231,46 @@ jobs:
           if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
-            # Try to extract coverage percentage from XML
             coverage_pct=$(python3 - <<'PY' 2>/dev/null || echo 'N/A')
-import xml.etree.ElementTree as ET
-try:
-    root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
-    line_rate = float(root.get('line-rate', 0))
-    print(f"{line_rate * 100:.1f}%")
-except Exception:
-    print('N/A')
-PY
+            import xml.etree.ElementTree as ET
+            try:
+              root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
+              line_rate = float(root.get('line-rate', 0))
+              print(f"{line_rate * 100:.1f}%")
+              except Exception:
+                print('N/A')
+                PY
             )
             echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
           fi
 
-          # Add benchmark results if available from CI
+          # Add benchmark results if available from CI or validation
           if [ -d "$BUILD_DIR/bench_results" ] && [ "$(find $BUILD_DIR/bench_results -name '*.json' 2>/dev/null)" ]; then
             echo "### Performance Metrics" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |" >> "$SUMMARY_FILE"
             echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
 
-            # Parse JSON benchmark files and extract key metrics
             for json_file in "$BUILD_DIR/bench_results"/*.json; do
               if [ -f "$json_file" ]; then
                 python3 -c "
-                import json, sys
+                import json
                 try:
                   with open('$json_file') as f:
                     data = json.load(f)
                     if 'benchmarks' in data:
                       for bench in data['benchmarks']:
                         name = bench.get('name', 'Unknown')
-                        real_time = bench.get('real_time', 0)
-                        cpu_time = bench.get('cpu_time', 0)
-                        bytes_per_sec = bench.get('bytes_per_second', 0)
-                        items_per_sec = bench.get('items_per_second', 0)
-                        memory = f'{bytes_per_sec/1024/1024:.1f} MB/s' if bytes_per_sec > 0 else f'{items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
+                        real_time = bench.get('real_time', 0.0)
+                        cpu_time = bench.get('cpu_time', 0.0)
+                        bytes_per_sec = bench.get('bytes_per_second', 0.0)
+                        items_per_sec = bench.get('items_per_second', 0.0)
+                        memory = f'{bytes_per_sec/1024/1024:.1f} MB/s' if bytes_per_sec > 0 else f' {items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
                         print(f'| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |')
-                except: pass
-                " >> "$SUMMARY_FILE" 2>/dev/null || true
+                        except Exception:
+                          pass
+                          " >> "$SUMMARY_FILE" 2>/dev/null || true
               fi
             done
             echo "" >> "$SUMMARY_FILE"
@@ -394,7 +360,6 @@ PY
         shell: bash
         run: |
           mkdir -p assets
-
           # Collect all release files
           for dir in release-artifacts/release-*; do
             if [ -d "$dir" ]; then
@@ -404,7 +369,6 @@ PY
               cp $dir/bench_results/*.json assets/ 2>/dev/null || true
             fi
           done
-
           echo "Collected assets:"
           ls -la assets/
 
@@ -416,14 +380,11 @@ PY
           echo "" >> "$COMBINED_NOTES"
           echo "## Platform Builds" >> "$COMBINED_NOTES"
           echo "" >> "$COMBINED_NOTES"
-
           # Add summaries from each platform
           for summary in release-artifacts/release-*/release_summary.md; do
             if [ -f "$summary" ]; then
-              # Extract platform name from path
               platform=$(basename $(dirname "$summary") | sed 's/release-//')
               echo "### $platform" >> "$COMBINED_NOTES"
-              # Skip the title line from summary
               tail -n +2 "$summary" >> "$COMBINED_NOTES"
               echo "" >> "$COMBINED_NOTES"
             fi

@@ -425,9 +425,11 @@ if [[ -n "$INCLUDE_DIRS" ]]; then
     done
 fi
 
-# Add compile commands if available
-if [[ -f "$COMPILE_COMMANDS" ]]; then
+# Add compile commands if available (but only if not using git-only mode)
+USE_COMPILE_COMMANDS=false
+if [[ -f "$COMPILE_COMMANDS" && "$GIT_ONLY" == false ]]; then
     CPPCHECK_ARGS+=("--project=$COMPILE_COMMANDS")
+    USE_COMPILE_COMMANDS=true
 fi
 
 # Profile-specific configuration
@@ -522,29 +524,61 @@ printf '%s\n' "${FILE_ARRAY[@]}" > "$TEMP_FILE_LIST"
 
 # Run cppcheck
 print_progress "Running cppcheck analysis..."
-if [[ "$VERBOSE" == true ]]; then
-    print_progress "Command: cppcheck ${CPPCHECK_ARGS[*]} --file-list=$TEMP_FILE_LIST"
-fi
 
-CPPCHECK_EXIT_CODE=0
-if [[ -n "$OUTPUT_FILE" ]]; then
-    # Output to file
-    if [[ "$OUTPUT_FORMAT" == "xml" || "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "sarif" ]]; then
-        # XML output goes to stderr
-        if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST" 2> "$OUTPUT_FILE.tmp"; then
-            CPPCHECK_EXIT_CODE=$?
+# Choose between project mode and file list mode
+if [[ "$USE_COMPILE_COMMANDS" == true ]]; then
+    # Use project mode - don't specify individual files
+    if [[ "$VERBOSE" == true ]]; then
+        print_progress "Command: cppcheck ${CPPCHECK_ARGS[*]} (using compile_commands.json)"
+    fi
+    
+    CPPCHECK_EXIT_CODE=0
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        # Output to file
+        if [[ "$OUTPUT_FORMAT" == "xml" || "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "sarif" ]]; then
+            # XML output goes to stderr
+            if ! cppcheck "${CPPCHECK_ARGS[@]}" 2> "$OUTPUT_FILE.tmp"; then
+                CPPCHECK_EXIT_CODE=$?
+            fi
+            mv "$OUTPUT_FILE.tmp" "$OUTPUT_FILE"
+        else
+            # Human output
+            if ! cppcheck "${CPPCHECK_ARGS[@]}" > "$OUTPUT_FILE" 2>&1; then
+                CPPCHECK_EXIT_CODE=$?
+            fi
         fi
-        mv "$OUTPUT_FILE.tmp" "$OUTPUT_FILE"
     else
-        # Human output
-        if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST" > "$OUTPUT_FILE" 2>&1; then
+        # Output to stdout/stderr
+        if ! cppcheck "${CPPCHECK_ARGS[@]}"; then
             CPPCHECK_EXIT_CODE=$?
         fi
     fi
 else
-    # Output to stdout/stderr
-    if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST"; then
-        CPPCHECK_EXIT_CODE=$?
+    # Use file list mode
+    if [[ "$VERBOSE" == true ]]; then
+        print_progress "Command: cppcheck ${CPPCHECK_ARGS[*]} --file-list=$TEMP_FILE_LIST"
+    fi
+    
+    CPPCHECK_EXIT_CODE=0
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        # Output to file
+        if [[ "$OUTPUT_FORMAT" == "xml" || "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "sarif" ]]; then
+            # XML output goes to stderr
+            if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST" 2> "$OUTPUT_FILE.tmp"; then
+                CPPCHECK_EXIT_CODE=$?
+            fi
+            mv "$OUTPUT_FILE.tmp" "$OUTPUT_FILE"
+        else
+            # Human output
+            if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST" > "$OUTPUT_FILE" 2>&1; then
+                CPPCHECK_EXIT_CODE=$?
+            fi
+        fi
+    else
+        # Output to stdout/stderr
+        if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST"; then
+            CPPCHECK_EXIT_CODE=$?
+        fi
     fi
 fi
 

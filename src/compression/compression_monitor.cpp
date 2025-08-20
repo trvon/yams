@@ -61,6 +61,9 @@ public:
         MetricsSnapshot snapshot;
         snapshot.timestamp = std::chrono::system_clock::now();
         snapshot.stats = getCurrentStatsInternal();
+        snapshot.cpuUsage = 0.0;
+        snapshot.memoryUsage = 0;
+        snapshot.activeThreads = 0;
 
         // Collect custom metrics if available
         if (metricCollector_) {

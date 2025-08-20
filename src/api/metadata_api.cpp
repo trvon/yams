@@ -322,6 +322,7 @@ BulkCreateResponse MetadataApi::bulkCreate(const BulkCreateRequest& request) {
                 result.documentId = createResp.documentId;
                 response.successCount++;
             } else {
+                result.documentId = 0; // Invalid/unset document ID for failed operations
                 result.error = createResp.message;
                 response.failureCount++;
 
@@ -1001,6 +1002,7 @@ BulkUpdateResponse MetadataApi::bulkUpdate(const BulkUpdateRequest& request) {
                 result.newVersion = updateResp.newVersion;
                 response.successCount++;
             } else {
+                result.newVersion = -1; // Invalid version for failed operations
                 result.error = updateResp.message;
                 response.failureCount++;
 

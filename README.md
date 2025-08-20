@@ -3,7 +3,7 @@
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
 
-My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming.
+My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming. I added additional prompts for [research](docs/prompts/PROMPT-research-mcp.md) with MCP usage. **These prompts are subject to change with experimentation**
 
 ## Features
 

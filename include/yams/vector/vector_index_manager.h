@@ -86,7 +86,7 @@ struct SearchResult {
     std::map<std::string, std::string> metadata; // Optional metadata
 
     // Constructors
-    SearchResult() = default;
+    SearchResult() : distance(0.0f), similarity(0.0f) {}
     SearchResult(std::string id_, float dist, float sim)
         : id(std::move(id_)), distance(dist), similarity(sim) {}
 

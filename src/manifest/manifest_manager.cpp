@@ -93,6 +93,8 @@ struct ManifestManager::Impl {
         auto it = cache.find(key);
         if (it != cache.end()) {
             it->second->lastAccess = std::chrono::steady_clock::now();
+            // Count cache hits toward deserialization stats (use minimal non-zero duration)
+            updateStats(std::chrono::milliseconds(0), std::chrono::milliseconds(1));
             return it->second->manifest;
         }
         return std::nullopt;

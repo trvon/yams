@@ -78,9 +78,10 @@ struct DocumentChunk {
     size_t line_count = 0;
 
     // Constructors
-    DocumentChunk() = default;
+    DocumentChunk() : strategy_used(ChunkingStrategy::FIXED_SIZE) {}
     DocumentChunk(std::string id, std::string doc_hash, std::string text)
-        : chunk_id(std::move(id)), document_hash(std::move(doc_hash)), content(std::move(text)) {}
+        : chunk_id(std::move(id)), document_hash(std::move(doc_hash)), content(std::move(text)),
+          strategy_used(ChunkingStrategy::FIXED_SIZE) {}
 
     // Utility methods
     bool hasOverlapWith(const DocumentChunk& other) const {

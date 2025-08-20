@@ -311,6 +311,7 @@ private:
         RecoveryResult result;
         result.strategyUsed = RecoveryStrategy::Retry;
         result.success = false;
+        result.attemptsUsed = 0;
 
         auto cfg = config();
         auto delay = cfg.retryDelay;

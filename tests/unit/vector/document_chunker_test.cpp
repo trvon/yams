@@ -183,6 +183,7 @@ TEST_F(DocumentChunkerTest, SentenceBasedChunker_BasicChunking) {
 TEST_F(DocumentChunkerTest, SentenceBasedChunker_SingleSentence) {
     ChunkingConfig config = default_config_;
     config.strategy = ChunkingStrategy::SENTENCE_BASED;
+    config.min_chunk_size = 0; // Allow small chunks for single sentence test
 
     SentenceBasedChunker chunker(config);
     std::string single_sentence = "This is just one sentence.";
