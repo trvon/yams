@@ -1,8 +1,36 @@
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <yams/extraction/html_text_extractor.h>
+#include <yams/extraction/pdf_extractor.h>
 #include <yams/extraction/text_extractor.h>
 
 namespace yams::extraction {
+
+// Constructor - registers built-in extractors
+TextExtractorFactory::TextExtractorFactory() {
+    // Register PDF extractor
+#ifdef YAMS_HAS_PDF_SUPPORT
+    registerExtractor({".pdf"}, []() { return std::make_unique<PdfExtractor>(); });
+    spdlog::debug("Registered PDF text extractor for .pdf files");
+#endif
+
+    // Register HTML extractor
+    registerExtractor({".html", ".htm"}, []() { return std::make_unique<HtmlTextExtractor>(); });
+    spdlog::debug("Registered HTML text extractor for .html/.htm files");
+
+    // Log all registered extensions
+    auto exts = supportedExtensions();
+    if (!exts.empty()) {
+        std::string extList;
+        for (const auto& e : exts) {
+            if (!extList.empty())
+                extList += ", ";
+            extList += e;
+        }
+        spdlog::info("TextExtractorFactory initialized with extensions: {}", extList);
+    }
+}
 
 TextExtractorFactory& TextExtractorFactory::instance() {
     static TextExtractorFactory instance;

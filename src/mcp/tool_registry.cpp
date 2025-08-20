@@ -536,4 +536,326 @@ json MCPAddDirectoryResponse::toJson() const {
                 {"results", results}};
 }
 
+// MCPGetByNameRequest implementation
+MCPGetByNameRequest MCPGetByNameRequest::fromJson(const json& j) {
+    MCPGetByNameRequest req;
+    req.name = j.value("name", std::string{});
+    req.rawContent = j.value("raw_content", false);
+    req.extractText = j.value("extract_text", true);
+    return req;
+}
+
+json MCPGetByNameRequest::toJson() const {
+    return json{{"name", name}, {"raw_content", rawContent}, {"extract_text", extractText}};
+}
+
+// MCPGetByNameResponse implementation
+MCPGetByNameResponse MCPGetByNameResponse::fromJson(const json& j) {
+    MCPGetByNameResponse resp;
+    resp.hash = j.value("hash", std::string{});
+    resp.name = j.value("name", std::string{});
+    resp.path = j.value("path", std::string{});
+    resp.size = j.value("size", uint64_t{0});
+    resp.mimeType = j.value("mime_type", std::string{});
+    resp.content = j.value("content", std::string{});
+    return resp;
+}
+
+json MCPGetByNameResponse::toJson() const {
+    return json{{"hash", hash}, {"name", name},          {"path", path},
+                {"size", size}, {"mime_type", mimeType}, {"content", content}};
+}
+
+// MCPDeleteByNameRequest implementation
+MCPDeleteByNameRequest MCPDeleteByNameRequest::fromJson(const json& j) {
+    MCPDeleteByNameRequest req;
+    req.name = j.value("name", std::string{});
+    req.pattern = j.value("pattern", std::string{});
+    req.dryRun = j.value("dry_run", false);
+
+    if (j.contains("names") && j["names"].is_array()) {
+        for (const auto& n : j["names"]) {
+            if (n.is_string()) {
+                req.names.push_back(n.get<std::string>());
+            }
+        }
+    }
+
+    return req;
+}
+
+json MCPDeleteByNameRequest::toJson() const {
+    return json{{"name", name}, {"names", names}, {"pattern", pattern}, {"dry_run", dryRun}};
+}
+
+// MCPDeleteByNameResponse implementation
+MCPDeleteByNameResponse MCPDeleteByNameResponse::fromJson(const json& j) {
+    MCPDeleteByNameResponse resp;
+    resp.count = j.value("count", size_t{0});
+    resp.dryRun = j.value("dry_run", false);
+
+    if (j.contains("deleted") && j["deleted"].is_array()) {
+        for (const auto& d : j["deleted"]) {
+            if (d.is_string()) {
+                resp.deleted.push_back(d.get<std::string>());
+            }
+        }
+    }
+
+    return resp;
+}
+
+json MCPDeleteByNameResponse::toJson() const {
+    return json{{"deleted", deleted}, {"count", count}, {"dry_run", dryRun}};
+}
+
+// MCPCatDocumentRequest implementation
+MCPCatDocumentRequest MCPCatDocumentRequest::fromJson(const json& j) {
+    MCPCatDocumentRequest req;
+    req.hash = j.value("hash", std::string{});
+    req.name = j.value("name", std::string{});
+    req.rawContent = j.value("raw_content", false);
+    req.extractText = j.value("extract_text", true);
+    return req;
+}
+
+json MCPCatDocumentRequest::toJson() const {
+    return json{
+        {"hash", hash}, {"name", name}, {"raw_content", rawContent}, {"extract_text", extractText}};
+}
+
+// MCPCatDocumentResponse implementation
+MCPCatDocumentResponse MCPCatDocumentResponse::fromJson(const json& j) {
+    MCPCatDocumentResponse resp;
+    resp.content = j.value("content", std::string{});
+    resp.hash = j.value("hash", std::string{});
+    resp.name = j.value("name", std::string{});
+    resp.size = j.value("size", uint64_t{0});
+    return resp;
+}
+
+json MCPCatDocumentResponse::toJson() const {
+    return json{{"content", content}, {"hash", hash}, {"name", name}, {"size", size}};
+}
+
+// MCPUpdateMetadataRequest implementation
+MCPUpdateMetadataRequest MCPUpdateMetadataRequest::fromJson(const json& j) {
+    MCPUpdateMetadataRequest req;
+    req.hash = j.value("hash", std::string{});
+    req.name = j.value("name", std::string{});
+
+    if (j.contains("metadata")) {
+        req.metadata = j["metadata"];
+    }
+
+    if (j.contains("tags") && j["tags"].is_array()) {
+        for (const auto& tag : j["tags"]) {
+            if (tag.is_string()) {
+                req.tags.push_back(tag.get<std::string>());
+            }
+        }
+    }
+
+    return req;
+}
+
+json MCPUpdateMetadataRequest::toJson() const {
+    return json{{"hash", hash}, {"name", name}, {"metadata", metadata}, {"tags", tags}};
+}
+
+// MCPUpdateMetadataResponse implementation
+MCPUpdateMetadataResponse MCPUpdateMetadataResponse::fromJson(const json& j) {
+    MCPUpdateMetadataResponse resp;
+    resp.success = j.value("success", false);
+    resp.message = j.value("message", std::string{});
+    return resp;
+}
+
+json MCPUpdateMetadataResponse::toJson() const {
+    return json{{"success", success}, {"message", message}};
+}
+
+// MCPRestoreCollectionRequest implementation
+MCPRestoreCollectionRequest MCPRestoreCollectionRequest::fromJson(const json& j) {
+    MCPRestoreCollectionRequest req;
+    req.collection = j.value("collection", std::string{});
+    req.outputDirectory = j.value("output_directory", std::string{});
+    req.layoutTemplate = j.value("layout_template", std::string{"{path}"});
+    req.overwrite = j.value("overwrite", false);
+    req.createDirs = j.value("create_dirs", true);
+    req.dryRun = j.value("dry_run", false);
+
+    if (j.contains("include_patterns") && j["include_patterns"].is_array()) {
+        for (const auto& p : j["include_patterns"]) {
+            if (p.is_string()) {
+                req.includePatterns.push_back(p.get<std::string>());
+            }
+        }
+    }
+
+    if (j.contains("exclude_patterns") && j["exclude_patterns"].is_array()) {
+        for (const auto& p : j["exclude_patterns"]) {
+            if (p.is_string()) {
+                req.excludePatterns.push_back(p.get<std::string>());
+            }
+        }
+    }
+
+    return req;
+}
+
+json MCPRestoreCollectionRequest::toJson() const {
+    return json{{"collection", collection},
+                {"output_directory", outputDirectory},
+                {"layout_template", layoutTemplate},
+                {"include_patterns", includePatterns},
+                {"exclude_patterns", excludePatterns},
+                {"overwrite", overwrite},
+                {"create_dirs", createDirs},
+                {"dry_run", dryRun}};
+}
+
+// MCPRestoreCollectionResponse implementation
+MCPRestoreCollectionResponse MCPRestoreCollectionResponse::fromJson(const json& j) {
+    MCPRestoreCollectionResponse resp;
+    resp.filesRestored = j.value("files_restored", size_t{0});
+    resp.dryRun = j.value("dry_run", false);
+
+    if (j.contains("restored_paths") && j["restored_paths"].is_array()) {
+        for (const auto& p : j["restored_paths"]) {
+            if (p.is_string()) {
+                resp.restoredPaths.push_back(p.get<std::string>());
+            }
+        }
+    }
+
+    return resp;
+}
+
+json MCPRestoreCollectionResponse::toJson() const {
+    return json{
+        {"files_restored", filesRestored}, {"restored_paths", restoredPaths}, {"dry_run", dryRun}};
+}
+
+// MCPRestoreSnapshotRequest implementation
+MCPRestoreSnapshotRequest MCPRestoreSnapshotRequest::fromJson(const json& j) {
+    MCPRestoreSnapshotRequest req;
+    req.snapshotId = j.value("snapshot_id", std::string{});
+    req.snapshotLabel = j.value("snapshot_label", std::string{});
+    req.outputDirectory = j.value("output_directory", std::string{});
+    req.layoutTemplate = j.value("layout_template", std::string{"{path}"});
+    req.overwrite = j.value("overwrite", false);
+    req.createDirs = j.value("create_dirs", true);
+    req.dryRun = j.value("dry_run", false);
+
+    if (j.contains("include_patterns") && j["include_patterns"].is_array()) {
+        for (const auto& p : j["include_patterns"]) {
+            if (p.is_string()) {
+                req.includePatterns.push_back(p.get<std::string>());
+            }
+        }
+    }
+
+    if (j.contains("exclude_patterns") && j["exclude_patterns"].is_array()) {
+        for (const auto& p : j["exclude_patterns"]) {
+            if (p.is_string()) {
+                req.excludePatterns.push_back(p.get<std::string>());
+            }
+        }
+    }
+
+    return req;
+}
+
+json MCPRestoreSnapshotRequest::toJson() const {
+    return json{{"snapshot_id", snapshotId},
+                {"snapshot_label", snapshotLabel},
+                {"output_directory", outputDirectory},
+                {"layout_template", layoutTemplate},
+                {"include_patterns", includePatterns},
+                {"exclude_patterns", excludePatterns},
+                {"overwrite", overwrite},
+                {"create_dirs", createDirs},
+                {"dry_run", dryRun}};
+}
+
+// MCPRestoreSnapshotResponse implementation
+MCPRestoreSnapshotResponse MCPRestoreSnapshotResponse::fromJson(const json& j) {
+    MCPRestoreSnapshotResponse resp;
+    resp.filesRestored = j.value("files_restored", size_t{0});
+    resp.dryRun = j.value("dry_run", false);
+
+    if (j.contains("restored_paths") && j["restored_paths"].is_array()) {
+        for (const auto& p : j["restored_paths"]) {
+            if (p.is_string()) {
+                resp.restoredPaths.push_back(p.get<std::string>());
+            }
+        }
+    }
+
+    return resp;
+}
+
+json MCPRestoreSnapshotResponse::toJson() const {
+    return json{
+        {"files_restored", filesRestored}, {"restored_paths", restoredPaths}, {"dry_run", dryRun}};
+}
+
+// MCPListCollectionsRequest implementation
+MCPListCollectionsRequest MCPListCollectionsRequest::fromJson(const json& j) {
+    MCPListCollectionsRequest req;
+    // No fields to parse
+    return req;
+}
+
+json MCPListCollectionsRequest::toJson() const {
+    return json::object();
+}
+
+// MCPListCollectionsResponse implementation
+MCPListCollectionsResponse MCPListCollectionsResponse::fromJson(const json& j) {
+    MCPListCollectionsResponse resp;
+
+    if (j.contains("collections") && j["collections"].is_array()) {
+        for (const auto& c : j["collections"]) {
+            if (c.is_string()) {
+                resp.collections.push_back(c.get<std::string>());
+            }
+        }
+    }
+
+    return resp;
+}
+
+json MCPListCollectionsResponse::toJson() const {
+    return json{{"collections", collections}};
+}
+
+// MCPListSnapshotsRequest implementation
+MCPListSnapshotsRequest MCPListSnapshotsRequest::fromJson(const json& j) {
+    MCPListSnapshotsRequest req;
+    req.collection = j.value("collection", std::string{});
+    req.withLabels = j.value("with_labels", true);
+    return req;
+}
+
+json MCPListSnapshotsRequest::toJson() const {
+    return json{{"collection", collection}, {"with_labels", withLabels}};
+}
+
+// MCPListSnapshotsResponse implementation
+MCPListSnapshotsResponse MCPListSnapshotsResponse::fromJson(const json& j) {
+    MCPListSnapshotsResponse resp;
+
+    if (j.contains("snapshots") && j["snapshots"].is_array()) {
+        resp.snapshots = j["snapshots"];
+    }
+
+    return resp;
+}
+
+json MCPListSnapshotsResponse::toJson() const {
+    return json{{"snapshots", snapshots}};
+}
+
 } // namespace yams::mcp

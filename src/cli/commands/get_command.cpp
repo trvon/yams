@@ -13,8 +13,14 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
 #include <yams/detection/file_type_detector.h>
+#include <yams/extraction/text_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace yams::cli {
 
@@ -69,6 +75,10 @@ public:
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--latest", getLatest_, "Get the most recently indexed matching document");
         cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document");
+
+        // Text extraction options
+        cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
+        cmd->add_flag("--extract", extract_, "Force text extraction even when piping to file");
 
         // Knowledge graph options
         cmd->add_flag("--graph", showGraph_, "Show related documents from knowledge graph");
@@ -251,30 +261,113 @@ public:
                 }
             }
 
-            // Check if outputting to stdout or file
-            if (outputPath_.empty() || outputPath_ == "-") {
-                YAMS_ZONE_SCOPED_N("GetCommand::retrieveToStdout");
-                // Output to stdout using stream interface
-                auto result = store->retrieveStream(hashToRetrieve, std::cout);
-                if (!result) {
-                    return Error{result.error().code, result.error().message};
+            // Determine if we should extract text
+            bool outputToStdout = (outputPath_.empty() || outputPath_ == "-");
+            bool shouldExtract = false;
+
+            if (!raw_) {
+                if (extract_) {
+                    // User explicitly requested extraction
+                    shouldExtract = true;
+                } else if (outputToStdout) {
+                    // Auto-detect: extract if outputting to terminal
+                    shouldExtract = isatty(fileno(stdout)) != 0;
                 }
+            }
+
+            // Retrieve content
+            YAMS_ZONE_SCOPED_N("GetCommand::retrieveBytes");
+            auto result = store->retrieveBytes(hashToRetrieve);
+            if (!result) {
+                return Error{result.error().code, result.error().message};
+            }
+            std::vector<std::byte> contentBytes = std::move(result.value());
+
+            // Apply text extraction if needed
+            if (shouldExtract) {
+                // Try to determine file extension from metadata
+                std::string extension;
+                std::string fileName;
+
+                // Always get the actual fileName from metadata using the resolved hash
+                auto metadataRepo = cli_->getMetadataRepository();
+                if (metadataRepo) {
+                    auto docResult = metadataRepo->getDocumentByHash(hashToRetrieve);
+                    if (docResult && docResult.value().has_value()) {
+                        fileName = docResult.value()->fileName;
+                    }
+                }
+
+                // Fallback to using the search term if no metadata found and we used name-based
+                // lookup
+                if (fileName.empty() && !name_.empty()) {
+                    fileName = name_;
+                }
+
+                // Extract extension from file name
+                if (!fileName.empty()) {
+                    auto lastDot = fileName.find_last_of('.');
+                    if (lastDot != std::string::npos) {
+                        extension = fileName.substr(lastDot);
+                    }
+                }
+
+                // Try text extraction if we have an extension
+                if (!extension.empty()) {
+                    auto& factory = extraction::TextExtractorFactory::instance();
+                    auto extractor = factory.create(extension);
+
+                    if (extractor) {
+                        // Create extraction config
+                        extraction::ExtractionConfig config;
+                        config.maxFileSize = 100 * 1024 * 1024; // 100MB max
+
+                        // Convert to byte span
+                        auto dataSpan =
+                            std::span<const std::byte>(contentBytes.data(), contentBytes.size());
+
+                        // Extract text
+                        auto extractResult = extractor->extractFromBuffer(dataSpan, config);
+                        if (extractResult) {
+                            // Replace content with extracted text
+                            const std::string& text = extractResult.value().text;
+                            contentBytes.clear();
+                            contentBytes.reserve(text.size());
+                            std::transform(text.begin(), text.end(),
+                                           std::back_inserter(contentBytes),
+                                           [](char c) { return std::byte(c); });
+                        }
+                        // If extraction fails, keep original content
+                    }
+                }
+            }
+
+            // Output content
+            if (outputToStdout) {
+                // Output to stdout
+                std::cout.write(reinterpret_cast<const char*>(contentBytes.data()),
+                                contentBytes.size());
                 // Silent output to stdout - just the content
             } else {
-                YAMS_ZONE_SCOPED_N("GetCommand::retrieveToFile");
-                // Retrieve to file
-                auto result = store->retrieve(hashToRetrieve, outputPath_);
-                if (!result) {
-                    return Error{result.error().code, result.error().message};
+                YAMS_ZONE_SCOPED_N("GetCommand::writeToFile");
+                // Write to file
+                std::ofstream file(outputPath_, std::ios::binary);
+                if (!file) {
+                    return Error{ErrorCode::FileNotFound,
+                                 "Cannot create output file: " + outputPath_.string()};
                 }
-                YAMS_PLOT("RetrievedBytes", static_cast<int64_t>(result.value().size));
+                file.write(reinterpret_cast<const char*>(contentBytes.data()), contentBytes.size());
+                file.close();
 
-                auto& retrieveResult = result.value();
+                YAMS_PLOT("RetrievedBytes", static_cast<int64_t>(contentBytes.size()));
 
                 // Output success message to stderr so it doesn't interfere with piped output
                 std::cerr << "Document retrieved successfully!" << std::endl;
                 std::cerr << "Output: " << outputPath_ << std::endl;
-                std::cerr << "Size: " << retrieveResult.size << " bytes" << std::endl;
+                std::cerr << "Size: " << contentBytes.size() << " bytes" << std::endl;
+                if (shouldExtract) {
+                    std::cerr << "Text extraction: Applied" << std::endl;
+                }
             }
 
             return Result<void>();
@@ -1067,6 +1160,8 @@ private:
     std::string extension_;
     bool binaryOnly_ = false;
     bool textOnly_ = false;
+    bool raw_ = false;     // Output raw content without text extraction
+    bool extract_ = false; // Force text extraction even when piping
 
     // Time filters
     std::string createdAfter_;

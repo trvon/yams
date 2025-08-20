@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.4.1] - 2025-08-20
 
+### Added
+- **Smart Text Extraction by Default**
+  - CLI commands now extract text from PDFs, HTML, and other supported formats by default
+  - `cat` command: Shows readable text instead of binary data for PDFs and HTML files
+  - `get` command: Auto-detects output destination - extracts text for terminal, raw for files
+  - `--raw` flag added to both commands for accessing original content when needed
+  - `--extract` flag for `get` command to force text extraction even when piping
+
+### Changed
+- **MCP Server Text Extraction**
+  - Now uses `TextExtractorFactory` for all supported file types (not just HTML)
+  - PDF text extraction works correctly in MCP tools
+  - Consistent text extraction behavior across CLI and MCP interfaces
+
+### Fixed
+- **PDF Text Extraction in MCP**
+  - Fixed issue where PDF files returned empty content in MCP tools
+  - MCP server now properly extracts text from PDFs using PDFium
+  - Added missing `HtmlTextExtractor` to build system
+- **Compilation Issues**
+  - Fixed missing `HtmlTextExtractor` in CMakeLists.txt
+  - Fixed ErrorCode enum references in HTML text extractor
+  - Fixed regex_replace lambda usage for C++ standard compliance
+- IPC Response variant construction
+- GitHub Actions release workflow: wrap embedded multi-line Python f-string code in bash here-docs and pass JSON file path via argv in the benchmarks block to avoid shell syntax errors on runners.
+
 ## [v0.4.0] - 2025-08-20
 
 ### Added

@@ -6,6 +6,8 @@
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/extraction/html_text_extractor.h>
+#include <yams/extraction/text_extractor.h>
 #include <yams/profiling.h>
 
 namespace yams::cli {
@@ -26,6 +28,9 @@ public:
         group->add_option("hash", hash_, "Hash of the document to display");
         group->add_option("--name", name_, "Name of the document to display");
         group->require_option(1);
+
+        // Add flag for raw content output
+        cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
 
         // No output option - cat always goes to stdout
         // This is intentional for piping and viewing content directly
@@ -106,14 +111,100 @@ public:
                 return Error{ErrorCode::NotFound, "Document not found: " + hashToDisplay};
             }
 
-            // Output to stdout using stream interface - always silent (no metadata)
+            // Retrieve content
+            std::vector<std::byte> contentBytes;
             {
-                YAMS_ZONE_SCOPED_N("CatCommand::retrieveStream");
-                auto result = store->retrieveStream(hashToDisplay, std::cout);
+                YAMS_ZONE_SCOPED_N("CatCommand::retrieveBytes");
+                auto result = store->retrieveBytes(hashToDisplay);
                 if (!result) {
                     return Error{result.error().code, result.error().message};
                 }
+                contentBytes = std::move(result.value());
             }
+
+            // Apply text extraction if not in raw mode
+            if (!raw_) {
+                // Try to determine file extension from name or metadata
+                std::string extension;
+                std::string fileName;
+
+                // Always try to get the actual fileName from metadata using the resolved hash
+                auto metadataRepo = cli_->getMetadataRepository();
+                if (metadataRepo) {
+                    auto docResult = metadataRepo->getDocumentByHash(hashToDisplay);
+                    if (docResult && docResult.value().has_value()) {
+                        fileName = docResult.value()->fileName;
+                    }
+                }
+
+                // Fallback to using the search term if no metadata found
+                if (fileName.empty() && !name_.empty()) {
+                    fileName = name_;
+                }
+
+                // Extract extension from file name
+                if (!fileName.empty()) {
+                    auto lastDot = fileName.find_last_of('.');
+                    if (lastDot != std::string::npos) {
+                        extension = fileName.substr(lastDot);
+                    }
+                }
+
+                // Try text extraction if we have an extension
+                if (!extension.empty()) {
+                    auto& factory = extraction::TextExtractorFactory::instance();
+                    auto extractor = factory.create(extension);
+
+                    if (extractor) {
+                        // Create extraction config
+                        extraction::ExtractionConfig config;
+                        config.maxFileSize = 100 * 1024 * 1024; // 100MB max
+
+                        // Convert to byte span
+                        auto dataSpan =
+                            std::span<const std::byte>(contentBytes.data(), contentBytes.size());
+
+                        // Extract text
+                        auto extractResult = extractor->extractFromBuffer(dataSpan, config);
+                        if (extractResult) {
+                            // Output extracted text
+                            std::cout << extractResult.value().text;
+                            return Result<void>();
+                        }
+                        // If extraction fails, fall back to raw output
+                    } else if (extension == ".html" || extension == ".htm") {
+                        // Try HTML extraction even without factory support
+                        std::string content(reinterpret_cast<const char*>(contentBytes.data()),
+                                            contentBytes.size());
+                        std::string extracted =
+                            extraction::HtmlTextExtractor::extractTextFromHtml(content);
+                        std::cout << extracted;
+                        return Result<void>();
+                    }
+                } else {
+                    // No extension, try content-based detection for HTML
+                    std::string content(reinterpret_cast<const char*>(contentBytes.data()),
+                                        std::min(size_t(1000), contentBytes.size()));
+                    std::transform(content.begin(), content.end(), content.begin(), ::tolower);
+
+                    if (content.find("<!doctype html") != std::string::npos ||
+                        content.find("<html") != std::string::npos ||
+                        content.find("<head") != std::string::npos ||
+                        content.find("<body") != std::string::npos) {
+                        // Detected HTML content
+                        std::string fullContent(reinterpret_cast<const char*>(contentBytes.data()),
+                                                contentBytes.size());
+                        std::string extracted =
+                            extraction::HtmlTextExtractor::extractTextFromHtml(fullContent);
+                        std::cout << extracted;
+                        return Result<void>();
+                    }
+                }
+            }
+
+            // Output raw content
+            std::cout.write(reinterpret_cast<const char*>(contentBytes.data()),
+                            contentBytes.size());
 
             // Cat command should not output any status messages
             // This allows clean piping: yams cat --name file.txt | grep something
@@ -416,6 +507,7 @@ private:
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
+    bool raw_ = false; // Flag to output raw content without text extraction
 };
 
 // Factory function

@@ -142,6 +142,16 @@ private:
     Result<MCPStatsResponse> handleGetStats(const MCPStatsRequest& req);
     Result<MCPAddDirectoryResponse> handleAddDirectory(const MCPAddDirectoryRequest& req);
 
+    Result<MCPGetByNameResponse> handleGetByName(const MCPGetByNameRequest& req);
+    Result<MCPDeleteByNameResponse> handleDeleteByName(const MCPDeleteByNameRequest& req);
+    Result<MCPCatDocumentResponse> handleCatDocument(const MCPCatDocumentRequest& req);
+    Result<MCPUpdateMetadataResponse> handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
+    Result<MCPRestoreCollectionResponse>
+    handleRestoreCollection(const MCPRestoreCollectionRequest& req);
+    Result<MCPRestoreSnapshotResponse> handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
+    Result<MCPListCollectionsResponse> handleListCollections(const MCPListCollectionsRequest& req);
+    Result<MCPListSnapshotsResponse> handleListSnapshots(const MCPListSnapshotsRequest& req);
+
     // Legacy JSON-based tool implementations (for gradual migration)
     json storeDocument(const json& args);
     json deleteDocument(const json& args);

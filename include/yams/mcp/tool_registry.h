@@ -310,6 +310,195 @@ struct ToolDescriptor {
         : name(n), handler(std::move(h)), schema(std::move(s)), description(d) {}
 };
 
+// Get by name DTOs
+struct MCPGetByNameRequest {
+    using RequestType = MCPGetByNameRequest;
+
+    std::string name;
+    bool rawContent = false; // Return raw content without processing
+    bool extractText = true; // Apply text extraction for HTML/supported formats
+
+    static MCPGetByNameRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPGetByNameResponse {
+    using ResponseType = MCPGetByNameResponse;
+
+    std::string hash;
+    std::string name;
+    std::string path;
+    uint64_t size = 0;
+    std::string mimeType;
+    std::string content;
+
+    static MCPGetByNameResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Delete by name DTOs
+struct MCPDeleteByNameRequest {
+    using RequestType = MCPDeleteByNameRequest;
+
+    std::string name;
+    std::vector<std::string> names;
+    std::string pattern;
+    bool dryRun = false;
+
+    static MCPDeleteByNameRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPDeleteByNameResponse {
+    using ResponseType = MCPDeleteByNameResponse;
+
+    std::vector<std::string> deleted;
+    size_t count = 0;
+    bool dryRun = false;
+
+    static MCPDeleteByNameResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Cat document DTOs
+struct MCPCatDocumentRequest {
+    using RequestType = MCPCatDocumentRequest;
+
+    std::string hash;
+    std::string name;
+    bool rawContent = false; // Return raw content without processing
+    bool extractText = true; // Apply text extraction for HTML/supported formats
+
+    static MCPCatDocumentRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPCatDocumentResponse {
+    using ResponseType = MCPCatDocumentResponse;
+
+    std::string content;
+    std::string hash;
+    std::string name;
+    uint64_t size = 0;
+
+    static MCPCatDocumentResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Update metadata DTOs
+struct MCPUpdateMetadataRequest {
+    using RequestType = MCPUpdateMetadataRequest;
+
+    std::string hash;
+    std::string name;
+    json metadata;
+    std::vector<std::string> tags;
+
+    static MCPUpdateMetadataRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPUpdateMetadataResponse {
+    using ResponseType = MCPUpdateMetadataResponse;
+
+    bool success = false;
+    std::string message;
+
+    static MCPUpdateMetadataResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Collection/Snapshot DTOs
+struct MCPRestoreCollectionRequest {
+    using RequestType = MCPRestoreCollectionRequest;
+
+    std::string collection;
+    std::string outputDirectory;
+    std::string layoutTemplate = "{path}";
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    bool overwrite = false;
+    bool createDirs = true;
+    bool dryRun = false;
+
+    static MCPRestoreCollectionRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPRestoreCollectionResponse {
+    using ResponseType = MCPRestoreCollectionResponse;
+
+    size_t filesRestored = 0;
+    std::vector<std::string> restoredPaths;
+    bool dryRun = false;
+
+    static MCPRestoreCollectionResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPRestoreSnapshotRequest {
+    using RequestType = MCPRestoreSnapshotRequest;
+
+    std::string snapshotId;
+    std::string snapshotLabel;
+    std::string outputDirectory;
+    std::string layoutTemplate = "{path}";
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    bool overwrite = false;
+    bool createDirs = true;
+    bool dryRun = false;
+
+    static MCPRestoreSnapshotRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPRestoreSnapshotResponse {
+    using ResponseType = MCPRestoreSnapshotResponse;
+
+    size_t filesRestored = 0;
+    std::vector<std::string> restoredPaths;
+    bool dryRun = false;
+
+    static MCPRestoreSnapshotResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListCollectionsRequest {
+    using RequestType = MCPListCollectionsRequest;
+
+    static MCPListCollectionsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListCollectionsResponse {
+    using ResponseType = MCPListCollectionsResponse;
+
+    std::vector<std::string> collections;
+
+    static MCPListCollectionsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListSnapshotsRequest {
+    using RequestType = MCPListSnapshotsRequest;
+
+    std::string collection;
+    bool withLabels = true;
+
+    static MCPListSnapshotsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListSnapshotsResponse {
+    using ResponseType = MCPListSnapshotsResponse;
+
+    std::vector<json> snapshots;
+
+    static MCPListSnapshotsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 // Generic tool wrapper template
 template <ToolRequest RequestType, ToolResponse ResponseType>
 requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>

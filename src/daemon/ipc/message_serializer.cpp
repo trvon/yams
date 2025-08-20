@@ -8,6 +8,7 @@
 #include <ranges>
 #include <stdexcept>
 #include <type_traits>
+#include <variant>
 
 namespace yams::daemon {
 
@@ -466,133 +467,146 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             auto resResult = deserialize<SearchResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<SearchResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::AddResponse: {
             auto resResult = deserialize<AddResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload = Response{std::in_place_type<AddResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GetResponse: {
             auto resResult = deserialize<GetResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload = Response{std::in_place_type<GetResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GetInitResponse: {
             auto resResult = deserialize<GetInitResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<GetInitResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GetChunkResponse: {
             auto resResult = deserialize<GetChunkResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<GetChunkResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::StatusResponse: {
             auto resResult = deserialize<StatusResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<StatusResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::SuccessResponse: {
             auto resResult = deserialize<SuccessResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<SuccessResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::ErrorResponse: {
             auto resResult = deserialize<ErrorResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload = Response{std::in_place_type<ErrorResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::PongResponse: {
             auto resResult = deserialize<PongResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload = Response{std::in_place_type<PongResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::EmbeddingResponse: {
             auto resResult = deserialize<EmbeddingResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<EmbeddingResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::BatchEmbeddingResponse: {
             auto resResult = deserialize<BatchEmbeddingResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<BatchEmbeddingResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::ModelLoadResponse: {
             auto resResult = deserialize<ModelLoadResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<ModelLoadResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::ModelStatusResponse: {
             auto resResult = deserialize<ModelStatusResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<ModelStatusResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::ListResponse: {
             auto resResult = deserialize<ListResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload = Response{std::in_place_type<ListResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::DownloadResponse: {
             auto resResult = deserialize<DownloadResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<DownloadResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::AddDocumentResponse: {
             auto resResult = deserialize<AddDocumentResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<AddDocumentResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GrepResponse: {
             auto resResult = deserialize<GrepResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload = Response{std::in_place_type<GrepResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::UpdateDocumentResponse: {
             auto resResult = deserialize<UpdateDocumentResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<UpdateDocumentResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GetStatsResponse: {
             auto resResult = deserialize<GetStatsResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::move(resResult.value())};
+            msg.payload =
+                Response{std::in_place_type<GetStatsResponse>, std::move(resResult.value())};
             break;
         }
 

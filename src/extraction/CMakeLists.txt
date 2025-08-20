@@ -2,6 +2,7 @@
 set(EXTRACTION_SOURCES
     text_extractor_factory.cpp
     plain_text_extractor.cpp
+    html_text_extractor.cpp
 )
 
 # Add PDF extractor if enabled

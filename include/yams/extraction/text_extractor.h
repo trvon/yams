@@ -143,7 +143,7 @@ public:
     bool isSupported(const std::string& extension) const;
 
 private:
-    TextExtractorFactory() = default;
+    TextExtractorFactory(); // Constructor registers built-in extractors
     std::unordered_map<std::string, ExtractorCreator> extractors_;
     mutable std::mutex mutex_;
 };

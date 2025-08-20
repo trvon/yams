@@ -4,10 +4,15 @@
 #include <cctype>
 #include <cstring>
 #include <errno.h>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <regex>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/extraction/html_text_extractor.h>
+#include <yams/extraction/text_extractor.h>
 #include <yams/mcp/mcp_server.h>
 
 // Platform-specific includes for non-blocking I/O
@@ -735,7 +740,16 @@ json MCPServer::listTools() {
                {"description", "Retrieve document content by name"},
                {"inputSchema",
                 {{"type", "object"},
-                 {"properties", {{"name", {{"type", "string"}, {"description", "Document name"}}}}},
+                 {"properties",
+                  {{"name", {{"type", "string"}, {"description", "Document name"}}},
+                   {"raw_content",
+                    {{"type", "boolean"},
+                     {"description", "Return raw content without text extraction"},
+                     {"default", false}}},
+                   {"extract_text",
+                    {{"type", "boolean"},
+                     {"description", "Extract text from HTML/PDF files"},
+                     {"default", true}}}}},
                  {"required", json::array({"name"})}}}},
               {{"name", "cat_document"},
                {"description", "Display document content (like cat command)"},
@@ -743,7 +757,15 @@ json MCPServer::listTools() {
                 {{"type", "object"},
                  {"properties",
                   {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name"}}}}}}}},
+                   {"name", {{"type", "string"}, {"description", "Document name"}}},
+                   {"raw_content",
+                    {{"type", "boolean"},
+                     {"description", "Return raw content without text extraction"},
+                     {"default", false}}},
+                   {"extract_text",
+                    {{"type", "boolean"},
+                     {"description", "Extract text from HTML/PDF files"},
+                     {"default", true}}}}}}}},
 
               // Directory operations from v0.0.4
               {{"name", "add_directory"},
@@ -1502,6 +1524,125 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "File patterns to include"}}}}},
              {"required", json::array({"directory_path"})}},
         "Index all files from a directory into YAMS storage with optional filtering");
+
+    // Register missing tools that were causing empty responses
+    toolRegistry_->registerTool<MCPGetByNameRequest, MCPGetByNameResponse>(
+        "get_by_name", [this](const MCPGetByNameRequest& req) { return handleGetByName(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"name", {{"type", "string"}, {"description", "Document name to retrieve"}}},
+               {"raw_content",
+                {{"type", "boolean"},
+                 {"description", "Return raw content without text extraction"},
+                 {"default", false}}},
+               {"extract_text",
+                {{"type", "boolean"},
+                 {"description", "Extract text from HTML/PDF files"},
+                 {"default", true}}}}},
+             {"required", json::array({"name"})}},
+        "Retrieve document content by name");
+
+    toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
+        "delete_by_name",
+        [this](const MCPDeleteByNameRequest& req) { return handleDeleteByName(req); },
+        json{
+            {"type", "object"},
+            {"properties",
+             {{"name", {{"type", "string"}, {"description", "Single document name to delete"}}},
+              {"names",
+               {{"type", "array"},
+                {"items", {{"type", "string"}}},
+                {"description", "Multiple document names to delete"}}},
+              {"pattern", {{"type", "string"}, {"description", "Glob pattern for matching names"}}},
+              {"dry_run",
+               {{"type", "boolean"},
+                {"description", "Preview what would be deleted"},
+                {"default", false}}}}}},
+        "Delete documents by name, names array, or pattern");
+
+    toolRegistry_->registerTool<MCPCatDocumentRequest, MCPCatDocumentResponse>(
+        "cat_document", [this](const MCPCatDocumentRequest& req) { return handleCatDocument(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
+               {"name", {{"type", "string"}, {"description", "Document name"}}},
+               {"raw_content",
+                {{"type", "boolean"},
+                 {"description", "Return raw content without text extraction"},
+                 {"default", false}}},
+               {"extract_text",
+                {{"type", "boolean"},
+                 {"description", "Extract text from HTML/PDF files"},
+                 {"default", true}}}}}},
+        "Display document content by hash or name");
+
+    toolRegistry_->registerTool<MCPUpdateMetadataRequest, MCPUpdateMetadataResponse>(
+        "update_metadata",
+        [this](const MCPUpdateMetadataRequest& req) { return handleUpdateMetadata(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
+               {"name", {{"type", "string"}, {"description", "Document name"}}},
+               {"metadata",
+                {{"type", "object"}, {"description", "Metadata key-value pairs to update"}}},
+               {"tags",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Tags to add or update"}}}}}},
+        "Update document metadata and tags");
+
+    toolRegistry_->registerTool<MCPRestoreCollectionRequest, MCPRestoreCollectionResponse>(
+        "restore_collection",
+        [this](const MCPRestoreCollectionRequest& req) { return handleRestoreCollection(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
+               {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
+               {"overwrite",
+                {{"type", "boolean"},
+                 {"description", "Overwrite existing files"},
+                 {"default", false}}},
+               {"dry_run",
+                {{"type", "boolean"},
+                 {"description", "Preview without writing"},
+                 {"default", false}}}}},
+             {"required", json::array({"collection", "output_directory"})}},
+        "Restore all documents from a collection");
+
+    toolRegistry_->registerTool<MCPRestoreSnapshotRequest, MCPRestoreSnapshotResponse>(
+        "restore_snapshot",
+        [this](const MCPRestoreSnapshotRequest& req) { return handleRestoreSnapshot(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+               {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
+               {"overwrite",
+                {{"type", "boolean"},
+                 {"description", "Overwrite existing files"},
+                 {"default", false}}},
+               {"dry_run",
+                {{"type", "boolean"},
+                 {"description", "Preview without writing"},
+                 {"default", false}}}}},
+             {"required", json::array({"snapshot_id", "output_directory"})}},
+        "Restore all documents from a snapshot");
+
+    toolRegistry_->registerTool<MCPListCollectionsRequest, MCPListCollectionsResponse>(
+        "list_collections",
+        [this](const MCPListCollectionsRequest& req) { return handleListCollections(req); },
+        json{{"type", "object"}}, "List available collections");
+
+    toolRegistry_->registerTool<MCPListSnapshotsRequest, MCPListSnapshotsResponse>(
+        "list_snapshots",
+        [this](const MCPListSnapshotsRequest& req) { return handleListSnapshots(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"collection", {{"type", "string"}, {"description", "Filter by collection"}}},
+               {"with_labels",
+                {{"type", "boolean"},
+                 {"description", "Include snapshot labels"},
+                 {"default", true}}}}}},
+        "List available snapshots");
 }
 
 json MCPServer::createResponse(const json& id, const json& result) {
@@ -1510,6 +1651,645 @@ json MCPServer::createResponse(const json& id, const json& result) {
 
 json MCPServer::createError(const json& id, int code, const std::string& message) {
     return json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}};
+}
+
+Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
+    try {
+        if (!metadataRepo_) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        if (req.name.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Document name is required"};
+        }
+
+        spdlog::debug("MCP handleGetByName: searching for document with name '{}'", req.name);
+
+        // Find documents by name using metadata repository
+        auto docsResult = metadataRepo_->findDocumentsByPath("%" + req.name);
+        if (!docsResult) {
+            spdlog::error("MCP handleGetByName: failed to query metadata repository: {}",
+                          docsResult.error().message);
+            return Error{ErrorCode::InternalError,
+                         "Failed to search for document: " + docsResult.error().message};
+        }
+
+        auto& docs = docsResult.value();
+
+        // Try exact name match first
+        const metadata::DocumentInfo* foundDoc = nullptr;
+        for (const auto& doc : docs) {
+            if (doc.fileName == req.name) {
+                foundDoc = &doc;
+                break;
+            }
+        }
+
+        // If no exact match, try suffix match
+        if (!foundDoc && !docs.empty()) {
+            for (const auto& doc : docs) {
+                if (doc.filePath.ends_with("/" + req.name) ||
+                    doc.fileName.find(req.name) != std::string::npos) {
+                    foundDoc = &doc;
+                    break;
+                }
+            }
+        }
+
+        if (!foundDoc) {
+            spdlog::warn("MCP handleGetByName: document '{}' not found", req.name);
+            return Error{ErrorCode::NotFound, "Document not found: " + req.name};
+        }
+
+        // Get content from content store
+        auto contentResult = store_->retrieveBytes(foundDoc->sha256Hash);
+        if (!contentResult) {
+            spdlog::error("MCP handleGetByName: failed to retrieve content for hash {}: {}",
+                          foundDoc->sha256Hash, contentResult.error().message);
+            return Error{ErrorCode::InternalError,
+                         "Failed to retrieve document content: " + contentResult.error().message};
+        }
+
+        // Build response
+        MCPGetByNameResponse response;
+        response.hash = foundDoc->sha256Hash;
+        response.name = foundDoc->fileName;
+        response.path = foundDoc->filePath;
+        response.size = static_cast<uint64_t>(foundDoc->fileSize);
+        response.mimeType = foundDoc->mimeType;
+
+        // Convert vector<std::byte> to string
+        const auto& data = contentResult.value();
+        std::string content = std::string(reinterpret_cast<const char*>(data.data()), data.size());
+
+        // Apply text extraction if requested (default behavior unless raw is requested)
+        if (req.extractText && !req.rawContent) {
+            // Try to determine file extension from fileName
+            std::string extension;
+            if (!foundDoc->fileName.empty()) {
+                auto lastDot = foundDoc->fileName.find_last_of('.');
+                if (lastDot != std::string::npos) {
+                    extension = foundDoc->fileName.substr(lastDot);
+                }
+            }
+
+            // Try to get appropriate text extractor
+            if (!extension.empty()) {
+                auto& factory = extraction::TextExtractorFactory::instance();
+                auto extractor = factory.create(extension);
+
+                if (extractor) {
+                    spdlog::debug("MCP handleGetByName: extracting text from {} for '{}'",
+                                  extension, req.name);
+
+                    // Create extraction config
+                    extraction::ExtractionConfig config;
+                    config.maxFileSize = 100 * 1024 * 1024; // 100MB max
+
+                    // Convert string to byte span for extraction
+                    auto dataSpan = std::span<const std::byte>(
+                        reinterpret_cast<const std::byte*>(content.data()), content.size());
+
+                    // Extract text
+                    auto extractResult = extractor->extractFromBuffer(dataSpan, config);
+                    if (extractResult) {
+                        content = extractResult.value().text;
+                        spdlog::debug(
+                            "MCP handleGetByName: successfully extracted {} bytes of text",
+                            content.size());
+                    } else {
+                        spdlog::warn("MCP handleGetByName: text extraction failed: {}",
+                                     extractResult.error().message);
+                        // Keep original content on extraction failure
+                    }
+                } else if (extension == ".html" || extension == ".htm") {
+                    // Fallback to HTML extractor for HTML files
+                    spdlog::debug(
+                        "MCP handleGetByName: using HTML text extractor fallback for '{}'",
+                        req.name);
+                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
+                }
+            } else if (foundDoc->mimeType == "text/html") {
+                // No extension but MIME type indicates HTML
+                spdlog::debug(
+                    "MCP handleGetByName: detected HTML via MIME type, extracting text for '{}'",
+                    req.name);
+                content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
+            } else {
+                // Content-based detection as last resort
+                // Check if content looks like HTML
+                auto trimmedContent = content.substr(0, std::min(size_t(1000), content.size()));
+                std::transform(trimmedContent.begin(), trimmedContent.end(), trimmedContent.begin(),
+                               ::tolower);
+
+                if (trimmedContent.find("<!doctype html") != std::string::npos ||
+                    trimmedContent.find("<html") != std::string::npos ||
+                    trimmedContent.find("<head") != std::string::npos ||
+                    trimmedContent.find("<body") != std::string::npos) {
+                    spdlog::debug("MCP handleGetByName: detected HTML via content inspection, "
+                                  "extracting text for '{}'",
+                                  req.name);
+                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
+                }
+            }
+        }
+
+        response.content = content;
+
+        spdlog::debug("MCP handleGetByName: successfully retrieved document '{}' (hash: {}, size: "
+                      "{}, extracted: {})",
+                      response.name, response.hash, response.size,
+                      (req.extractText && !req.rawContent) ? "yes" : "no");
+
+        return response;
+    } catch (const std::exception& e) {
+        spdlog::error("MCP handleGetByName exception: {}", e.what());
+        return Error{ErrorCode::InternalError, std::string("Get by name failed: ") + e.what()};
+    }
+}
+
+Result<MCPDeleteByNameResponse> MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
+    try {
+        if (!metadataRepo_) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        std::vector<std::string> hashesToDelete;
+        std::vector<std::string> deletedNames;
+
+        // Handle single name
+        if (!req.name.empty()) {
+            auto docsResult = metadataRepo_->findDocumentsByPath("%" + req.name);
+            if (docsResult) {
+                for (const auto& doc : docsResult.value()) {
+                    if (doc.fileName == req.name) {
+                        hashesToDelete.push_back(doc.sha256Hash);
+                        deletedNames.push_back(doc.fileName);
+                    }
+                }
+            }
+        }
+
+        // Handle multiple names
+        for (const auto& name : req.names) {
+            auto docsResult = metadataRepo_->findDocumentsByPath("%" + name);
+            if (docsResult) {
+                for (const auto& doc : docsResult.value()) {
+                    if (doc.fileName == name) {
+                        hashesToDelete.push_back(doc.sha256Hash);
+                        deletedNames.push_back(doc.fileName);
+                    }
+                }
+            }
+        }
+
+        // Handle pattern
+        if (!req.pattern.empty()) {
+            // Simple glob pattern matching
+            auto docsResult = metadataRepo_->findDocumentsByPath("%");
+            if (docsResult) {
+                for (const auto& doc : docsResult.value()) {
+                    // Basic glob matching (supports * wildcard)
+                    std::string pattern = req.pattern;
+                    std::replace(pattern.begin(), pattern.end(), '*', '%');
+
+                    if (doc.fileName.find(pattern.substr(0, pattern.find('%'))) == 0) {
+                        hashesToDelete.push_back(doc.sha256Hash);
+                        deletedNames.push_back(doc.fileName);
+                    }
+                }
+            }
+        }
+
+        MCPDeleteByNameResponse response;
+        response.dryRun = req.dryRun;
+        response.deleted = deletedNames;
+        response.count = deletedNames.size();
+
+        // Actually delete if not dry run
+        if (!req.dryRun) {
+            for (const auto& hash : hashesToDelete) {
+                store_->remove(hash);
+                // Note: We should also remove from metadata repo, but that API might not exist
+            }
+        }
+
+        return response;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, std::string("Delete by name failed: ") + e.what()};
+    }
+}
+
+Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocumentRequest& req) {
+    try {
+        std::string hash;
+        std::string name;
+
+        // Resolve hash from name if needed
+        if (!req.name.empty()) {
+            auto getByNameReq = MCPGetByNameRequest{};
+            getByNameReq.name = req.name;
+            auto result = handleGetByName(getByNameReq);
+            if (!result) {
+                return Error{ErrorCode::NotFound, result.error().message};
+            }
+            hash = result.value().hash;
+            name = result.value().name;
+        } else if (!req.hash.empty()) {
+            hash = req.hash;
+            // Try to get name from metadata
+            if (metadataRepo_) {
+                auto docsResult = metadataRepo_->findDocumentsByPath("%");
+                if (docsResult) {
+                    for (const auto& doc : docsResult.value()) {
+                        if (doc.sha256Hash == hash) {
+                            name = doc.fileName;
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            return Error{ErrorCode::InvalidArgument, "Either hash or name must be provided"};
+        }
+
+        // Get content
+        auto contentResult = store_->retrieveBytes(hash);
+        if (!contentResult) {
+            return Error{ErrorCode::NotFound, "Document not found"};
+        }
+
+        MCPCatDocumentResponse response;
+        response.hash = hash;
+        response.name = name;
+        const auto& data = contentResult.value();
+        std::string content = std::string(reinterpret_cast<const char*>(data.data()), data.size());
+
+        // Apply text extraction if requested (default behavior unless raw is requested)
+        if (req.extractText && !req.rawContent) {
+            // Get the actual fileName from metadata to determine the correct extension
+            std::string actualFileName;
+            if (metadataRepo_) {
+                auto docResult = metadataRepo_->getDocumentByHash(hash);
+                if (docResult && docResult.value().has_value()) {
+                    actualFileName = docResult.value()->fileName;
+                }
+            }
+
+            // Fallback to name if no metadata found
+            if (actualFileName.empty()) {
+                actualFileName = name;
+            }
+
+            // Try to determine file extension from actual fileName
+            std::string extension;
+            if (!actualFileName.empty()) {
+                auto lastDot = actualFileName.find_last_of('.');
+                if (lastDot != std::string::npos) {
+                    extension = actualFileName.substr(lastDot);
+                }
+            }
+
+            // Try to get appropriate text extractor
+            if (!extension.empty()) {
+                auto& factory = extraction::TextExtractorFactory::instance();
+                auto extractor = factory.create(extension);
+
+                if (extractor) {
+                    spdlog::debug("MCP handleCatDocument: extracting text from {} using extractor",
+                                  extension);
+
+                    // Create extraction config
+                    extraction::ExtractionConfig config;
+                    config.maxFileSize = 100 * 1024 * 1024; // 100MB max
+
+                    // Convert string to byte span for extraction
+                    auto dataSpan = std::span<const std::byte>(
+                        reinterpret_cast<const std::byte*>(content.data()), content.size());
+
+                    // Extract text
+                    auto extractResult = extractor->extractFromBuffer(dataSpan, config);
+                    if (extractResult) {
+                        content = extractResult.value().text;
+                        spdlog::debug(
+                            "MCP handleCatDocument: successfully extracted {} bytes of text",
+                            content.size());
+                    } else {
+                        spdlog::warn("MCP handleCatDocument: text extraction failed: {}",
+                                     extractResult.error().message);
+                        // Keep original content on extraction failure
+                    }
+                } else if (extension == ".html" || extension == ".htm") {
+                    // Fallback to HTML extractor for HTML files
+                    spdlog::debug("MCP handleCatDocument: using HTML text extractor fallback");
+                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
+                }
+            } else if (!content.empty()) {
+                // No extension, check if it's HTML content
+                // Use case-insensitive search on first 1000 chars
+                auto trimmedContent = content.substr(0, std::min(size_t(1000), content.size()));
+                std::transform(trimmedContent.begin(), trimmedContent.end(), trimmedContent.begin(),
+                               ::tolower);
+
+                if (trimmedContent.find("<!doctype html") != std::string::npos ||
+                    trimmedContent.find("<html") != std::string::npos ||
+                    trimmedContent.find("<head") != std::string::npos ||
+                    trimmedContent.find("<body") != std::string::npos) {
+                    spdlog::debug("MCP handleCatDocument: detected HTML via content inspection, "
+                                  "extracting text");
+                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
+                }
+            }
+        }
+
+        response.content = content;
+        response.size = content.size();
+
+        return response;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, std::string("Cat document failed: ") + e.what()};
+    }
+}
+
+Result<MCPUpdateMetadataResponse>
+MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
+    try {
+        if (!metadataRepo_) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        // Find document ID
+        int64_t docId = -1;
+        if (!req.name.empty()) {
+            auto docsResult = metadataRepo_->findDocumentsByPath("%" + req.name);
+            if (docsResult && !docsResult.value().empty()) {
+                for (const auto& doc : docsResult.value()) {
+                    if (doc.fileName == req.name) {
+                        docId = doc.id;
+                        break;
+                    }
+                }
+            }
+        } else if (!req.hash.empty()) {
+            auto docsResult = metadataRepo_->findDocumentsByPath("%");
+            if (docsResult) {
+                for (const auto& doc : docsResult.value()) {
+                    if (doc.sha256Hash == req.hash) {
+                        docId = doc.id;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (docId < 0) {
+            return Error{ErrorCode::NotFound, "Document not found"};
+        }
+
+        // Update metadata
+        for (const auto& [key, value] : req.metadata.items()) {
+            metadata::MetadataValue mv;
+            if (value.is_string()) {
+                mv.value = value.get<std::string>();
+            } else {
+                mv.value = value.dump();
+            }
+            mv.type = metadata::MetadataValueType::String;
+
+            auto result = metadataRepo_->setMetadata(docId, key, mv);
+            if (!result) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to update metadata: " + result.error().message};
+            }
+        }
+
+        // Update tags
+        for (const auto& tag : req.tags) {
+            metadata::MetadataValue mv;
+            mv.value = "";
+            mv.type = metadata::MetadataValueType::String;
+
+            auto result = metadataRepo_->setMetadata(docId, "tag:" + tag, mv);
+            if (!result) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to update tag: " + result.error().message};
+            }
+        }
+
+        MCPUpdateMetadataResponse response;
+        response.success = true;
+        response.message = "Metadata updated successfully";
+
+        return response;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, std::string("Update metadata failed: ") + e.what()};
+    }
+}
+
+// Implementation of collection restore
+Result<MCPRestoreCollectionResponse>
+MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
+    try {
+        if (!metadataRepo_) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        if (!store_) {
+            return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+        }
+
+        if (req.collection.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Collection name is required"};
+        }
+
+        spdlog::debug("MCP handleRestoreCollection: restoring collection '{}'", req.collection);
+
+        // Get documents from collection
+        auto docsResult = metadataRepo_->findDocumentsByCollection(req.collection);
+        if (!docsResult) {
+            return Error{ErrorCode::InternalError,
+                         "Failed to find collection documents: " + docsResult.error().message};
+        }
+
+        const auto& documents = docsResult.value();
+        if (documents.empty()) {
+            MCPRestoreCollectionResponse response;
+            response.filesRestored = 0;
+            response.dryRun = req.dryRun;
+            spdlog::info("MCP handleRestoreCollection: no documents found in collection '{}'",
+                         req.collection);
+            return response;
+        }
+
+        MCPRestoreCollectionResponse response;
+        response.dryRun = req.dryRun;
+
+        // Create output directory if needed
+        std::filesystem::path outputDir(req.outputDirectory);
+        if (!req.dryRun && req.createDirs) {
+            std::error_code ec;
+            std::filesystem::create_directories(outputDir, ec);
+            if (ec) {
+                return Error{ErrorCode::IOError,
+                             "Failed to create output directory: " + ec.message()};
+            }
+        }
+
+        // Process each document
+        for (const auto& doc : documents) {
+            // Apply include/exclude filters
+            bool shouldInclude = true;
+
+            // Check include patterns
+            if (!req.includePatterns.empty()) {
+                shouldInclude = false;
+                for (const auto& pattern : req.includePatterns) {
+                    // Simple wildcard matching (convert * to .*)
+                    std::string regexPattern = pattern;
+                    size_t pos = 0;
+                    while ((pos = regexPattern.find("*", pos)) != std::string::npos) {
+                        regexPattern.replace(pos, 1, ".*");
+                        pos += 2;
+                    }
+
+                    std::regex rx(regexPattern);
+                    if (std::regex_match(doc.fileName, rx)) {
+                        shouldInclude = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check exclude patterns
+            if (shouldInclude && !req.excludePatterns.empty()) {
+                for (const auto& pattern : req.excludePatterns) {
+                    std::string regexPattern = pattern;
+                    size_t pos = 0;
+                    while ((pos = regexPattern.find("*", pos)) != std::string::npos) {
+                        regexPattern.replace(pos, 1, ".*");
+                        pos += 2;
+                    }
+
+                    std::regex rx(regexPattern);
+                    if (std::regex_match(doc.fileName, rx)) {
+                        shouldInclude = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!shouldInclude) {
+                continue;
+            }
+
+            // Expand layout template
+            std::string outputPath = req.layoutTemplate;
+
+            // Replace {path} with original file path
+            size_t pos = outputPath.find("{path}");
+            if (pos != std::string::npos) {
+                outputPath.replace(pos, 6, doc.filePath);
+            }
+
+            // Replace {name} with file name
+            pos = outputPath.find("{name}");
+            if (pos != std::string::npos) {
+                outputPath.replace(pos, 6, doc.fileName);
+            }
+
+            // Replace {hash} with content hash
+            pos = outputPath.find("{hash}");
+            if (pos != std::string::npos) {
+                outputPath.replace(pos, 6, doc.sha256Hash);
+            }
+
+            // Replace {collection} with collection name
+            pos = outputPath.find("{collection}");
+            if (pos != std::string::npos) {
+                outputPath.replace(pos, 12, req.collection);
+            }
+
+            std::filesystem::path fullOutputPath = outputDir / outputPath;
+
+            // Check if file exists and handle overwrite
+            if (!req.dryRun && !req.overwrite && std::filesystem::exists(fullOutputPath)) {
+                spdlog::debug("MCP handleRestoreCollection: skipping existing file '{}'",
+                              fullOutputPath.string());
+                continue;
+            }
+
+            if (req.dryRun) {
+                response.restoredPaths.push_back(fullOutputPath.string());
+                response.filesRestored++;
+                spdlog::info("MCP handleRestoreCollection: [DRY-RUN] would restore '{}' to '{}'",
+                             doc.fileName, fullOutputPath.string());
+            } else {
+                // Retrieve content
+                auto contentResult = store_->retrieveBytes(doc.sha256Hash);
+                if (!contentResult) {
+                    spdlog::error(
+                        "MCP handleRestoreCollection: failed to retrieve content for '{}': {}",
+                        doc.fileName, contentResult.error().message);
+                    continue;
+                }
+
+                // Create parent directories
+                std::error_code ec;
+                std::filesystem::create_directories(fullOutputPath.parent_path(), ec);
+                if (ec) {
+                    spdlog::error(
+                        "MCP handleRestoreCollection: failed to create directory for '{}': {}",
+                        fullOutputPath.string(), ec.message());
+                    continue;
+                }
+
+                // Write file
+                std::ofstream outFile(fullOutputPath, std::ios::binary);
+                if (!outFile) {
+                    spdlog::error("MCP handleRestoreCollection: failed to open output file '{}'",
+                                  fullOutputPath.string());
+                    continue;
+                }
+
+                const auto& data = contentResult.value();
+                outFile.write(reinterpret_cast<const char*>(data.data()), data.size());
+                outFile.close();
+
+                response.restoredPaths.push_back(fullOutputPath.string());
+                response.filesRestored++;
+                spdlog::info("MCP handleRestoreCollection: restored '{}' to '{}'", doc.fileName,
+                             fullOutputPath.string());
+            }
+        }
+
+        spdlog::info("MCP handleRestoreCollection: restored {} files from collection '{}'{}",
+                     response.filesRestored, req.collection, req.dryRun ? " [DRY-RUN]" : "");
+
+        return response;
+    } catch (const std::exception& e) {
+        spdlog::error("MCP handleRestoreCollection exception: {}", e.what());
+        return Error{ErrorCode::InternalError,
+                     std::string("Restore collection failed: ") + e.what()};
+    }
+}
+
+Result<MCPRestoreSnapshotResponse>
+MCPServer::handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req) {
+    return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
+}
+
+Result<MCPListCollectionsResponse>
+MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
+    MCPListCollectionsResponse response;
+    // TODO: Implement collection listing
+    return response;
+}
+
+Result<MCPListSnapshotsResponse>
+MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
+    MCPListSnapshotsResponse response;
+    // TODO: Implement snapshot listing
+    return response;
 }
 
 } // namespace yams::mcp

@@ -231,7 +231,7 @@ jobs:
           if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
-            coverage_pct=$(python3 - <<'PY' 2>/dev/null || echo 'N/A')
+            coverage_pct=$(python3 <<'PY' 2>/dev/null || echo 'N/A'
             import xml.etree.ElementTree as ET
             try:
               root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
@@ -240,7 +240,7 @@ jobs:
               except Exception:
                 print('N/A')
                 PY
-            )
+                )
             echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
           fi
@@ -254,10 +254,11 @@ jobs:
 
             for json_file in "$BUILD_DIR/bench_results"/*.json; do
               if [ -f "$json_file" ]; then
-                python3 -c "
-                import json
+                python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
+                import json, sys
                 try:
-                  with open('$json_file') as f:
+                  path = sys.argv[1]
+                  with open(path) as f:
                     data = json.load(f)
                     if 'benchmarks' in data:
                       for bench in data['benchmarks']:
@@ -266,11 +267,11 @@ jobs:
                         cpu_time = bench.get('cpu_time', 0.0)
                         bytes_per_sec = bench.get('bytes_per_second', 0.0)
                         items_per_sec = bench.get('items_per_second', 0.0)
-                        memory = f'{bytes_per_sec/1024/1024:.1f} MB/s' if bytes_per_sec > 0 else f' {items_per_sec:.0f} ops/s' if items_per_sec > 0 else 'N/A'
-                        print(f'| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |')
+                        memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
+                        print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
                         except Exception:
                           pass
-                          " >> "$SUMMARY_FILE" 2>/dev/null || true
+                          PY
               fi
             done
             echo "" >> "$SUMMARY_FILE"
