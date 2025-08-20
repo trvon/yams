@@ -21,7 +21,7 @@ using ::testing::HasSubstr;
 using ::testing::Return;
 
 // Forward declaration for dummy pool
-static ConnectionPool* getDummyPool();
+static std::shared_ptr<ConnectionPool> getDummyPool();
 
 // Mock classes for testing
 class MockMetadataRepository : public MetadataRepository {
@@ -137,12 +137,9 @@ public:
 };
 
 // Dummy function implementations for mocks
-static ConnectionPool* getDummyPool() {
-    static ConnectionPool* dummyPool = nullptr;
-    if (!dummyPool) {
-        static ConnectionPool pool(":memory:", ConnectionPoolConfig{});
-        dummyPool = &pool;
-    }
+static std::shared_ptr<ConnectionPool> getDummyPool() {
+    static std::shared_ptr<ConnectionPool> dummyPool =
+        std::make_shared<ConnectionPool>(":memory:", ConnectionPoolConfig{});
     return dummyPool;
 }
 
@@ -152,9 +149,8 @@ protected:
         mockMetadataRepo_ = std::make_shared<MockMetadataRepository>();
         mockContentStore_ = std::make_shared<MockContentStore>();
 
-        // Create command without parameters for now due to type mismatch
-        // TODO: Fix constructor parameter types or UpdateCommand interface
-        command_ = std::make_unique<UpdateCommand>();
+        // Create command with mock objects
+        command_ = std::make_unique<UpdateCommand>(mockMetadataRepo_, mockContentStore_);
 
         // Set up test database in temp directory
         testDir_ = std::filesystem::temp_directory_path() / "update_command_test";
@@ -164,7 +160,13 @@ protected:
         setupTestDocuments();
     }
 
-    void TearDown() override { std::filesystem::remove_all(testDir_); }
+    void TearDown() override {
+        // Explicitly reset objects to ensure proper destruction order
+        command_.reset();
+        mockMetadataRepo_.reset();
+        mockContentStore_.reset();
+        std::filesystem::remove_all(testDir_);
+    }
 
     void setupTestDocuments() {
         // Create sample documents for testing
@@ -213,6 +215,9 @@ TEST_F(UpdateCommandTest, UpdateByHash) {
         .WillOnce(Return(Result<std::optional<DocumentInfo>>(optDoc)));
 
     EXPECT_CALL(*mockMetadataRepo_, setMetadata(1, "status", _)).WillOnce(Return(Result<void>()));
+
+    // updateFuzzyIndex is called after metadata update
+    EXPECT_CALL(*mockMetadataRepo_, updateFuzzyIndex(1)).WillOnce(Return(Result<void>()));
 
     // Act
     auto result = command_->execute();

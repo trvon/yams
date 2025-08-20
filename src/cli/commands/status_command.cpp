@@ -1,12 +1,14 @@
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <algorithm>
-#include <chrono>
-#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <vector>
+
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_migration.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_service.h>
@@ -45,6 +47,40 @@ public:
         YAMS_ZONE_SCOPED_N("StatusCommand::execute");
 
         try {
+            // Try daemon-first for quick status snapshot
+            {
+                yams::daemon::StatusRequest dreq;
+                dreq.detailed = true;
+                auto render = [&](const yams::daemon::StatusResponse& s) -> Result<void> {
+                    if (jsonOutput_) {
+                        nlohmann::json j;
+                        j["running"] = s.running;
+                        j["version"] = s.version;
+                        j["uptimeSeconds"] = s.uptimeSeconds;
+                        j["requestsProcessed"] = s.requestsProcessed;
+                        j["activeConnections"] = s.activeConnections;
+                        j["memoryUsageMb"] = s.memoryUsageMb;
+                        j["cpuUsagePercent"] = s.cpuUsagePercent;
+                        std::cout << j.dump(2) << std::endl;
+                    } else {
+                        std::cout << "YAMS Daemon Status\n";
+                        std::cout << "==================\n";
+                        std::cout << (s.running ? "✓ Running" : "✗ Not running") << "\n";
+                        std::cout << "Version: " << s.version << "\n";
+                        std::cout << "Uptime: " << s.uptimeSeconds << "s\n";
+                        std::cout << "Requests: " << s.requestsProcessed
+                                  << ", Active: " << s.activeConnections << "\n";
+                        std::cout << "Memory: " << s.memoryUsageMb
+                                  << " MB, CPU: " << s.cpuUsagePercent << "%\n";
+                    }
+                    return Result<void>();
+                };
+                auto fallback = [&]() -> Result<void> {
+                    return Error{ErrorCode::NotImplemented, "local"};
+                };
+                if (auto d = daemon_first(dreq, fallback, render); d)
+                    return Result<void>();
+            }
             // Ensure storage is initialized (will detect existing storage)
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
@@ -98,6 +134,11 @@ private:
         uint64_t totalSize = 0;
         std::string storagePath;
 
+        // Configuration
+        bool configMigrationNeeded = false;
+        std::string configVersion;
+        std::string configPath;
+
         // Models
         std::vector<std::string> availableModels;
         bool hasModels = false;
@@ -127,6 +168,53 @@ private:
         } catch (const std::exception& e) {
             info.storageHealthy = false;
             info.warnings.push_back("Storage access failed: " + std::string(e.what()));
+        }
+
+        // Configuration migration status
+        try {
+            const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
+            const char* homeEnv = std::getenv("HOME");
+
+            fs::path configPath;
+            if (xdgConfigHome) {
+                configPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
+            } else if (homeEnv) {
+                configPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
+            } else {
+                configPath = fs::path("~/.config") / "yams" / "config.toml";
+            }
+
+            info.configPath = configPath.string();
+
+            config::ConfigMigrator migrator;
+            auto needsResult = migrator.needsMigration(configPath);
+
+            if (needsResult) {
+                info.configMigrationNeeded = needsResult.value();
+
+                // Get current version
+                auto versionResult = migrator.getConfigVersion(configPath);
+                if (versionResult) {
+                    info.configVersion = versionResult.value().toString();
+                } else {
+                    info.configVersion = "1.0.0";
+                }
+            } else {
+                // Error checking migration - assume v1 if config exists
+                if (fs::exists(configPath)) {
+                    info.configMigrationNeeded = true;
+                    info.configVersion = "1.0.0 (assumed)";
+                } else {
+                    info.configMigrationNeeded = false;
+                    info.configVersion = "none";
+                }
+            }
+        } catch (const std::exception& e) {
+            info.configMigrationNeeded = false;
+            info.configVersion = "unknown";
+            if (verbose_) {
+                info.warnings.push_back("Config migration check failed: " + std::string(e.what()));
+            }
         }
 
         // Check available models
@@ -184,6 +272,11 @@ private:
     }
 
     void generateRecommendations(StatusInfo& info) {
+        // Configuration migration (highest priority)
+        if (info.configMigrationNeeded) {
+            info.recommendations.push_back("Update configuration: yams config migrate");
+        }
+
         if (!info.hasModels) {
             info.recommendations.push_back(
                 "Download an embedding model: yams model --download all-MiniLM-L6-v2");
@@ -211,6 +304,13 @@ private:
         std::cout << "    \"totalDocuments\": " << info.totalDocuments << ",\n";
         std::cout << "    \"totalSize\": " << info.totalSize << ",\n";
         std::cout << "    \"path\": \"" << info.storagePath << "\"\n";
+        std::cout << "  },\n";
+
+        std::cout << "  \"configuration\": {\n";
+        std::cout << "    \"migrationNeeded\": " << (info.configMigrationNeeded ? "true" : "false")
+                  << ",\n";
+        std::cout << "    \"version\": \"" << info.configVersion << "\",\n";
+        std::cout << "    \"path\": \"" << info.configPath << "\"\n";
         std::cout << "  },\n";
 
         std::cout << "  \"models\": {\n";
@@ -262,6 +362,14 @@ private:
                       << " documents)\n";
         } else {
             std::cout << "Issues detected\n";
+        }
+
+        // Configuration status
+        std::cout << (info.configMigrationNeeded ? "⚠" : "✓") << " Configuration: ";
+        if (info.configMigrationNeeded) {
+            std::cout << "v" << info.configVersion << " (migration recommended)\n";
+        } else {
+            std::cout << "v" << info.configVersion << " (current)\n";
         }
 
         // Models status

@@ -11,6 +11,7 @@ target_link_libraries(yams
         yams_search
         yams_metadata
         yams_storage
+        yams::daemon
         CLI11::CLI11
         nlohmann_json::nlohmann_json
         spdlog::spdlog

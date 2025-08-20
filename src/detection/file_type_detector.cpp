@@ -1,11 +1,23 @@
+#include <yams/detection/file_type_detector.h>
+
 #include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
-#include <yams/detection/file_type_detector.h>
+
+#ifdef __linux__
+#include <unistd.h>
+#include <linux/limits.h>
+#endif
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #ifdef YAMS_HAS_LIBMAGIC
 #include <magic.h>
@@ -337,6 +349,97 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
         }
     }
 
+    return {};
+}
+
+Result<void> FileTypeDetector::initializeWithMagicNumbers() {
+    // Find the magic_numbers.json file
+    auto magicNumbersPath = findMagicNumbersFile();
+
+    // Create configuration
+    FileTypeDetectorConfig config;
+
+    if (!magicNumbersPath.empty()) {
+        // Initializing FileTypeDetector with magic_numbers.json
+        config.patternsFile = magicNumbersPath;
+        config.useCustomPatterns = true;
+    } else {
+        // magic_numbers.json not found, using built-in patterns only
+        config.useCustomPatterns = false;
+    }
+
+    // Always use built-in patterns as fallback
+    config.useBuiltinPatterns = true;
+    config.cacheResults = true;
+    config.cacheSize = 1000;
+
+    // Initialize the singleton instance
+    return instance().initialize(config);
+}
+
+std::filesystem::path FileTypeDetector::findMagicNumbersFile() {
+    namespace fs = std::filesystem;
+
+    std::vector<fs::path> searchPaths;
+
+    // 1. Check environment variable
+    if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
+        searchPaths.push_back(fs::path(dataDir) / "magic_numbers.json");
+    }
+
+    // 2. Check relative to executable location (for installed binaries)
+    try {
+        // Get the path to the current executable
+#ifdef __linux__
+        char result[PATH_MAX];
+        ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
+        if (count != -1) {
+            fs::path exePath(std::string(result, count));
+            // Check ../share/yams/data relative to binary
+            searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "data" /
+                                  "magic_numbers.json");
+        }
+#elif defined(__APPLE__)
+        char path[1024];
+        uint32_t size = sizeof(path);
+        if (_NSGetExecutablePath(path, &size) == 0) {
+            fs::path exePath(path);
+            // Check ../share/yams/data relative to binary
+            searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "data" /
+                                  "magic_numbers.json");
+        }
+#endif
+    } catch (...) {
+        // Ignore errors in getting executable path
+    }
+
+    // 3. Check common installation paths
+    searchPaths.push_back("/usr/local/share/yams/data/magic_numbers.json");
+    searchPaths.push_back("/usr/share/yams/data/magic_numbers.json");
+    searchPaths.push_back("/opt/yams/share/data/magic_numbers.json");
+
+    // 4. Check relative to current working directory (for development)
+    searchPaths.push_back("data/magic_numbers.json");
+    searchPaths.push_back("../data/magic_numbers.json");
+    searchPaths.push_back("../../data/magic_numbers.json");
+    searchPaths.push_back("../../../data/magic_numbers.json");
+    searchPaths.push_back("../../../../data/magic_numbers.json");
+
+    // 5. Check in home directory
+    if (const char* home = std::getenv("HOME")) {
+        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "data" /
+                              "magic_numbers.json");
+    }
+
+    // Find the first existing file
+    for (const auto& path : searchPaths) {
+        if (fs::exists(path) && fs::is_regular_file(path)) {
+            // Found magic_numbers.json at this path
+            return path;
+        }
+    }
+
+    // magic_numbers.json not found in any standard location
     return {};
 }
 
@@ -773,8 +876,7 @@ std::string FileTypeDetector::bytesToHex(std::span<const std::byte> data, size_t
     size_t length = std::min(data.size(), maxLength);
 
     for (size_t i = 0; i < length; ++i) {
-        ss << std::uppercase << std::setfill('0') << std::setw(2) << std::hex
-           << static_cast<int>(data[i]);
+        ss << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(data[i]);
     }
 
     return ss.str();

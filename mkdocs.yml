@@ -13,38 +13,48 @@ nav:
   - Get Started:
       - Installation: user_guide/installation.md
       - CLI: user_guide/cli.md
+      - Self-hosting: hosting/self_hosting.md
       - Prompts:
           - CLI usage: PROMPT.md
           - Engineering: PROMPT-eng.md
-  - Guides:
-      - Search: user_guide/search_guide.md
-      - Vector Search: user_guide/vector_search_guide.md
-      - Tutorials: user_guide/tutorials/README.md
-  - API:
-      - Overview: api/README.md
-      - Search API: api/search_api.md
-      - Vector Search API: api/vector_search_api.md
-      - OpenAPI (YAML): api/openapi.yaml
-      - MCP Tools: api/mcp_tools.md
-  - Architecture:
-      - Search System: architecture/search_system.md
-      - Vector Search Architecture: architecture/vector_search_architecture.md
-  - Reference:
-      - Developer:
-          - Setup: developer/setup.md
-          - Build System: developer/build_system.md
-          - Contributing: developer/contributing.md
-          - Architecture Notes: developer/architecture/README.md
-      - Admin:
-          - Configuration: admin/configuration.md
-          - Performance Tuning: admin/performance_tuning.md
-          - Vector Search Tuning: admin/vector_search_tuning.md
-      - Operations:
-          - Deployment: operations/deployment.md
-          - Monitoring: operations/monitoring.md
-          - Backup: operations/backup.md
-      - Benchmarks: benchmarks/performance_report.md
-  - Troubleshooting: troubleshooting/search_issues.md
+  - Docs:
+      - Guides:
+          - Search: user_guide/search_guide.md
+          - Vector Search: user_guide/vector_search_guide.md
+          - Tutorials: user_guide/tutorials/README.md
+      - Troubleshooting: troubleshooting/search_issues.md
+      - API:
+          - Overview: api/README.md
+          - Search API: api/search_api.md
+          - Vector Search API: api/vector_search_api.md
+          - OpenAPI (YAML): api/openapi.yaml
+          - MCP Tools: api/mcp_tools.md
+      - Cloud:
+          - Hosting: hosting/README.md
+          - Early Access: hosting/early-access.md
+          - Pricing (Preview): hosting/pricing.md
+          - Services: services/README.md
+          - Support Plans: services/support_plans.md
+          - Contact: services/contact.md
+      - Roadmap: roadmap.md
+      - Architecture:
+          - Search System: architecture/search_system.md
+          - Vector Search Architecture: architecture/vector_search_architecture.md
+      - Reference:
+          - Developer:
+              - Setup: developer/setup.md
+              - Build System: developer/build_system.md
+              - Contributing: developer/contributing.md
+              - Architecture Notes: developer/architecture/README.md
+          - Admin:
+              - Configuration: admin/configuration.md
+              - Performance Tuning: admin/performance_tuning.md
+              - Vector Search Tuning: admin/vector_search_tuning.md
+          - Operations:
+              - Deployment: operations/deployment.md
+              - Monitoring: operations/monitoring.md
+              - Backup: operations/backup.md
+          - Benchmarks: benchmarks/performance_report.md
 
 theme:
   name: material
@@ -83,6 +93,14 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/trvon/yams
       name: GitHub
+    - icon: fontawesome/solid/envelope
+      link: mailto:support@yamsmemory.ai
+      name: Email
+  announcement: '<a href="/hosting/early-access/">Join Hosting Early Access →</a>'
 
 extra_css:
   - assets/retro.css
+  - assets/landing.css
+extra_javascript:
+  - assets/landing.js
+copyright: "© YAMS"

@@ -1,5 +1,6 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_migration.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -24,7 +25,7 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 
-static constexpr std::string_view DEFAULT_STORAGE_ENGINE = "local";
+// static constexpr std::string_view DEFAULT_STORAGE_ENGINE = "local";  // Currently unused
 static constexpr size_t DEFAULT_API_KEY_BYTES = 32;
 
 // Available models for vector database
@@ -156,61 +157,36 @@ public:
             // 7) Generate an initial API key
             std::string apiKeyHex = generateApiKey(DEFAULT_API_KEY_BYTES);
 
-            // 8) Write config.toml
-            auto wc =
-                writeConfigToml(configPath, dataPath, std::string(DEFAULT_STORAGE_ENGINE),
-                                privateKeyPath, publicKeyPath, std::vector<std::string>{apiKeyHex},
-                                enableVectorDB, selectedModel, force_);
-            if (!wc)
-                return wc;
+            // 8) Write config.toml (v2 format)
+            auto migrator = std::make_unique<config::ConfigMigrator>();
+            auto createResult = migrator->createDefaultV2Config(configPath);
+            if (!createResult) {
+                return createResult;
+            }
+
+            // Update the v2 config with user choices
+            auto updateResult = updateV2Config(configPath, dataPath, privateKeyPath, publicKeyPath,
+                                               apiKeyHex, enableVectorDB, selectedModel);
+            if (!updateResult) {
+                return updateResult;
+            }
 
             if (printConfig_) {
-                // Print sanitized config (secrets masked)
-                std::ostringstream oss;
-                oss << "# YAMS configuration\n";
-                oss << "[core]\n";
-                oss << "data_dir = \"" << escapeTomlString(dataPath.string()) << "\"\n";
-                oss << "storage_engine = \""
-                    << escapeTomlString(std::string(DEFAULT_STORAGE_ENGINE)) << "\"\n";
-                oss << "\n";
-                oss << "[auth]\n";
-                oss << "private_key_path = \"" << escapeTomlString(privateKeyPath.string())
-                    << "\"\n";
-                oss << "public_key_path = \"" << escapeTomlString(publicKeyPath.string()) << "\"\n";
-                oss << "api_keys = [\"" << escapeTomlString(maskApiKey(apiKeyHex)) << "\"]\n";
-                oss << "\n";
-                oss << "[search.hybrid]\n";
-                oss << "enable_kg = true\n";
-                oss << "vector_weight = 0.6\n";
-                oss << "keyword_weight = 0.35\n";
-                oss << "kg_entity_weight = 0.03\n";
-                oss << "structural_weight = 0.02\n";
-                oss << "kg_max_neighbors = 32\n";
-                oss << "kg_max_hops = 1\n";
-                oss << "kg_budget_ms = 20\n";
-                oss << "generate_explanations = true\n";
-                oss << "\n";
-                oss << "[knowledge_graph]\n";
-                oss << "db_path = \"" << escapeTomlString((dataPath / "yams.db").string())
-                    << "\"\n";
-                oss << "enable_alias_fts = true\n";
-                oss << "enable_wal = true\n";
-                oss << "node_cache_capacity = 10000\n";
-                oss << "alias_cache_capacity = 50000\n";
-                oss << "embedding_cache_capacity = 10000\n";
-                oss << "neighbor_cache_capacity = 10000\n";
-
-                if (enableVectorDB) {
-                    oss << "\n[vector_database]\n";
-                    oss << "enabled = true\n";
-                    oss << "model = \"" << escapeTomlString(selectedModel) << "\"\n";
-                    oss << "model_path = \""
-                        << escapeTomlString(
-                               (dataPath / "models" / selectedModel / "model.onnx").string())
-                        << "\"\n";
+                // Print the v2 config (with secrets masked)
+                std::ifstream configFile(configPath);
+                if (configFile) {
+                    std::string line;
+                    while (std::getline(configFile, line)) {
+                        // Mask API keys in output
+                        if (line.find("api_keys = ") != std::string::npos) {
+                            std::cout << "api_keys = [\"" << maskApiKey(apiKeyHex) << "\"]"
+                                      << std::endl;
+                        } else {
+                            std::cout << line << std::endl;
+                        }
+                    }
+                    configFile.close();
                 }
-
-                std::cout << oss.str();
             }
 
             // Initialize vector database if enabled
@@ -296,81 +272,163 @@ private:
         return defaultYes;
     }
 
-    static Result<void>
-    writeConfigToml(const fs::path& configPath, const fs::path& dataDir,
-                    const std::string& storageEngine, const fs::path& privateKeyPath,
-                    const fs::path& publicKeyPath, const std::vector<std::string>& apiKeys,
-                    bool enableVectorDB, const std::string& selectedModel, bool force) {
+    static Result<void> updateV2Config(const fs::path& configPath, const fs::path& dataDir,
+                                       const fs::path& privateKeyPath,
+                                       const fs::path& publicKeyPath, const std::string& apiKey,
+                                       bool enableVectorDB, const std::string& selectedModel) {
         try {
-            if (fs::exists(configPath) && !force) {
-                return Error{ErrorCode::InvalidState,
-                             "Config file already exists: " + configPath.string()};
+            // Read the existing v2 config
+            std::ifstream in(configPath);
+            if (!in) {
+                return Error{ErrorCode::InvalidState, "Failed to read config file"};
+            }
+            std::stringstream buffer;
+            buffer << in.rdbuf();
+            in.close();
+
+            std::string content = buffer.str();
+
+            // Update specific values in the config
+            // This is a simple string replacement approach
+            // In production, we'd use a proper TOML parser
+
+            // Update data_dir
+            size_t pos = content.find("data_dir = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos,
+                                    "data_dir = \"" + escapeTomlString(dataDir.string()) + "\"");
+                }
             }
 
-            std::ostringstream oss;
-            oss << "# YAMS configuration\n";
-            oss << "[core]\n";
-            oss << "data_dir = \"" << escapeTomlString(dataDir.string()) << "\"\n";
-            oss << "storage_engine = \"" << escapeTomlString(storageEngine) << "\"\n";
-            oss << "\n";
-            oss << "[auth]\n";
-            oss << "private_key_path = \"" << escapeTomlString(privateKeyPath.string()) << "\"\n";
-            oss << "public_key_path = \"" << escapeTomlString(publicKeyPath.string()) << "\"\n";
-            oss << "api_keys = [";
-            for (size_t i = 0; i < apiKeys.size(); ++i) {
-                if (i)
-                    oss << ", ";
-                oss << "\"" << escapeTomlString(apiKeys[i]) << "\"";
+            // Update auth keys
+            pos = content.find("private_key_path = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos,
+                                    "private_key_path = \"" +
+                                        escapeTomlString(privateKeyPath.string()) + "\"");
+                }
             }
-            oss << "]\n";
-            oss << "\n";
-            oss << "[search.hybrid]\n";
-            oss << "enable_kg = true\n";
-            oss << "vector_weight = 0.6\n";
-            oss << "keyword_weight = 0.35\n";
-            oss << "kg_entity_weight = 0.03\n";
-            oss << "structural_weight = 0.02\n";
-            oss << "kg_max_neighbors = 32\n";
-            oss << "kg_max_hops = 1\n";
-            oss << "kg_budget_ms = 20\n";
-            oss << "generate_explanations = true\n";
-            oss << "\n";
-            oss << "[knowledge_graph]\n";
-            oss << "db_path = \"" << escapeTomlString((dataDir / "yams.db").string()) << "\"\n";
-            oss << "enable_alias_fts = true\n";
-            oss << "enable_wal = true\n";
-            oss << "node_cache_capacity = 10000\n";
-            oss << "alias_cache_capacity = 50000\n";
-            oss << "embedding_cache_capacity = 10000\n";
-            oss << "neighbor_cache_capacity = 10000\n";
 
-            // Add vector database configuration if enabled
+            pos = content.find("public_key_path = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos,
+                                    "public_key_path = \"" +
+                                        escapeTomlString(publicKeyPath.string()) + "\"");
+                }
+            }
+
+            pos = content.find("api_keys = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos,
+                                    "api_keys = [\"" + escapeTomlString(apiKey) + "\"]");
+                }
+            }
+
+            // Update vector database settings
             if (enableVectorDB && !selectedModel.empty()) {
-                oss << "\n[vector_database]\n";
-                oss << "enabled = true\n";
-                oss << "model = \"" << escapeTomlString(selectedModel) << "\"\n";
-                oss << "model_path = \""
-                    << escapeTomlString(
-                           (dataDir / "models" / selectedModel / "model.onnx").string())
-                    << "\"\n";
+                pos = content.find("[vector_database]");
+                if (pos != std::string::npos) {
+                    // Find the enabled line
+                    size_t enabledPos = content.find("enabled = ", pos);
+                    if (enabledPos != std::string::npos) {
+                        size_t endPos = content.find("\n", enabledPos);
+                        if (endPos != std::string::npos) {
+                            content.replace(enabledPos, endPos - enabledPos, "enabled = true");
+                        }
+                    }
+
+                    // Update model
+                    size_t modelPos = content.find("model = ", pos);
+                    if (modelPos != std::string::npos) {
+                        size_t endPos = content.find("\n", modelPos);
+                        if (endPos != std::string::npos) {
+                            content.replace(modelPos, endPos - modelPos,
+                                            "model = \"" + escapeTomlString(selectedModel) + "\"");
+                        }
+                    }
+
+                    // Update model_path
+                    size_t pathPos = content.find("model_path = ", pos);
+                    if (pathPos != std::string::npos) {
+                        size_t endPos = content.find("\n", pathPos);
+                        if (endPos != std::string::npos) {
+                            content.replace(pathPos, endPos - pathPos,
+                                            "model_path = \"" +
+                                                escapeTomlString((dataDir / "models" /
+                                                                  selectedModel / "model.onnx")
+                                                                     .string()) +
+                                                "\"");
+                        }
+                    }
+                }
             }
 
-            // Ensure parent directory exists
-            if (configPath.has_parent_path()) {
-                fs::create_directories(configPath.parent_path());
+            // Update storage base path and CAS directories based on selected data dir
+            pos = content.find("base_path = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos,
+                                    "base_path = \"" + escapeTomlString(dataDir.string()) + "\"");
+                }
             }
 
+            // Ensure CAS subdirectories are explicitly set (relative to base_path)
+            pos = content.find("objects_dir = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos, "objects_dir = \"objects\"");
+                }
+            }
+
+            pos = content.find("staging_dir = ");
+            if (pos != std::string::npos) {
+                size_t endPos = content.find("\n", pos);
+                if (endPos != std::string::npos) {
+                    content.replace(pos, endPos - pos, "staging_dir = \"staging\"");
+                }
+            }
+
+            // Ensure downloader store-only behavior and temp extension are set
+            size_t dpos = content.find("[downloader]");
+            if (dpos != std::string::npos) {
+                size_t storePos = content.find("store_only = ", dpos);
+                if (storePos != std::string::npos) {
+                    size_t endPos = content.find("\n", storePos);
+                    if (endPos != std::string::npos) {
+                        content.replace(storePos, endPos - storePos, "store_only = true");
+                    }
+                }
+                size_t tempPos = content.find("temp_extension = ", dpos);
+                if (tempPos != std::string::npos) {
+                    size_t endPos = content.find("\n", tempPos);
+                    if (endPos != std::string::npos) {
+                        content.replace(tempPos, endPos - tempPos, "temp_extension = \".part\"");
+                    }
+                }
+            }
+
+            // Write updated config
             std::ofstream out(configPath, std::ios::trunc);
             if (!out) {
-                return Error{ErrorCode::WriteError,
-                             "Failed to open config file for writing: " + configPath.string()};
+                return Error{ErrorCode::WriteError, "Failed to write updated config"};
             }
-            out << oss.str();
+            out << content;
             out.close();
 
             return Result<void>();
         } catch (const std::exception& e) {
-            return Error{ErrorCode::WriteError, std::string("Failed to write config: ") + e.what()};
+            return Error{ErrorCode::WriteError,
+                         std::string("Failed to update config: ") + e.what()};
         }
     }
 

@@ -72,6 +72,31 @@ public:
     Result<void> initialize(const FileTypeDetectorConfig& config = {});
 
     /**
+     * @brief Initialize detector with magic_numbers.json file
+     *
+     * This utility method automatically finds and loads the magic_numbers.json file
+     * from standard locations. It's a convenience wrapper around initialize()
+     * that handles the common initialization pattern used throughout the codebase.
+     *
+     * @return Success or error if initialization fails
+     */
+    static Result<void> initializeWithMagicNumbers();
+
+    /**
+     * @brief Find the magic_numbers.json file in standard locations
+     *
+     * Searches for magic_numbers.json in the following order:
+     * 1. YAMS_DATA_DIR environment variable
+     * 2. Relative to executable location (for installed binaries)
+     * 3. Common installation paths (/usr/local/share, /usr/share, etc.)
+     * 4. Relative to current working directory (for development)
+     * 5. User's home directory (~/.local/share/yams/data)
+     *
+     * @return Path to magic_numbers.json if found, empty path otherwise
+     */
+    static std::filesystem::path findMagicNumbersFile();
+
+    /**
      * @brief Detect file type from buffer
      * @param data First bytes of file
      * @return Detected file signature or error

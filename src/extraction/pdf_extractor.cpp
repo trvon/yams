@@ -46,7 +46,7 @@ void PdfExtractor::initializePdfium() {
     std::lock_guard<std::mutex> lock(pdfiumMutex);
     if (!pdfiumInitialized) {
         FPDF_LIBRARY_CONFIG config = {};
-        config.version = 3;
+        config.version = 2;
         config.m_pUserFontPaths = nullptr;
         config.m_pIsolate = nullptr;
         config.m_v8EmbedderSlot = 0;
@@ -165,7 +165,7 @@ Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte
 
     if (!pdfiumInitialized) {
         FPDF_LIBRARY_CONFIG config = {};
-        config.version = 3;
+        config.version = 2;
         config.m_pUserFontPaths = nullptr;
         config.m_pIsolate = nullptr;
         config.m_v8EmbedderSlot = 0;
@@ -193,6 +193,7 @@ Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte
     }
 
     ExtractionResult result;
+    result.extractionMethod = "pdfium";
     result.metadata["content_type"] = "application/pdf";
     result.metadata["encoding"] = "UTF-8";
 

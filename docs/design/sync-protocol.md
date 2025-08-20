@@ -9,7 +9,7 @@ Version: 1.0.0
 ## Transport Layer
 The protocol is transport-agnostic and can work over:
 - HTTP/HTTPS (REST API)
-- WebSocket (real-time sync)
+- Stdio (local process integration)
 - Direct TCP (P2P)
 - QUIC (future)
 

@@ -188,7 +188,7 @@ public:
     ManifestManager(ManifestManager&&) noexcept;
     ManifestManager& operator=(ManifestManager&&) noexcept;
 
-    // Create manifest using ranges and C++20 features
+    // Create manifest using ranges
     template <std::ranges::input_range R>
     requires std::same_as<std::ranges::range_value_t<R>, chunking::Chunk>
     Result<Manifest> createManifest(const FileInfo& fileInfo, R&& chunks) {
@@ -220,6 +220,9 @@ public:
         if (config_.enableChecksums) {
             manifest.checksum = calculateChecksum(manifest);
         }
+
+        // Update statistics (same as in non-template version)
+        updateManifestCreationStats();
 
         return manifest.isValid() ? Result<Manifest>(std::move(manifest))
                                   : Result<Manifest>(ErrorCode::InvalidArgument);
@@ -254,6 +257,10 @@ public:
     // Utility methods
     static std::string detectMimeType(const std::filesystem::path& path);
     static Result<FileInfo> getFileInfo(const std::filesystem::path& path);
+
+protected:
+    // Helper method for template functions to update statistics
+    void updateManifestCreationStats();
 
 private:
     struct Impl;

@@ -73,7 +73,7 @@ These guides are short, practical walkthroughs. They’ll be added incrementally
 - Goal: speed navigation, search toggles, and power keybindings.
 - Concepts: FTXUI controls, fuzzy toggles, quick actions.
 
-9) MCP Server: Stdio/WebSocket Smoke Test (coming soon)
+9) MCP Server: Stdio Smoke Test (coming soon)
 - Goal: run `yams serve`, connect with a simple client, exchange a message.
 - Concepts: transports, minimal JSON, quick client tooling (websocat/wscat).
 
@@ -105,7 +105,7 @@ YAMS_STORAGE="$PWD/.yams-projectA" yams add ./notes.txt
 - CLI Reference: [../cli.md](../cli.md)
 - Search Guides: [../search_guide.md](../search_guide.md), [../vector_search_guide.md](../vector_search_guide.md)
 - Admin/Config: [../../admin/configuration.md](../../admin/configuration.md)
-- MCP (WebSocket): [../../mcp_websocket_transport.md](../../mcp_websocket_transport.md)
+- MCP: [../mcp.md](../mcp.md)
 
 ---
 

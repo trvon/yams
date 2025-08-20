@@ -80,45 +80,26 @@ if(POLICY CMP0135) # IN_LIST behavior and other modern improvements
     cmake_policy(SET CMP0135 NEW)
 endif()
 
-# C++ standard configuration
-option(YAMS_CXX17_MODE "Use C++17 for broader compatibility (default: C++20)" OFF)
-
-if(YAMS_CXX17_MODE)
-    set(CMAKE_CXX_STANDARD 17)
-    message(STATUS "Using C++17 compatibility mode")
-    
-    # Compiler version checks for C++17 mode
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
-            message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 9+ is required for C++17 support.")
-        endif()
-        message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION} in C++17 mode")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
-            message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected. Clang 9+ is required for C++17 support.")
-        endif()
-        message(STATUS "Using Clang ${CMAKE_CXX_COMPILER_VERSION} in C++17 mode")
-    endif()
-else()
-    set(CMAKE_CXX_STANDARD 20)
-    message(STATUS "Using C++20 mode (default)")
-    
-    # Compiler version checks for C++20 mode
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
-            message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 11+ is required for C++20 support.")
-        endif()
-        message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION} in C++20 mode")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
-            message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected. Clang 12+ is required for C++20 support.")
-        endif()
-        message(STATUS "Using Clang ${CMAKE_CXX_COMPILER_VERSION} in C++20 mode")
-    endif()
-endif()
-
+# C++ standard configuration (C++20-only)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+message(STATUS "Using C++20 mode")
+
+# Compiler version checks for C++20 mode
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
+        message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} detected. GCC 11+ is required for C++20 support.")
+    endif()
+    message(STATUS "Using GCC ${CMAKE_CXX_COMPILER_VERSION} in C++20 mode")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+        message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected. Clang 12+ is required for C++20 support.")
+    endif()
+    message(STATUS "Using Clang ${CMAKE_CXX_COMPILER_VERSION} in C++20 mode")
+endif()
+
+## Kept above in unified C++20 configuration
 
 # Tracy profiler integration for Debug builds
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -145,26 +126,21 @@ else()
     set(YAMS_ENABLE_PROFILING OFF)
 endif()
 
-# Check for std::format availability (only in C++20 mode)
+# Check for std::format availability (C++20 project; allow fmt fallback)
 include(CheckCXXSourceCompiles)
-if(NOT YAMS_CXX17_MODE)
-    check_cxx_source_compiles("
-        #include <version>
-        #ifdef __cpp_lib_format
-        #include <format>
-        int main() {
-            auto s = std::format(\"{}\", 42);
-            return 0;
-        }
-        #else
-        #error No format support
-        #endif
-    " YAMS_HAS_STD_FORMAT)
-else()
-    # In C++17 mode, std::format is not available
-    set(YAMS_HAS_STD_FORMAT FALSE)
-    message(STATUS "C++17 mode: std::format not available, using fmt fallback")
-endif()
+check_cxx_source_compiles("
+    #include <version>
+    #ifdef __cpp_lib_format
+    #include <format>
+    int main() {
+        auto s = std::format(\"{}\", 42);
+        (void)s;
+        return 0;
+    }
+    #else
+    #error No format support
+    #endif
+" YAMS_HAS_STD_FORMAT)
 
 if(YAMS_HAS_STD_FORMAT)
     add_compile_definitions(YAMS_HAS_STD_FORMAT=1)
@@ -389,8 +365,8 @@ endif()
     install(FILES "${MAN_DIR}/yams.1" DESTINATION "${CMAKE_INSTALL_MANDIR}/man1" COMPONENT runtime)
 
     # 9) Install data files (magic_numbers.json)
-    install(FILES "${CMAKE_SOURCE_DIR}/data/magic_numbers.json" 
-            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/yams/data" 
+    install(FILES "${CMAKE_SOURCE_DIR}/data/magic_numbers.json"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/yams/data"
             COMPONENT runtime)
 
     # 10) Global compile definition to indicate embedded help is available
@@ -476,33 +452,21 @@ endif()
 # Legacy compatibility
 set(YAMS_BUILD_TOOLS ${YAMS_BUILD_CLI})
 
-# C++ feature detection
+# C++20 feature detection
 include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+    #include <concepts>
+    template<typename T>
+    concept Integral = std::integral<T>;
+    int main() { return 0; }
+" YAMS_HAS_CXX20_CONCEPTS)
 
-if(NOT YAMS_CXX17_MODE)
-    # C++20 feature checks (only when in C++20 mode)
-    check_cxx_source_compiles("
-        #include <concepts>
-        template<typename T>
-        concept Integral = std::integral<T>;
-        int main() {
-            return 0;
-        }
-    " YAMS_HAS_CXX20_CONCEPTS)
-    
-    # std::span check is already done above for compatibility layer
-    
-    if(NOT YAMS_HAS_CXX20_CONCEPTS)
-        message(WARNING "C++20 concepts not available, some features may be limited")
-        add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=0)
-    else()
-        add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=1)
-        message(STATUS "C++20 concepts available")
-    endif()
-else()
-    # C++17 mode - set feature flags appropriately
+if(NOT YAMS_HAS_CXX20_CONCEPTS)
+    message(WARNING "concepts appear unavailable; features using <concepts> may be limited")
     add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=0)
-    message(STATUS "C++17 mode: C++20 concepts not available")
+else()
+    add_compile_definitions(YAMS_HAS_CXX20_CONCEPTS=1)
+    message(STATUS "concepts available")
 endif()
 
 # Compiler warnings
@@ -565,7 +529,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     " HAVE_CXX20_COROUTINES)
 
     if(NOT HAVE_CXX20_COROUTINES)
-        message(WARNING "C++20 coroutines appear unsupported with current flags; features requiring <coroutine> may fail to build.")
+        message(WARNING "coroutines appear unsupported with current flags; features requiring <coroutine> may fail to build.")
     endif()
 elseif(MSVC)
     add_compile_options(
@@ -626,6 +590,23 @@ find_package(OpenSSL REQUIRED)
 message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
 message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "OpenSSL crypto library: ${OPENSSL_CRYPTO_LIBRARY}")
+
+# ZLIB (for CRC32 and compression)
+find_package(ZLIB REQUIRED)
+message(STATUS "Found ZLIB: ${ZLIB_VERSION_STRING}")
+
+# libcurl (HTTP client)
+find_package(CURL REQUIRED)
+message(STATUS "Found libcurl: ${CURL_VERSION_STRING}")
+if(NOT TARGET CURL::libcurl)
+    message(FATAL_ERROR "CURL::libcurl target not found after find_package(CURL)")
+endif()
+
+# Provide a stable interface target for downloader code
+add_library(yams_curl INTERFACE)
+target_link_libraries(yams_curl INTERFACE CURL::libcurl)
+add_library(yams::curl ALIAS yams_curl)
+install(TARGETS yams_curl EXPORT YamsTargets)
 
 # Threads (required for websocketpp)
 find_package(Threads REQUIRED)
@@ -737,11 +718,11 @@ if(YAMS_USE_CONAN)
             find_package(gtest REQUIRED)
             message(STATUS "Conan build: Found gtest package")
         else()
-            # Try uppercase GTest 
+            # Try uppercase GTest
             find_package(GTest REQUIRED)
             message(STATUS "Conan build: Found GTest package")
         endif()
-        
+
         # Check which targets are available
         if(TARGET gtest::gtest)
             message(STATUS "Conan build: gtest::gtest target is available")
@@ -762,7 +743,7 @@ endif()
 message(STATUS "YAMS_USE_CONAN is: ${YAMS_USE_CONAN}")
 if(NOT YAMS_USE_CONAN)
     message(STATUS "Using FetchContent for dependencies (non-Conan mode)")
-    
+
     # fmt for std::format fallback when not available
     if(NOT YAMS_HAS_STD_FORMAT)
         FetchContent_Declare(
@@ -774,7 +755,7 @@ if(NOT YAMS_USE_CONAN)
         FetchContent_MakeAvailable(fmt)
         message(STATUS "Using fmt library as std::format fallback")
     endif()
-    
+
     # spdlog for logging
     FetchContent_Declare(
         spdlog
@@ -1052,16 +1033,16 @@ FetchContent_Declare(
 FetchContent_GetProperties(sqlite_vec)
 if(NOT sqlite_vec_POPULATED)
     FetchContent_Populate(sqlite_vec)
-    
+
     # Export the source directory for use by yams_vector
     set(sqlite_vec_SOURCE_DIR ${sqlite_vec_SOURCE_DIR} CACHE INTERNAL "sqlite-vec source directory")
-    
+
     message(STATUS "sqlite-vec source fetched successfully to ${sqlite_vec_SOURCE_DIR}")
 endif()
 
 if(YAMS_ENABLE_PDF)
     message(STATUS "Configuring PDFium for PDF support")
-    
+
     # Try to find PDFium from Conan first if using Conan
     set(PDFium_FOUND FALSE)
     if(YAMS_USE_CONAN)
@@ -1074,7 +1055,7 @@ if(YAMS_ENABLE_PDF)
             message(STATUS "PDFium not available via Conan, falling back to FetchContent")
         endif()
     endif()
-    
+
     # If PDFium not found via Conan, use FetchContent (both Conan and non-Conan builds)
     if(NOT PDFium_FOUND)
         # Determine platform and architecture
@@ -1108,69 +1089,69 @@ if(YAMS_ENABLE_PDF)
 
         FetchContent_GetProperties(pdfium)
         if(NOT pdfium_POPULATED)
-        message(STATUS "Downloading PDFium binaries for ${PDFIUM_PLATFORM}...")
-        FetchContent_Populate(pdfium)
+            message(STATUS "Downloading PDFium binaries for ${PDFIUM_PLATFORM}...")
+            FetchContent_Populate(pdfium)
 
-        # Verify PDFium was downloaded correctly
-        if(NOT EXISTS "${pdfium_SOURCE_DIR}/include/fpdfview.h")
-            message(WARNING "PDFium download failed or incomplete. PDF support will be disabled.")
-            set(YAMS_ENABLE_PDF OFF)
-            return()
-        endif()
+            # Verify PDFium was downloaded correctly
+            if(NOT EXISTS "${pdfium_SOURCE_DIR}/include/fpdfview.h")
+                message(WARNING "PDFium download failed or incomplete. PDF support will be disabled.")
+                set(YAMS_ENABLE_PDF OFF)
+                return()
+            endif()
 
-        # Create imported target for PDFium
-        add_library(pdfium SHARED IMPORTED GLOBAL)
+            # Create imported target for PDFium
+            add_library(pdfium SHARED IMPORTED GLOBAL)
 
-        # Set include directories
-        set_target_properties(pdfium PROPERTIES
+            # Set include directories
+            set_target_properties(pdfium PROPERTIES
             INTERFACE_INCLUDE_DIRECTORIES "${pdfium_SOURCE_DIR}/include"
         )
 
-        # Set library location based on platform
-        if(APPLE)
-            set_target_properties(pdfium PROPERTIES
+            # Set library location based on platform
+            if(APPLE)
+                set_target_properties(pdfium PROPERTIES
                 IMPORTED_LOCATION "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
             )
-            # Ensure @rpath install_name on the fetched dylib for proper link-time embedding
-            execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib")
-        elseif(UNIX)
-            set_target_properties(pdfium PROPERTIES
+                # Ensure @rpath install_name on the fetched dylib for proper link-time embedding
+                execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib")
+            elseif(UNIX)
+                set_target_properties(pdfium PROPERTIES
                 IMPORTED_LOCATION "${pdfium_SOURCE_DIR}/lib/libpdfium.so"
             )
-        elseif(WIN32)
-            set_target_properties(pdfium PROPERTIES
+            elseif(WIN32)
+                set_target_properties(pdfium PROPERTIES
                 IMPORTED_LOCATION "${pdfium_SOURCE_DIR}/bin/pdfium.dll"
                 IMPORTED_IMPLIB "${pdfium_SOURCE_DIR}/lib/pdfium.lib"
             )
-        endif()
+            endif()
 
-        # Create alias for consistent naming
-        add_library(pdfium::pdfium ALIAS pdfium)
+            # Create alias for consistent naming
+            add_library(pdfium::pdfium ALIAS pdfium)
 
-        # Install the prebuilt PDFium library based on platform
-        if(APPLE)
-            install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
+            # Install the prebuilt PDFium library based on platform
+            if(APPLE)
+                install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
                     DESTINATION ${CMAKE_INSTALL_LIBDIR}
                     COMPONENT runtime)
-        elseif(UNIX)
-            install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.so"
+            elseif(UNIX)
+                install(FILES "${pdfium_SOURCE_DIR}/lib/libpdfium.so"
                     DESTINATION ${CMAKE_INSTALL_LIBDIR}
                     COMPONENT runtime)
-        elseif(WIN32)
-            install(FILES "${pdfium_SOURCE_DIR}/bin/pdfium.dll"
+            elseif(WIN32)
+                install(FILES "${pdfium_SOURCE_DIR}/bin/pdfium.dll"
                     DESTINATION ${CMAKE_INSTALL_BINDIR}
                     COMPONENT runtime)
-            install(FILES "${pdfium_SOURCE_DIR}/lib/pdfium.lib"
+                install(FILES "${pdfium_SOURCE_DIR}/lib/pdfium.lib"
                     DESTINATION ${CMAKE_INSTALL_LIBDIR}
                     COMPONENT development)
-        endif()
+            endif()
 
-        if(APPLE)
-            # Ensure consumers load PDFium via @rpath; installed binaries use @loader_path/../lib
-            install(CODE "execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib \"${CMAKE_INSTALL_FULL_LIBDIR}/libpdfium.dylib\")")
+            if(APPLE)
+                # Ensure consumers load PDFium via @rpath; installed binaries use @loader_path/../lib
+                install(CODE "execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib \"${CMAKE_INSTALL_FULL_LIBDIR}/libpdfium.dylib\")")
 
-            # Patch installed executables to reference @rpath/libpdfium.dylib and ensure rpath includes ../lib
-            install(CODE "
+                # Patch installed executables to reference @rpath/libpdfium.dylib and ensure rpath includes ../lib
+                install(CODE "
                 set(_bins yams yams-mcp-server)
                 foreach(_bin IN LISTS _bins)
                     set(_path \"${CMAKE_INSTALL_FULL_BINDIR}/${_bin}\")
@@ -1181,10 +1162,10 @@ if(YAMS_ENABLE_PDF)
                     endif()
                 endforeach()
             ")
-        endif()
+            endif()
 
-        message(STATUS "PDFium ${PDFIUM_PLATFORM} successfully configured")
-        set(YAMS_PDFIUM_FOUND TRUE CACHE BOOL "PDFium library found and configured")
+            message(STATUS "PDFium ${PDFIUM_PLATFORM} successfully configured")
+            set(YAMS_PDFIUM_FOUND TRUE CACHE BOOL "PDFium library found and configured")
         endif()  # end if(NOT pdfium_POPULATED)
     endif()  # end if(NOT PDFium_FOUND)
 else()
@@ -1221,11 +1202,7 @@ target_include_directories(yams_core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-if(YAMS_CXX17_MODE)
-    target_compile_features(yams_core INTERFACE cxx_std_17)
-else()
-    target_compile_features(yams_core INTERFACE cxx_std_20)
-endif()
+target_compile_features(yams_core INTERFACE cxx_std_20)
 add_library(yams::core ALIAS yams_core)
 
 # Add subdirectories
@@ -1248,7 +1225,7 @@ if(YAMS_BUILD_TESTS)
         # Prevent overriding the parent project's compiler/linker settings on Windows
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googletest)
-        
+
         # Create alias targets for compatibility with find_package(GTest)
         if(TARGET gtest AND NOT TARGET GTest::gtest)
             add_library(GTest::gtest ALIAS gtest)
@@ -1350,7 +1327,7 @@ install(DIRECTORY include/
 )
 
 # Install data files
-install(FILES 
+install(FILES
     data/magic_numbers.json
     DESTINATION ${CMAKE_INSTALL_DATADIR}/yams/data
     COMPONENT runtime
@@ -1482,6 +1459,146 @@ if(YAMS_ENABLE_COVERAGE)
             COMMENT "Running tests and generating coverage report"
         )
     endif()
+endif()
+
+# =============================================================================
+# Code Quality Targets
+# =============================================================================
+
+# Find cppcheck for static analysis
+find_program(CPPCHECK_PATH cppcheck)
+
+if(CPPCHECK_PATH)
+    message(STATUS "Found cppcheck: ${CPPCHECK_PATH}")
+    
+    # Quality check script path
+    set(QUALITY_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/check-quality.sh")
+    
+    if(EXISTS ${QUALITY_SCRIPT})
+        # Quick quality check (essential checks only)
+        add_custom_target(quality-quick
+            COMMAND ${QUALITY_SCRIPT} --profile quick --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Running quick code quality analysis"
+        )
+        
+        # Normal quality check (standard checks)
+        add_custom_target(quality
+            COMMAND ${QUALITY_SCRIPT} --profile normal --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Running standard code quality analysis"
+        )
+        
+        # Strict quality check (all checks, warnings as errors)
+        add_custom_target(quality-strict
+            COMMAND ${QUALITY_SCRIPT} --profile strict --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Running strict code quality analysis"
+        )
+        
+        # CI quality check (optimized for continuous integration)
+        add_custom_target(quality-ci
+            COMMAND ${QUALITY_SCRIPT} --profile ci --format xml 
+                --output ${CMAKE_BINARY_DIR}/quality-reports/ --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Running CI code quality analysis with XML output"
+        )
+        
+        # Quality check with automatic formatting
+        add_custom_target(quality-format
+            COMMAND ${QUALITY_SCRIPT} --profile normal --fix-format --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Running code quality analysis with automatic formatting"
+        )
+        
+        # Git-aware quality check (only modified files)
+        add_custom_target(quality-git
+            COMMAND ${QUALITY_SCRIPT} --profile normal --git --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Running code quality analysis on git-modified files"
+        )
+        
+        # Generate quality baseline
+        add_custom_target(quality-baseline
+            COMMAND ${QUALITY_SCRIPT} --profile normal --generate-baseline 
+                --output ${CMAKE_BINARY_DIR}/quality-reports/ --build-dir ${CMAKE_BINARY_DIR}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Generating code quality baseline"
+        )
+        
+        # Create quality reports directory
+        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/quality-reports)
+        
+        message(STATUS "Code quality targets enabled:")
+        message(STATUS "  quality-quick    - Quick essential checks")
+        message(STATUS "  quality          - Standard quality analysis")  
+        message(STATUS "  quality-strict   - Strict analysis (warnings as errors)")
+        message(STATUS "  quality-ci       - CI-optimized with XML output")
+        message(STATUS "  quality-format   - Analysis with auto-formatting")
+        message(STATUS "  quality-git      - Analysis of git-modified files only")
+        message(STATUS "  quality-baseline - Generate quality baseline")
+    else()
+        message(WARNING "Quality script not found: ${QUALITY_SCRIPT}")
+    endif()
+    
+    # Add quality checks to development workflow targets
+    if(TARGET format-code)
+        add_dependencies(quality format-code)
+    endif()
+    
+else()
+    message(STATUS "cppcheck not found - quality targets disabled")
+    message(STATUS "Install with: brew install cppcheck (macOS) or apt-get install cppcheck (Linux)")
+endif()
+
+# Find clang-format for code formatting
+find_program(CLANG_FORMAT_PATH clang-format)
+if(CLANG_FORMAT_PATH AND EXISTS "${CMAKE_SOURCE_DIR}/scripts/format-code.sh")
+    add_custom_target(format-code
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/format-code.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Formatting code with clang-format"
+    )
+    
+    add_custom_target(format-check
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/format-code.sh --check
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Checking code formatting"
+    )
+    
+    message(STATUS "Code formatting targets enabled:")
+    message(STATUS "  format-code  - Format all C++ files")
+    message(STATUS "  format-check - Check if formatting is needed")
+endif()
+
+# Combined development targets
+if(CPPCHECK_PATH AND EXISTS ${QUALITY_SCRIPT})
+    # Full development check: format + quality + tests
+    add_custom_target(dev-check
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target all
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --parallel
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running full development checks (build + test + quality)"
+    )
+    
+    if(TARGET format-code)
+        add_dependencies(dev-check format-code)
+    endif()
+    
+    if(TARGET quality)
+        add_dependencies(dev-check quality)
+    endif()
+    
+    # Pre-commit hook target
+    add_custom_target(pre-commit
+        COMMAND ${QUALITY_SCRIPT} --profile normal --git --fix-format --build-dir ${CMAKE_BINARY_DIR}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Running pre-commit quality checks and formatting"
+    )
+    
+    message(STATUS "Development workflow targets:")
+    message(STATUS "  dev-check   - Full development check (build + test + quality)")
+    message(STATUS "  pre-commit  - Pre-commit checks (git files only, with formatting)")
 endif()
 
 # CPack configuration

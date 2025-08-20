@@ -50,7 +50,7 @@ For concrete examples, see:
 - The HTTP API surface may evolve with releases; `openapi.yaml` in your branch/tag matches that build.
 - If you don’t see a running HTTP server, use:
   - CLI: `docs/user_guide/cli.md`
-  - MCP server (for AI tools/workflows): `docs/mcp_websocket_transport.md`
+  - MCP server (for AI tools/workflows): `docs/user_guide/mcp.md`
 
 ## See also
 

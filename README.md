@@ -211,19 +211,9 @@ yams delete --pattern "*.log" --dry-run
 
 ### MCP Server
 
-Start the MCP server over WebSocket:
+Start the MCP server (stdio transport only):
 ```bash
-yams serve --transport websocket --host 127.0.0.1 --port 8080 --path /mcp
-```
-
-Use TLS (wss):
-```bash
-yams serve --transport websocket --host your.domain --port 443 --path /mcp --ssl
-```
-
-StdIO transport (recommended for local integration and Claude Desktop):
-```bash
-yams serve --transport stdio
+yams serve
 ```
 
 ### Claude Desktop (MCP) Integration
@@ -234,29 +224,13 @@ Use stdio (recommended). Add this to your Claude Desktop config (e.g., ~/Library
   "mcpServers": {
     "yams": {
       "command": "/usr/local/bin/yams",
-      "args": ["serve", "--transport", "stdio"],
+      "args": ["serve"],
       "env": {
-        "YAMS_STORAGE": "$HOME/.local/share/yams"
       }
     }
   }
 }
-```
 
-Alternative (WebSocket) for clients that support ws:
-```json
-{
-  "mcpServers": {
-    "yams-ws": {
-      "command": "/usr/local/bin/yams",
-      "args": ["serve", "--transport", "websocket", "--host", "127.0.0.1", "--port", "8080", "--path", "/mcp"],
-      "env": {
-        "YAMS_STORAGE": "$HOME/.local/share/yams"
-      }
-    }
-  }
-}
-```
 
 ### CLI Usage
 
@@ -332,6 +306,7 @@ yams browse
 #### Search
 yams search "query" --limit 10
 yams search "error" --type "log"
+yams search "call(" --paths-only --literal-text  # treat query as literal text, not regex
 
 # Retrieve
 yams get <hash>
@@ -434,31 +409,31 @@ YAMS is ideal for LLMs to maintain persistent memory across sessions:
 #### Development Workflow
 ```bash
 # Store current code state before making changes
-git diff | yams store - --tags "pre-refactor,auth-module,$(date +%Y%m%d)"
+git diff | yams add - --tags "pre-refactor,auth-module,$(date +%Y%m%d)"
 
 # Track implementation decisions
-yams store "Decided to use JWT tokens with 24h expiry for auth" \
+echo "Decided to use JWT tokens with 24h expiry for auth" | yams add - \
   --tags "decision,auth,architecture"
 
 # Store error context for debugging
-yams store "$(tail -100 app.log)" --tags "error,production,$(date +%Y%m%d-%H%M)"
+tail -100 app.log | yams add - --tags "error,production,$(date +%Y%m%d-%H%M)"
 
 # Save working implementation
-yams store-file auth_handler.py --tags "working,auth,v2.1"
+yams add auth_handler.py --tags "working,auth,v2.1"
 ```
 
 #### Research & Documentation
 ```bash
 # Store web research
-curl -s https://api.example.com/docs | yams store - \
+curl -s https://api.example.com/docs | yams add - \
   --tags "api-docs,external,example-api" \
   --source "https://api.example.com/docs"
 
 # Cache fetched content
-yams store "$WEB_CONTENT" --tags "research,oauth,implementation-guide"
+echo "$WEB_CONTENT" | yams add - --tags "research,oauth,implementation-guide"
 
 # Store meeting notes
-yams store-file meeting-notes-2024-01-15.md --tags "meeting,requirements,client"
+yams add meeting-notes-2024-01-15.md --tags "meeting,requirements,client"
 ```
 
 #### Search Patterns
@@ -493,8 +468,8 @@ export YAMS_CACHE_SIZE=1GB   # Default: 256MB
 
 **Reduce memory usage**:
 ```bash
-# Use streaming mode for large files
-yams store-file --stream large-file.bin
+# Add a large file (streamed from disk)
+yams add large-file.bin
 
 # Enable compression
 export YAMS_COMPRESSION=zstd  # Options: none, zstd, lzma

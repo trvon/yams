@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <sstream>
 #include <stack>
+#include <string_view>
 #include <yams/search/query_parser.h>
 
 namespace yams::search {
@@ -15,8 +16,22 @@ QueryParser::QueryParser(const QueryParserConfig& config) : config_(config), cur
 }
 
 Result<std::unique_ptr<QueryNode>> QueryParser::parse(const std::string& query) {
+    return parse(query, ParseOptions{});
+}
+
+Result<std::unique_ptr<QueryNode>> QueryParser::parse(const std::string& query,
+                                                      const ParseOptions& options) {
     if (query.empty()) {
         return Error{ErrorCode::InvalidArgument, "Empty query string"};
+    }
+
+    // Store options for use during parsing
+    currentOptions_ = options;
+
+    // If literal text mode, create a simple term node with escaped text
+    if (options.literalText) {
+        auto termNode = std::make_unique<TermNode>(query);
+        return std::unique_ptr<QueryNode>(std::move(termNode));
     }
 
     try {
@@ -44,7 +59,7 @@ Result<std::unique_ptr<QueryNode>> QueryParser::parse(const std::string& query) 
 }
 
 QueryValidation QueryParser::validate(const std::string& query) {
-    auto result = parse(query);
+    auto result = parse(query, ParseOptions{});
     if (result) {
         return QueryValidation::valid();
     } else {
@@ -59,6 +74,10 @@ std::string QueryParser::toFTS5Query(const QueryNode* node) {
     switch (node->getType()) {
         case QueryNodeType::Term: {
             auto termNode = static_cast<const TermNode*>(node);
+            // If in literal text mode, apply more aggressive escaping
+            if (currentOptions_.literalText) {
+                return escapeLiteralTextForFTS5(termNode->getTerm());
+            }
             return escapeForFTS5(termNode->getTerm());
         }
 
@@ -375,6 +394,37 @@ std::string QueryParser::escapeForFTS5(const std::string& term) {
         }
     }
     return escaped;
+}
+
+[[nodiscard]] std::string QueryParser::escapeLiteralTextForFTS5(std::string_view text) const {
+    // C++20 optimized literal text escaping for FTS5
+    // Pre-allocate with expected size (worst case: every char needs escaping)
+    std::string result;
+    result.reserve(text.size() * 2);
+
+    // FTS5 special characters that need escaping in literal text mode
+    constexpr std::string_view specialChars = "\"'*()[]{}\\-+:^";
+
+    for (char c : text) {
+        // Check if character needs escaping
+        if (specialChars.find(c) != std::string_view::npos) {
+            // For literal text, we want to treat these as regular characters
+            // FTS5 uses double quotes for exact phrases, so wrap in quotes
+            if (c == '"') {
+                result += "\"\""; // Escape quotes by doubling
+            } else {
+                // For other special chars, we need to ensure they're treated literally
+                // One approach is to put them in a quoted phrase
+                result += c;
+            }
+        } else {
+            result += c;
+        }
+    }
+
+    // Wrap the entire result in quotes to make it a phrase search
+    // This ensures the text is searched literally
+    return "\"" + result + "\"";
 }
 
 std::string QueryParser::fieldToFTS5(const std::string& field, const std::string& value) {

@@ -9,8 +9,6 @@ The MCP server can be started with:
 # StdIO transport (recommended for Claude Desktop)
 yams serve
 
-# WebSocket transport
-yams serve --transport websocket --host 127.0.0.1 --port 8080
 ```
 
 ## Available Tools
@@ -227,13 +225,13 @@ Search for regex patterns within document contents (similar to grep command).
       "default": 0
     },
     "before_context": {
-      "type": "integer", 
+      "type": "integer",
       "description": "Show N lines before match",
       "default": 0
     },
     "context": {
       "type": "integer",
-      "description": "Show N lines before and after match", 
+      "description": "Show N lines before and after match",
       "default": 0
     },
     "ignore_case": {
@@ -377,7 +375,7 @@ Update metadata for an existing document.
       "description": "Hash of the document to update"
     },
     "name": {
-      "type": "string", 
+      "type": "string",
       "description": "Name of the document to update"
     },
     "metadata": {
@@ -459,7 +457,7 @@ Get storage statistics with optional file type breakdown.
 List all documents with comprehensive filtering and sorting capabilities.
 
 **Enhanced Features:**
-- File type filtering (`type`, `mime`, `extension`, `binary`, `text`)  
+- File type filtering (`type`, `mime`, `extension`, `binary`, `text`)
 - Time-based filtering (`created_after/before`, `modified_after/before`, `indexed_after/before`)
 - Recent documents (`recent` parameter)
 - Sorting options (`sort_by`: name, size, created, modified, indexed)
@@ -485,7 +483,7 @@ List all documents with comprehensive filtering and sorting capabilities.
 ### delete_by_name
 Delete documents by name, multiple names, or glob patterns.
 
-### get_by_name  
+### get_by_name
 Retrieve document content by name instead of hash.
 
 ### cat_document
@@ -537,9 +535,7 @@ Add to your Claude Desktop configuration:
     "yams": {
       "command": "yams",
       "args": ["serve"],
-      "env": {
-        "YAMS_STORAGE": "/path/to/your/storage"
-      }
+      "env": {}
     }
   }
 }

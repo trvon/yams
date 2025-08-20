@@ -18,14 +18,8 @@ The YAMS MCP server exposes content-addressable storage and search capabilities 
 # Stdio transport (for Claude Desktop and similar)
 yams serve
 
-# HTTP transport (for direct network access)
-yams serve --transport http --host 127.0.0.1 --port 8777 --path /mcp
-
 # Docker (stdio transport)
 docker run -i ghcr.io/trvon/yams:latest serve
-
-# Docker (HTTP transport)
-docker run -p 8777:8777 ghcr.io/trvon/yams:latest serve --transport http --host 0.0.0.0 --path /mcp
 ```
 
 ## Transport Options
@@ -44,22 +38,7 @@ The stdio transport uses standard input/output for JSON-RPC communication. This 
 - Secure by default
 - Simple configuration
 
-### HTTP Transport (Streamable HTTP)
 
-HTTP transport enables direct, network-based communication (no subprocess/stdio). This is useful for local apps that POST JSON-RPC to an MCP endpoint.
-
-**When to use:**
-- Apps that connect to a URL (localhost) instead of launching a subprocess
-- Container deployments
-- Multi-client scenarios
-
-**Options:**
-- `--host <address>`: Bind address (default: 127.0.0.1)
-- `--port <number>`: Port number (default: 8777)
-- `--path <path>`: Endpoint path (default: /mcp)
-**Security:**
-- Origin allow-list (CORS) defaults to http://localhost, http://127.0.0.1, and null. Override with `YAMS_MCP_ALLOW_ORIGINS`.
-- Bind to 127.0.0.1 unless external access is needed.
 
 ## Claude Desktop Integration
 
@@ -124,7 +103,7 @@ docker run -d --name yams-mcp \
   -v ~/.local/share/yams:/data \
   -e YAMS_STORAGE=/data \
   ghcr.io/trvon/yams:latest \
-  serve --transport http --host 0.0.0.0 --path /mcp
+  serve
 
 # With custom configuration
 docker run -i --rm \
@@ -177,7 +156,7 @@ Search using regular expressions across indexed content.
 **Example:**
 ```json
 {
-  "tool": "grep_documents", 
+  "tool": "grep_documents",
   "arguments": {
     "pattern": "class\\s+\\w+Handler",
     "ignore_case": false,
@@ -242,56 +221,6 @@ echo '{"jsonrpc":"2.0","method":"tools/list","id":2}' | yams serve
 echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_documents","arguments":{"query":"test"}},"id":3}' | yams serve
 ```
 
-### Using curl with HTTP
-
-```bash
-# Initialize
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"curl","version":"test"}}}' \
-  http://127.0.0.1:8777/mcp
-
-# List tools
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  http://127.0.0.1:8777/mcp
-
-# Call a tool
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_documents","arguments":{"query":"test"}}}' \
-  http://127.0.0.1:8777/mcp
-
-# Notification (expect HTTP 202, no body)
-curl -i -X POST -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  http://127.0.0.1:8777/mcp
-
-# Batch (mixed)
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '[{"jsonrpc":"2.0","method":"notifications/logging/setLevel","params":{"level":"warn"}},{"jsonrpc":"2.0","id":4,"method":"tools/list"}]' \
-  http://127.0.0.1:8777/mcp
-```
-
-### Test Script
-
-Create a test script `test-mcp.sh`:
-
-```bash
-#!/bin/bash
-
-# Start server in background
-yams serve --transport websocket --port 9999 &
-SERVER_PID=$!
-
-# Wait for startup
-sleep 2
-
-# Test with wscat or curl
-# ... test commands ...
-
-# Cleanup
-kill $SERVER_PID
-```
-
 ## Integration Examples
 
 ### Python Client
@@ -310,7 +239,7 @@ class YamsMCP:
             text=True
         )
         self.request_id = 0
-    
+
     def call_tool(self, tool_name, arguments):
         self.request_id += 1
         request = {
@@ -342,7 +271,7 @@ class YamsMCP {
     this.proc = spawn('yams', ['serve']);
     this.requestId = 0;
   }
-  
+
   async callTool(toolName, args) {
     this.requestId++;
     const request = {
@@ -351,9 +280,9 @@ class YamsMCP {
       params: { name: toolName, arguments: args },
       id: this.requestId
     };
-    
+
     this.proc.stdin.write(JSON.stringify(request) + '\n');
-    
+
     return new Promise((resolve) => {
       this.proc.stdout.once('data', (data) => {
         resolve(JSON.parse(data.toString()));
@@ -385,7 +314,7 @@ Press Ctrl+C to stop the server
 If not visible:
 1. Check stderr isn't being redirected
 2. Ensure you're not in a non-interactive environment
-3. Try `--transport http` for testing
+
 
 ### Claude Desktop doesn't show YAMS tools
 
@@ -402,18 +331,7 @@ docker run -i ghcr.io/trvon/yams:latest serve  # Correct
 docker run ghcr.io/trvon/yams:latest serve     # Wrong - will exit
 ```
 
-### HTTP connection issues
 
-- 405 on GET /mcp
-  - Expected in Phase 1 (SSE not enabled). Use POST for requests.
-- 403 Forbidden
-  - Origin not allowed. Set `YAMS_MCP_ALLOW_ORIGINS` or call from http://localhost or http://127.0.0.1.
-- 400 Bad Request
-  - Invalid JSON or missing Content-Length (curl sets it for you).
-- Connection refused
-  - Ensure server is running on the expected host/port and Docker port mapping (`-p 8777:8777`) is correct.
-- External access
-  - Use `--host 0.0.0.0` only if you understand the risks; prefer `127.0.0.1` for local.
 
 ## Security Considerations
 
@@ -422,11 +340,7 @@ docker run ghcr.io/trvon/yams:latest serve     # Wrong - will exit
 - No network exposure
 - Ideal for local AI assistants
 
-### WebSocket Transport
-- Consider using `--ssl` for TLS encryption
-- Bind to 127.0.0.1 unless external access is needed
-- Use firewall rules to restrict access
-- Consider authentication mechanisms for production
+
 
 ### Docker Deployment
 - Use read-only mounts where possible
@@ -440,7 +354,7 @@ docker run ghcr.io/trvon/yams:latest serve     # Wrong - will exit
 2. **Use paths_only**: Reduces response size for large result sets
 3. **Limit results**: Use reasonable limits to avoid overwhelming the AI
 4. **Cache common queries**: YAMS caches search results automatically
-5. **Use appropriate search type**: 
+5. **Use appropriate search type**:
    - `keyword` for exact matches
    - `fuzzy` for approximate matches
    - `hybrid` for best overall results

@@ -9,7 +9,7 @@
 
 namespace yams {
 namespace api {
-class ContentStore; // Forward declaration
+class IContentStore; // Forward declaration
 }
 } // namespace yams
 
@@ -22,7 +22,7 @@ public:
     // Constructors for testing
     UpdateCommand() = default;
     UpdateCommand(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
-                  std::shared_ptr<api::ContentStore> contentStore)
+                  std::shared_ptr<api::IContentStore> contentStore)
         : metadataRepo_(metadataRepo), contentStore_(contentStore) {}
 
     // ICommand interface
@@ -43,6 +43,7 @@ public:
     void parseArguments(const std::vector<std::string>& args);
 
 private:
+    Result<void> executeLocal();
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
@@ -51,7 +52,7 @@ private:
 
     // Dependencies for testing
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
-    std::shared_ptr<api::ContentStore> contentStore_;
+    std::shared_ptr<api::IContentStore> contentStore_;
 
     Result<metadata::MetadataValue> parseMetadataValue(const std::string& value);
     Result<metadata::DocumentInfo> resolveNameToDocument(const std::string& name);

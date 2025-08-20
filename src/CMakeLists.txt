@@ -13,8 +13,15 @@ add_subdirectory(detection)
 add_subdirectory(extraction)
 add_subdirectory(indexing)
 add_subdirectory(search)
+
+# Daemon component (core component for high-performance embedding generation)
+add_subdirectory(daemon)
+
 add_subdirectory(vector)
 add_subdirectory(benchmarks)
+add_subdirectory(config)
+add_subdirectory(content)
+add_subdirectory(downloader)
 
 # Application services (for MCP and CLI)
 add_subdirectory(app)

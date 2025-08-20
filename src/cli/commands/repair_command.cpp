@@ -1,10 +1,12 @@
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <fcntl.h>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <thread>
+#include <unistd.h>
 #include <yams/cli/command.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
@@ -671,6 +673,44 @@ private:
                 vdbConfig.database_path = (cli_->getDataPath() / "vectors.db").string();
                 vdbConfig.embedding_dim = embConfig.embedding_dim;
 
+                // Cross-process single-writer lock on vectors.db
+                struct FileLock {
+                    int fd{-1};
+                    std::filesystem::path path;
+                    explicit FileLock(const std::filesystem::path& p) : path(p) {
+                        fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
+                        if (fd >= 0) {
+                            struct flock fl{};
+                            fl.l_type = F_WRLCK;
+                            fl.l_whence = SEEK_SET;
+                            fl.l_start = 0;
+                            fl.l_len = 0;
+                            if (fcntl(fd, F_SETLK, &fl) == -1) {
+                                ::close(fd);
+                                fd = -1;
+                            }
+                        }
+                    }
+                    bool locked() const { return fd >= 0; }
+                    ~FileLock() {
+                        if (fd >= 0) {
+                            struct flock fl{};
+                            fl.l_type = F_UNLCK;
+                            fl.l_whence = SEEK_SET;
+                            fl.l_start = 0;
+                            fl.l_len = 0;
+                            (void)fcntl(fd, F_SETLK, &fl);
+                            ::close(fd);
+                        }
+                    }
+                } vlock(cli_->getDataPath() / "vectors.db.lock");
+                if (!vlock.locked()) {
+                    std::cout << "  ℹ Another process is updating the vector database; skipping "
+                                 "embeddings\n";
+                    return Error{ErrorCode::InvalidState,
+                                 "vectors.db is locked by another process"};
+                }
+
                 auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
                 if (!vectorDb->initialize()) {
                     std::cout << "  ✗ Failed to initialize vector database: "
@@ -716,7 +756,19 @@ private:
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
                 });
-                const size_t batchSize = 32;
+                size_t batchSize = 32; // safe default
+                if (const char* envBatch = std::getenv("YAMS_EMBED_BATCH")) {
+                    try {
+                        unsigned long v = std::stoul(std::string(envBatch));
+                        if (v < 4UL)
+                            v = 4UL;
+                        if (v > 128UL)
+                            v = 128UL;
+                        batchSize = static_cast<size_t>(v);
+                    } catch (...) {
+                        // keep default
+                    }
+                }
 
                 for (size_t i = 0; i < documents.size(); i += batchSize) {
                     size_t end = std::min(i + batchSize, documents.size());
@@ -762,8 +814,10 @@ private:
                             continue;
                         }
 
-                        // Store embeddings in vector database
-                        for (size_t k = 0; k < embeddings.size(); ++k) {
+                        // Store embeddings in vector database using batch insert
+                        std::vector<vector::VectorRecord> records;
+                        records.reserve(embeddings.size());
+                        for (size_t k = 0; k < embeddings.size() && k < batchDocs.size(); ++k) {
                             vector::VectorRecord record;
                             record.document_hash = batchDocs[k].sha256Hash;
                             record.chunk_id =
@@ -772,11 +826,14 @@ private:
                             record.content = texts[k].substr(0, 1000); // Store snippet
                             record.metadata["name"] = batchDocs[k].fileName;
                             record.metadata["mime_type"] = batchDocs[k].mimeType;
+                            records.push_back(std::move(record));
+                        }
 
-                            if (vectorDb->insertVector(record)) {
-                                processed.fetch_add(1);
+                        if (!records.empty()) {
+                            if (vectorDb->insertVectorsBatch(records)) {
+                                processed.fetch_add(records.size());
                             } else {
-                                failed.fetch_add(1);
+                                failed.fetch_add(records.size());
                             }
                         }
                     }

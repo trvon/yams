@@ -6,11 +6,13 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_migration.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/hybrid_search_factory.h>
+#include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
@@ -68,8 +70,6 @@ namespace fs = std::filesystem;
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -106,7 +106,7 @@ YamsCLI::YamsCLI() {
 }
 
 YamsCLI::~YamsCLI() {
-    // No cleanup needed for simplified embedding service
+    // Cleanup will be handled by smart pointers
 }
 
 int YamsCLI::run(int argc, char* argv[]) {
@@ -242,6 +242,9 @@ int YamsCLI::run(int argc, char* argv[]) {
             spdlog::set_level(spdlog::level::warn);
         }
 
+        // Check for config migration before storage initialization
+        checkConfigMigration();
+
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()
 
         return 0;
@@ -263,6 +266,20 @@ Result<void> YamsCLI::ensureStorageInitialized() {
         return Error{initResult.error().code, initResult.error().message + hint};
     }
     return Result<void>();
+}
+
+std::shared_ptr<vector::EmbeddingGenerator> YamsCLI::getEmbeddingGenerator() {
+    if (embeddingGenerator_ && !embeddingGenerator_->isInitialized()) {
+        // Lazy initialization on first actual use
+        if (embeddingGenerator_->initialize()) {
+            spdlog::info("Successfully initialized EmbeddingGenerator with backend: {}",
+                         embeddingGenerator_->getModelInfo());
+        } else {
+            spdlog::warn("Failed to initialize EmbeddingGenerator on first use");
+            embeddingGenerator_.reset();
+        }
+    }
+    return embeddingGenerator_;
 }
 
 Result<void> YamsCLI::initializeStorage() {
@@ -440,6 +457,81 @@ Result<void> YamsCLI::initializeStorage() {
                              indexConfig.dimension);
             }
 
+            // Initialize EmbeddingClient (daemon-based) if VectorIndexManager is available
+            if (vectorIndexManager_) {
+                try {
+                    // Check for available models
+                    // Reuse existing HOME env var; avoid shadowing warnings
+                    if (home) {
+                        fs::path modelsPath = fs::path(home) / ".yams" / "models";
+                        if (fs::exists(modelsPath)) {
+                            // Configure embedding settings
+                            vector::EmbeddingConfig embConfig;
+
+                            // Check for specific models in priority order
+                            std::string selectedModel;
+                            if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
+                                selectedModel = "all-MiniLM-L6-v2";
+                                embConfig.embedding_dim = 384;
+                            } else if (fs::exists(modelsPath / "all-mpnet-base-v2" /
+                                                  "model.onnx")) {
+                                selectedModel = "all-mpnet-base-v2";
+                                embConfig.embedding_dim = 768;
+                            }
+
+                            if (!selectedModel.empty()) {
+                                embConfig.model_path =
+                                    (modelsPath / selectedModel / "model.onnx").string();
+                                embConfig.model_name = selectedModel;
+                                embConfig.batch_size = 32;
+                                embConfig.max_sequence_length = 512;
+                                embConfig.normalize_embeddings = true;
+
+                                // Configure backend selection (Hybrid by default for best
+                                // performance)
+                                embConfig.backend =
+                                    vector::EmbeddingConfig::Backend::Hybrid; // Try daemon first,
+                                                                              // fallback to local
+
+                                // Additional daemon settings
+                                // daemon_socket left empty - will be auto-resolved by DaemonClient
+                                embConfig.daemon_timeout = std::chrono::milliseconds(5000);
+                                embConfig.daemon_max_retries = 3;
+                                // Do not auto-start the daemon from generic CLI init paths;
+                                // rely on explicit `yams daemon start` or on-demand components.
+                                embConfig.daemon_auto_start = false;
+
+                                spdlog::info(
+                                    "Creating EmbeddingGenerator with model: {} (hybrid backend)",
+                                    selectedModel);
+
+                                embeddingGenerator_ =
+                                    std::make_shared<vector::EmbeddingGenerator>(embConfig);
+                                // Defer initialization until actually needed to avoid daemon
+                                // connection during stats and other non-embedding commands
+                                spdlog::debug(
+                                    "Created EmbeddingGenerator (deferred init) with model: {}",
+                                    selectedModel);
+                            } else {
+                                spdlog::debug("No embedding models found in {}",
+                                              modelsPath.string());
+                            }
+                        } else {
+                            spdlog::debug("Models directory does not exist: {}",
+                                          modelsPath.string());
+                        }
+                    } else {
+                        spdlog::debug("HOME environment variable not set");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Exception while initializing EmbeddingGenerator: {}", e.what());
+                    // Continue without embedding generator
+                }
+            } else {
+                spdlog::debug(
+                    "VectorIndexManager not available, skipping EmbeddingGenerator initialization");
+            }
+
             // Initialize vector database proactively to avoid "Not found" messages
             try {
                 vector::VectorDatabaseConfig vdbConfig;
@@ -549,14 +641,7 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
     searchPaths.push_back("/usr/share/yams/data/magic_numbers.json");
     searchPaths.push_back("/opt/yams/share/data/magic_numbers.json");
 
-    // 4. Check relative to current working directory (for development)
-    searchPaths.push_back("data/magic_numbers.json");
-    searchPaths.push_back("../data/magic_numbers.json");
-    searchPaths.push_back("../../data/magic_numbers.json");
-    searchPaths.push_back("../../../data/magic_numbers.json");
-    searchPaths.push_back("../../../../data/magic_numbers.json");
-
-    // 5. Check in home directory
+    // 4. Check in home directory
     if (const char* home = std::getenv("HOME")) {
         searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "data" /
                               "magic_numbers.json");
@@ -693,6 +778,48 @@ std::map<std::string, std::string> YamsCLI::parseSimpleToml(const fs::path& path
     }
 
     return config;
+}
+
+void YamsCLI::checkConfigMigration() {
+    try {
+        auto configPath = getConfigPath();
+        config::ConfigMigrator migrator;
+
+        auto needsResult = migrator.needsMigration(configPath);
+        if (!needsResult) {
+            if (verbose_) {
+                spdlog::debug("Config migration check failed: {}", needsResult.error().message);
+            }
+            return;
+        }
+
+        if (needsResult.value()) {
+            std::cout << "\nConfiguration Migration Required\n";
+            std::cout << "YAMS needs to update your configuration to version 2.\n";
+            std::cout << "This will add new features and improve performance.\n\n";
+            std::cout << "Proceed with migration? [Y/n]: ";
+            std::cout.flush();
+
+            std::string response;
+            std::getline(std::cin, response);
+
+            // Default to 'yes' if empty or starts with 'y'/'Y'
+            if (response.empty() || response[0] == 'y' || response[0] == 'Y') {
+                auto migrateResult = migrator.migrateToV2(configPath, true);
+                if (migrateResult) {
+                    std::cout << "✅ Configuration successfully migrated to v2\n\n";
+                } else {
+                    std::cout << "❌ Migration failed: " << migrateResult.error().message << "\n\n";
+                }
+            } else {
+                std::cout << "Migration skipped. Some features may not work correctly.\n\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        if (verbose_) {
+            spdlog::debug("Config migration check error: {}", e.what());
+        }
+    }
 }
 
 } // namespace yams::cli

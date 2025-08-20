@@ -1,8 +1,12 @@
+#include <spdlog/spdlog.h>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <thread>
+#include <unistd.h>
 #include <gtest/gtest.h>
+#include <yams/content/content_handler_registry.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/indexing/indexing_pipeline.h>
 #include <yams/metadata/connection_pool.h>
@@ -21,20 +25,50 @@ protected:
     }
 
     void TearDown() override {
-        // Clean up if needed
+        // Clear content handler registry to prevent test interference
+        yams::content::ContentHandlerRegistry::instance().clear();
+
+        // Clean up database and test directory if they were created
+        if (database_) {
+            database_->close();
+            database_.reset();
+        }
+        if (pool_) {
+            pool_->shutdown();
+            pool_.reset();
+        }
+        if (!testDir_.empty() && std::filesystem::exists(testDir_)) {
+            std::error_code ec;
+            std::filesystem::remove_all(testDir_, ec);
+        }
     }
 
     void SetUpWithDatabase() {
-        // Create test directory
-        testDir_ = std::filesystem::temp_directory_path() / "yams_indexing_test";
-        std::filesystem::create_directories(testDir_);
+        // Create test directory with unique name to avoid conflicts
+        auto pid = std::to_string(::getpid());
+        auto timestamp =
+            std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        testDir_ = std::filesystem::temp_directory_path() /
+                   ("yams_indexing_test_" + pid + "_" + timestamp);
 
-        // Initialize database
-        dbPath_ = testDir_ / "test.db";
+        // Ensure directory exists and is writable
+        std::error_code ec;
+        std::filesystem::create_directories(testDir_, ec);
+        if (ec) {
+            throw std::runtime_error("Failed to create test directory: " + ec.message());
+        }
+
+        // Initialize database with absolute path
+        dbPath_ = std::filesystem::absolute(testDir_ / "test.db");
         database_ = std::make_unique<Database>();
-        auto openResult = database_->open(dbPath_.string());
+
+        // Ensure parent directory exists before opening database
+        std::filesystem::create_directories(dbPath_.parent_path(), ec);
+
+        auto openResult = database_->open(dbPath_.string(), ConnectionMode::Create);
         if (!openResult) {
-            throw std::runtime_error("Failed to open database: " + openResult.error().message);
+            throw std::runtime_error("Failed to open database: " + openResult.error().message +
+                                     " (path: " + dbPath_.string() + ")");
         }
 
         // Initialize connection pool
@@ -211,6 +245,9 @@ TEST_F(IndexingTest, BatchDocumentIndexing) {
 
 TEST_F(IndexingTest, IncrementalIndexing) {
     SetUpWithDatabase();
+
+    // Enable debug logging for this test
+    spdlog::set_level(spdlog::level::debug);
 
     auto indexer = createDocumentIndexer(metadataRepo_);
 
@@ -441,4 +478,71 @@ TEST_F(IndexingTest, KeyTermExtraction) {
     }
     EXPECT_TRUE(foundQuick);
     EXPECT_TRUE(foundLazy);
+}
+
+TEST_F(IndexingTest, DuplicateContentDifferentPath) {
+    SetUpWithDatabase();
+
+    auto indexer = createDocumentIndexer(metadataRepo_);
+
+    // Create two files with identical content
+    std::string content = "This is identical content in two different files.";
+    createTestFile("duplicate1.txt", content);
+
+    // Ensure subdir exists
+    std::filesystem::create_directories(testDir_ / "subdir");
+    createTestFile("subdir/duplicate2.txt", content);
+
+    // Index first file
+    auto path1 = testDir_ / "duplicate1.txt";
+    IndexingConfig config;
+    auto result1 = indexer->indexDocument(path1, config);
+    ASSERT_TRUE(result1.has_value());
+    EXPECT_EQ(result1.value().status, IndexingStatus::Completed);
+
+    // Index second file with same content
+    auto path2 = testDir_ / "subdir" / "duplicate2.txt";
+    auto result2 = indexer->indexDocument(path2, config);
+    ASSERT_TRUE(result2.has_value());
+    EXPECT_EQ(result2.value().status, IndexingStatus::Completed);
+
+    // Both should have the same document ID (same content)
+    EXPECT_EQ(result1.value().documentId, result2.value().documentId);
+
+    // Second file should not create new chunks
+    EXPECT_GT(result1.value().chunksCreated, 0);
+    EXPECT_EQ(result2.value().chunksCreated, 0);
+
+    // Check that alternate location metadata was added
+    int64_t docId = std::stoll(result1.value().documentId);
+    auto metadata = metadataRepo_->getAllMetadata(docId);
+    ASSERT_TRUE(metadata.has_value());
+
+    // Should have at least one alternate_location metadata entry
+    bool hasAlternateLocation = false;
+    for (const auto& [key, value] : metadata.value()) {
+        if (key.find("alternate_location") != std::string::npos) {
+            hasAlternateLocation = true;
+            EXPECT_EQ(value.asString(), path2.string());
+            break;
+        }
+    }
+    EXPECT_TRUE(hasAlternateLocation);
+}
+
+TEST_F(IndexingTest, DuplicateContentSamePath) {
+    SetUpWithDatabase();
+
+    auto indexer = createDocumentIndexer(metadataRepo_);
+
+    // Index a file
+    auto path = testDir_ / "test1.txt";
+    IndexingConfig config;
+    auto result1 = indexer->indexDocument(path, config);
+    ASSERT_TRUE(result1.has_value());
+
+    // Check if same file needs re-indexing (should be false)
+    auto needsIndexing = indexer->needsIndexing(path);
+    ASSERT_TRUE(needsIndexing.has_value());
+    EXPECT_FALSE(needsIndexing.value());
 }

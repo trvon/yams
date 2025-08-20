@@ -3,9 +3,7 @@
     "yams": {
       "command": "yams",
       "args": ["serve"],
-      "env": {
-        "YAMS_STORAGE": "/USERS/USERNAME/.local/share/yams"
-      }
+      "env": {}
     },
     "yams-docker": {
       "command": "docker",

@@ -59,7 +59,22 @@ public:
     explicit QueryParser(const QueryParserConfig& config = {});
 
     /**
+     * @brief Parse options for query parsing
+     */
+    struct ParseOptions {
+        bool literalText = false; // Treat query as literal text
+    };
+
+    /**
      * @brief Parse a query string into an AST
+     * @param query The query string to parse
+     * @param options Parsing options (e.g., literal text mode)
+     * @return Result containing the parsed AST or an error
+     */
+    Result<std::unique_ptr<QueryNode>> parse(const std::string& query, const ParseOptions& options);
+
+    /**
+     * @brief Parse a query string into an AST (legacy overload)
      * @param query The query string to parse
      * @return Result containing the parsed AST or an error
      */
@@ -94,6 +109,7 @@ private:
     QueryTokenizer tokenizer_;
     std::vector<Token> tokens_;
     size_t currentToken_;
+    ParseOptions currentOptions_; // Current parsing options
 
     /**
      * @brief Parse methods for different expression types
@@ -131,6 +147,11 @@ private:
      */
     std::string escapeForFTS5(const std::string& term);
     std::string fieldToFTS5(const std::string& field, const std::string& value);
+
+    /**
+     * @brief Escape literal text for FTS5 (C++20 optimized)
+     */
+    [[nodiscard]] std::string escapeLiteralTextForFTS5(std::string_view text) const;
 };
 
 /**

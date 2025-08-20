@@ -31,7 +31,6 @@ target_include_directories(yams_storage_engine
         $<INSTALL_INTERFACE:include>
 )
 
-# Add C++20 features
 target_compile_features(yams_storage_engine PUBLIC cxx_std_20)
 
 # Platform-specific definitions
@@ -52,7 +51,7 @@ target_link_libraries(yams_reference_counter
         yams::core
         yams::storage_engine
     PRIVATE
-        SQLite::SQLite3
+        sqlite3
         spdlog::spdlog
         Threads::Threads
 )
@@ -63,7 +62,6 @@ target_include_directories(yams_reference_counter
         $<INSTALL_INTERFACE:include>
 )
 
-# Add C++20 features
 target_compile_features(yams_reference_counter PUBLIC cxx_std_20)
 
 # Link Tracy if profiling is enabled

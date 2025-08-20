@@ -104,18 +104,12 @@ jobs:
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf
 
-      - name: Setup Conan Profile
+      - name: Setup Conan Profile (hosted macOS)
         if: matrix.os == 'macos-hosted-x64'
         shell: bash
         run: |
           # Hosted-only: do not modify Conan profiles on self-hosted runners
           conan profile detect --force
-
-          # Force correct architecture for ARM64 macOS
-          if [[ "${{ matrix.suffix }}" == "macos-arm64" ]]; then
-            sed -i '' 's/arch=x86_64/arch=armv8/' ~/.conan2/profiles/default || true
-            sed -i '' 's/arch=X86_64/arch=armv8/' ~/.conan2/profiles/default || true
-          fi
 
           # Ensure C++20 support
           if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -205,6 +199,7 @@ jobs:
 
           # Reuse Conan dependencies
           conan install . \
+            --output-folder=build/conan-release \
             -s build_type=Release \
             --build=missing \
 
@@ -270,19 +265,19 @@ jobs:
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             # Try to extract coverage percentage from XML
-            coverage_pct=$(python3 -c "
-            import xml.etree.ElementTree as ET
-            try:
-              tree = ET.parse('ci-artifacts/coverage/coverage.xml')
-              root = tree.getroot()
-              line_rate = float(root.get('line-rate', 0))
-              print(f'{line_rate * 100:.1f}%')
-              except:
-                print('N/A')
-                " 2>/dev/null || echo 'N/A')
-                echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
-                echo "" >> "$SUMMARY_FILE"
-                fi
+            coverage_pct=$(python3 - <<'PY' 2>/dev/null || echo 'N/A')
+import xml.etree.ElementTree as ET
+try:
+    root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
+    line_rate = float(root.get('line-rate', 0))
+    print(f"{line_rate * 100:.1f}%")
+except Exception:
+    print('N/A')
+PY
+            )
+            echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+          fi
 
           # Add benchmark results if available from CI
           if [ -d "$BUILD_DIR/bench_results" ] && [ "$(find $BUILD_DIR/bench_results -name '*.json' 2>/dev/null)" ]; then

@@ -1802,4 +1802,151 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
         });
 }
 
+Result<std::vector<DocumentInfo>>
+MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bool matchAll) {
+    if (tags.empty()) {
+        return std::vector<DocumentInfo>();
+    }
+
+    return executeQuery<std::vector<DocumentInfo>>(
+        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
+            // Build the SQL query based on matchAll flag
+            std::string sql;
+            if (matchAll) {
+                // For matchAll, we need documents that have ALL the specified tags
+                sql = R"(
+                    SELECT DISTINCT d.*
+                    FROM documents d
+                    WHERE d.id IN (
+                        SELECT document_id
+                        FROM metadata
+                        WHERE key LIKE 'tag:%'
+                        AND key IN (";
+                
+                for (size_t i = 0; i < tags.size(); ++i) {
+                    if (i > 0) sql += ", ";
+                    sql += "'tag:" + tags[i] + "'";
+                }
+                sql += R"()
+                        GROUP BY document_id
+                        HAVING COUNT(DISTINCT key) = ?)
+                    ORDER BY d.indexed_time DESC
+                )";
+            } else {
+                // For matchAny, we need documents that have ANY of the specified tags
+                sql = R"(
+                    SELECT DISTINCT d.*
+                    FROM documents d
+                    JOIN metadata m ON d.id = m.document_id
+                    WHERE m.key IN (";
+                
+                for (size_t i = 0; i < tags.size(); ++i) {
+                    if (i > 0) sql += ", ";
+                    sql += "'tag:" + tags[i] + "'";
+                }
+                sql += R"()
+                    ORDER BY d.indexed_time DESC
+                )";
+            }
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+
+            // Bind the count for matchAll query
+            if (matchAll) {
+                auto bindResult = stmt.bind(1, static_cast<int64_t>(tags.size()));
+                if (!bindResult)
+                    return Error{bindResult.error()};
+            }
+
+            std::vector<DocumentInfo> results;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                results.push_back(mapDocumentRow(stmt));
+            }
+
+            return results;
+        });
+}
+
+Result<std::vector<std::string>> MetadataRepository::getDocumentTags(int64_t documentId) {
+    return executeQuery<std::vector<std::string>>(
+        [&](Database& db) -> Result<std::vector<std::string>> {
+            auto stmtResult = db.prepare(R"(
+                SELECT key
+                FROM metadata
+                WHERE document_id = ?
+                AND key LIKE 'tag:%'
+                ORDER BY key
+            )");
+
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, documentId);
+            if (!bindResult)
+                return Error{bindResult.error()};
+
+            std::vector<std::string> tags;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                std::string fullKey = stmt.getString(0);
+                // Remove "tag:" prefix
+                if (fullKey.starts_with("tag:")) {
+                    tags.push_back(fullKey.substr(4));
+                }
+            }
+
+            return tags;
+        });
+}
+
+Result<std::vector<std::string>> MetadataRepository::getAllTags() {
+    return executeQuery<std::vector<std::string>>(
+        [&](Database& db) -> Result<std::vector<std::string>> {
+            auto stmtResult = db.prepare(R"(
+                SELECT DISTINCT key
+                FROM metadata
+                WHERE key LIKE 'tag:%'
+                ORDER BY key
+            )");
+
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            std::vector<std::string> tags;
+
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                std::string fullKey = stmt.getString(0);
+                // Remove "tag:" prefix
+                if (fullKey.starts_with("tag:")) {
+                    tags.push_back(fullKey.substr(4));
+                }
+            }
+
+            return tags;
+        });
+}
+
 } // namespace yams::metadata

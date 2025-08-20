@@ -1,15 +1,22 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <yams/cli/command.h>
+#include <yams/cli/result_renderer.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_executor.h>
 #include <yams/vector/vector_index_manager.h>
+// Daemon client API for daemon-first search
+#include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
 
@@ -26,6 +33,7 @@ public:
 
         auto* cmd = app.add_subcommand("search", getDescription());
         cmd->add_option("query", query_, "Search query")->required();
+        cmd->add_option("path", pathFilter_, "Filter results by path pattern (optional)");
 
         cmd->add_option("-l,--limit", limit_, "Maximum number of results")->default_val(20);
 
@@ -39,6 +47,8 @@ public:
 
         cmd->add_flag("--paths-only", pathsOnly_,
                       "Output only file paths, one per line (useful for scripting)");
+        cmd->add_flag("--literal-text", literalText_,
+                      "Treat query as literal text, not regex (escapes special characters)");
         cmd->add_flag("--show-hash", showHash_, "Show document hashes in results");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information including full hashes");
         cmd->add_flag("--json", jsonOutput_, "Output results in JSON format");
@@ -66,6 +76,90 @@ public:
         YAMS_ZONE_SCOPED_N("SearchCommand::execute");
 
         try {
+            // Attempt daemon search first via generic helper; fall back to local on failure
+            {
+                yams::daemon::SearchRequest dreq;
+                dreq.query = query_;
+                dreq.limit = static_cast<size_t>(limit_);
+                dreq.fuzzy = fuzzySearch_;
+                dreq.literalText = literalText_;
+                dreq.similarity = static_cast<double>(minSimilarity_);
+
+                auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
+                    const auto& items = resp.results;
+                    if (pathsOnly_) {
+                        for (const auto& r : items) {
+                            auto itPath = r.metadata.find("path");
+                            if (itPath != r.metadata.end()) {
+                                std::cout << itPath->second << std::endl;
+                            } else if (!r.path.empty()) {
+                                std::cout << r.path << std::endl;
+                            } else {
+                                std::cout << r.id << std::endl;
+                            }
+                        }
+                        return Result<void>();
+                    }
+                    if (jsonOutput_ || verbose_) {
+                        json output;
+                        output["query"] = query_;
+                        output["method"] = "daemon";
+                        output["total_results"] = items.size();
+                        output["returned"] = items.size();
+                        json results = json::array();
+                        for (const auto& r : items) {
+                            json doc;
+                            doc["id"] = r.id;
+                            if (!r.title.empty())
+                                doc["title"] = r.title;
+                            if (!r.path.empty())
+                                doc["path"] = r.path;
+                            doc["score"] = r.score;
+                            if (!r.snippet.empty())
+                                doc["snippet"] = truncateSnippet(r.snippet, 200);
+                            results.push_back(doc);
+                        }
+                        output["results"] = results;
+                        std::cout << output.dump(2) << std::endl;
+                    } else {
+                        for (const auto& r : items) {
+                            std::cout << r.score << "  ";
+                            if (!r.path.empty()) {
+                                std::cout << r.path;
+                            } else if (!r.title.empty()) {
+                                std::cout << r.title;
+                            } else {
+                                std::cout << r.id;
+                            }
+                            if (!r.snippet.empty()) {
+                                std::cout << "\n    " << truncateSnippet(r.snippet, 200);
+                            }
+                            std::cout << "\n";
+                        }
+                    }
+                    return Result<void>();
+                };
+                auto fallback = [&]() -> Result<void> {
+                    // Signal to caller to use local fallback only for specific daemon errors
+                    return Error{ErrorCode::NotImplemented, "daemon_unavailable"};
+                };
+                auto daemonResult = daemon_first(dreq, fallback, render);
+                if (daemonResult) {
+                    // Daemon path succeeded; avoid heavy local initialization
+                    return Result<void>();
+                }
+
+                // Check if we should fallback to local search or propagate the error
+                if (daemonResult.error().code == ErrorCode::NotImplemented &&
+                    daemonResult.error().message == "daemon_unavailable") {
+                    // Continue to local fallback for daemon unavailable
+                    spdlog::debug("Daemon unavailable, falling back to local search");
+                } else {
+                    // Other daemon errors should be propagated without heavy local initialization
+                    return daemonResult.error();
+                }
+            }
+            // Daemon-first failed with retriable condition, use local fallback
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;
@@ -88,6 +182,9 @@ public:
                 return Result<void>();
             }
 
+            // Pass raw query string - escaping happens at the search engine level
+            std::string processedQuery = query_;
+
             // Check if we should use fuzzy search via metadata repository
             if (fuzzySearch_) {
                 YAMS_ZONE_SCOPED_N("SearchCommand::fuzzySearch");
@@ -104,14 +201,18 @@ public:
                 }
 
                 // Execute fuzzy search
-                auto searchResult = metadataRepo->fuzzySearch(query_, minSimilarity_, limit_);
+                auto searchResult =
+                    metadataRepo->fuzzySearch(processedQuery, minSimilarity_, limit_);
                 if (!searchResult) {
                     return Error{searchResult.error().code, searchResult.error().message};
                 }
 
+                // Apply tag filter if specified
+                auto filteredResults = filterResultsByTags(searchResult.value(), metadataRepo);
+
                 YAMS_PLOT("SearchResultCount",
-                          static_cast<int64_t>(searchResult.value().results.size()));
-                outputFuzzyResults(searchResult.value());
+                          static_cast<int64_t>(filteredResults.results.size()));
+                outputFuzzyResults(filteredResults);
                 return Result<void>();
             }
 
@@ -124,115 +225,133 @@ public:
                     YAMS_ZONE_SCOPED_N("SearchCommand::hybridSearch");
                     YAMS_PLOT("SearchType", static_cast<int64_t>(2)); // 2 = hybrid
 
-                    auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
-                    yams::search::SearchEngineBuilder builder;
-                    builder.withVectorIndex(vecMgr)
-                        .withMetadataRepo(metadataRepo)
-                        .withKGStore(cli_->getKnowledgeGraphStore());
-
-                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                    opts.hybrid.final_top_k = static_cast<size_t>(limit_);
-                    // Show method and score breakdown only when verbose/json requested
-                    opts.hybrid.generate_explanations = verbose_ || jsonOutput_;
-
-                    auto engRes = builder.buildEmbedded(opts);
-                    if (engRes) {
-                        auto eng = engRes.value();
-                        auto hres = eng->search(query_, opts.hybrid.final_top_k);
-                        if (hres) {
-                            const auto& items = hres.value();
-                            YAMS_PLOT("SearchResultCount", static_cast<int64_t>(items.size()));
-
-                            // Handle paths-only output first
-                            if (pathsOnly_) {
-                                for (const auto& r : items) {
-                                    auto itPath = r.metadata.find("path");
-                                    if (itPath != r.metadata.end()) {
-                                        std::cout << itPath->second << std::endl;
-                                    } else {
-                                        std::cout << r.id << std::endl;
-                                    }
-                                }
-                                return Result<void>();
+                    // Use shared VectorIndexManager from CLI instead of creating new instance
+                    auto vecMgr = cli_->getVectorIndexManager();
+                    if (!vecMgr) {
+                        spdlog::warn(
+                            "VectorIndexManager not available, falling back to metadata search");
+                        // Fall through to metadata-based search below
+                    } else {
+                        // Avoid initializing a new heavy embedding pipeline here; reuse shared
+                        // generator only if already available.
+                        yams::search::SearchEngineBuilder builder;
+                        builder.withVectorIndex(vecMgr)
+                            .withMetadataRepo(metadataRepo)
+                            .withKGStore(cli_->getKnowledgeGraphStore());
+                        // Only use embedding generator if it already exists to avoid heavy
+                        // initialization
+                        if (cli_->hasEmbeddingGenerator()) {
+                            if (auto gen = cli_->getEmbeddingGenerator()) {
+                                builder.withEmbeddingGenerator(gen);
                             }
+                        }
 
-                            // Output in JSON if --json flag is set, or if --verbose is set
-                            if (jsonOutput_ || verbose_) {
-                                json output;
-                                output["query"] = query_;
-                                output["method"] = "hybrid";
-                                output["kg_enabled"] = eng->getConfig().enable_kg;
-                                output["total_results"] = items.size();
-                                output["returned"] = items.size();
+                        auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                        opts.hybrid.final_top_k = static_cast<size_t>(limit_);
+                        // Show method and score breakdown only when verbose/json requested
+                        opts.hybrid.generate_explanations = verbose_ || jsonOutput_;
 
-                                json results = json::array();
-                                for (const auto& r : items) {
-                                    json doc;
-                                    doc["id"] = r.id;
-                                    // Prefer adapter-provided metadata
-                                    auto itTitle = r.metadata.find("title");
-                                    if (itTitle != r.metadata.end())
-                                        doc["title"] = itTitle->second;
-                                    auto itPath = r.metadata.find("path");
-                                    if (itPath != r.metadata.end())
-                                        doc["path"] = itPath->second;
-                                    doc["score"] = r.hybrid_score;
-                                    if (!r.content.empty()) {
-                                        doc["snippet"] = truncateSnippet(r.content, 200);
-                                    }
-                                    if (verbose_) {
-                                        json breakdown;
-                                        breakdown["vector_score"] = r.vector_score;
-                                        breakdown["keyword_score"] = r.keyword_score;
-                                        breakdown["kg_entity_score"] = r.kg_entity_score;
-                                        breakdown["structural_score"] = r.structural_score;
-                                        doc["score_breakdown"] = breakdown;
-                                    }
-                                    results.push_back(doc);
-                                }
-                                output["results"] = results;
-                                std::cout << output.dump(2) << std::endl;
-                            } else {
-                                // Simple, concise output by default
-                                if (items.empty()) {
-                                    std::cout << "No results found for: " << query_ << std::endl;
-                                } else {
-                                    std::cout << "Found " << items.size()
-                                              << " result(s) for: " << query_ << std::endl;
-                                    std::cout << std::endl;
+                        auto engRes = builder.buildEmbedded(opts);
+                        if (engRes) {
+                            auto eng = engRes.value();
+                            auto hres = eng->search(processedQuery, opts.hybrid.final_top_k);
+                            if (hres) {
+                                const auto& items = hres.value();
+                                YAMS_PLOT("SearchResultCount", static_cast<int64_t>(items.size()));
 
-                                    for (size_t i = 0; i < items.size(); i++) {
-                                        const auto& r = items[i];
-                                        std::cout << (i + 1) << ". ";
-                                        auto itTitle = r.metadata.find("title");
-                                        if (itTitle != r.metadata.end()) {
-                                            std::cout << itTitle->second;
-                                        } else {
-                                            std::cout << r.id;
-                                        }
+                                // Handle paths-only output first
+                                if (pathsOnly_) {
+                                    for (const auto& r : items) {
                                         auto itPath = r.metadata.find("path");
                                         if (itPath != r.metadata.end()) {
-                                            std::cout << " (" << itPath->second << ")";
+                                            std::cout << itPath->second << std::endl;
+                                        } else {
+                                            std::cout << r.id << std::endl;
                                         }
+                                    }
+                                    return Result<void>();
+                                }
+
+                                // Output in JSON if --json flag is set, or if --verbose is set
+                                if (jsonOutput_ || verbose_) {
+                                    json output;
+                                    output["query"] = query_;
+                                    output["method"] = "hybrid";
+                                    output["kg_enabled"] = eng->getConfig().enable_kg;
+                                    output["total_results"] = items.size();
+                                    output["returned"] = items.size();
+
+                                    json results = json::array();
+                                    for (const auto& r : items) {
+                                        json doc;
+                                        doc["id"] = r.id;
+                                        // Prefer adapter-provided metadata
+                                        auto itTitle = r.metadata.find("title");
+                                        if (itTitle != r.metadata.end())
+                                            doc["title"] = itTitle->second;
+                                        auto itPath = r.metadata.find("path");
+                                        if (itPath != r.metadata.end())
+                                            doc["path"] = itPath->second;
+                                        doc["score"] = r.hybrid_score;
+                                        if (!r.content.empty()) {
+                                            doc["snippet"] = truncateSnippet(r.content, 200);
+                                        }
+                                        if (verbose_) {
+                                            json breakdown;
+                                            breakdown["vector_score"] = r.vector_score;
+                                            breakdown["keyword_score"] = r.keyword_score;
+                                            breakdown["kg_entity_score"] = r.kg_entity_score;
+                                            breakdown["structural_score"] = r.structural_score;
+                                            doc["score_breakdown"] = breakdown;
+                                        }
+                                        results.push_back(doc);
+                                    }
+                                    output["results"] = results;
+                                    std::cout << output.dump(2) << std::endl;
+                                } else {
+                                    // Simple, concise output by default
+                                    if (items.empty()) {
+                                        std::cout << "No results found for: " << query_
+                                                  << std::endl;
+                                    } else {
+                                        std::cout << "Found " << items.size()
+                                                  << " result(s) for: " << query_ << std::endl;
                                         std::cout << std::endl;
 
-                                        if (!r.content.empty()) {
-                                            std::cout << "   " << truncateSnippet(r.content, 200)
-                                                      << std::endl;
+                                        for (size_t i = 0; i < items.size(); i++) {
+                                            const auto& r = items[i];
+                                            std::cout << (i + 1) << ". ";
+                                            auto itTitle = r.metadata.find("title");
+                                            if (itTitle != r.metadata.end()) {
+                                                std::cout << itTitle->second;
+                                            } else {
+                                                std::cout << r.id;
+                                            }
+                                            auto itPath = r.metadata.find("path");
+                                            if (itPath != r.metadata.end()) {
+                                                std::cout << " (" << itPath->second << ")";
+                                            }
+                                            std::cout << std::endl;
+
+                                            if (!r.content.empty()) {
+                                                std::cout << "   "
+                                                          << truncateSnippet(r.content, 200)
+                                                          << std::endl;
+                                            }
+                                            std::cout << std::endl;
                                         }
-                                        std::cout << std::endl;
                                     }
                                 }
-                            }
 
-                            return Result<void>();
+                                return Result<void>();
+                            } else {
+                                spdlog::warn("Hybrid search failed: {}", hres.error().message);
+                            }
                         } else {
-                            spdlog::warn("Hybrid search failed: {}", hres.error().message);
+                            spdlog::warn("Hybrid engine initialization failed: {}",
+                                         engRes.error().message);
                         }
-                    } else {
-                        spdlog::warn("Hybrid engine initialization failed: {}",
-                                     engRes.error().message);
-                    }
+                    } // end of vecMgr check
                 } catch (const std::exception& e) {
                     spdlog::warn("Hybrid engine error (fallback to metadata): {}", e.what());
                 }
@@ -252,7 +371,7 @@ public:
                 return Result<void>();
             }
 
-            // Final fallback to SearchExecutor if metadata repo not available
+            // Final fallback to SearchExecutor (or primary path when --literal-text)
             auto searchExecutor = cli_->getSearchExecutor();
             if (!searchExecutor) {
                 return Error{ErrorCode::NotInitialized, "Search executor not initialized"};
@@ -265,6 +384,7 @@ public:
             request.offset = 0;
             request.includeHighlights = true;
             request.includeSnippets = true;
+            request.literalText = literalText_; // Pass the literal text flag
 
             // Execute search
             auto result = searchExecutor->search(request);
@@ -338,102 +458,12 @@ private:
     }
 
     void outputSearchResults(const search::SearchResults& response) {
-        // Handle paths-only output first
-        if (pathsOnly_) {
-            for (const auto& item : response.getItems()) {
-                std::cout << (!item.path.empty() ? item.path : std::to_string(item.documentId))
-                          << std::endl;
-            }
-            return;
-        }
-
-        // Output in JSON if --json flag is set, or if --verbose is set
-        if (jsonOutput_ || verbose_) {
-            json output;
-            output["query"] = response.getStatistics().originalQuery;
-            output["total_results"] = response.getStatistics().totalResults;
-            output["returned"] = response.getItems().size();
-
-            json results = json::array();
-            for (const auto& item : response.getItems()) {
-                json doc;
-                doc["id"] = item.documentId;
-                doc["title"] = item.title;
-                doc["path"] = item.path;
-                doc["score"] = item.relevanceScore;
-                doc["snippet"] = item.contentPreview;
-
-                if (!item.highlights.empty()) {
-                    json highlights = json::array();
-                    for (const auto& h : item.highlights) {
-                        json highlight;
-                        highlight["field"] = h.field;
-                        highlight["snippet"] = h.snippet;
-                        highlights.push_back(highlight);
-                    }
-                    doc["highlights"] = highlights;
-                }
-
-                results.push_back(doc);
-            }
-            output["results"] = results;
-
-            // Performance metrics
-            json metrics;
-            metrics["query_parse_ms"] = response.getStatistics().queryTime.count();
-            metrics["search_ms"] = response.getStatistics().searchTime.count();
-            metrics["ranking_ms"] = 0; // rankingTime not available in SearchStatistics
-            metrics["total_ms"] = response.getStatistics().totalTime.count();
-            output["metrics"] = metrics;
-
-            std::cout << output.dump(2) << std::endl;
-        } else {
-            // Simple, concise output by default
-            const auto& items = response.getItems();
-            if (items.empty()) {
-                std::cout << "No results found for: " << response.getStatistics().originalQuery
-                          << std::endl;
-            } else {
-                std::cout << "Found " << response.getStatistics().totalResults
-                          << " result(s) for: " << response.getStatistics().originalQuery
-                          << std::endl;
-                std::cout << std::endl;
-
-                for (size_t i = 0; i < items.size(); i++) {
-                    const auto& item = items[i];
-                    std::cout << (i + 1) << ". " << item.title;
-                    if (!item.path.empty()) {
-                        std::cout << " (" << item.path << ")";
-                    }
-                    std::cout << std::endl;
-
-                    if (!item.contentPreview.empty()) {
-                        std::cout << "   " << item.contentPreview << std::endl;
-                    }
-                    std::cout << std::endl;
-                }
-            }
-        }
-    }
-
-    // Helper function to format file size in human-readable format
-    std::string formatSize(int64_t bytes) {
-        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-        int unitIndex = 0;
-        double size = static_cast<double>(bytes);
-
-        while (size >= 1024 && unitIndex < 4) {
-            size /= 1024;
-            unitIndex++;
-        }
-
-        std::stringstream ss;
-        if (unitIndex == 0) {
-            ss << static_cast<int>(size) << " " << units[unitIndex];
-        } else {
-            ss << std::fixed << std::setprecision(1) << size << " " << units[unitIndex];
-        }
-        return ss.str();
+        auto format = pathsOnly_ ? OutputFormat::PathsOnly
+                                 : (jsonOutput_ ? OutputFormat::JSON : OutputFormat::Verbose);
+        auto renderer = createHybridSearchResultRenderer(pathFilter_, format, showHash_, verbose_);
+        renderer.render(response.getStatistics().originalQuery, "hybrid", response.getItems(),
+                        response.getStatistics().totalResults,
+                        response.getStatistics().totalTime.count());
     }
 
     // Helper function to detect if a string is a SHA256 hash
@@ -492,8 +522,11 @@ private:
                 std::cout << "1. " << doc.fileName << std::endl;
                 std::cout << "   Path: " << doc.filePath << std::endl;
                 std::cout << "   Hash: " << doc.sha256Hash << std::endl;
-                std::cout << "   Size: " << formatSize(doc.fileSize) << " | Type: " << doc.mimeType
-                          << std::endl;
+                std::cout
+                    << "   Size: "
+                    << yams::cli::ResultRenderer<yams::cli::DocumentInfoResultAdapter>::formatSize(
+                           doc.fileSize)
+                    << " | Type: " << doc.mimeType << std::endl;
             } else {
                 std::cout << "1. " << doc.fileName << std::endl;
                 std::cout << "   " << doc.sha256Hash.substr(0, 16) << "..." << std::endl;
@@ -541,7 +574,9 @@ private:
                     std::cout << (i + 1) << ". " << doc.fileName << std::endl;
                     std::cout << "   Path: " << doc.filePath << std::endl;
                     std::cout << "   Hash: " << doc.sha256Hash << std::endl;
-                    std::cout << "   Size: " << formatSize(doc.fileSize)
+                    std::cout << "   Size: "
+                              << yams::cli::ResultRenderer<
+                                     yams::cli::DocumentInfoResultAdapter>::formatSize(doc.fileSize)
                               << " | Type: " << doc.mimeType << std::endl;
                 } else {
                     std::cout << (i + 1) << ". " << doc.fileName << std::endl;
@@ -605,6 +640,19 @@ private:
         return result.substr(0, maxLength);
     }
 
+    [[nodiscard]] constexpr bool matchesPathFilter(std::string_view path) const noexcept {
+        if (pathFilter_.empty()) {
+            return true; // No filter, include all
+        }
+        return path.find(pathFilter_) != std::string_view::npos;
+    }
+
+    [[nodiscard]] constexpr std::string_view
+    getDisplayPath(const metadata::DocumentInfo& doc) const noexcept {
+        return (!doc.filePath.empty() && doc.filePath != "stdin") ? std::string_view{doc.filePath}
+                                                                  : std::string_view{doc.fileName};
+    }
+
     void outputFuzzyResults(const metadata::SearchResults& results) {
         // Handle error case
         if (!results.errorMessage.empty()) {
@@ -612,132 +660,11 @@ private:
             return;
         }
 
-        // Handle paths-only output first
-        if (pathsOnly_) {
-            for (const auto& result : results.results) {
-                std::cout << (!result.document.filePath.empty() &&
-                                      result.document.filePath != "stdin"
-                                  ? result.document.filePath
-                                  : result.document.fileName)
-                          << std::endl;
-            }
-            return;
-        }
-
-        // Output in JSON if --json flag is set
-        if (jsonOutput_) {
-            json output;
-            output["query"] = results.query;
-            output["type"] = "fuzzy";
-            output["total_results"] = results.totalCount;
-            output["returned"] = results.results.size();
-            output["execution_time_ms"] = results.executionTimeMs;
-
-            json items = json::array();
-            for (const auto& result : results.results) {
-                json item;
-                item["id"] = result.document.id;
-                item["hash"] = result.document.sha256Hash;
-                item["file_name"] = result.document.fileName;
-                item["file_path"] = result.document.filePath;
-                item["size"] = result.document.fileSize;
-                item["mime_type"] = result.document.mimeType;
-                item["score"] = result.score;
-                item["snippet"] = result.snippet;
-                items.push_back(item);
-            }
-            output["results"] = items;
-
-            std::cout << output.dump(2) << std::endl;
-        } else if (verbose_ || showHash_) {
-            // Verbose output with full details
-            if (results.results.empty()) {
-                std::cout << "No fuzzy matches found for: " << results.query << std::endl;
-            } else {
-                std::cout << "Found " << results.totalCount
-                          << " fuzzy match(es) for: " << results.query << std::endl;
-                std::cout << std::endl;
-
-                for (size_t i = 0; i < results.results.size(); i++) {
-                    const auto& result = results.results[i];
-                    std::cout << (i + 1) << ". " << result.document.fileName;
-                    std::cout << " [fuzzy score: " << std::fixed << std::setprecision(2)
-                              << result.score << "]" << std::endl;
-
-                    // Show hash
-                    if (verbose_) {
-                        std::cout << "   Hash: " << result.document.sha256Hash << std::endl;
-                    } else {
-                        std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 12)
-                                  << "..." << std::endl;
-                    }
-
-                    // Show full path and metadata in verbose mode
-                    if (result.document.filePath != "stdin") {
-                        std::cout << "   Path: " << result.document.filePath << std::endl;
-                    }
-                    if (verbose_) {
-                        std::cout << "   Size: " << formatSize(result.document.fileSize)
-                                  << " | Type: " << result.document.mimeType << std::endl;
-                    }
-
-                    // Show full snippet in verbose mode
-                    if (!result.snippet.empty()) {
-                        if (verbose_) {
-                            std::cout << std::endl;
-                            std::cout << "   " << result.snippet << std::endl;
-                        } else {
-                            std::string truncated = truncateSnippet(result.snippet, 150);
-                            std::cout << "   " << truncated;
-                            if (truncated.length() < result.snippet.length()) {
-                                std::cout << "...";
-                            }
-                            std::cout << std::endl;
-                        }
-                    }
-                    // Show line context if requested
-                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
-                        displayLineContext(result.document);
-                    }
-
-                    std::cout << std::endl;
-                }
-            }
-        } else {
-            // Default concise output with hash prefixes
-            if (results.results.empty()) {
-                std::cout << "No fuzzy matches found for: " << results.query << std::endl;
-            } else {
-                std::cout << "Found " << results.totalCount
-                          << " fuzzy match(es) for: " << results.query << std::endl;
-                std::cout << std::endl;
-
-                for (size_t i = 0; i < results.results.size(); i++) {
-                    const auto& result = results.results[i];
-                    std::cout << (i + 1) << ". " << result.document.fileName << std::endl;
-
-                    // Show hash prefix by default (first 8 chars)
-                    std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 8) << "..."
-                              << std::endl;
-
-                    // Show truncated snippet (first 150 chars max, single line)
-                    if (!result.snippet.empty()) {
-                        std::string truncated = truncateSnippet(result.snippet, 150);
-                        std::cout << "   " << truncated;
-                        if (truncated.length() < result.snippet.length()) {
-                            std::cout << "...";
-                        }
-                        std::cout << std::endl;
-                    }
-                    // Show line context if requested
-                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
-                        displayLineContext(result.document);
-                    }
-
-                    std::cout << std::endl;
-                }
-            }
-        }
+        auto format = pathsOnly_ ? OutputFormat::PathsOnly
+                                 : (jsonOutput_ ? OutputFormat::JSON : OutputFormat::Verbose);
+        auto renderer = createSearchResultRenderer(pathFilter_, format, showHash_, verbose_);
+        renderer.render(results.query, "fuzzy", results.results, results.totalCount,
+                        results.executionTimeMs);
     }
 
     void outputMetadataResults(const metadata::SearchResults& results) {
@@ -747,142 +674,23 @@ private:
             return;
         }
 
-        // Handle paths-only output first
-        if (pathsOnly_) {
-            for (const auto& result : results.results) {
-                std::cout << (!result.document.filePath.empty() &&
-                                      result.document.filePath != "stdin"
-                                  ? result.document.filePath
-                                  : result.document.fileName)
-                          << std::endl;
-            }
-            return;
-        }
-
-        // Output in JSON if --json flag is set
-        if (jsonOutput_) {
-            json output;
-            output["query"] = results.query;
-            output["type"] = "full-text";
-            output["total_results"] = results.totalCount;
-            output["returned"] = results.results.size();
-            output["execution_time_ms"] = results.executionTimeMs;
-
-            json items = json::array();
-            for (const auto& result : results.results) {
-                json item;
-                item["id"] = result.document.id;
-                item["hash"] = result.document.sha256Hash;
-                item["file_name"] = result.document.fileName;
-                item["file_path"] = result.document.filePath;
-                item["size"] = result.document.fileSize;
-                item["mime_type"] = result.document.mimeType;
-                item["score"] = result.score;
-                item["snippet"] = result.snippet;
-                items.push_back(item);
-            }
-            output["results"] = items;
-
-            std::cout << output.dump(2) << std::endl;
-        } else if (verbose_ || showHash_) {
-            // Verbose output with full details
-            if (results.results.empty()) {
-                std::cout << "No results found for: " << results.query << std::endl;
-            } else {
-                std::cout << "Found " << results.totalCount << " result(s) for: " << results.query
-                          << std::endl;
-                std::cout << std::endl;
-
-                for (size_t i = 0; i < results.results.size(); i++) {
-                    const auto& result = results.results[i];
-                    std::cout << (i + 1) << ". " << result.document.fileName;
-                    std::cout << " [score: " << std::fixed << std::setprecision(2) << result.score
-                              << "]" << std::endl;
-
-                    // Show hash
-                    if (verbose_) {
-                        std::cout << "   Hash: " << result.document.sha256Hash << std::endl;
-                    } else {
-                        std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 12)
-                                  << "..." << std::endl;
-                    }
-
-                    // Show full path and metadata in verbose mode
-                    if (result.document.filePath != "stdin") {
-                        std::cout << "   Path: " << result.document.filePath << std::endl;
-                    }
-                    if (verbose_) {
-                        std::cout << "   Size: " << formatSize(result.document.fileSize)
-                                  << " | Type: " << result.document.mimeType << std::endl;
-                    }
-
-                    // Show full snippet in verbose mode
-                    if (!result.snippet.empty()) {
-                        if (verbose_) {
-                            std::cout << std::endl;
-                            std::cout << "   " << result.snippet << std::endl;
-                        } else {
-                            std::string truncated = truncateSnippet(result.snippet, 150);
-                            std::cout << "   " << truncated;
-                            if (truncated.length() < result.snippet.length()) {
-                                std::cout << "...";
-                            }
-                            std::cout << std::endl;
-                        }
-                    }
-                    // Show line context if requested
-                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
-                        displayLineContext(result.document);
-                    }
-
-                    std::cout << std::endl;
-                }
-            }
-        } else {
-            // Default concise output with hash prefixes
-            if (results.results.empty()) {
-                std::cout << "No results found for: " << results.query << std::endl;
-            } else {
-                std::cout << "Found " << results.totalCount << " result(s) for: " << results.query
-                          << std::endl;
-                std::cout << std::endl;
-
-                for (size_t i = 0; i < results.results.size(); i++) {
-                    const auto& result = results.results[i];
-                    std::cout << (i + 1) << ". " << result.document.fileName << std::endl;
-
-                    // Show hash prefix by default (first 8 chars)
-                    std::cout << "   Hash: " << result.document.sha256Hash.substr(0, 8) << "..."
-                              << std::endl;
-
-                    // Show truncated snippet (first 150 chars max, single line)
-                    if (!result.snippet.empty()) {
-                        std::string truncated = truncateSnippet(result.snippet, 150);
-                        std::cout << "   " << truncated;
-                        if (truncated.length() < result.snippet.length()) {
-                            std::cout << "...";
-                        }
-                        std::cout << std::endl;
-                    }
-                    // Show line context if requested
-                    if (showLineNumbers_ || beforeContext_ > 0 || afterContext_ > 0) {
-                        displayLineContext(result.document);
-                    }
-
-                    std::cout << std::endl;
-                }
-            }
-        }
+        auto format = pathsOnly_ ? OutputFormat::PathsOnly
+                                 : (jsonOutput_ ? OutputFormat::JSON : OutputFormat::Verbose);
+        auto renderer = createSearchResultRenderer(pathFilter_, format, showHash_, verbose_);
+        renderer.render(results.query, "full-text", results.results, results.totalCount,
+                        results.executionTimeMs);
     }
 
 private:
     YamsCLI* cli_ = nullptr;
     std::string query_;
+    std::string pathFilter_;
     size_t limit_ = 20;
     std::string searchType_ = "keyword";
     bool fuzzySearch_ = false;
     float minSimilarity_ = 0.7f;
     bool pathsOnly_ = false;
+    bool literalText_ = false;
     bool showHash_ = false;
     bool verbose_ = false;
     bool jsonOutput_ = false;
@@ -893,6 +701,77 @@ private:
     size_t beforeContext_ = 0;
     size_t afterContext_ = 0;
     size_t context_ = 0;
+
+    // Tag filtering
+    std::string filterTags_;
+    bool matchAllTags_ = false;
+
+    // Helper method to filter search results by tags
+    metadata::SearchResults
+    filterResultsByTags(const metadata::SearchResults& results,
+                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
+        if (filterTags_.empty()) {
+            return results;
+        }
+
+        // Parse comma-separated tags
+        std::vector<std::string> tags;
+        std::stringstream ss(filterTags_);
+        std::string tag;
+        while (std::getline(ss, tag, ',')) {
+            // Trim whitespace
+            tag.erase(0, tag.find_first_not_of(" \t"));
+            tag.erase(tag.find_last_not_of(" \t") + 1);
+            if (!tag.empty()) {
+                tags.push_back(tag);
+            }
+        }
+
+        if (tags.empty()) {
+            return results;
+        }
+
+        // Filter results
+        metadata::SearchResults filtered = results;
+        filtered.results.clear();
+
+        for (const auto& result : results.results) {
+            // Get tags for this document
+            auto docTagsResult = metadataRepo->getDocumentTags(result.document.id);
+            if (!docTagsResult) {
+                continue; // Skip documents we can't get tags for
+            }
+
+            const auto& docTags = docTagsResult.value();
+            bool matches = false;
+
+            if (matchAllTags_) {
+                // Check if document has all required tags
+                matches = true;
+                for (const auto& requiredTag : tags) {
+                    if (std::find(docTags.begin(), docTags.end(), requiredTag) == docTags.end()) {
+                        matches = false;
+                        break;
+                    }
+                }
+            } else {
+                // Check if document has any of the required tags
+                for (const auto& requiredTag : tags) {
+                    if (std::find(docTags.begin(), docTags.end(), requiredTag) != docTags.end()) {
+                        matches = true;
+                        break;
+                    }
+                }
+            }
+
+            if (matches) {
+                filtered.results.push_back(result);
+            }
+        }
+
+        filtered.totalCount = filtered.results.size();
+        return filtered;
+    }
 };
 
 // Factory function

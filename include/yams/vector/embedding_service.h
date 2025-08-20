@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,10 +49,13 @@ public:
     /**
      * @brief Check if embeddings are missing and trigger repair if needed
      *
-     * Checks system health and spawns a single detached repair thread
-     * only if embeddings are missing and no repair is in progress.
+     * Checks system health and, if needed, starts a managed background worker (std::jthread)
+     * only if embeddings are missing and no repair is currently running.
      */
     void triggerRepairIfNeeded();
+    bool startRepairAsync();
+    void stopRepair();
+    bool isRepairRunning() const;
 
     /**
      * @brief Generate embeddings for multiple documents (synchronous)
@@ -71,18 +75,18 @@ private:
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo_;
     std::filesystem::path dataPath_;
 
-    // Simple static flag to prevent multiple repair threads
-    static std::atomic<bool> repairInProgress_;
+    // Managed background worker (C++20 std::jthread) and lifecycle
+    mutable std::mutex workerMutex_;
+    std::jthread repairThread_;
+    bool repairRunning_{false};
 
     // Internal helper methods (extracted from repair command)
     std::vector<std::string> getAvailableModels() const;
     Result<void> generateEmbeddingsInternal(const std::vector<std::string>& documentHashes,
                                             bool showProgress = false);
 
-    // Static repair function that runs in detached thread
-    static void runRepair(std::shared_ptr<api::IContentStore> store,
-                          std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                          std::filesystem::path dataPath);
+    // Stop-aware repair routine used by the managed worker
+    void runRepair(std::stop_token stopToken);
 };
 
 } // namespace yams::vector

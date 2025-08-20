@@ -5,8 +5,10 @@
 #include <sstream>
 #include <vector>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::cli {
 
@@ -53,6 +55,23 @@ public:
 
     Result<void> execute() override {
         try {
+            // Simple daemon-first path for direct hash deletion
+            if (!hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() &&
+                directory_.empty() && !dryRun_) {
+                yams::daemon::DeleteRequest dreq;
+                dreq.hash = hash_;
+                dreq.purge = !keepRefs_;
+                auto render = [&](const yams::daemon::SuccessResponse&) -> Result<void> {
+                    std::cout << "Deleted " << hash_.substr(0, 12) << "... via daemon\n";
+                    return Result<void>();
+                };
+                auto fallback = [&]() -> Result<void> {
+                    return Error{ErrorCode::NotImplemented, "local"};
+                };
+                if (auto d = daemon_first(dreq, fallback, render); d) {
+                    return Result<void>();
+                }
+            }
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;

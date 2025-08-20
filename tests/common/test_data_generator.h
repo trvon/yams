@@ -44,23 +44,44 @@ public:
 
     std::vector<uint8_t> generatePDF(size_t pages) {
         // Generate a minimal valid PDF structure
-        std::string pdf = "%PDF-1.4\n";
+        std::string pdf;
+        std::vector<size_t> offsets; // Track byte offsets for xref table
+
+        // PDF header
+        pdf = "%PDF-1.4\n";
+
+        // Catalog object (object 1)
+        offsets.push_back(pdf.size());
         pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
-        pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count " + std::to_string(pages) +
+
+        // Build kids array for Pages object
+        std::string kids = "[";
+        for (size_t i = 0; i < pages; ++i) {
+            if (i > 0)
+                kids += " ";
+            kids += std::to_string(3 + i * 2) + " 0 R";
+        }
+        kids += "]";
+
+        // Pages object (object 2)
+        offsets.push_back(pdf.size());
+        pdf += "2 0 obj\n<< /Type /Pages /Kids " + kids + " /Count " + std::to_string(pages) +
                " >>\nendobj\n";
 
         size_t objNum = 3;
         for (size_t i = 0; i < pages; ++i) {
             // Page object
+            offsets.push_back(pdf.size());
             pdf += std::to_string(objNum) + " 0 obj\n";
             pdf += "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ";
             pdf += "/Contents " + std::to_string(objNum + 1) + " 0 R ";
             pdf += "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
                    ">> >> >> >>\n";
             pdf += "endobj\n";
+            objNum++;
 
             // Content stream
-            objNum++;
+            offsets.push_back(pdf.size());
             std::string content = "BT /F1 12 Tf 100 700 Td (Page " + std::to_string(i + 1) + ": " +
                                   generateLoremIpsum(20) + ") Tj ET";
             pdf += std::to_string(objNum) + " 0 obj\n";
@@ -70,20 +91,35 @@ public:
         }
 
         // Add metadata
+        offsets.push_back(pdf.size());
         pdf += std::to_string(objNum) + " 0 obj\n";
         pdf += "<< /Title (Test PDF Document) /Author (TestDataGenerator) ";
         pdf += "/Subject (Unit Testing) /Keywords (test, pdf, yams) ";
         pdf += "/Creator (YAMS Test Suite) /Producer (TestDataGenerator) >>\n";
         pdf += "endobj\n";
 
+        // Store xref table position
+        size_t xref_pos = pdf.size();
+
         // xref table
-        pdf += "xref\n0 " + std::to_string(objNum + 1) + "\n";
-        pdf += "0000000000 65535 f\n";
+        pdf += "xref\n";
+        pdf += "0 " + std::to_string(objNum + 1) + "\n";
+        pdf += "0000000000 65535 f \n";
+
+        // Write object offsets (10 digits, zero-padded)
+        for (size_t offset : offsets) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%010zu 00000 n \n", offset);
+            pdf += buf;
+        }
 
         // Trailer
-        pdf += "trailer\n<< /Size " + std::to_string(objNum + 1) + " /Root 1 0 R ";
+        pdf += "trailer\n";
+        pdf += "<< /Size " + std::to_string(objNum + 1) + " /Root 1 0 R ";
         pdf += "/Info " + std::to_string(objNum) + " 0 R >>\n";
-        pdf += "startxref\n" + std::to_string(pdf.size() - 100) + "\n%%EOF";
+        pdf += "startxref\n";
+        pdf += std::to_string(xref_pos) + "\n";
+        pdf += "%%EOF";
 
         return std::vector<uint8_t>(pdf.begin(), pdf.end());
     }

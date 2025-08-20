@@ -1,5 +1,16 @@
 #pragma once
 
+#include <yams/api/content_store.h>
+#include <yams/app/services/factory.hpp>
+#include <yams/app/services/services.hpp>
+#include <yams/core/types.h>
+#include <yams/mcp/error_handling.h>
+#include <yams/mcp/tool_registry.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_executor.h>
+#include <yams/version.hpp>
+
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <functional>
@@ -7,85 +18,55 @@
 #include <regex>
 #include <string>
 #include <thread>
-#include <yams/api/content_store.h>
-#include <yams/core/types.h>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/search/hybrid_search_engine.h>
-#include <yams/search/search_executor.h>
-#include <yams/version.hpp>
 
 namespace yams::mcp {
 
 using json = nlohmann::json;
 
 /**
- * Transport interface for MCP communication
+ * Transport interface for MCP communication with modern error handling
  */
 class ITransport {
 public:
     virtual ~ITransport() = default;
     virtual void send(const json& message) = 0;
-    virtual json receive() = 0;
+    virtual MessageResult receive() = 0;
     virtual bool isConnected() const = 0;
     virtual void close() = 0;
+    virtual TransportState getState() const = 0;
 };
 
 /**
- * Standard I/O transport (default for MCP)
+ * Standard I/O transport (default for MCP) with atomic state management
  */
 class StdioTransport : public ITransport {
 public:
     StdioTransport();
     void send(const json& message) override;
-    json receive() override;
-    bool isConnected() const override { return !closed_; }
-    void close() override { closed_ = true; }
+    MessageResult receive() override;
+    bool isConnected() const override { return state_.load() == TransportState::Connected; }
+    void close() override { state_.store(TransportState::Closing); }
+    TransportState getState() const override { return state_.load(); }
 
     // Set external shutdown flag for non-blocking checks
     void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
 
 private:
-    std::atomic<bool> closed_{false};
+    std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
+    std::atomic<size_t> errorCount_{0};
 
     // Helper for non-blocking stdin check
     bool isInputAvailable(int timeoutMs = 100) const;
+
+    // Error recovery and circuit breaker
+    bool shouldRetryAfterError() const noexcept;
+    void recordError() noexcept;
+    void resetErrorCount() noexcept;
 };
 
-/**
- * WebSocket transport for MCP over WebSocket
- */
-class WebSocketTransport : public ITransport {
-public:
-    struct Config {
-        std::string host = "localhost";
-        uint16_t port = 8080;
-        std::string path = "/mcp";
-        bool useSSL = false;
-        std::chrono::milliseconds connectTimeout{5000};
-        std::chrono::milliseconds receiveTimeout{30000};
-        size_t maxMessageSize = 1024 * 1024; // 1MB
-        bool enablePingPong = true;
-        std::chrono::seconds pingInterval{30};
-    };
-
-    explicit WebSocketTransport(const Config& config);
-    ~WebSocketTransport();
-
-    void send(const json& message) override;
-    json receive() override;
-    bool isConnected() const override;
-    void close() override;
-
-    // WebSocket-specific methods
-    bool connect();
-    void reconnect();
-    bool waitForConnection(std::chrono::milliseconds timeout = std::chrono::milliseconds{5000});
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> pImpl;
-};
+// WebSocket transport removed - not needed for current implementation
+// TODO: Add back if WebSocket support is required in the future
 
 /**
  * MCP Server implementation
@@ -118,17 +99,31 @@ public:
 #ifdef YAMS_TESTING
     // Public testing interface - only available when building tests
     json testListTools() { return listTools(); }
-    json testSearchDocuments(const json& args) { return searchDocuments(args); }
-    json testGrepDocuments(const json& args) { return grepDocuments(args); }
-    json testRetrieveDocument(const json& args) { return retrieveDocument(args); }
-    json testUpdateDocumentMetadata(const json& args) { return updateDocumentMetadata(args); }
-    json testListDocuments(const json& args) { return listDocuments(args); }
-    json testGetStats(const json& args) { return getStats(args); }
+
+    // Expose modern handle* methods for testing
+    // Request types are already in the yams::mcp namespace
+
+    Result<MCPSearchResponse> testHandleSearchDocuments(const MCPSearchRequest& req) {
+        return handleSearchDocuments(req);
+    }
+    Result<MCPGrepResponse> testHandleGrepDocuments(const MCPGrepRequest& req) {
+        return handleGrepDocuments(req);
+    }
+    Result<MCPRetrieveDocumentResponse>
+    testHandleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
+        return handleRetrieveDocument(req);
+    }
+    Result<MCPListDocumentsResponse> testHandleListDocuments(const MCPListDocumentsRequest& req) {
+        return handleListDocuments(req);
+    }
+    Result<MCPStatsResponse> testHandleGetStats(const MCPStatsRequest& req) {
+        return handleGetStats(req);
+    }
 #endif
 
 private:
-    // MCP protocol methods
-    json handleRequest(const json& request);
+    // MCP protocol methods with error handling
+    MessageResult handleRequest(const json& request);
     json initialize(const json& params);
     json listResources();
     json listTools();
@@ -136,15 +131,21 @@ private:
     json callTool(const std::string& name, const json& arguments);
     json readResource(const std::string& uri);
 
-    // Tool implementations
-    json searchDocuments(const json& args);
-    json grepDocuments(const json& args);
+    // Modern C++20 tool handlers (type-safe, clean)
+    Result<MCPSearchResponse> handleSearchDocuments(const MCPSearchRequest& req);
+    Result<MCPGrepResponse> handleGrepDocuments(const MCPGrepRequest& req);
+    Result<MCPDownloadResponse> handleDownload(const MCPDownloadRequest& req);
+    Result<MCPStoreDocumentResponse> handleStoreDocument(const MCPStoreDocumentRequest& req);
+    Result<MCPRetrieveDocumentResponse>
+    handleRetrieveDocument(const MCPRetrieveDocumentRequest& req);
+    Result<MCPListDocumentsResponse> handleListDocuments(const MCPListDocumentsRequest& req);
+    Result<MCPStatsResponse> handleGetStats(const MCPStatsRequest& req);
+    Result<MCPAddDirectoryResponse> handleAddDirectory(const MCPAddDirectoryRequest& req);
+
+    // Legacy JSON-based tool implementations (for gradual migration)
     json storeDocument(const json& args);
-    json retrieveDocument(const json& args);
     json deleteDocument(const json& args);
     json updateMetadata(const json& args);
-    json updateDocumentMetadata(const json& args);
-    json getStats(const json& args);
 
     // New v0.0.2 CLI integration tools
     json deleteByName(const json& args);
@@ -223,11 +224,27 @@ private:
     bool isBinaryMimeType(const std::string& mimeType);
 
 private:
+    // Core services
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<search::HybridSearchEngine> hybridEngine_;
     std::unique_ptr<ITransport> transport_;
+
+    // App context and services for business logic
+    app::services::AppContext appContext_;
+    std::shared_ptr<app::services::ISearchService> searchService_;
+    std::shared_ptr<app::services::IGrepService> grepService_;
+    std::shared_ptr<app::services::IDocumentService> documentService_;
+    std::shared_ptr<app::services::IDownloadService> downloadService_;
+    std::shared_ptr<app::services::IIndexingService> indexingService_;
+    std::shared_ptr<app::services::IStatsService> statsService_;
+
+    // Modern tool registry
+    std::unique_ptr<ToolRegistry> toolRegistry_;
+
+    // Tool registry initialization
+    void initializeToolRegistry();
 
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
@@ -236,7 +253,7 @@ private:
 
     // Server info
     struct {
-        std::string name = "kronos-mcp";
+        std::string name = "yams-mcp";
         std::string version = YAMS_VERSION_STRING;
     } serverInfo_;
 
@@ -251,8 +268,14 @@ private:
 
 public:
     // Process a single JSON-RPC message. For requests (with id), returns a JSON-RPC response.
-    // For notifications (no id), returns a null json.
-    json processMessage(const json& message) { return handleRequest(message); }
+    // For notifications (no id), returns an error for no response expected.
+    MessageResult processMessage(const json& message) {
+        auto result = json_utils::validate_jsonrpc_message(message);
+        if (!result) {
+            return result.error();
+        }
+        return handleRequest(result.value());
+    }
 };
 
 } // namespace yams::mcp

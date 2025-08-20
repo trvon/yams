@@ -18,8 +18,7 @@ using std::vformat_to;
 } // namespace yams
 #else
 // C++17/pre-C++20 fallback using fmt library
-#include <fmt/core.h>
-#include <fmt/format.h>
+#include <spdlog/fmt/fmt.h>
 
 namespace yams {
 // Map fmt functions to std::format interface

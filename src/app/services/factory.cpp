@@ -15,6 +15,9 @@ ServiceBundle makeServices(const AppContext& ctx) {
     bundle.search = makeSearchService(ctx);
     bundle.grep = makeGrepService(ctx);
     bundle.document = makeDocumentService(ctx);
+    bundle.download = makeDownloadService(ctx);
+    bundle.indexing = makeIndexingService(ctx);
+    bundle.stats = makeStatsService(ctx);
 
     // Restore service is pending real implementation.
     // Once implemented, wire it here by uncommenting the line below.

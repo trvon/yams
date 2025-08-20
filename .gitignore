@@ -73,3 +73,5 @@ site/
 public/*
 !public/.gitkeep
 conan.lock
+AGENTS.md
+.yams*

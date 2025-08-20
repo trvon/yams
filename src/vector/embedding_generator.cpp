@@ -3,20 +3,30 @@
 #include <yams/vector/embedding_generator.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <random>
 #include <regex>
+#include <shared_mutex>
 #include <sstream>
-#include <thread>
 #include <unordered_map>
 
+#ifdef YAMS_USE_ONNX_RUNTIME
 #include <onnxruntime_cxx_api.h>
+#endif
+
+// Include daemon client for DaemonBackend
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::vector {
+
+// Forward declarations
+class LocalOnnxBackend;
+class DaemonBackend;
+class HybridBackend;
 
 // =============================================================================
 // TextPreprocessor Implementation
@@ -262,10 +272,26 @@ std::string TextPreprocessor::decodeToken(int32_t token_id) const {
 // ModelManager Implementation
 // =============================================================================
 
+#ifdef YAMS_USE_ONNX_RUNTIME
 class ModelManager::Impl {
 public:
     Impl() : env_(ORT_LOGGING_LEVEL_WARNING, "yams") {
-        session_options_.SetIntraOpNumThreads(4);
+        int threads = 4; // safe default
+        if (const char* env = std::getenv("YAMS_ONNX_INTRA_OP_THREADS")) {
+            try {
+                unsigned long v = std::stoul(std::string(env));
+                // Clamp to a reasonable range to avoid oversubscription
+                if (v < 1UL)
+                    v = 1UL;
+                if (v > 8UL)
+                    v = 8UL;
+                threads = static_cast<int>(v);
+            } catch (...) {
+                spdlog::warn("Invalid YAMS_ONNX_INTRA_OP_THREADS='{}', using default {}", env,
+                             threads);
+            }
+        }
+        session_options_.SetIntraOpNumThreads(threads);
         session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     }
 
@@ -560,7 +586,8 @@ public:
                                         YAMS_ONNX_ZONE("L2Normalization");
                                         double norm = 0.0;
                                         for (float val : embedding) {
-                                            norm += val * val;
+                                            norm +=
+                                                static_cast<double>(val) * static_cast<double>(val);
                                         }
                                         norm = std::sqrt(norm);
 
@@ -579,7 +606,8 @@ public:
                                     embeddings.push_back(std::move(embedding));
                                 }
                             }
-                        } else if (output_shape.size() == 2 && output_shape[1] == embedding_size) {
+                        } else if (output_shape.size() == 2 &&
+                                   static_cast<size_t>(output_shape[1]) == embedding_size) {
                             // Direct pooled output - already sentence embedding
                             size_t batch_size = output_shape[0];
                             for (size_t b_idx = 0; b_idx < batch_size; ++b_idx) {
@@ -591,7 +619,7 @@ public:
                                 // L2 normalize
                                 double norm = 0.0;
                                 for (float val : embedding) {
-                                    norm += val * val;
+                                    norm += static_cast<double>(val) * static_cast<double>(val);
                                 }
                                 norm = std::sqrt(norm);
 
@@ -727,6 +755,25 @@ private:
     Ort::Env env_;
     Ort::SessionOptions session_options_;
 }; // End of ModelManager::Impl class
+#else
+// Stub implementation when ONNX is not available
+class ModelManager::Impl {
+public:
+    bool loadModel(const std::string&, const std::string&) { return false; }
+    bool isModelLoaded(const std::string&) const { return false; }
+    void unloadModel(const std::string&) {}
+    void clearCache() {}
+    std::vector<std::vector<float>> runInference(const std::string&,
+                                                 const std::vector<std::vector<int32_t>>&,
+                                                 const std::vector<std::vector<int32_t>>&) {
+        return {};
+    }
+    size_t getModelEmbeddingDim(const std::string&) const { return 0; }
+    size_t getModelMaxLength(const std::string&) const { return 0; }
+    ModelManager::ModelStats getModelStats(const std::string&) const { return {}; }
+    std::vector<std::string> getLoadedModels() const { return {}; }
+};
+#endif
 
 // ModelManager method implementations
 ModelManager::ModelManager() : pImpl(std::make_unique<Impl>()) {}
@@ -774,40 +821,744 @@ std::vector<std::string> ModelManager::getLoadedModels() const {
 }
 
 // =============================================================================
-// EmbeddingGenerator Implementation
+// Backend Implementations
 // =============================================================================
 
-class EmbeddingGenerator::Impl {
+#ifdef YAMS_USE_ONNX_RUNTIME
+/**
+ * LocalOnnxBackend - Direct ONNX runtime backend
+ * Uses the existing ModelManager and TextPreprocessor
+ */
+class LocalOnnxBackend : public IEmbeddingBackend {
 public:
-    explicit Impl(const EmbeddingConfig& config)
-        : config_(config), preprocessor_(config), initialized_(false), has_error_(false) {}
+    explicit LocalOnnxBackend(const EmbeddingConfig& config)
+        : config_(config), preprocessor_(config), initialized_(false) {}
 
-    bool initialize() {
-        YAMS_ZONE_SCOPED_N("EmbeddingGenerator::initialize");
-        std::lock_guard<std::mutex> lock(mutex_);
+    bool initialize() override {
+        YAMS_ZONE_SCOPED_N("LocalOnnxBackend::initialize");
 
         if (initialized_) {
             return true;
         }
 
         try {
-            // Load the model
-            {
-                YAMS_ONNX_ZONE("Initialize");
-                if (!model_manager_.loadModel(config_.model_name, config_.model_path)) {
-                    setError("Failed to load embedding model");
-                    return false;
-                }
+            if (!model_manager_.loadModel(config_.model_name, config_.model_path)) {
+                spdlog::error("Failed to load ONNX model: {}", config_.model_name);
+                return false;
             }
 
-            // Verify model dimensions match config
+            // Verify model dimensions
             auto model_dim = model_manager_.getModelEmbeddingDim(config_.model_name);
             if (model_dim != 0 && model_dim != config_.embedding_dim) {
-                config_.embedding_dim = model_dim; // Update config to match model
+                config_.embedding_dim = model_dim;
             }
 
             initialized_ = true;
-            has_error_ = false;
+            spdlog::info("LocalOnnxBackend initialized with model: {}", config_.model_name);
+            return true;
+        } catch (const std::exception& e) {
+            spdlog::error("LocalOnnxBackend initialization failed: {}", e.what());
+            return false;
+        }
+    }
+
+    void shutdown() override {
+        model_manager_.clearCache();
+        initialized_ = false;
+        stats_ = GenerationStats{};
+    }
+
+    bool isInitialized() const override { return initialized_; }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        YAMS_ZONE_SCOPED_N("LocalOnnxBackend::generateEmbedding");
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+        }
+
+        try {
+            auto start = std::chrono::high_resolution_clock::now();
+
+            // Get model sequence length
+            size_t model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
+            if (model_seq_length == 0) {
+                model_seq_length = config_.max_sequence_length;
+            }
+
+            // Tokenize and preprocess
+            auto tokens = preprocessor_.tokenize(text);
+            tokens = preprocessor_.truncateTokens(tokens, model_seq_length);
+            tokens = preprocessor_.padTokens(tokens, model_seq_length);
+            auto attention_mask = preprocessor_.generateAttentionMask(tokens);
+
+            // Run inference
+            std::vector<std::vector<int32_t>> batch_tokens = {tokens};
+            std::vector<std::vector<int32_t>> batch_masks = {attention_mask};
+            auto embeddings =
+                model_manager_.runInference(config_.model_name, batch_tokens, batch_masks);
+
+            if (embeddings.empty()) {
+                return Error{ErrorCode::InternalError, "Model inference failed"};
+            }
+
+            auto embedding = embeddings[0];
+
+            // Normalize if requested
+            if (config_.normalize_embeddings) {
+                embedding = embedding_utils::normalizeEmbedding(embedding);
+            }
+
+            // Update stats
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            updateStats(1, tokens.size(), duration);
+
+            return embedding;
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("Embedding generation failed: ") + e.what()};
+        }
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateEmbeddings(std::span<const std::string> texts) override {
+        YAMS_EMBEDDING_ZONE_BATCH(texts.size());
+
+        if (texts.empty()) {
+            return std::vector<std::vector<float>>{};
+        }
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+        }
+
+        try {
+            auto start = std::chrono::high_resolution_clock::now();
+            std::vector<std::vector<float>> all_embeddings;
+            all_embeddings.reserve(texts.size());
+
+            // Process in batches
+            for (size_t i = 0; i < texts.size(); i += config_.batch_size) {
+                size_t batch_end = std::min(i + config_.batch_size, texts.size());
+                auto batch_span = texts.subspan(i, batch_end - i);
+
+                // Tokenize batch
+                std::vector<std::vector<int32_t>> batch_tokens;
+                std::vector<std::vector<int32_t>> batch_masks;
+                size_t model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
+                if (model_seq_length == 0) {
+                    model_seq_length = config_.max_sequence_length;
+                }
+
+                for (const auto& text : batch_span) {
+                    auto tokens = preprocessor_.tokenize(text);
+                    tokens = preprocessor_.truncateTokens(tokens, model_seq_length);
+                    tokens = preprocessor_.padTokens(tokens, model_seq_length);
+                    batch_tokens.push_back(tokens);
+                    batch_masks.push_back(preprocessor_.generateAttentionMask(tokens));
+                }
+
+                // Run batch inference
+                auto batch_embeddings =
+                    model_manager_.runInference(config_.model_name, batch_tokens, batch_masks);
+
+                if (batch_embeddings.size() != batch_span.size()) {
+                    return Error{ErrorCode::InternalError, "Batch inference size mismatch"};
+                }
+
+                // Normalize if requested
+                if (config_.normalize_embeddings) {
+                    batch_embeddings = embedding_utils::normalizeEmbeddings(batch_embeddings);
+                }
+
+                all_embeddings.insert(all_embeddings.end(), batch_embeddings.begin(),
+                                      batch_embeddings.end());
+                stats_.total_batches.fetch_add(1);
+            }
+
+            // Update stats
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            updateStats(texts.size(), texts.size() * config_.max_sequence_length / 4, duration);
+
+            return all_embeddings;
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("Batch embedding generation failed: ") + e.what()};
+        }
+    }
+
+    size_t getEmbeddingDimension() const override { return config_.embedding_dim; }
+    size_t getMaxSequenceLength() const override { return config_.max_sequence_length; }
+    std::string getBackendName() const override { return "LocalONNX"; }
+    bool isAvailable() const override { return initialized_; }
+    GenerationStats getStats() const override { return stats_; }
+    void resetStats() override {
+        stats_.total_texts_processed.store(0);
+        stats_.total_tokens_processed.store(0);
+        stats_.total_inference_time.store(0);
+        stats_.avg_inference_time.store(0);
+        stats_.batch_count.store(0);
+        stats_.total_batches.store(0);
+        stats_.throughput_texts_per_sec.store(0.0);
+        stats_.throughput_tokens_per_sec.store(0.0);
+    }
+
+private:
+    void updateStats(size_t texts, size_t tokens, std::chrono::milliseconds duration) {
+        stats_.total_texts_processed.fetch_add(texts);
+        stats_.total_tokens_processed.fetch_add(tokens);
+        stats_.total_inference_time.fetch_add(duration.count());
+
+        auto total_texts = stats_.total_texts_processed.load();
+        if (total_texts > 0) {
+            auto total_time = stats_.total_inference_time.load();
+            stats_.avg_inference_time.store(total_time / total_texts);
+        }
+        stats_.updateThroughput();
+    }
+
+    EmbeddingConfig config_;
+    TextPreprocessor preprocessor_;
+    ModelManager model_manager_;
+    bool initialized_;
+    GenerationStats stats_;
+};
+#else
+// Stub implementation when ONNX is not available
+class LocalOnnxBackend : public IEmbeddingBackend {
+public:
+    explicit LocalOnnxBackend(const EmbeddingConfig& config)
+        : config_(config), initialized_(false) {}
+
+    bool initialize() override {
+        // Check if mock mode is enabled
+        bool use_mock = (std::getenv("YAMS_USE_MOCK_EMBEDDINGS") != nullptr) ||
+                        (std::getenv("YAMS_USE_MOCK_PROVIDER") != nullptr);
+
+        if (use_mock) {
+            initialized_ = true;
+            use_mock_ = true;
+            spdlog::info("LocalOnnxBackend: Using mock embeddings (ONNX not available)");
+            return true;
+        }
+
+        spdlog::warn("LocalOnnxBackend not available - ONNX Runtime not compiled in");
+        return false;
+    }
+
+    void shutdown() override {
+        initialized_ = false;
+        use_mock_ = false;
+        stats_ = GenerationStats{};
+    }
+
+    bool isInitialized() const override { return initialized_ && use_mock_; }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        if (!initialized_ || !use_mock_) {
+            return Error{ErrorCode::NotImplemented,
+                         "ONNX Runtime not available and mock mode disabled"};
+        }
+
+        // Generate deterministic mock embedding based on text hash
+        std::hash<std::string> hasher;
+        size_t seed = hasher(text);
+        std::mt19937 gen(seed);
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+
+        std::vector<float> embedding(config_.embedding_dim);
+        for (size_t i = 0; i < config_.embedding_dim; ++i) {
+            embedding[i] = dist(gen);
+        }
+
+        // Normalize to unit length if requested
+        if (config_.normalize_embeddings) {
+            float norm = 0.0f;
+            for (float val : embedding) {
+                norm += val * val;
+            }
+            norm = std::sqrt(norm);
+            if (norm > 0) {
+                for (float& val : embedding) {
+                    val /= norm;
+                }
+            }
+        }
+
+        // Update stats
+        stats_.total_texts_processed++;
+        stats_.total_tokens_processed += text.length() / 4; // Rough estimate
+        stats_.batch_count++;
+
+        return embedding;
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateEmbeddings(std::span<const std::string> texts) override {
+        if (!initialized_ || !use_mock_) {
+            return Error{ErrorCode::NotImplemented,
+                         "ONNX Runtime not available and mock mode disabled"};
+        }
+
+        std::vector<std::vector<float>> embeddings;
+        embeddings.reserve(texts.size());
+
+        for (const auto& text : texts) {
+            auto result = generateEmbedding(text);
+            if (!result) {
+                return result.error();
+            }
+            embeddings.push_back(std::move(result.value()));
+        }
+
+        // Update batch stats
+        stats_.total_batches++;
+
+        return embeddings;
+    }
+
+    size_t getEmbeddingDimension() const override { return config_.embedding_dim; }
+    size_t getMaxSequenceLength() const override { return config_.max_sequence_length; }
+    std::string getBackendName() const override {
+        return use_mock_ ? "LocalOnnx (mock)" : "LocalOnnx (disabled)";
+    }
+    bool isAvailable() const override { return use_mock_; }
+    GenerationStats getStats() const override { return stats_; }
+    void resetStats() override {
+        stats_.total_texts_processed.store(0);
+        stats_.total_tokens_processed.store(0);
+        stats_.total_inference_time.store(0);
+        stats_.avg_inference_time.store(0);
+        stats_.batch_count.store(0);
+        stats_.total_batches.store(0);
+        stats_.throughput_texts_per_sec.store(0.0);
+        stats_.throughput_tokens_per_sec.store(0.0);
+    }
+
+private:
+    EmbeddingConfig config_;
+    bool initialized_;
+    bool use_mock_ = false;
+    GenerationStats stats_;
+};
+#endif
+
+/**
+ * DaemonBackend - Daemon IPC backend
+ * Communicates with the daemon service for embedding generation
+ */
+class DaemonBackend : public IEmbeddingBackend {
+public:
+    explicit DaemonBackend(const EmbeddingConfig& config) : config_(config), initialized_(false) {}
+
+    bool initialize() override {
+        YAMS_ZONE_SCOPED_N("DaemonBackend::initialize");
+
+        if (initialized_) {
+            return true;
+        }
+
+        try {
+            // Configure daemon client with socket/auto-start from config
+            daemon::ClientConfig dcfg;
+            // If socket path is empty, let DaemonClient auto-resolve it
+            if (!config_.daemon_socket.empty()) {
+                dcfg.socketPath = config_.daemon_socket;
+            }
+            // Otherwise socketPath remains empty and DaemonClient will resolve it
+            dcfg.requestTimeout = config_.daemon_timeout;
+            dcfg.maxRetries = config_.daemon_max_retries;
+            dcfg.autoStart = config_.daemon_auto_start;
+            daemon_client_ = std::make_shared<daemon::DaemonClient>(dcfg);
+
+            if (auto result = daemon_client_->connect(); !result) {
+                spdlog::warn("Failed to connect to daemon: {}", result.error().message);
+
+                // Try to auto-start daemon if configured
+                if (config_.daemon_auto_start) {
+                    spdlog::info("Attempting to auto-start daemon...");
+                    // TODO: Implement daemon auto-start
+                }
+                return false;
+            }
+
+            // Verify daemon is responsive, then request model preload (non-fatal on error)
+            auto st = daemon_client_->status();
+            if (!st) {
+                // Downgrade to debug to avoid noisy warnings during CLI init paths.
+                // Search will gracefully fall back when daemon is unavailable/slow.
+                spdlog::debug("Daemon status probe failed: {}", st.error().message);
+            } else if (!config_.model_name.empty()) {
+                daemon::LoadModelRequest req;
+                req.modelName = config_.model_name;
+                req.preload = true;
+                auto lm = daemon_client_->loadModel(req);
+                if (!lm) {
+                    spdlog::warn("Failed to preload model in daemon: {}", lm.error().message);
+                }
+            }
+
+            initialized_ = true;
+            spdlog::info("DaemonBackend connected to daemon service");
+            return true;
+        } catch (const std::exception& e) {
+            spdlog::error("DaemonBackend initialization failed: {}", e.what());
+            return false;
+        }
+    }
+
+    void shutdown() override {
+        if (daemon_client_) {
+            daemon_client_->disconnect();
+            daemon_client_.reset();
+        }
+        initialized_ = false;
+        stats_ = GenerationStats{};
+    }
+
+    bool isInitialized() const override {
+        return initialized_ && daemon_client_ && daemon_client_->isConnected();
+    }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        YAMS_ZONE_SCOPED_N("DaemonBackend::generateEmbedding");
+
+        if (!isInitialized()) {
+            return Error{ErrorCode::NotInitialized, "Daemon backend not connected"};
+        }
+
+        try {
+            auto start = std::chrono::high_resolution_clock::now();
+
+            daemon::GenerateEmbeddingRequest req;
+            req.text = text;
+            req.modelName = config_.model_name;
+            req.normalize = config_.normalize_embeddings;
+
+            auto result = daemon_client_->generateEmbedding(req);
+            if (!result) {
+                return Error{ErrorCode::NetworkError, result.error().message};
+            }
+
+            const auto& response = result.value();
+
+            // Update cached dimensions
+            if (response.dimensions > 0) {
+                cached_dim_ = response.dimensions;
+            }
+
+            // Update stats
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            updateStats(1, text.length() / 4, duration);
+
+            return response.embedding;
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("Daemon embedding failed: ") + e.what()};
+        }
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateEmbeddings(std::span<const std::string> texts) override {
+        YAMS_EMBEDDING_ZONE_BATCH(texts.size());
+
+        if (!isInitialized()) {
+            return Error{ErrorCode::NotInitialized, "Daemon backend not connected"};
+        }
+
+        try {
+            auto start = std::chrono::high_resolution_clock::now();
+
+            daemon::BatchEmbeddingRequest req;
+            req.texts = std::vector<std::string>(texts.begin(), texts.end());
+            req.modelName = config_.model_name;
+            req.normalize = config_.normalize_embeddings;
+            req.batchSize = config_.batch_size;
+
+            auto result = daemon_client_->generateBatchEmbeddings(req);
+            if (!result) {
+                return Error{ErrorCode::NetworkError, result.error().message};
+            }
+
+            const auto& response = result.value();
+
+            // Update cached dimensions
+            if (response.dimensions > 0) {
+                cached_dim_ = response.dimensions;
+            }
+
+            // Update stats
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            size_t total_chars = 0;
+            for (const auto& text : texts) {
+                total_chars += text.length();
+            }
+            updateStats(texts.size(), total_chars / 4, duration);
+            stats_.total_batches++;
+
+            return response.embeddings;
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("Daemon batch embedding failed: ") + e.what()};
+        }
+    }
+
+    size_t getEmbeddingDimension() const override {
+        return cached_dim_ > 0 ? cached_dim_ : config_.embedding_dim;
+    }
+
+    size_t getMaxSequenceLength() const override {
+        return cached_seq_len_ > 0 ? cached_seq_len_ : config_.max_sequence_length;
+    }
+
+    std::string getBackendName() const override { return "Daemon"; }
+
+    bool isAvailable() const override { return daemon_client_ && daemon_client_->isConnected(); }
+
+    GenerationStats getStats() const override { return stats_; }
+    void resetStats() override {
+        stats_.total_texts_processed.store(0);
+        stats_.total_tokens_processed.store(0);
+        stats_.total_inference_time.store(0);
+        stats_.avg_inference_time.store(0);
+        stats_.batch_count.store(0);
+        stats_.total_batches.store(0);
+        stats_.throughput_texts_per_sec.store(0.0);
+        stats_.throughput_tokens_per_sec.store(0.0);
+    }
+
+private:
+    void updateStats(size_t texts, size_t tokens, std::chrono::milliseconds duration) {
+        stats_.total_texts_processed.fetch_add(texts);
+        stats_.total_tokens_processed.fetch_add(tokens);
+        stats_.total_inference_time.fetch_add(duration.count());
+
+        auto total_texts = stats_.total_texts_processed.load();
+        if (total_texts > 0) {
+            auto total_time = stats_.total_inference_time.load();
+            stats_.avg_inference_time.store(total_time / total_texts);
+        }
+        stats_.updateThroughput();
+    }
+
+    EmbeddingConfig config_;
+    std::shared_ptr<daemon::DaemonClient> daemon_client_;
+    bool initialized_;
+    GenerationStats stats_;
+    mutable size_t cached_dim_ = 0;
+    mutable size_t cached_seq_len_ = 0;
+};
+
+/**
+ * HybridBackend - Tries daemon first, falls back to local
+ * Provides seamless failover between daemon and local ONNX
+ */
+class HybridBackend : public IEmbeddingBackend {
+public:
+    explicit HybridBackend(const EmbeddingConfig& config)
+        : config_(config), daemon_backend_(std::make_unique<DaemonBackend>(config)),
+          local_backend_(std::make_unique<LocalOnnxBackend>(config)), initialized_(false) {}
+
+    bool initialize() override {
+        YAMS_ZONE_SCOPED_N("HybridBackend::initialize");
+
+        if (initialized_) {
+            return true;
+        }
+
+        // Try daemon first
+        bool daemon_ok = daemon_backend_->initialize();
+        if (daemon_ok) {
+            spdlog::info("HybridBackend: Daemon backend available");
+        } else {
+            spdlog::info("HybridBackend: Daemon backend not available, will use local fallback");
+        }
+
+        // Always initialize local as fallback
+        bool local_ok = local_backend_->initialize();
+        if (local_ok) {
+            spdlog::info("HybridBackend: Local backend available");
+        } else if (!daemon_ok) {
+            spdlog::error("HybridBackend: Neither daemon nor local backend available");
+            return false;
+        }
+
+        initialized_ = daemon_ok || local_ok;
+        return initialized_;
+    }
+
+    void shutdown() override {
+        daemon_backend_->shutdown();
+        local_backend_->shutdown();
+        initialized_ = false;
+        stats_ = GenerationStats{};
+    }
+
+    bool isInitialized() const override { return initialized_; }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        YAMS_ZONE_SCOPED_N("HybridBackend::generateEmbedding");
+
+        // Try daemon first if available
+        if (daemon_backend_->isAvailable()) {
+            auto result = daemon_backend_->generateEmbedding(text);
+            if (result) {
+                daemon_uses_++;
+                mergeStats(daemon_backend_->getStats());
+                return result;
+            }
+            spdlog::debug("Daemon backend failed, falling back to local");
+        }
+
+        // Fall back to local
+        if (local_backend_->isAvailable()) {
+            auto result = local_backend_->generateEmbedding(text);
+            if (result) {
+                local_fallbacks_++;
+                mergeStats(local_backend_->getStats());
+                return result;
+            }
+        }
+
+        return Error{ErrorCode::NotSupported, "No backend available for embedding generation"};
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateEmbeddings(std::span<const std::string> texts) override {
+        YAMS_EMBEDDING_ZONE_BATCH(texts.size());
+
+        // Try daemon first if available
+        if (daemon_backend_->isAvailable()) {
+            auto result = daemon_backend_->generateEmbeddings(texts);
+            if (result) {
+                daemon_uses_++;
+                mergeStats(daemon_backend_->getStats());
+                return result;
+            }
+            spdlog::debug("Daemon backend failed for batch, falling back to local");
+        }
+
+        // Fall back to local
+        if (local_backend_->isAvailable()) {
+            auto result = local_backend_->generateEmbeddings(texts);
+            if (result) {
+                local_fallbacks_++;
+                mergeStats(local_backend_->getStats());
+                return result;
+            }
+        }
+
+        return Error{ErrorCode::NotSupported,
+                     "No backend available for batch embedding generation"};
+    }
+
+    size_t getEmbeddingDimension() const override {
+        if (daemon_backend_->isAvailable()) {
+            return daemon_backend_->getEmbeddingDimension();
+        }
+        return local_backend_->getEmbeddingDimension();
+    }
+
+    size_t getMaxSequenceLength() const override {
+        if (daemon_backend_->isAvailable()) {
+            return daemon_backend_->getMaxSequenceLength();
+        }
+        return local_backend_->getMaxSequenceLength();
+    }
+
+    std::string getBackendName() const override {
+        return "Hybrid (Daemon: " + std::to_string(daemon_uses_) +
+               ", Local: " + std::to_string(local_fallbacks_) + ")";
+    }
+
+    bool isAvailable() const override {
+        return daemon_backend_->isAvailable() || local_backend_->isAvailable();
+    }
+
+    GenerationStats getStats() const override { return stats_; }
+    void resetStats() override {
+        stats_.total_texts_processed.store(0);
+        stats_.total_tokens_processed.store(0);
+        stats_.total_inference_time.store(0);
+        stats_.avg_inference_time.store(0);
+        stats_.batch_count.store(0);
+        stats_.total_batches.store(0);
+        stats_.throughput_texts_per_sec.store(0.0);
+        stats_.throughput_tokens_per_sec.store(0.0);
+        daemon_uses_ = 0;
+        local_fallbacks_ = 0;
+    }
+
+private:
+    void mergeStats(const GenerationStats& backend_stats) {
+        stats_.total_texts_processed.store(backend_stats.total_texts_processed.load());
+        stats_.total_tokens_processed.store(backend_stats.total_tokens_processed.load());
+        stats_.total_inference_time.store(backend_stats.total_inference_time.load());
+        stats_.avg_inference_time.store(backend_stats.avg_inference_time.load());
+        stats_.total_batches.store(backend_stats.total_batches.load());
+        stats_.updateThroughput();
+    }
+
+    EmbeddingConfig config_;
+    std::unique_ptr<DaemonBackend> daemon_backend_;
+    std::unique_ptr<LocalOnnxBackend> local_backend_;
+    bool initialized_;
+    GenerationStats stats_;
+    mutable size_t daemon_uses_ = 0;
+    mutable size_t local_fallbacks_ = 0;
+};
+
+// =============================================================================
+// EmbeddingGenerator Implementation with Variant Backend
+// =============================================================================
+
+class EmbeddingGenerator::Impl {
+public:
+    explicit Impl(const EmbeddingConfig& config) : config_(config) {
+        // Select backend based on configuration
+        switch (config.backend) {
+            case EmbeddingConfig::Backend::Local:
+                backend_ = std::make_unique<LocalOnnxBackend>(config);
+                break;
+            case EmbeddingConfig::Backend::Daemon:
+                backend_ = std::make_unique<DaemonBackend>(config);
+                break;
+            case EmbeddingConfig::Backend::Hybrid:
+            default:
+                backend_ = std::make_unique<HybridBackend>(config);
+                break;
+        }
+    }
+
+    bool initialize() {
+        YAMS_ZONE_SCOPED_N("EmbeddingGenerator::initialize");
+
+        // Check if already initialized (lock-free fast path)
+        if (initialized_.load()) {
+            return true;
+        }
+
+        try {
+            if (!backend_) {
+                setError("No backend configured");
+                return false;
+            }
+
+            bool init_result = backend_->initialize();
+            if (!init_result) {
+                setError("Backend initialization failed: " + backend_->getBackendName());
+                return false;
+            }
+
+            // Atomically update initialization state
+            initialized_.store(true);
+            has_error_.store(false);
+            spdlog::info("EmbeddingGenerator initialized with backend: {}",
+                         backend_->getBackendName());
             return true;
 
         } catch (const std::exception& e) {
@@ -817,99 +1568,39 @@ public:
     }
 
     bool isInitialized() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return initialized_;
+        return initialized_.load() && backend_ && backend_->isInitialized();
     }
 
     void shutdown() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        model_manager_.clearCache();
-        initialized_ = false;
-        has_error_ = false;
-        last_error_.clear();
+        if (backend_) {
+            backend_->shutdown();
+        }
+        initialized_.store(false);
+        has_error_.store(false);
+        {
+            std::unique_lock<std::shared_mutex> lock(error_mutex_);
+            last_error_.clear();
+        }
     }
 
     std::vector<float> generateEmbedding(const std::string& text) {
         YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbedding");
-        std::lock_guard<std::mutex> lock(mutex_);
 
-        if (!initialized_) {
+        // Lock-free check for initialization
+        if (!initialized_.load() || !backend_) {
             setError("Generator not initialized");
             return {};
         }
 
         try {
-            auto start = std::chrono::high_resolution_clock::now();
-
-            // Tokenize and preprocess using model-specific sequence length
-            size_t model_seq_length;
-            {
-                YAMS_ZONE_SCOPED_N("Preprocessing::GetModelLength");
-                model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
-                if (model_seq_length == 0) {
-                    model_seq_length = config_.max_sequence_length; // Fallback to config
-                }
-            }
-
-            std::vector<int32_t> tokens;
-            std::vector<int32_t> attention_mask;
-
-            {
-                YAMS_ONNX_ZONE("Tokenization");
-                YAMS_PLOT("InputTextLength", static_cast<int64_t>(text.length()));
-                tokens = preprocessor_.tokenize(text);
-                tokens = preprocessor_.truncateTokens(tokens, model_seq_length);
-                tokens = preprocessor_.padTokens(tokens, model_seq_length);
-                attention_mask = preprocessor_.generateAttentionMask(tokens);
-                YAMS_PLOT("TokenCount", static_cast<int64_t>(tokens.size()));
-            }
-
-            // Run inference
-            std::vector<std::vector<float>> embeddings;
-            {
-                YAMS_ONNX_ZONE("Inference");
-                std::vector<std::vector<int32_t>> batch_tokens = {tokens};
-                std::vector<std::vector<int32_t>> batch_masks = {attention_mask};
-                embeddings =
-                    model_manager_.runInference(config_.model_name, batch_tokens, batch_masks);
-            }
-
-            if (embeddings.empty()) {
-                setError("Model inference failed");
+            auto result = backend_->generateEmbedding(text);
+            if (!result) {
+                setError(result.error().message);
                 return {};
             }
 
-            std::vector<float> embedding = embeddings[0];
-
-            // Normalize if requested
-            if (config_.normalize_embeddings) {
-                YAMS_ONNX_ZONE("Normalization");
-                embedding = embedding_utils::normalizeEmbedding(embedding);
-            }
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-
-            // Update statistics
-            {
-                YAMS_ZONE_SCOPED_N("Statistics::Update");
-                stats_.total_texts_processed++;
-                stats_.total_tokens_processed += tokens.size();
-                stats_.total_inference_time += duration;
-                stats_.avg_inference_time =
-                    stats_.total_inference_time / stats_.total_texts_processed;
-                stats_.updateThroughput();
-
-                // Tracy performance plots
-                YAMS_PLOT("EmbeddingDimension", static_cast<int64_t>(embedding.size()));
-                YAMS_PLOT_F("InferenceTimeMs", duration.count());
-                YAMS_PLOT("TotalProcessedTexts",
-                          static_cast<int64_t>(stats_.total_texts_processed));
-                YAMS_PLOT_F("ThroughputTextsPerSec", stats_.throughput_texts_per_sec);
-            }
-
-            has_error_ = false;
-            return embedding;
+            has_error_.store(false);
+            return result.value();
 
         } catch (const std::exception& e) {
             setError("Embedding generation failed: " + std::string(e.what()));
@@ -924,110 +1615,24 @@ public:
             return {};
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (!initialized_) {
+        // Lock-free check for initialization
+        if (!initialized_.load() || !backend_) {
             setError("Generator not initialized");
             return {};
         }
 
         try {
-            auto start = std::chrono::high_resolution_clock::now();
+            // Convert to span
+            std::span<const std::string> texts_span(texts);
+            auto result = backend_->generateEmbeddings(texts_span);
 
-            // Process texts in batches
-            std::vector<std::vector<float>> all_embeddings;
-            all_embeddings.reserve(texts.size());
-
-            // Tracy plots for batch characteristics
-            YAMS_PLOT("BatchInputSize", static_cast<int64_t>(texts.size()));
-            size_t total_chars = 0;
-            for (const auto& text : texts) {
-                total_chars += text.length();
-            }
-            YAMS_PLOT("BatchTotalChars", static_cast<int64_t>(total_chars));
-            YAMS_PLOT("BatchAvgCharsPerText", static_cast<int64_t>(total_chars / texts.size()));
-
-            for (size_t i = 0; i < texts.size(); i += config_.batch_size) {
-                YAMS_ZONE_SCOPED_N("Batch::ProcessChunk");
-
-                size_t batch_end = std::min(i + config_.batch_size, texts.size());
-                std::vector<std::string> batch_texts(texts.begin() + i, texts.begin() + batch_end);
-                YAMS_PLOT("CurrentBatchSize", static_cast<int64_t>(batch_texts.size()));
-
-                // Tokenize batch
-                std::vector<std::vector<int32_t>> batch_tokens;
-                std::vector<std::vector<int32_t>> batch_masks;
-                size_t model_seq_length;
-
-                {
-                    YAMS_ONNX_ZONE("BatchTokenization");
-                    batch_tokens = preprocessor_.tokenizeBatch(batch_texts);
-
-                    // Get model-specific sequence length
-                    model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
-                    if (model_seq_length == 0) {
-                        model_seq_length = config_.max_sequence_length; // Fallback to config
-                    }
-
-                    // Truncate and pad
-                    for (auto& tokens : batch_tokens) {
-                        tokens = preprocessor_.truncateTokens(tokens, model_seq_length);
-                        tokens = preprocessor_.padTokens(tokens, model_seq_length);
-                    }
-
-                    // Generate attention masks
-                    for (const auto& tokens : batch_tokens) {
-                        batch_masks.push_back(preprocessor_.generateAttentionMask(tokens));
-                    }
-
-                    YAMS_PLOT("BatchTokensPerText", static_cast<int64_t>(model_seq_length));
-                }
-
-                // Run batch inference
-                std::vector<std::vector<float>> batch_embeddings;
-                {
-                    YAMS_ONNX_ZONE("BatchInference");
-                    batch_embeddings =
-                        model_manager_.runInference(config_.model_name, batch_tokens, batch_masks);
-                }
-
-                if (batch_embeddings.size() != batch_texts.size()) {
-                    setError("Batch inference size mismatch");
-                    return {};
-                }
-
-                // Normalize if requested
-                if (config_.normalize_embeddings) {
-                    YAMS_ONNX_ZONE("BatchNormalization");
-                    batch_embeddings = embedding_utils::normalizeEmbeddings(batch_embeddings);
-                }
-
-                // Add to results
-                {
-                    YAMS_ZONE_SCOPED_N("Batch::MergeResults");
-                    all_embeddings.insert(all_embeddings.end(), batch_embeddings.begin(),
-                                          batch_embeddings.end());
-                }
-
-                stats_.total_batches++;
-                YAMS_PLOT("ProcessedBatches", static_cast<int64_t>(stats_.total_batches));
+            if (!result) {
+                setError(result.error().message);
+                return {};
             }
 
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-
-            // Update statistics
-            stats_.total_texts_processed += texts.size();
-            for (const auto& text : texts) {
-                stats_.total_tokens_processed += estimateTokenCount(text);
-            }
-            stats_.total_inference_time += duration;
-            stats_.avg_inference_time = stats_.total_inference_time / stats_.total_texts_processed;
-            stats_.batch_count++;
-            stats_.updateThroughput();
-
-            has_error_ = false;
-            return all_embeddings;
+            has_error_.store(false);
+            return result.value();
 
         } catch (const std::exception& e) {
             setError("Batch embedding generation failed: " + std::string(e.what()));
@@ -1041,46 +1646,61 @@ public:
     }
 
     // Getters and configuration
-    size_t getEmbeddingDimension() const { return config_.embedding_dim; }
+    size_t getEmbeddingDimension() const {
+        return backend_ ? backend_->getEmbeddingDimension() : config_.embedding_dim;
+    }
 
-    size_t getMaxSequenceLength() const { return config_.max_sequence_length; }
+    size_t getMaxSequenceLength() const {
+        return backend_ ? backend_->getMaxSequenceLength() : config_.max_sequence_length;
+    }
 
     const EmbeddingConfig& getConfig() const { return config_; }
 
     GenerationStats getStats() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return stats_;
+        if (!backend_) {
+            return GenerationStats{};
+        }
+
+        try {
+            return backend_->getStats();
+        } catch (const std::exception& e) {
+            spdlog::warn("getStats: Backend getStats failed: {}", e.what());
+            return GenerationStats{};
+        }
     }
 
     void resetStats() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stats_ = GenerationStats{};
+        if (backend_) {
+            try {
+                backend_->resetStats();
+            } catch (const std::exception& e) {
+                spdlog::warn("resetStats: Backend reset failed: {}", e.what());
+            }
+        }
     }
 
     std::string getLastError() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(error_mutex_);
         return last_error_;
     }
 
-    bool hasError() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return has_error_;
-    }
+    bool hasError() const { return has_error_.load(); }
 
 private:
     void setError(const std::string& error) const {
-        last_error_ = error;
-        has_error_ = true;
+        {
+            std::unique_lock<std::shared_mutex> lock(error_mutex_);
+            last_error_ = error;
+        }
+        has_error_.store(true);
     }
 
     EmbeddingConfig config_;
-    TextPreprocessor preprocessor_;
-    ModelManager model_manager_;
-    bool initialized_;
-    GenerationStats stats_;
-    mutable std::mutex mutex_;
+    std::unique_ptr<IEmbeddingBackend> backend_;
+    std::atomic<bool> initialized_{false};
+    mutable std::shared_mutex error_mutex_; // Reader-writer lock for error strings only
     mutable std::string last_error_;
-    mutable bool has_error_;
+    mutable std::atomic<bool> has_error_{false};
 };
 
 EmbeddingGenerator::EmbeddingGenerator(const EmbeddingConfig& config)
@@ -1123,13 +1743,13 @@ EmbeddingGenerator::generateEmbeddingsAsync(const std::vector<std::string>& text
     return std::async(std::launch::async, [this, texts]() { return generateEmbeddings(texts); });
 }
 
-bool EmbeddingGenerator::loadModel(const std::string& model_path) {
+bool EmbeddingGenerator::loadModel([[maybe_unused]] const std::string& model_path) {
     // Update config and reinitialize
     // This is a simplified implementation
     return initialize();
 }
 
-bool EmbeddingGenerator::switchModel(const std::string& model_name,
+bool EmbeddingGenerator::switchModel([[maybe_unused]] const std::string& model_name,
                                      const EmbeddingConfig& new_config) {
     shutdown();
     pImpl = std::make_unique<Impl>(new_config);
@@ -1212,7 +1832,7 @@ namespace embedding_utils {
 std::vector<float> normalizeEmbedding(const std::vector<float>& embedding) {
     double norm = 0.0;
     for (float val : embedding) {
-        norm += val * val;
+        norm += static_cast<double>(val) * static_cast<double>(val);
     }
     norm = std::sqrt(norm);
 
@@ -1223,7 +1843,7 @@ std::vector<float> normalizeEmbedding(const std::vector<float>& embedding) {
     std::vector<float> normalized;
     normalized.reserve(embedding.size());
     for (float val : embedding) {
-        normalized.push_back(static_cast<float>(val / norm));
+        normalized.push_back(val / static_cast<float>(norm));
     }
 
     return normalized;
@@ -1244,7 +1864,7 @@ normalizeEmbeddings(const std::vector<std::vector<float>>& embeddings) {
 double computeMagnitude(const std::vector<float>& embedding) {
     double magnitude = 0.0;
     for (float val : embedding) {
-        magnitude += val * val;
+        magnitude += static_cast<double>(val) * static_cast<double>(val);
     }
     return std::sqrt(magnitude);
 }
@@ -1282,13 +1902,14 @@ std::string embeddingToString(const std::vector<float>& embedding, size_t max_va
     return oss.str();
 }
 
-EmbeddingConfig loadConfigFromFile(const std::string& config_path) {
+EmbeddingConfig loadConfigFromFile([[maybe_unused]] const std::string& config_path) {
     // TODO: Implement JSON loading
     // For now, return default config
     return EmbeddingConfig{};
 }
 
-bool saveConfigToFile(const EmbeddingConfig& config, const std::string& config_path) {
+bool saveConfigToFile([[maybe_unused]] const EmbeddingConfig& config,
+                      [[maybe_unused]] const std::string& config_path) {
     // TODO: Implement JSON saving
     return false;
 }
@@ -1307,7 +1928,8 @@ std::vector<std::string> getAvailableModels(const std::string& models_dir) {
     return models;
 }
 
-bool downloadModel(const std::string& model_name, const std::string& target_dir) {
+bool downloadModel([[maybe_unused]] const std::string& model_name,
+                   [[maybe_unused]] const std::string& target_dir) {
     // TODO: Implement model downloading
     return false;
 }

@@ -116,6 +116,23 @@
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
         "YAMS_USE_CONAN": "ON"
       }
+    },
+
+    {
+      "name": "conan-debug-coverage",
+      "displayName": "Conan Debug with Coverage",
+      "description": "Debug build with code coverage enabled",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
+        "YAMS_USE_CONAN": "ON",
+        "YAMS_ENABLE_COVERAGE": "ON",
+        "CMAKE_CXX_FLAGS": "-O0 -g --coverage",
+        "CMAKE_C_FLAGS": "-O0 -g --coverage"
+      }
     }
   ],
 
@@ -152,6 +169,12 @@
     {
       "name": "build-conan-make-release",
       "configurePreset": "conan-make-release"
+    },
+    {
+      "name": "build-conan-debug-coverage",
+      "configurePreset": "conan-debug-coverage",
+      "displayName": "Build with Coverage",
+      "description": "Build with code coverage instrumentation"
     }
   ],
 
@@ -211,6 +234,19 @@
       "configurePreset": "conan-make-release",
       "output": {
         "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-conan-debug-coverage",
+      "configurePreset": "conan-debug-coverage",
+      "displayName": "Test with Coverage",
+      "description": "Run tests and generate coverage",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
       }
     }
   ]

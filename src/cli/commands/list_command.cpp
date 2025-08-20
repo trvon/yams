@@ -1,7 +1,9 @@
 #include <spdlog/spdlog.h>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -116,6 +118,46 @@ public:
 
     Result<void> execute() override {
         try {
+            // Try daemon-first for simple list (no heavy filters)
+            if (!binaryOnly_ && !textOnly_ && fileType_.empty() && mimeType_.empty() &&
+                extensions_.empty() && createdAfter_.empty() && createdBefore_.empty() &&
+                modifiedAfter_.empty() && modifiedBefore_.empty() && indexedAfter_.empty() &&
+                indexedBefore_.empty() && !showChanges_ && sinceTime_.empty() && !showDiffTags_ &&
+                !showDeleted_) {
+                yams::daemon::ListRequest dreq;
+                dreq.limit = static_cast<size_t>(recentCount_ > 0 ? recentCount_ : limit_);
+                dreq.recent = true; // respect recent ordering
+                auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
+                    if (format_ == "json") {
+                        nlohmann::json j;
+                        j["total"] = resp.totalCount;
+                        nlohmann::json items = nlohmann::json::array();
+                        for (const auto& e : resp.items) {
+                            items.push_back({{"hash", e.hash},
+                                             {"path", e.path},
+                                             {"name", e.name},
+                                             {"size", e.size}});
+                        }
+                        j["items"] = items;
+                        std::cout << j.dump(2) << std::endl;
+                    } else {
+                        for (const auto& e : resp.items) {
+                            if (format_ == "minimal") {
+                                std::cout << e.path << "\n";
+                            } else {
+                                std::cout << e.name << "\t" << e.size << "\t"
+                                          << e.hash.substr(0, 12) << "\t" << e.path << "\n";
+                            }
+                        }
+                    }
+                    return Result<void>();
+                };
+                auto fallback = [&]() -> Result<void> {
+                    return Error{ErrorCode::NotImplemented, "local"};
+                };
+                if (auto d = daemon_first(dreq, fallback, render); d)
+                    return Result<void>();
+            }
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;
@@ -994,6 +1036,10 @@ private:
     bool showDiffTags_ = false;
     bool showDeleted_ = false;
     std::string changeWindow_;
+
+    // Tag filtering
+    std::string filterTags_;
+    // bool matchAllTags_ = false;  // Currently unused - reserved for future tag matching logic
 
     std::string getFileTypeIndicator(const EnhancedDocumentInfo& doc) {
         std::string indicator = "[";

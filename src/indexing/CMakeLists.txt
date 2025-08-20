@@ -13,6 +13,8 @@ target_link_libraries(yams_indexing PUBLIC
     yams_core
     yams_metadata
     yams_extraction
+    yams_content
+    yams_detection
     spdlog::spdlog
     Threads::Threads
 )

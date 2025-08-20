@@ -137,14 +137,15 @@ public:
             return true;
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Only hold mutex for validation and state check
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (!initialized_) {
-            setError("Database not initialized");
-            return false;
-        }
+            if (!initialized_) {
+                setError("Database not initialized");
+                return false;
+            }
 
-        try {
             // Validate all records first
             for (const auto& record : records) {
                 if (!utils::validateVectorRecord(record, config_.embedding_dim)) {
@@ -152,18 +153,23 @@ public:
                     return false;
                 }
             }
+        }
 
-            // Use backend batch insert
+        try {
+            // Don't hold our mutex while calling backend to avoid potential deadlock
             auto result = backend_->insertVectorsBatch(records);
             if (!result) {
+                std::lock_guard<std::mutex> lock(mutex_);
                 setError("Batch insert failed: " + result.error().message);
                 return false;
             }
 
+            std::lock_guard<std::mutex> lock(mutex_);
             has_error_ = false;
             return true;
 
         } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
             setError("Batch insert failed: " + std::string(e.what()));
             return false;
         }
@@ -342,24 +348,22 @@ public:
     }
 
     VectorDatabase::DatabaseStats getStats() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-
         VectorDatabase::DatabaseStats stats;
 
-        // Get basic stats from backend
+        // Get basic stats from backend - don't hold our mutex while calling backend
+        // to avoid potential deadlock with backend's mutex
         auto countResult = backend_->getVectorCount();
         stats.total_vectors = countResult ? countResult.value() : 0;
-
-        // Get document count (estimate based on unique document hashes)
-        stats.total_documents = 0; // TODO: implement document counting in backend
 
         // Get stats from backend if available
         auto backendStats = backend_->getStats();
         if (backendStats) {
+            stats.total_documents = backendStats.value().total_documents;
             stats.avg_embedding_magnitude = backendStats.value().avg_embedding_magnitude;
             stats.index_size_bytes = backendStats.value().index_size_bytes;
         } else {
-            // Estimate index size
+            // Estimate if backend doesn't provide stats
+            stats.total_documents = 0;
             stats.index_size_bytes = stats.total_vectors * config_.embedding_dim * sizeof(float);
         }
 

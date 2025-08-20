@@ -223,6 +223,9 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
         return Error{ErrorCode::DatabaseError, "Failed to open database: " + error};
     }
 
+    // Set busy timeout to avoid indefinite blocking
+    sqlite3_busy_timeout(db_, 5000); // 5 second timeout
+
     path_ = path;
     return {};
 }

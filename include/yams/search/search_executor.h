@@ -67,6 +67,7 @@ struct SearchRequest {
     bool enableQueryExpansion = false;  // Expand query with synonyms
     bool enableSpellCorrection = false; // Suggest spelling corrections
     float minRelevanceScore = 0.0f;     // Minimum relevance score
+    bool literalText = false;           // Treat query as literal text (escape special chars)
 };
 
 // Note: SearchResults is defined in search_results.h

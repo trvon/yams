@@ -5,6 +5,69 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - Unreleased
+
+### Added
+- **Downloader** new download module with libcurl adapter, repo-local staging, SHA-256 integrity verification, rate limiting, and atomic finalize into CAS (store-only by default).
+  - new `yams download` command returning JSON {hash, stored_path, size_bytes}; progress output (human/json); no user-path writes unless export is requested.
+- **Daemon Command Suite**
+  - New `yams-daemon` background service for persistent resource management
+  - Automatic daemon lifecycle management with configurable policies
+  - `yams daemon start` - Start background service
+  - `yams daemon stop` - Graceful shutdown with pending request completion
+  - `yams daemon status` - Health monitoring and resource usage
+  - `yams daemon restart` - Restart with configuration reload
+  - Auto-start on first command if daemon enabled in config
+- **Configuration v2**
+  - New `[daemon]` section for service configuration
+  - `[daemon.models]` for model lifecycle management
+  - `[daemon.lifecycle]` for auto-start and shutdown policies
+  - `[daemon.ipc]` for communication tuning
+  - Backward compatible with direct mode (no daemon)
+- **Literal Text Search Support**
+  - `--literal-text` flag for search and grep commands
+  - Treats query patterns as literal text instead of regex/operators
+  - Example: `yams search "call(" --literal-text` safely searches for parentheses
+  - Works across all search engines (fuzzy, hybrid, metadata, vector)
+- **Metadata Storage from ContentHandlers**
+  - ContentHandler metadata now properly stored in database
+  - Previously metadata was only logged, not persisted
+  - Enables rich metadata search and filtering for all file types
+  - Supports universal content handler system
+
+### Changed
+- Search command now uses daemon client
+- All CLI commands can leverage shared daemon resources
+- VectorIndexManager cached in daemon memory
+- EmbeddingGenerator shared across all operations
+- Shared result renderer system
+- **MCP Server Simplified**: Removed HTTP transport support, now stdio-only for cleaner local integration
+- **Improved EmbeddingGenerator Lifecycle**
+  - Deferred initialization until actual use to prevent startup overhead
+  - Lazy loading eliminates daemon connection attempts during stats/info commands
+  - Better resource management with on-demand initialization
+
+### Fixed
+- **Eliminated "Failed to preload model" Warning**
+  - Implemented lazy initialization of EmbeddingGenerator in YamsCLI
+  - Fixed daemon configuration defaults for missing config sections
+  - Daemon now gracefully handles missing `[daemon]` sections in config files
+- **Configuration Migration Robustness**
+  - ConfigMigrator now properly handles v1 to v2 migrations without breaking existing configs
+- **MCP Tools Schema Validation**: Fixed "Expected object, received null" error in tool definitions
+  - Removed empty `properties: {}` fields from tools with no parameters (`list_collections`)
+  - MCP server now loads correctly without schema validation errors
+  - Improved tool schema compliance with MCP specification
+- **FTS5 Query Safety**
+  - Special characters in search queries no longer break FTS5
+  - Automatic sanitization prevents syntax errors from `()[]{}*"` characters
+  - Maintains regex functionality for normal searches while protecting database
+  - Simplified architecture removes unnecessary interface complexity
+- **Search Engine Integration**
+  - All search paths (fuzzy, hybrid, metadata) handle special characters safely
+  - Raw query strings flow through pipeline unchanged until FTS5 level
+  - Removed routing complexity that excluded literal text from hybrid search
+
 ## [v0.3.4] - 2025-08-16
 
 ### Added

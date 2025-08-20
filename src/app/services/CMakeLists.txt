@@ -4,6 +4,9 @@ set(APP_SERVICES_SOURCES
     document_service.cpp
     search_service.cpp
     grep_service.cpp
+    download_service.cpp
+    indexing_service.cpp
+    stats_service.cpp
     factory.cpp
 )
 
@@ -15,6 +18,7 @@ target_link_libraries(yams_app_services
         yams_metadata
         yams_search
         yams_vector
+        yams_downloader
         nlohmann_json::nlohmann_json
         spdlog::spdlog
 )

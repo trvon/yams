@@ -121,10 +121,11 @@ HybridSearchFactory::create(std::shared_ptr<vector::VectorIndexManager> vectorIn
                      "HybridSearchFactory::create: null engine dependency"};
     }
 
-    // Create default embedding generator if none provided
+    // Don't create a new embedding generator here - use the shared one from YamsCLI
+    // This prevents creating a new ONNX runtime instance on every search
     if (!embeddingGenerator) {
-        embeddingGenerator = createDefaultEmbeddingGenerator();
-        // Note: It's OK if this returns nullptr - engine will fallback to zero vectors
+        spdlog::debug("No embedding generator provided to HybridSearchFactory::create");
+        // Engine will fallback to zero vectors if no embedding generator
     }
 
     // Build engine with embedding generator

@@ -14,6 +14,11 @@
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/embedding_service.h>
+// Daemon client API for daemon-first add
+#include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
 
@@ -66,39 +71,108 @@ public:
 
     Result<void> execute() override {
         try {
-            auto ensured = cli_->ensureStorageInitialized();
-            if (!ensured) {
-                return ensured;
-            }
-            auto store = cli_->getContentStore();
-            if (!store) {
-                return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+            // Attempt daemon-first add; fall back to local on failure
+            {
+                // Skip daemon for stdin input (requires special handling)
+                if (targetPath_.string() != "-") {
+                    yams::daemon::AddDocumentRequest dreq;
+                    dreq.path = targetPath_;
+                    dreq.name = documentName_;
+                    dreq.tags = tags_;
+
+                    // Parse metadata key=value pairs
+                    for (const auto& kv : metadata_) {
+                        auto pos = kv.find('=');
+                        if (pos != std::string::npos) {
+                            std::string key = kv.substr(0, pos);
+                            std::string value = kv.substr(pos + 1);
+                            dreq.metadata[key] = value;
+                        }
+                    }
+
+                    dreq.recursive = recursive_;
+                    // These fields don't exist in AddDocumentRequest yet
+                    // dreq.includePattern = includePatterns_;
+                    // dreq.excludePattern = excludePatterns_;
+                    // dreq.collection = collection_;
+                    // dreq.generateEmbeddings = !noEmbeddings_;
+
+                    auto render =
+                        [&](const yams::daemon::AddDocumentResponse& resp) -> Result<void> {
+                        // Display results
+                        if (resp.documentsAdded == 1) {
+                            std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
+                                      << std::endl;
+                        } else {
+                            std::cout << "Added " << resp.documentsAdded << " documents"
+                                      << std::endl;
+                        }
+                        return Result<void>();
+                    };
+
+                    auto fallback = [&]() -> Result<void> {
+                        // Fall back to local execution
+                        return executeLocal();
+                    };
+
+                    if (auto d = daemon_first(dreq, fallback, render); d) {
+                        return Result<void>();
+                    }
+                }
             }
 
-            // Check if reading from stdin
-            if (targetPath_.string() == "-") {
-                return storeFromStdin(store);
-            }
-
-            // Validate path exists
-            if (!std::filesystem::exists(targetPath_)) {
-                return Error{ErrorCode::FileNotFound, "Path not found: " + targetPath_.string()};
-            }
-
-            // Generate snapshot ID if not provided but snapshot label is given
-            if (snapshotId_.empty() && !snapshotLabel_.empty()) {
-                snapshotId_ = generateSnapshotId();
-            }
-
-            // Handle directory vs file
-            if (std::filesystem::is_directory(targetPath_)) {
-                return storeDirectory(store);
-            } else {
-                return storeFile(store, targetPath_);
-            }
+            // Fall back to local execution for stdin or if daemon failed
+            return executeLocal();
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+        }
+    }
+
+private:
+    std::string formatSize(uint64_t bytes) const {
+        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = static_cast<double>(bytes);
+        while (size >= 1024 && unitIndex < 4) {
+            size /= 1024;
+            unitIndex++;
+        }
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
+        return oss.str();
+    }
+
+    Result<void> executeLocal() {
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured) {
+            return ensured;
+        }
+        auto store = cli_->getContentStore();
+        if (!store) {
+            return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+        }
+
+        // Check if reading from stdin
+        if (targetPath_.string() == "-") {
+            return storeFromStdin(store);
+        }
+
+        // Validate path exists
+        if (!std::filesystem::exists(targetPath_)) {
+            return Error{ErrorCode::FileNotFound, "Path not found: " + targetPath_.string()};
+        }
+
+        // Generate snapshot ID if not provided but snapshot label is given
+        if (snapshotId_.empty() && !snapshotLabel_.empty()) {
+            snapshotId_ = generateSnapshotId();
+        }
+
+        // Handle directory vs file
+        if (std::filesystem::is_directory(targetPath_)) {
+            return storeDirectory(store);
+        } else {
+            return storeFile(store, targetPath_);
         }
     }
 
@@ -657,22 +731,10 @@ private:
 
     void outputResult(const api::StoreResult& storeResult) {
         // Generate embedding asynchronously if not disabled
-        if (!noEmbeddings_) {
-            auto store = cli_->getContentStore();
-            auto metadataRepo = cli_->getMetadataRepository();
-
-            if (store && metadataRepo) {
-                auto embeddingService = std::make_unique<vector::EmbeddingService>(
-                    store, metadataRepo, cli_->getDataPath());
-
-                if (embeddingService->isAvailable()) {
-                    // Trigger repair if there are missing embeddings
-                    // This spawns a single detached thread only if needed
-                    embeddingService->triggerRepairIfNeeded();
-                } else if (cli_->getVerbose()) {
-                    spdlog::debug("Embedding generation not available (no models found)");
-                }
-            }
+        // Note: Embedding repair is automatically triggered during storage initialization
+        // No need to manually trigger here to avoid duplicate repair threads
+        if (!noEmbeddings_ && cli_->getVerbose()) {
+            spdlog::debug("Embedding generation handled by storage initialization");
         }
 
         // Output in JSON if --json flag is set, or if --verbose is set

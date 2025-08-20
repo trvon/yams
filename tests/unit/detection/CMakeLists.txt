@@ -26,4 +26,5 @@ gtest_discover_tests(detection_tests
     PROPERTIES
         LABELS "unit"
         TIMEOUT 30
+    DISCOVERY_MODE PRE_TEST
 )

@@ -28,9 +28,11 @@ set_target_properties(vector_database_tests PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
-# Discover tests
+# Discover tests with increased timeout and environment for discovery mode
 gtest_discover_tests(vector_database_tests
     PROPERTIES
         LABELS "vector;unit"
         TIMEOUT 60
+        ENVIRONMENT "GTEST_DISCOVERY_MODE=1"
+    DISCOVERY_TIMEOUT 30  # Increase from default 5 to 30 seconds
 )

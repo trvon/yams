@@ -50,6 +50,12 @@ enum class ErrorCode {
     NotInitialized,
     NotImplemented,
     InvalidPath,
+    ResourceBusy,
+    IOError,
+    SerializationError,
+    DataCorruption,
+    RateLimited,
+    Unauthorized,
     Unknown
 };
 
@@ -116,6 +122,18 @@ constexpr const char* errorToString(ErrorCode error) {
             return "Not implemented";
         case ErrorCode::InvalidPath:
             return "Invalid path";
+        case ErrorCode::ResourceBusy:
+            return "Resource busy";
+        case ErrorCode::IOError:
+            return "I/O error";
+        case ErrorCode::SerializationError:
+            return "Serialization error";
+        case ErrorCode::DataCorruption:
+            return "Data corruption";
+        case ErrorCode::RateLimited:
+            return "Rate limited";
+        case ErrorCode::Unauthorized:
+            return "Unauthorized";
         case ErrorCode::Unknown:
             return "Unknown error";
     }
@@ -226,7 +244,7 @@ template <> struct std::formatter<yams::ErrorCode> {
 
 // fmt library support for ErrorCode (for spdlog)
 #if defined(SPDLOG_FMT_EXTERNAL) || defined(FMT_VERSION)
-#include <fmt/format.h>
+#include <spdlog/fmt/fmt.h>
 template <> struct fmt::formatter<yams::ErrorCode> {
     constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 

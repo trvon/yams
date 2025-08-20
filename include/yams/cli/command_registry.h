@@ -100,6 +100,11 @@ public:
     static std::unique_ptr<ICommand> createUpdateCommand();
 
     /**
+     * Create download command
+     */
+    static std::unique_ptr<ICommand> createDownloadCommand();
+
+    /**
      * Create serve command (MCP server)
      */
     static std::unique_ptr<ICommand> createServeCommand();
@@ -128,6 +133,11 @@ public:
      * Create model command (ONNX model management)
      */
     static std::unique_ptr<ICommand> createModelCommand();
+
+    /**
+     * Create daemon command (daemon management)
+     */
+    static std::unique_ptr<ICommand> createDaemonCommand();
 };
 
 } // namespace yams::cli

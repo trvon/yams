@@ -1,16 +1,13 @@
 # YAMS — Yet Another Memory System
 
-**Note**: YAMS v0.3.x is experimental software under active development.
+[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)
+**Note**: Pre‑1.0 releases (v0.x) are not considered stable. Expect breaking changes until v1.0.
 
-<div class="hero" style="border:1px solid #00ff7f;padding:1rem;background:#0b0f10;margin:1rem 0">
-<pre style="margin:0;color:#9bffb0">
-$ yams --version
-YAMS: persistent memory for LLMs and applications
-SHA-256 CAS • Rabin dedupe • zstd/LZMA • FTS5 + vectors • WAL
-</pre>
-</div>
+
 
 Persistent memory for LLMs and applications. Content‑addressed storage with deduplication, compression, semantic search, and full‑text indexing.
+
+
 
 ## What it does
 
@@ -20,6 +17,44 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 - Search: full‑text (SQLite FTS5) + semantic (vector)
 - Crash safety: WAL
 - Fast and portable CLI + MCP server 
+
+<div class="hero-cta">
+  <h2>Managed hosting coming soon</h2>
+  <p>Get hosting updates. Help shape the roadmap.</p>
+  <button class="waitlist-toggle-btn" type="button">Sign up</button>
+  <form action="https://formspree.io/f/xgvzbbzy" method="POST" class="waitlist-form" style="display:none">
+    <input type="email" name="email" placeholder="email@domain.com" required />
+    <input type="text" name="name" placeholder="Full name (optional)" />
+    <input type="text" name="use_case" placeholder="Primary use case (optional)" />
+    <!-- Honeypot field -->
+    <input type="text" name="_gotcha" style="display:none" />
+    <!-- Redirect to thanks page -->
+    <input type="hidden" name="_redirect" value="/thanks/" />
+    <!-- Tag the submission -->
+    <input type="hidden" name="list" value="hosting-early-access" />
+    <button type="submit">Join waitlist</button>
+  </form>
+  <p class="privacy-note">We only email about hosting. Unsubscribe anytime.</p>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var cta = document.querySelector('.hero-cta');
+  if (!cta) return;
+  var btn = cta.querySelector('.waitlist-toggle-btn');
+  var form = cta.querySelector('form.waitlist-form');
+  var heading = cta.querySelector('h1, h2, h3, h4, h5, h6');
+  if (!btn || !form) return;
+  btn.addEventListener('click', function () {
+    var isHidden = form.style.display === 'none' || form.hidden;
+    form.style.display = isHidden ? '' : 'none';
+    form.hidden = !isHidden;
+    if (isHidden && heading && (heading.hidden || heading.getAttribute('aria-hidden') === 'true')) {
+      heading.hidden = false;
+      heading.removeAttribute('aria-hidden');
+    }
+  });
+});
+</script>
 
 ## Versioning
 

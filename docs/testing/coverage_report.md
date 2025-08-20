@@ -41,7 +41,7 @@ This document provides a comprehensive analysis of YAMS test coverage, testing s
 
 ### Recent Additions
 - **MCP Server Tests**: Comprehensive test suite added for Model Context Protocol server
-- **WebSocket Transport Tests**: Full coverage of WebSocket transport functionality  
+- **Transport Tests**: Stdio transport only
 - **Stdio Transport Tests**: Complete testing of standard I/O transport
 - **Coverage Infrastructure**: Automated coverage reporting with gcovr
 
@@ -298,7 +298,7 @@ bash <(curl -s https://codecov.io/bash)
 - **Storage** - Basic storage engine
 - **WAL** - Write-ahead logging (builds successfully)
 - **Extraction** - Text extraction from documents
-- **MCP Server** - Model Context Protocol with WebSocket transport
+- **MCP Server** - Model Context Protocol (stdio transport)
 
 ### Priority Fixes for Coverage Analysis
 1. **High Priority**: Fix Search module type mismatches
@@ -345,7 +345,7 @@ bash <(curl -s https://codecov.io/bash)
 ### Verified Working Components
 - **Gold Standard**: Crypto module (SHA-256 hashing) builds and tests successfully
 - **Solid Foundation**: Core storage, chunking, and compression modules compile
-- **Modern Addition**: MCP server with WebSocket transport fully tested
+- **Modern Addition**: MCP server stdio transport fully tested
 - **Essential Services**: WAL (Write-Ahead Logging) implementation builds correctly
 
 ### Current Status Summary

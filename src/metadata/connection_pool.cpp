@@ -140,7 +140,7 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
         }
 
         // Wait for connection to become available
-        if (timeout == std::chrono::milliseconds::max()) {
+        if (timeout.count() >= 30000) { // >= 30 seconds, treat as indefinite wait
             cv_.wait(lock, [this] { return !available_.empty() || shutdown_; });
         } else {
             if (!cv_.wait_until(lock, deadline,

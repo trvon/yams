@@ -4,28 +4,19 @@
 #include <sstream>
 #include <thread>
 #include <gtest/gtest.h>
+#include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
 
 using namespace yams::mcp;
 using json = nlohmann::json;
 
-static std::string frameJson(const json& j) {
-    const std::string payload = j.dump();
-    std::ostringstream oss;
-    oss << "Content-Length: " << payload.size() << "\r\n"
-        << "Content-Type: application/json\r\n"
-        << "\r\n"
-        << payload;
-    return oss.str();
+// MCP stdio protocol uses newline-delimited JSON, not HTTP framing
+static std::string formatMessage(const json& j) {
+    return j.dump() + "\n";
 }
 
-static std::string frameRaw(const std::string& raw) {
-    std::ostringstream oss;
-    oss << "Content-Length: " << raw.size() << "\r\n"
-        << "Content-Type: application/json\r\n"
-        << "\r\n"
-        << raw;
-    return oss.str();
+static std::string formatRaw(const std::string& raw) {
+    return raw + "\n";
 }
 
 class StdioTransportTest : public ::testing::Test {
@@ -91,47 +82,65 @@ TEST_F(StdioTransportTest, SendMessage) {
 TEST_F(StdioTransportTest, ReceiveValidJson) {
     json testMessage = {{"jsonrpc", "2.0"}, {"method", "initialize"}, {"id", 1}};
 
-    setInput(frameJson(testMessage));
+    setInput(formatMessage(testMessage));
 
-    json received = transport->receive();
+    auto result = transport->receive();
 
-    EXPECT_FALSE(received.is_null());
-    EXPECT_EQ(received["jsonrpc"], "2.0");
-    EXPECT_EQ(received["method"], "initialize");
-    EXPECT_EQ(received["id"], 1);
+    EXPECT_TRUE(result);
+    if (result) {
+        const json& received = result.value();
+        EXPECT_EQ(received["jsonrpc"], "2.0");
+        EXPECT_EQ(received["method"], "initialize");
+        EXPECT_EQ(received["id"], 1);
+    }
 }
 
 TEST_F(StdioTransportTest, ReceiveInvalidJson) {
-    setInput(frameRaw("invalid json"));
+    setInput(formatRaw("invalid json"));
 
-    json received = transport->receive();
+    auto result = transport->receive();
 
-    // Should return empty/null JSON on parse error
-    EXPECT_TRUE(received.is_null() || received.empty());
+    // Should return error for invalid JSON
+    EXPECT_FALSE(result);
+    if (!result) {
+        const auto& error = result.error();
+        EXPECT_EQ(error.code, yams::ErrorCode::InvalidData);
+        EXPECT_FALSE(error.message.empty());
+    }
 }
 
 TEST_F(StdioTransportTest, ReceiveEmptyLine) {
-    setInput(frameRaw(""));
+    setInput("\n"); // Just a newline, no JSON
 
-    json received = transport->receive();
+    auto result = transport->receive();
 
-    // Should handle empty lines gracefully
-    EXPECT_TRUE(received.is_null() || received.empty());
+    // Should skip empty lines and eventually timeout/close
+    EXPECT_FALSE(result);
+    if (!result) {
+        // Could be transport closed or timeout
+        EXPECT_EQ(result.error().code, yams::ErrorCode::NetworkError);
+    }
 }
 
 TEST_F(StdioTransportTest, ReceiveMultipleMessages) {
     json message1 = {{"id", 1}, {"method", "test1"}};
     json message2 = {{"id", 2}, {"method", "test2"}};
 
-    setInput(frameJson(message1) + frameJson(message2));
+    setInput(formatMessage(message1) + formatMessage(message2));
 
-    json received1 = transport->receive();
-    EXPECT_EQ(received1["id"], 1);
-    EXPECT_EQ(received1["method"], "test1");
+    auto result1 = transport->receive();
+    EXPECT_TRUE(result1.has_value());
+    if (result1) {
+        EXPECT_EQ(result1.value()["id"], 1);
+        EXPECT_EQ(result1.value()["method"], "test1");
+    }
 
-    json received2 = transport->receive();
-    EXPECT_EQ(received2["id"], 2);
-    EXPECT_EQ(received2["method"], "test2");
+    auto result2 = transport->receive();
+    EXPECT_TRUE(result2.has_value());
+    if (result2) {
+        EXPECT_EQ(result2.value()["id"], 2);
+        EXPECT_EQ(result2.value()["method"], "test2");
+    }
 }
 
 TEST_F(StdioTransportTest, SendMultipleMessages) {
@@ -180,10 +189,13 @@ TEST_F(StdioTransportTest, ReceiveAfterClose) {
 
     setInput("{\"test\": \"message\"}\n");
 
-    json received = transport->receive();
+    auto result = transport->receive();
 
-    // Should return empty JSON
-    EXPECT_TRUE(received.is_null() || received.empty());
+    // Should return transport closed error
+    EXPECT_FALSE(result);
+    if (!result) {
+        EXPECT_EQ(result.error().code, yams::ErrorCode::NetworkError);
+    }
 }
 
 TEST_F(StdioTransportTest, ComplexJsonMessage) {
@@ -209,21 +221,25 @@ TEST_F(StdioTransportTest, ComplexJsonMessage) {
     clearOutput();
 
     // Test receiving complex message
-    setInput(frameJson(complexMessage));
-    json received = transport->receive();
+    setInput(formatMessage(complexMessage));
+    auto result = transport->receive();
 
-    EXPECT_EQ(received["jsonrpc"], "2.0");
-    EXPECT_EQ(received["id"], 42);
-    EXPECT_EQ(received["method"], "tools/call");
-    EXPECT_TRUE(received.contains("params"));
+    EXPECT_TRUE(result);
+    if (result) {
+        const json& received = result.value();
+        EXPECT_EQ(received["jsonrpc"], "2.0");
+        EXPECT_EQ(received["id"], 42);
+        EXPECT_EQ(received["method"], "tools/call");
+        EXPECT_TRUE(received.contains("params"));
 
-    auto params = received["params"];
-    EXPECT_EQ(params["name"], "search_documents");
-    EXPECT_TRUE(params.contains("arguments"));
+        auto params = received["params"];
+        EXPECT_EQ(params["name"], "search_documents");
+        EXPECT_TRUE(params.contains("arguments"));
 
-    auto arguments = params["arguments"];
-    EXPECT_EQ(arguments["query"], "complex search with spaces");
-    EXPECT_EQ(arguments["limit"], 10);
+        auto arguments = params["arguments"];
+        EXPECT_EQ(arguments["query"], "complex search with spaces");
+        EXPECT_EQ(arguments["limit"], 10);
+    }
 }
 
 TEST_F(StdioTransportTest, JsonWithSpecialCharacters) {
@@ -236,12 +252,16 @@ TEST_F(StdioTransportTest, JsonWithSpecialCharacters) {
     std::string output = getOutput();
     EXPECT_FALSE(output.empty());
 
-    setInput(frameJson(messageWithSpecialChars));
-    json received = transport->receive();
+    setInput(formatMessage(messageWithSpecialChars));
+    auto result = transport->receive();
 
-    EXPECT_EQ(received["message"], "Test with special chars: \n\t\r\"\\");
-    EXPECT_EQ(received["unicode"], "Unicode: 🚀 测试 🎉");
-    EXPECT_EQ(received["escaped"], "Escaped: \\\"quoted\\\" and \\n newline");
+    EXPECT_TRUE(result);
+    if (result) {
+        const json& received = result.value();
+        EXPECT_EQ(received["message"], "Test with special chars: \n\t\r\"\\");
+        EXPECT_EQ(received["unicode"], "Unicode: 🚀 测试 🎉");
+        EXPECT_EQ(received["escaped"], "Escaped: \\\"quoted\\\" and \\n newline");
+    }
 }
 
 TEST_F(StdioTransportTest, ConnectionStateConsistency) {
@@ -275,9 +295,13 @@ TEST_F(StdioTransportTest, LargeMessage) {
     EXPECT_GT(output.length(), 10000);
 
     // Test receiving large message
-    setInput(frameJson(largeMessage));
-    json received = transport->receive();
+    setInput(formatMessage(largeMessage));
+    auto result = transport->receive();
 
-    EXPECT_EQ(received["method"], "test");
-    EXPECT_EQ(received["params"]["large_data"].get<std::string>().length(), 10000);
+    EXPECT_TRUE(result);
+    if (result) {
+        const json& received = result.value();
+        EXPECT_EQ(received["method"], "test");
+        EXPECT_EQ(received["params"]["large_data"].get<std::string>().length(), 10000);
+    }
 }

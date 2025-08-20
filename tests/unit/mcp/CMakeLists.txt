@@ -28,7 +28,9 @@ target_compile_definitions(mcp_tests PRIVATE YAMS_TESTING)
 # Boost.Beast is header-only and included with Boost
 # No additional include directories needed
 
-gtest_discover_tests(mcp_tests)
+gtest_discover_tests(mcp_tests
+    DISCOVERY_TIMEOUT 30
+)
 
 # Add to CTest
 add_test(NAME mcp_unit_tests COMMAND mcp_tests)

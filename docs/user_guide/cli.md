@@ -746,35 +746,23 @@ yams browse
 
 ## serve (conditional) {#cmd-serve}
 
-Start the MCP (Model Context Protocol) server with multiple transport options (only when built with YAMS_BUILD_MCP_SERVER=ON).
+Start the MCP (Model Context Protocol) server over stdio (only when built with YAMS_BUILD_MCP_SERVER=ON).
 
 Synopsis:
-- yams serve [options]
+- yams serve
 
 Options:
-- -t, --transport <type>
-  - Transport type: stdio | websocket (default: stdio)
-- -p, --port <number>
-  - WebSocket port when using websocket transport (default: 8080)
-- --host <address>
-  - WebSocket host address (default: 127.0.0.1)
-- --path <path>
-  - WebSocket path (default: /mcp)
-- --ssl
-  - Use TLS for WebSocket connections (wss://)
+- None. Stdio transport only.
 
 Description:
 - Exposes YAMS functionality through the Model Context Protocol for AI tool integration.
-- Supports both stdio transport (for direct AI integration) and WebSocket transport (for network access).
+- Uses stdio transport for direct AI integration.
 - Provides search, retrieval, and document management capabilities to AI systems.
 - Graceful shutdown on SIGINT/SIGTERM signals.
 
 Examples:
 ```
-yams serve                                    # stdio transport
-yams serve --transport websocket              # WebSocket on default port
-yams serve -t websocket -p 9000 --ssl        # Secure WebSocket on port 9000
-yams serve --transport websocket --host 0.0.0.0 --port 8080  # Network accessible
+yams serve
 ```
 
 ---

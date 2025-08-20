@@ -17,17 +17,13 @@ namespace yams::cli {
 
 static std::atomic<bool> g_shutdown{false};
 
-// Forward declaration for HTTP transport runner (defined in serve_http.cpp)
-void run_mcp_http_server(yams::mcp::MCPServer& server, const std::string& host, uint16_t port,
-                         const std::string& path, std::atomic<bool>* shutdownFlag);
+// HTTP transport removed - now stdio only
 
 class ServeCommand : public ICommand {
 public:
     std::string getName() const override { return "serve"; }
 
-    std::string getDescription() const override {
-        return "Start MCP server (stdio or HTTP transport)";
-    }
+    std::string getDescription() const override { return "Start MCP server (stdio transport)"; }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
@@ -35,16 +31,6 @@ public:
         auto* cmd = app.add_subcommand("serve", getDescription());
         cmd->add_flag("--quiet", quiet_,
                       "Suppress banner and set warn log level (can also set YAMS_MCP_QUIET=1)");
-
-        // Transport options
-        cmd->add_option("--transport", transport_, "Transport: stdio or http")
-            ->check(CLI::IsMember({"stdio", "http"}));
-        cmd->add_option("--host", host_, "Bind host for HTTP transport (default: 127.0.0.1)");
-        cmd->add_option("--port", port_, "Bind port for HTTP transport (default: 8777)");
-        cmd->add_option("--path", path_, "Endpoint path for HTTP transport (default: /mcp)");
-        cmd->add_option("--idle-exit", idleExitSeconds_,
-                        "Shut down after N seconds of inactivity (HTTP only)");
-        cmd->add_option("--parent-pid", parentPid_, "Exit when this parent PID exits (HTTP only)");
 
         cmd->callback([this]() {
             auto result = execute();
@@ -82,10 +68,7 @@ public:
             } else {
                 // Interactive banner for humans
                 std::cerr << "\n=== YAMS MCP Server ===" << std::endl;
-                std::cerr << "Transport: "
-                          << (transport_ == "http" ? "http (Streamable HTTP)"
-                                                   : "stdio (JSON-RPC over stdin/stdout)")
-                          << std::endl;
+                std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)" << std::endl;
                 std::cerr << "Status: Waiting for client connection..." << std::endl;
                 std::cerr << "Press Ctrl+C to stop the server" << std::endl;
                 std::cerr << std::endl;
@@ -154,47 +137,21 @@ public:
                 return Error{ErrorCode::NotInitialized, "Storage not initialized"};
             }
 
-            // Create MCP server (behavior depends on selected transport)
-            std::unique_ptr<mcp::MCPServer> server;
-            if (transport_ == "http") {
-                // HTTP mode: construct server without a stdio transport; HTTP loop will call
-                // processMessage()
-                std::unique_ptr<mcp::ITransport> nullTransport;
-                server = std::make_unique<mcp::MCPServer>(store, searchExecutor, metadataRepo,
-                                                          hybridEngine, std::move(nullTransport),
-                                                          &g_shutdown);
-                spdlog::info("MCP server initialized with HTTP transport at {}:{}{}", host_, port_,
-                             path_);
+            // Create MCP server with stdio transport
+            std::unique_ptr<mcp::ITransport> transport = std::make_unique<mcp::StdioTransport>();
+            spdlog::info("MCP server initialized with stdio transport");
 
-                // Run HTTP server (blocking until shutdown)
-                // Pass idle-exit and parent PID via environment to HTTP server
-                if (idleExitSeconds_ > 0) {
-                    ::setenv("YAMS_MCP_IDLE_EXIT", std::to_string(idleExitSeconds_).c_str(), 1);
-                }
-                if (parentPid_ > 0) {
-                    ::setenv("YAMS_PARENT_PID", std::to_string(parentPid_).c_str(), 1);
-                }
-                run_mcp_http_server(*server, host_, static_cast<uint16_t>(port_), path_,
-                                    &g_shutdown);
-                spdlog::info("MCP HTTP server stopped");
-            } else {
-                // stdio mode (default)
-                std::unique_ptr<mcp::ITransport> transport =
-                    std::make_unique<mcp::StdioTransport>();
-                spdlog::info("MCP server initialized with stdio transport");
+            auto server =
+                std::make_unique<mcp::MCPServer>(store, searchExecutor, metadataRepo, hybridEngine,
+                                                 std::move(transport), &g_shutdown);
 
-                server = std::make_unique<mcp::MCPServer>(store, searchExecutor, metadataRepo,
-                                                          hybridEngine, std::move(transport),
-                                                          &g_shutdown);
-
-                // Run server until shutdown signal
-                server->start();
-                while (!g_shutdown && server->isRunning()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-                server->stop();
-                spdlog::info("MCP server stopped");
+            // Run server until shutdown signal
+            server->start();
+            while (!g_shutdown && server->isRunning()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
+            server->stop();
+            spdlog::info("MCP server stopped");
 
             return Result<void>();
 
@@ -206,12 +163,6 @@ public:
 private:
     YamsCLI* cli_ = nullptr;
     bool quiet_ = false;
-    std::string transport_ = "stdio";
-    std::string host_ = "127.0.0.1";
-    uint16_t port_ = 8777;
-    std::string path_ = "/mcp";
-    int idleExitSeconds_ = 0;
-    int parentPid_ = 0;
 };
 
 // Factory function

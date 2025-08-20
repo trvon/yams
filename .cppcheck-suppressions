@@ -1,0 +1,204 @@
+# YAMS cppcheck suppressions
+# This file contains suppressions for false positives and intentional code patterns
+
+# =============================================================================
+# Third-party and generated code suppressions
+# =============================================================================
+
+# Suppress all issues in third-party dependencies fetched via CMake
+*:*/_deps/*
+*:*/build/*
+*:*/cmake-build-*/*
+*:*/.cache/*
+*:*/third_party/*
+*:*/external/*
+*:*/vendor/*
+
+# Generated protobuf files
+*:*.pb.h
+*:*.pb.cc
+
+# =============================================================================
+# Library-specific suppressions
+# =============================================================================
+
+# SQLite amalgamation file - external code
+*:*/sqlite-vec.c
+*:*/sqlite3.c
+*:*/sqlite3.h
+
+# PDFium headers - external binary distribution
+*:*/pdfium/*
+
+# LZMA SDK - external C code
+*:*/lzma-src/*
+*:*/_deps/lzma-src/*
+
+# ONNX Runtime headers
+*:*/onnxruntime/*
+
+# =============================================================================
+# C++20 and modern C++ patterns
+# =============================================================================
+
+# std::format and newer string formatting
+unusedFunction:*format*
+unusedFunction:*Format*
+
+# Coroutines - may appear unused due to co_await/co_return
+unusedFunction:*co_*
+unusedFunction:*Task*
+unusedFunction:*Awaitable*
+unusedFunction:*awaitable*
+
+# Template instantiations may appear unused
+unusedFunction:*template*
+unusedFunction:*Template*
+
+# =============================================================================
+# YAMS-specific patterns
+# =============================================================================
+
+# Test utilities and fixtures may appear unused
+unusedFunction:*tests/*
+unusedFunction:*test/*
+unusedFunction:*Test*
+unusedFunction:*Mock*
+unusedFunction:*Fixture*
+
+# Factory patterns and plugin systems
+unusedFunction:*Factory*
+unusedFunction:*factory*
+unusedFunction:*Provider*
+unusedFunction:*provider*
+
+# CLI command handlers may appear unused but are used via registration
+unusedFunction:*Command*
+unusedFunction:*command*
+
+# MCP tools and handlers - used via dynamic registration
+unusedFunction:*Tool*
+unusedFunction:*Handler*
+unusedFunction:*Processor*
+
+# =============================================================================
+# Configuration and initialization code
+# =============================================================================
+
+# Static initialization functions
+unusedFunction:*init*
+unusedFunction:*Init*
+unusedFunction:*initialize*
+unusedFunction:*Initialize*
+
+# Configuration loaders
+unusedFunction:*Config*
+unusedFunction:*config*
+unusedFunction:*Settings*
+
+# =============================================================================
+# Performance and optimization patterns
+# =============================================================================
+
+# Move constructors and assignment operators
+unusedFunction:*move*
+unusedFunction:*Move*
+
+# RAII and resource management
+unusedFunction:*Guard*
+unusedFunction:*Lock*
+unusedFunction:*Scope*
+
+# =============================================================================
+# API and interface methods
+# =============================================================================
+
+# Virtual destructors
+unusedFunction:*~*
+
+# Interface implementations that may not be called in tests
+unusedFunction:*Interface*
+unusedFunction:*interface*
+unusedFunction:*Abstract*
+
+# =============================================================================
+# Platform-specific code
+# =============================================================================
+
+# macOS specific code
+unusedFunction:*:*darwin*
+unusedFunction:*:*macos*
+unusedFunction:*:*apple*
+
+# Linux specific code
+unusedFunction:*:*linux*
+unusedFunction:*:*posix*
+
+# =============================================================================
+# Common false positives
+# =============================================================================
+
+# Intentionally unused parameters (often marked with [[maybe_unused]])
+unusedVariable:*unused*
+unusedVariable:*_unused*
+missingOverride  # Sometimes false positive with complex inheritance
+
+# Forward declarations and incomplete types
+noExplicitConstructor  # Often intentional for simple structs
+
+# Template specializations may trigger false positives
+templateInstantiation
+
+# Memory management patterns
+useInitializationList  # Sometimes initialization order matters
+
+# =============================================================================
+# Specific suppression patterns for YAMS modules
+# =============================================================================
+
+# Vector and embedding code - mathematical operations may seem redundant
+duplicateExpression:*vector*
+duplicateExpression:*embedding*
+duplicateExpression:*similarity*
+
+# Compression algorithms - may have intentional similar patterns
+duplicateExpression:*compression*
+duplicateExpression:*compress*
+
+# Crypto and hashing - similar patterns are common
+duplicateExpression:*crypto*
+duplicateExpression:*hash*
+duplicateExpression:*sha*
+
+# Database and SQL generation - string concatenation patterns
+duplicateExpression:*sql*
+duplicateExpression:*query*
+duplicateExpression:*database*
+
+# Content handlers - similar validation patterns
+duplicateExpression:*content*
+duplicateExpression:*handler*
+
+# =============================================================================
+# Performance critical code
+# =============================================================================
+
+# Hot paths where performance matters more than style
+# These can be reviewed manually but shouldn't fail CI
+constParameter:*hot_path*
+constParameter:*performance*
+constParameter:*fast_*
+
+# =============================================================================
+# Error handling patterns
+# =============================================================================
+
+# Result<T> and Expected<T> patterns
+unusedFunction:*Result*
+unusedFunction:*Expected*
+unusedFunction:*Optional*
+
+# Exception safety and RAII
+unusedFunction:*finally*
+unusedFunction:*ScopeExit*
+unusedFunction:*Cleanup*

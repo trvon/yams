@@ -26,11 +26,16 @@ struct ServiceBundle {
     std::shared_ptr<IGrepService> grep;
     std::shared_ptr<IDocumentService> document;
     std::shared_ptr<IRestoreService> restore;
+    std::shared_ptr<IDownloadService> download;
+    std::shared_ptr<IIndexingService> indexing;
+    std::shared_ptr<IStatsService> stats;
 
     // True if all services are non-null.
     [[nodiscard]] bool valid() const noexcept {
         return static_cast<bool>(search) && static_cast<bool>(grep) &&
-               static_cast<bool>(document) && static_cast<bool>(restore);
+               static_cast<bool>(document) && static_cast<bool>(restore) &&
+               static_cast<bool>(download) && static_cast<bool>(indexing) &&
+               static_cast<bool>(stats);
     }
 };
 
@@ -54,5 +59,8 @@ struct ServiceBundle {
 [[nodiscard]] std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);
 [[nodiscard]] std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx);
 [[nodiscard]] std::shared_ptr<IRestoreService> makeRestoreService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IIndexingService> makeIndexingService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IStatsService> makeStatsService(const AppContext& ctx);
 
 } // namespace yams::app::services

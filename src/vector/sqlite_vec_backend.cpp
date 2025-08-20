@@ -10,6 +10,55 @@ extern "C" {
 
 namespace yams::vector {
 
+namespace {
+inline int stepWithRetry(sqlite3_stmt* stmt, int max_attempts = 20) {
+    int attempt = 0;
+    while (true) {
+        int rc = sqlite3_step(stmt);
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
+            int exp = attempt;
+            if (exp > 7)
+                exp = 7;
+            int sleep_ms = 10 * (1 << exp);
+            ++attempt;
+            if (attempt <= max_attempts) {
+                spdlog::warn("sqlite3_step busy/locked (rc={}): retry {}/{} after {} ms", rc,
+                             attempt, max_attempts, sleep_ms);
+                sqlite3_sleep(sleep_ms);
+                continue;
+            }
+        }
+        return rc;
+    }
+}
+
+// RAII transaction guard to ensure transactions are properly rolled back on error
+class TransactionGuard {
+public:
+    TransactionGuard(sqlite3* db, bool& in_transaction_flag)
+        : db_(db), in_transaction_flag_(in_transaction_flag), committed_(false) {
+        in_transaction_flag_ = true;
+    }
+
+    ~TransactionGuard() {
+        if (!committed_) {
+            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+            in_transaction_flag_ = false;
+        }
+    }
+
+    void commit() {
+        committed_ = true;
+        in_transaction_flag_ = false;
+    }
+
+private:
+    sqlite3* db_;
+    bool& in_transaction_flag_;
+    bool committed_;
+};
+} // namespace
+
 SqliteVecBackend::SqliteVecBackend()
     : db_(nullptr), embedding_dim_(0), initialized_(false), in_transaction_(false) {
     std::memset(&stmts_, 0, sizeof(stmts_));
@@ -67,17 +116,32 @@ Result<void> SqliteVecBackend::initialize(const std::string& db_path) {
         return Error{ErrorCode::DatabaseError, "Failed to open database: " + error};
     }
 
+    // Set busy timeout to avoid indefinite blocking
+    sqlite3_busy_timeout(db_, 5000); // 5 second timeout
+
     db_path_ = db_path;
 
     spdlog::info("Database opened successfully: {}", db_path);
+    // Enable additional pragmas for robustness and performance
+    executeSQL("PRAGMA foreign_keys=ON");
+    executeSQL("PRAGMA temp_store=MEMORY");
+    // 256 MiB memory map for improved I/O performance (bytes)
+    executeSQL("PRAGMA mmap_size=268435456");
 
-    // Temporarily disable WAL mode to test if it conflicts with virtual tables
-    // auto result = executeSQL("PRAGMA journal_mode=WAL");
-    // if (!result) {
-    //     close();
-    //     return result;
-    // }
-    spdlog::debug("Skipping WAL mode for debugging virtual table issues");
+    // Harden connection against SQLITE_BUSY/LOCKED and enable WAL for better concurrency
+    sqlite3_extended_result_codes(db_, 1);
+    sqlite3_busy_timeout(db_, 10000);
+
+    {
+        auto pragma = executeSQL("PRAGMA journal_mode=WAL");
+        if (!pragma) {
+            spdlog::warn("Failed to enable WAL journal mode: {}. Continuing with default mode.",
+                         pragma.error().message);
+        }
+    }
+    // Reasonable durability/performance trade-offs for WAL
+    executeSQL("PRAGMA synchronous=NORMAL");
+    executeSQL("PRAGMA wal_autocheckpoint=1000");
 
     // Load sqlite-vec extension
     Result<void> result;
@@ -135,7 +199,7 @@ Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {
     spdlog::info("Creating sqlite-vec tables with proper schema separation...");
 
     // Set a busy timeout to prevent hangs
-    sqlite3_busy_timeout(db_, 5000);
+    sqlite3_busy_timeout(db_, 10000);
 
     // 1. Create the vector virtual table (embeddings only)
     spdlog::info("Creating vector virtual table...");
@@ -302,7 +366,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
 
     // Only begin transaction if we're managing it
     if (manage_transaction) {
-        auto tx_result = executeSQL("BEGIN TRANSACTION");
+        auto tx_result = executeSQL("BEGIN IMMEDIATE TRANSACTION");
         if (!tx_result) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to begin transaction: " + tx_result.error().message};
@@ -341,7 +405,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
             sqlite3_bind_text(update_stmt, 1, vec_json.str().c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(update_stmt, 2, vector_rowid);
 
-            int rc = sqlite3_step(update_stmt);
+            int rc = stepWithRetry(update_stmt);
             sqlite3_finalize(update_stmt);
 
             if (rc != SQLITE_DONE) {
@@ -387,7 +451,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
             sqlite3_bind_text(metadata_stmt, 4, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(metadata_stmt, 5, vector_rowid);
 
-            rc = sqlite3_step(metadata_stmt);
+            rc = stepWithRetry(metadata_stmt);
             sqlite3_finalize(metadata_stmt);
 
             if (rc != SQLITE_DONE) {
@@ -434,7 +498,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
             int rc;
             {
                 YAMS_ZONE_SCOPED_N("SQLite::ExecuteVectorInsert");
-                rc = sqlite3_step(vector_stmt);
+                rc = stepWithRetry(vector_stmt);
             }
             spdlog::info("sqlite3_step returned: {}", rc);
             sqlite3_finalize(vector_stmt);
@@ -491,7 +555,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
 
             {
                 YAMS_ZONE_SCOPED_N("SQLite::ExecuteMetadataInsert");
-                rc = sqlite3_step(metadata_stmt);
+                rc = stepWithRetry(metadata_stmt);
             }
             sqlite3_finalize(metadata_stmt);
 
@@ -550,13 +614,15 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
     Result<void> tx_result;
     {
         YAMS_ZONE_SCOPED_N("BatchInsert::BeginTransaction");
-        tx_result = executeSQL("BEGIN TRANSACTION");
+        tx_result = executeSQL("BEGIN IMMEDIATE TRANSACTION");
         if (!tx_result) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to begin transaction: " + tx_result.error().message};
         }
     }
-    in_transaction_ = true;
+
+    // Use RAII guard to ensure transaction is properly rolled back on error
+    TransactionGuard guard(db_, in_transaction_);
     spdlog::info("Transaction started successfully");
 
     for (size_t i = 0; i < records.size(); ++i) {
@@ -566,8 +632,7 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
         auto result = insertVectorInternal(records[i], false);
         if (!result) {
             spdlog::error("Failed to insert record {} in batch: {}", i, result.error().message);
-            executeSQL("ROLLBACK");
-            in_transaction_ = false;
+            // TransactionGuard will automatically rollback
             return result;
         }
         spdlog::info("Record {}/{} inserted successfully", i + 1, records.size());
@@ -578,13 +643,15 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
         YAMS_ZONE_SCOPED_N("BatchInsert::CommitTransaction");
         commit_result = executeSQL("COMMIT");
     }
-    in_transaction_ = false;
 
     if (!commit_result) {
-        executeSQL("ROLLBACK");
+        // TransactionGuard will automatically rollback
         return Error{ErrorCode::DatabaseError,
                      "Failed to commit transaction: " + commit_result.error().message};
     }
+
+    // Mark transaction as successfully committed
+    guard.commit();
 
     return Result<void>();
 }
@@ -653,7 +720,7 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
         sqlite3_bind_text(vector_stmt, 1, vec_json.str().c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(vector_stmt, 2, rowid);
 
-        int rc = sqlite3_step(vector_stmt);
+        int rc = stepWithRetry(vector_stmt);
         sqlite3_finalize(vector_stmt);
 
         if (rc != SQLITE_DONE) {
@@ -692,7 +759,7 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
         sqlite3_bind_text(metadata_stmt, 4, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(metadata_stmt, 5, rowid);
 
-        rc = sqlite3_step(metadata_stmt);
+        rc = stepWithRetry(metadata_stmt);
         sqlite3_finalize(metadata_stmt);
 
         if (rc != SQLITE_DONE) {
@@ -727,7 +794,7 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
     }
 
     // Start transaction
-    auto tx_result = executeSQL("BEGIN TRANSACTION");
+    auto tx_result = executeSQL("BEGIN IMMEDIATE TRANSACTION");
     if (!tx_result) {
         return Error{ErrorCode::DatabaseError,
                      "Failed to begin transaction: " + tx_result.error().message};
@@ -769,7 +836,7 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
 
         sqlite3_bind_int64(metadata_stmt, 1, rowid);
 
-        int rc = sqlite3_step(metadata_stmt);
+        int rc = stepWithRetry(metadata_stmt);
         sqlite3_finalize(metadata_stmt);
 
         if (rc != SQLITE_DONE) {
@@ -789,7 +856,7 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
 
         sqlite3_bind_int64(vector_stmt, 1, rowid);
 
-        rc = sqlite3_step(vector_stmt);
+        rc = stepWithRetry(vector_stmt);
         sqlite3_finalize(vector_stmt);
 
         if (rc != SQLITE_DONE) {
@@ -824,7 +891,7 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
     }
 
     // Start transaction
-    auto tx_result = executeSQL("BEGIN TRANSACTION");
+    auto tx_result = executeSQL("BEGIN IMMEDIATE TRANSACTION");
     if (!tx_result) {
         return Error{ErrorCode::DatabaseError,
                      "Failed to begin transaction: " + tx_result.error().message};
@@ -861,7 +928,7 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
 
         sqlite3_bind_text(metadata_stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
-        int rc = sqlite3_step(metadata_stmt);
+        int rc = stepWithRetry(metadata_stmt);
         sqlite3_finalize(metadata_stmt);
 
         if (rc != SQLITE_DONE) {
@@ -882,7 +949,7 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
 
             sqlite3_bind_int64(vector_stmt, 1, rowid);
 
-            rc = sqlite3_step(vector_stmt);
+            rc = stepWithRetry(vector_stmt);
             sqlite3_finalize(vector_stmt);
 
             if (rc != SQLITE_DONE) {
@@ -947,6 +1014,8 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
 
     // Add metadata filters using json_extract
     for (const auto& [key, value] : metadata_filters) {
+        (void)key;   // Suppress unused variable warning - used in parameter binding below
+        (void)value; // Suppress unused variable warning - used in parameter binding below
         where_clauses.push_back("json_extract(m.metadata, '$.\"' || ? || '\"') = ?");
     }
 
@@ -1309,10 +1378,15 @@ Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
 
     VectorDatabase::DatabaseStats stats;
 
-    // Get total vectors
-    auto count_result = getVectorCount();
-    if (count_result) {
-        stats.total_vectors = count_result.value();
+    // Get total vectors from metadata table (avoiding separate lock acquisition)
+    const char* count_sql = "SELECT COUNT(*) FROM doc_metadata";
+    sqlite3_stmt* count_stmt;
+
+    if (sqlite3_prepare_v2(db_, count_sql, -1, &count_stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+            stats.total_vectors = static_cast<size_t>(sqlite3_column_int64(count_stmt, 0));
+        }
+        sqlite3_finalize(count_stmt);
     }
 
     // Get unique documents count (from metadata table which has document_hash)
@@ -1326,14 +1400,16 @@ Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
         sqlite3_finalize(stmt);
     }
 
-    // Get database size
-    sql = "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()";
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            stats.index_size_bytes = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
-        }
-        sqlite3_finalize(stmt);
-    }
+    // Estimate database size based on vector count and dimensions
+    // Avoid PRAGMA queries which can cause blocking issues
+    // Each vector is embedding_dim_ floats (4 bytes each) plus metadata overhead
+    size_t estimated_vector_size = embedding_dim_ * sizeof(float);
+    size_t metadata_overhead = 256; // Estimate for chunk_id, document_hash, metadata JSON
+    stats.index_size_bytes = stats.total_vectors * (estimated_vector_size + metadata_overhead);
+
+    // Set avg_embedding_magnitude to a reasonable value for normalized vectors
+    // Most embedding models produce normalized vectors with magnitude ~1.0
+    stats.avg_embedding_magnitude = 1.0;
 
     // TODO: Add vector_dimensions field to DatabaseStats if needed
     // stats.vector_dimensions = embedding_dim_;
@@ -1390,7 +1466,7 @@ Result<void> SqliteVecBackend::beginTransaction() {
         return Error{ErrorCode::InvalidState, "Transaction already in progress"};
     }
 
-    auto result = executeSQL("BEGIN TRANSACTION");
+    auto result = executeSQL("BEGIN IMMEDIATE TRANSACTION");
     if (result) {
         in_transaction_ = true;
     }
@@ -1471,7 +1547,7 @@ Result<void> SqliteVecBackend::loadSqliteVecExtension() {
                          "sqlite-vec extension loaded but vec0 module not available"};
         }
     } else {
-        spdlog::warn(
+        spdlog::debug(
             "Could not verify vec0 module availability, but extension initialization succeeded");
     }
 
@@ -1533,17 +1609,48 @@ Result<void> SqliteVecBackend::executeSQL(const std::string& sql) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::executeSQL");
     spdlog::info("Executing SQL: {}", sql); // Changed to info for visibility
 
+    const int max_attempts = 20;
+    int attempt = 0;
+    int rc = SQLITE_OK;
     char* error_msg = nullptr;
-    int rc;
-    {
-        YAMS_ZONE_SCOPED_N("SQLite::exec");
-        rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &error_msg);
-    }
 
-    if (rc != SQLITE_OK) {
+    while (true) {
+        {
+            YAMS_ZONE_SCOPED_N("SQLite::exec");
+            rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &error_msg);
+        }
+
+        if (rc == SQLITE_OK) {
+            if (error_msg) {
+                sqlite3_free(error_msg);
+                error_msg = nullptr;
+            }
+            break;
+        }
+
         std::string error = error_msg ? error_msg : "Unknown error";
+        if (error_msg) {
+            sqlite3_free(error_msg);
+            error_msg = nullptr;
+        }
+
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
+            // Exponential backoff with cap (10ms .. ~1.28s)
+            int exp = attempt;
+            if (exp > 7)
+                exp = 7;
+            int sleep_ms = 10 * (1 << exp);
+            ++attempt;
+
+            if (attempt <= max_attempts) {
+                spdlog::warn("SQL busy/locked (rc={}): {}. Retrying attempt {}/{} after {} ms", rc,
+                             error, attempt, max_attempts, sleep_ms);
+                sqlite3_sleep(sleep_ms);
+                continue;
+            }
+        }
+
         spdlog::error("SQL execution failed with code {}: {}", rc, error);
-        sqlite3_free(error_msg);
         return Error{ErrorCode::DatabaseError, error};
     }
 

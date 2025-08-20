@@ -16,6 +16,7 @@ target_link_libraries(yams-mcp-server
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         Threads::Threads
+        ZLIB::ZLIB
 )
 
 target_include_directories(yams-mcp-server

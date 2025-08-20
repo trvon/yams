@@ -22,6 +22,7 @@ add_library(yams_vector
     model_cache.cpp
     model_loader.cpp
     sqlite_vec_backend.cpp  # SQLite-vec backend implementation
+    mock_embedding_provider.cpp  # Mock provider for testing
     # Compile sqlite-vec directly into the library
     ${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
 )
@@ -44,6 +45,24 @@ target_include_directories(yams_vector
 )
 
 # Link dependencies
+# Make ONNX Runtime optional
+option(YAMS_ENABLE_ONNX "Enable ONNX Runtime support in vector library" ON)
+
+if(YAMS_ENABLE_ONNX)
+    if(NOT TARGET onnxruntime::onnxruntime)
+        find_package(onnxruntime QUIET)
+    endif()
+    
+    if(NOT TARGET onnxruntime::onnxruntime)
+        message(WARNING "ONNX Runtime requested but not found. Embedding features will use mock/daemon provider only.")
+        set(YAMS_ENABLE_ONNX OFF)
+    else()
+        message(STATUS "ONNX Runtime found - enabling local embedding generation")
+    endif()
+else()
+    message(STATUS "ONNX Runtime disabled - using mock/daemon embedding providers")
+endif()
+
 target_link_libraries(yams_vector
     PUBLIC
         yams::core
@@ -51,22 +70,35 @@ target_link_libraries(yams_vector
         yams::api       # Need IContentStore for worker
     PRIVATE
         spdlog::spdlog
-        onnxruntime::onnxruntime
-        SQLite::SQLite3         # Direct SQLite access
+        sqlite3                 # Direct SQLite access
 )
+
+# Link daemon client if available (avoids circular dependency)
+if(TARGET yams::daemon_client)
+    target_link_libraries(yams_vector PRIVATE yams::daemon_client)
+    target_compile_definitions(yams_vector PRIVATE YAMS_HAS_DAEMON_CLIENT)
+endif()
+
+# Conditionally link ONNX Runtime
+if(YAMS_ENABLE_ONNX AND TARGET onnxruntime::onnxruntime)
+    target_link_libraries(yams_vector PRIVATE onnxruntime::onnxruntime)
+endif()
 
 # Compiler flags
 target_compile_definitions(yams_vector
     PRIVATE
         # Enable debug logging in debug builds
         $<$<CONFIG:Debug>:YAMS_VECTOR_DEBUG>
-        # Enable ONNX Runtime support
-        YAMS_USE_ONNX_RUNTIME
         # SQLite-vec flags
         SQLITE_CORE=1
         SQLITE_ENABLE_LOAD_EXTENSION=1
         SQLITE_VEC_STATIC=1
 )
+
+# Conditionally enable ONNX Runtime support
+if(YAMS_ENABLE_ONNX AND TARGET onnxruntime::onnxruntime)
+    target_compile_definitions(yams_vector PRIVATE YAMS_USE_ONNX_RUNTIME)
+endif()
 
 # Create sqlite-vec.h manually since we're compiling as SQLITE_CORE
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/sqlite-vec.h 

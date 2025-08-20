@@ -3,6 +3,10 @@
 #include <chrono>
 #include <sstream>
 #include <unordered_set>
+#include <yams/content/content_handler_registry.h>
+#include <yams/crypto/hasher.h>
+#include <yams/detection/file_type_detector.h>
+#include <yams/extraction/plain_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/metadata/metadata_repository.h>
@@ -17,7 +21,11 @@ public:
     DocumentIndexer(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                     std::shared_ptr<IContentProcessor> contentProcessor)
         : metadataRepo_(std::move(metadataRepo)), contentProcessor_(std::move(contentProcessor)) {
-        // Register text extractor
+        // Initialize content handler registry with default handlers
+        auto& registry = content::ContentHandlerRegistry::instance();
+        registry.initializeDefaultHandlers();
+
+        // Keep text extractor for backward compatibility
         auto& factory = extraction::TextExtractorFactory::instance();
         textExtractor_ = factory.create(".txt"); // Default to plain text
     }
@@ -45,25 +53,87 @@ public:
                 return result;
             }
 
-            // Extract text content
-            extraction::ExtractionConfig extractConfig;
-            extractConfig.maxFileSize = config.maxDocumentSize;
-            extractConfig.extractMetadata = config.extractMetadata;
-            extractConfig.detectLanguage = config.detectLanguage;
-            extractConfig.preserveFormatting = true;
+            // Use ContentHandlerRegistry to process the file
+            auto& registry = content::ContentHandlerRegistry::instance();
+            auto& detector = detection::FileTypeDetector::instance();
 
-            auto extractResult = textExtractor_->extract(path, extractConfig);
-            if (!extractResult) {
+            // Detect file type
+            auto signatureResult = detector.detectFromFile(path);
+            if (!signatureResult) {
                 result.status = IndexingStatus::Failed;
-                result.error = extractResult.error().message;
+                result.error = "Failed to detect file type: " + signatureResult.error().message;
                 return result;
             }
 
-            auto& extraction = extractResult.value();
-            if (!extraction.isSuccess()) {
-                result.status = IndexingStatus::Failed;
-                result.error = extraction.error;
-                return result;
+            // Get appropriate handler
+            auto handler = registry.getHandler(signatureResult.value());
+
+            std::string extractedText;
+            std::unordered_map<std::string, std::string> metadata;
+
+            if (handler) {
+                // Use new content handler system
+                content::ContentConfig contentConfig;
+                contentConfig.maxFileSize = config.maxDocumentSize;
+                contentConfig.extractMetadata = config.extractMetadata;
+                contentConfig.detectLanguage = config.detectLanguage;
+                contentConfig.preserveFormatting = true;
+
+                auto processResult = handler->process(path, contentConfig);
+                if (!processResult) {
+                    result.status = IndexingStatus::Failed;
+                    result.error = processResult.error().message;
+                    return result;
+                }
+
+                auto& contentResult = processResult.value();
+                extractedText = contentResult.text.value_or("");
+                metadata = contentResult.metadata;
+
+                // Skip indexing if handler says not to
+                if (!contentResult.shouldIndex) {
+                    result.status = IndexingStatus::Skipped;
+                    result.error = "Content handler indicated file should not be indexed";
+                    return result;
+                }
+            } else {
+                // Fall back to legacy text extractor if available
+                extraction::ExtractionConfig extractConfig;
+                extractConfig.maxFileSize = config.maxDocumentSize;
+                extractConfig.extractMetadata = config.extractMetadata;
+                extractConfig.detectLanguage = config.detectLanguage;
+                extractConfig.preserveFormatting = true;
+
+                // Check if text extractor is available
+                if (!textExtractor_) {
+                    // Try to get extractor for this file type
+                    auto& factory = extraction::TextExtractorFactory::instance();
+                    textExtractor_ = factory.createForFile(path);
+
+                    if (!textExtractor_) {
+                        result.status = IndexingStatus::Failed;
+                        result.error = "No handler or text extractor available for file type: " +
+                                       path.extension().string();
+                        return result;
+                    }
+                }
+
+                auto extractResult = textExtractor_->extract(path, extractConfig);
+                if (!extractResult) {
+                    result.status = IndexingStatus::Failed;
+                    result.error = extractResult.error().message;
+                    return result;
+                }
+
+                auto& extraction = extractResult.value();
+                if (!extraction.isSuccess()) {
+                    result.status = IndexingStatus::Failed;
+                    result.error = extraction.error;
+                    return result;
+                }
+
+                extractedText = extraction.text;
+                metadata = extraction.metadata;
             }
 
             // Create or update document info
@@ -79,44 +149,138 @@ public:
                 std::chrono::system_clock::now());
             docInfo.modifiedTime = scTime;
             docInfo.indexedTime = std::chrono::system_clock::now();
-            docInfo.contentExtracted = true;
+            docInfo.contentExtracted = !extractedText.empty();
             docInfo.extractionStatus = metadata::ExtractionStatus::Success;
+
+            // Store additional metadata from content handler
+            // Note: This would require updating DocumentInfo to support arbitrary metadata
+            // For now, we can at least log it
+            if (!metadata.empty()) {
+                spdlog::debug("Document {} has {} metadata items", path.string(), metadata.size());
+                for (const auto& [key, value] : metadata) {
+                    spdlog::trace("  {}: {}", key, value);
+                }
+            }
 
             // Calculate SHA256 hash
             auto hashResult = calculateFileHash(path);
             if (hashResult) {
                 docInfo.sha256Hash = hashResult.value();
+                spdlog::debug("indexDocument: Storing document {} with hash {}", path.string(),
+                              docInfo.sha256Hash);
+            } else {
+                spdlog::error("indexDocument: Failed to calculate hash for {}", path.string());
             }
 
-            // Store document metadata
-            auto insertResult = metadataRepo_->insertDocument(docInfo);
-            if (!insertResult) {
-                result.status = IndexingStatus::Failed;
-                result.error = insertResult.error().message;
-                return result;
-            }
+            // Check if document with same hash already exists (duplicate content)
+            auto existingDoc = metadataRepo_->getDocumentByHash(docInfo.sha256Hash);
+            int64_t documentId = -1;
+            bool isNewDocument = true;
 
-            result.documentId = std::to_string(insertResult.value());
+            if (existingDoc && existingDoc.value().has_value()) {
+                // Document with same hash exists
+                auto& existing = existingDoc.value().value();
 
-            // Process and chunk content
-            auto chunks =
-                contentProcessor_->chunkContent(extraction.text, result.documentId, config);
+                if (existing.filePath != path.string()) {
+                    // Same content, different location
+                    spdlog::info("Duplicate content detected: {} has same content as {}",
+                                 path.string(), existing.filePath);
 
-            // Index chunks into FTS5
-            for (const auto& chunk : chunks) {
-                auto indexResult = indexChunk(chunk);
-                if (!indexResult) {
-                    spdlog::warn("Failed to index chunk {} for document {}: {}", chunk.chunkIndex,
-                                 result.documentId, indexResult.error().message);
+                    // Track alternate location
+                    auto metaResult = metadataRepo_->setMetadata(
+                        existing.id,
+                        "alternate_location_" +
+                            std::to_string(
+                                std::chrono::system_clock::now().time_since_epoch().count()),
+                        metadata::MetadataValue(path.string()));
+
+                    // Create automatic snapshot if significant time has passed
+                    auto timeDiff = docInfo.indexedTime - existing.indexedTime;
+                    auto hoursSinceLastIndex =
+                        std::chrono::duration_cast<std::chrono::hours>(timeDiff).count();
+
+                    if (hoursSinceLastIndex > 24) {
+                        auto timestamp = std::chrono::system_clock::now();
+                        auto snapshotId =
+                            "auto_" +
+                            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                               timestamp.time_since_epoch())
+                                               .count());
+
+                        metadataRepo_->setMetadata(existing.id, "snapshot_id",
+                                                   metadata::MetadataValue(snapshotId));
+
+                        spdlog::info("Created automatic snapshot {} for duplicate content",
+                                     snapshotId);
+                    }
+
+                    // Update indexed time (make a copy since existing is const)
+                    auto updatedDoc = existing;
+                    updatedDoc.indexedTime = docInfo.indexedTime;
+                    metadataRepo_->updateDocument(updatedDoc);
+
+                    documentId = existing.id;
+                    isNewDocument = false;
+                } else {
+                    // Same file, same content - shouldn't happen as needsIndexing() would return
+                    // false
+                    spdlog::warn("Unexpected: indexDocument called for unchanged file {}",
+                                 path.string());
+                    documentId = existing.id;
+                    isNewDocument = false;
                 }
+            } else {
+                // New document - insert it
+                auto insertResult = metadataRepo_->insertDocument(docInfo);
+                if (!insertResult) {
+                    result.status = IndexingStatus::Failed;
+                    result.error = insertResult.error().message;
+                    return result;
+                }
+
+                documentId = insertResult.value();
             }
 
-            result.chunksCreated = chunks.size();
+            result.documentId = std::to_string(documentId);
+
+            // Store additional metadata from content handler
+            if (!metadata.empty()) {
+                for (const auto& [key, value] : metadata) {
+                    auto metadataResult =
+                        metadataRepo_->setMetadata(documentId, key, metadata::MetadataValue(value));
+                    if (!metadataResult) {
+                        spdlog::warn("Failed to store metadata {}={} for document {}: {}", key,
+                                     value, documentId, metadataResult.error().message);
+                    }
+                }
+                spdlog::debug("Stored {} metadata items for document {}", metadata.size(),
+                              documentId);
+            }
+
+            // Process and chunk content (only for new documents)
+            if (isNewDocument) {
+                auto chunks =
+                    contentProcessor_->chunkContent(extractedText, result.documentId, config);
+
+                // Index chunks into FTS5
+                for (const auto& chunk : chunks) {
+                    auto indexResult = indexChunk(chunk);
+                    if (!indexResult) {
+                        spdlog::warn("Failed to index chunk {} for document {}: {}",
+                                     chunk.chunkIndex, result.documentId,
+                                     indexResult.error().message);
+                    }
+                }
+
+                result.chunksCreated = chunks.size();
+                chunksCreated_ += chunks.size();
+            } else {
+                result.chunksCreated = 0; // No new chunks for duplicate content
+            }
             result.status = IndexingStatus::Completed;
 
             // Update statistics
             documentsIndexed_++;
-            chunksCreated_ += chunks.size();
             bytesProcessed_ += fileSize;
 
         } catch (const std::exception& e) {
@@ -212,6 +376,9 @@ public:
             return Error{ErrorCode::InternalError, "Failed to calculate file hash"};
         }
 
+        spdlog::debug("needsIndexing: Calculated hash for {}: {}", path.string(),
+                      hashResult.value());
+
         // Check if document exists in index
         auto docResult = metadataRepo_->getDocumentByHash(hashResult.value());
         if (!docResult) {
@@ -220,23 +387,27 @@ public:
 
         if (!docResult.value().has_value()) {
             // Document not in index, needs indexing
+            spdlog::debug("needsIndexing: Document with hash {} not found in index",
+                          hashResult.value());
             return true;
         }
 
-        // Check modification time
-        auto fsTime = std::filesystem::last_write_time(path);
-        // Convert filesystem time to system_clock time
-        auto lastModified = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            fsTime - std::filesystem::file_time_type::clock::now() +
-            std::chrono::system_clock::now());
-        auto& doc = docResult.value().value();
+        // Document with this hash exists - check if it's the same file
+        auto& existingDoc = docResult.value().value();
 
-        if (lastModified > doc.modifiedTime) {
-            // Document has been modified
+        if (existingDoc.filePath == path.string()) {
+            // Same file, same content - no re-indexing needed
+            spdlog::debug("needsIndexing: Document {} already indexed with same hash",
+                          path.string());
+            return false;
+        } else {
+            // Same content, different file - this needs special handling
+            // We'll track this as an alternate location but won't re-index the content
+            spdlog::debug("needsIndexing: Found duplicate content - {} has same hash as {}",
+                          path.string(), existingDoc.filePath);
+            // Return true so indexDocument() can handle the relationship tracking
             return true;
         }
-
-        return false;
     }
 
     std::unordered_map<std::string, int64_t> getStatistics() const override {
@@ -248,10 +419,13 @@ public:
 
 private:
     Result<std::string> calculateFileHash(const std::filesystem::path& path) {
-        // TODO: Implement SHA256 hash calculation
-        // For now, return a dummy hash based on file path and size
-        auto size = std::filesystem::file_size(path);
-        return path.string() + "_" + std::to_string(size);
+        try {
+            crypto::SHA256Hasher hasher;
+            return hasher.hashFile(path);
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         "Failed to calculate SHA256 hash: " + std::string(e.what())};
+        }
     }
 
     Result<void> indexChunk(const ContentChunk& chunk) {

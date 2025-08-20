@@ -41,6 +41,7 @@ class YamsConan(ConanFile):
         self.requires("zstd/1.5.5")
         # LZ4 removed - not used in codebase
         self.requires("openssl/3.2.0")
+        self.requires("libcurl/8.10.1")
         self.requires("protobuf/3.21.12")
 
         # Note: PDFium is not available in Conan Center
@@ -53,7 +54,7 @@ class YamsConan(ConanFile):
             # Note: ImTUI is downloaded via FetchContent when TUI is enabled
 
         # MCP server no longer requires Drogon or Boost
-        
+
         # ONNX Runtime for embeddings and LLM inference
         self.requires("onnxruntime/1.18.1")
 
@@ -71,6 +72,14 @@ class YamsConan(ConanFile):
         self.options["sqlite3"].enable_fts5 = True
         self.options["sqlite3"].enable_fts4 = True  # For additional compatibility
         self.options["sqlite3"].enable_fts3_parenthesis = True  # For advanced query syntax
+
+        # Network stack options
+        # Ensure libcurl uses OpenSSL and zlib; prefer static for predictable deployment
+        self.options["libcurl"].with_ssl = "openssl"
+        self.options["libcurl"].with_zlib = True
+        self.options["libcurl"].shared = False
+        # Harden OpenSSL linkage to static unless overridden
+        self.options["openssl"].shared = False
 
         # MCP server configuration is now minimal
 

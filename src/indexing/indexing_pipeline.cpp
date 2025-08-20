@@ -2,6 +2,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <yams/crypto/hasher.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/indexing/indexing_pipeline.h>
 #include <yams/profiling.h>
@@ -293,6 +294,17 @@ bool IndexingPipeline::processContent(IndexingTask& task) {
         docInfo.fileName = task.path.filename().string();
         docInfo.fileExtension = task.path.extension().string();
         docInfo.fileSize = static_cast<int64_t>(std::filesystem::file_size(task.path));
+
+        // Calculate SHA256 hash of the file
+        try {
+            crypto::SHA256Hasher hasher;
+            docInfo.sha256Hash = hasher.hashFile(task.path);
+        } catch (const std::exception& e) {
+            spdlog::error("Failed to calculate SHA256 hash for {}: {}", task.path.string(),
+                          e.what());
+            return false;
+        }
+
         // Convert filesystem time to system_clock time
         auto fsTime = std::filesystem::last_write_time(task.path);
         auto scTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
@@ -328,21 +340,95 @@ bool IndexingPipeline::indexContent(IndexingTask& task) {
     }
 
     try {
-        // Add document to metadata repository
-        auto result = metadataRepo_->insertDocument(task.documentInfo.value());
-        if (!result) {
-            spdlog::error("Failed to insert document to metadata repository: {}",
-                          result.error().message);
+        // Check if document with same hash already exists
+        auto existingDoc = metadataRepo_->getDocumentByHash(task.documentInfo->sha256Hash);
+        if (!existingDoc) {
+            spdlog::error("Failed to check for existing document: {}", existingDoc.error().message);
             return false;
         }
 
-        task.documentInfo->id = result.value();
+        int64_t documentId = -1;
+        bool isNewDocument = true;
 
-        // Chunk and index content
-        auto chunks = contentProcessor_->chunkContent(
-            task.extractionResult->text, std::to_string(task.documentInfo->id), task.config);
+        if (existingDoc.value().has_value()) {
+            // Document with same hash exists
+            auto& existing = existingDoc.value().value();
+            isNewDocument = false;
+            documentId = existing.id;
 
-        totalChunks_ += chunks.size();
+            spdlog::debug("Found existing document with hash {} at path {}",
+                          task.documentInfo->sha256Hash, existing.filePath);
+
+            if (existing.filePath != task.documentInfo->filePath) {
+                // Same content, different location - track this relationship
+                spdlog::info("Duplicate content detected: {} has same content as {}",
+                             task.path.string(), existing.filePath);
+
+                // Add metadata to track alternate location
+                auto metaResult = metadataRepo_->setMetadata(
+                    existing.id,
+                    "alternate_location_" +
+                        std::to_string(std::chrono::system_clock::now().time_since_epoch().count()),
+                    metadata::MetadataValue(task.path.string()));
+
+                if (!metaResult) {
+                    spdlog::warn("Failed to add alternate location metadata: {}",
+                                 metaResult.error().message);
+                }
+
+                // Create automatic snapshot if significant time has passed
+                auto timeDiff = task.documentInfo->indexedTime - existing.indexedTime;
+                auto hoursSinceLastIndex =
+                    std::chrono::duration_cast<std::chrono::hours>(timeDiff).count();
+
+                if (hoursSinceLastIndex > 24) {
+                    // More than 24 hours since last index - create snapshot
+                    auto timestamp = std::chrono::system_clock::now();
+                    auto snapshotId =
+                        "auto_" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                                     timestamp.time_since_epoch())
+                                                     .count());
+
+                    metadataRepo_->setMetadata(existing.id, "snapshot_id",
+                                               metadata::MetadataValue(snapshotId));
+                    metadataRepo_->setMetadata(
+                        existing.id, "snapshot_time",
+                        metadata::MetadataValue(timestamp.time_since_epoch().count()));
+
+                    spdlog::info("Created automatic snapshot {} for duplicate content", snapshotId);
+                }
+            }
+
+            // Update the existing document's indexed time (make a copy since existing is const)
+            auto updatedDoc = existing;
+            updatedDoc.indexedTime = task.documentInfo->indexedTime;
+            auto updateResult = metadataRepo_->updateDocument(updatedDoc);
+            if (!updateResult) {
+                spdlog::warn("Failed to update document indexed time: {}",
+                             updateResult.error().message);
+            }
+
+            task.documentInfo->id = documentId;
+        } else {
+            // New document - insert it
+            auto result = metadataRepo_->insertDocument(task.documentInfo.value());
+            if (!result) {
+                spdlog::error("Failed to insert document to metadata repository: {}",
+                              result.error().message);
+                return false;
+            }
+
+            documentId = result.value();
+            task.documentInfo->id = documentId;
+        }
+
+        // Chunk and index content (only for new documents)
+        if (isNewDocument) {
+            auto chunks = contentProcessor_->chunkContent(task.extractionResult->text,
+                                                          std::to_string(documentId), task.config);
+
+            totalChunks_ += chunks.size();
+        }
 
         // TODO: Index chunks into FTS5
 

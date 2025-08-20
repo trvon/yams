@@ -27,7 +27,6 @@ target_include_directories(yams_manifest
         $<INSTALL_INTERFACE:include>
 )
 
-# Enable C++20 features
 target_compile_features(yams_manifest PUBLIC cxx_std_20)
 
 # Export target

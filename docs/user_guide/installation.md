@@ -2,37 +2,6 @@
 
 YAMS provides multiple installation methods to suit different users and environments.
 
-## Quick Install (Recommended)
-
-### One-line Installation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
-```
-
-This script will:
-- Auto-detect your platform (Linux/macOS, x86_64/ARM64)
-- Download the appropriate binary from GitHub Releases
-- Install to `~/.local/bin` by default
-- Set up shell completions if available
-- Verify the installation
-
-### Custom Installation Options
-
-```bash
-# Install specific version
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash -s -- --version 1.0.0
-
-# Install to custom directory (e.g., system-wide)
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash -s -- --install-dir /usr/local/bin
-
-# Download and inspect before running
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh -o install.sh
-chmod +x install.sh
-./install.sh --help
-./install.sh
-```
-
 ### Environment Variables
 
 You can customize the installation by setting environment variables:
@@ -263,7 +232,7 @@ source ~/.bashrc
 **Unsupported platform error**
 Currently supported platforms:
 - Linux x86_64
-- macOS x86_64 (Intel)  
+- macOS x86_64 (Intel)
 - macOS ARM64 (Apple Silicon)
 
 For other platforms, please [build from source](#build-from-source).

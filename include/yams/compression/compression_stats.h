@@ -246,38 +246,38 @@ struct CompressionStats {
         std::ostringstream oss;
 
         // Overall metrics
-        oss << "# HELP kronos_compression_files_total Total compressed files\n";
-        oss << "# TYPE kronos_compression_files_total counter\n";
-        oss << "kronos_compression_files_total " << totalCompressedFiles.load() << "\n\n";
+        oss << "# HELP yams_compression_files_total Total compressed files\n";
+        oss << "# TYPE yams_compression_files_total counter\n";
+        oss << "yams_compression_files_total " << totalCompressedFiles.load() << "\n\n";
 
-        oss << "# HELP kronos_compression_bytes_saved_total Total bytes saved\n";
-        oss << "# TYPE kronos_compression_bytes_saved_total counter\n";
-        oss << "kronos_compression_bytes_saved_total " << totalSpaceSaved.load() << "\n\n";
+        oss << "# HELP yams_compression_bytes_saved_total Total bytes saved\n";
+        oss << "# TYPE yams_compression_bytes_saved_total counter\n";
+        oss << "yams_compression_bytes_saved_total " << totalSpaceSaved.load() << "\n\n";
 
-        oss << "# HELP kronos_compression_ratio Overall compression ratio\n";
-        oss << "# TYPE kronos_compression_ratio gauge\n";
-        oss << "kronos_compression_ratio " << overallCompressionRatio() << "\n\n";
+        oss << "# HELP yams_compression_ratio Overall compression ratio\n";
+        oss << "# TYPE yams_compression_ratio gauge\n";
+        oss << "yams_compression_ratio " << overallCompressionRatio() << "\n\n";
 
         // Per-algorithm metrics
-        oss << "# HELP kronos_compression_algorithm_operations Operations by algorithm\n";
-        oss << "# TYPE kronos_compression_algorithm_operations counter\n";
+        oss << "# HELP yams_compression_algorithm_operations Operations by algorithm\n";
+        oss << "# TYPE yams_compression_algorithm_operations counter\n";
         for (const auto& [algo, stats] : algorithmStats) {
             std::string name = algorithmName(algo);
-            oss << "kronos_compression_algorithm_operations{algorithm=\"" << name
+            oss << "yams_compression_algorithm_operations{algorithm=\"" << name
                 << "\",operation=\"compress\"} " << stats.filesCompressed.load() << "\n";
-            oss << "kronos_compression_algorithm_operations{algorithm=\"" << name
+            oss << "yams_compression_algorithm_operations{algorithm=\"" << name
                 << "\",operation=\"decompress\"} " << stats.filesDecompressed.load() << "\n";
         }
         oss << "\n";
 
         // Cache metrics
-        oss << "# HELP kronos_compression_cache_hits_total Cache hit count\n";
-        oss << "# TYPE kronos_compression_cache_hits_total counter\n";
-        oss << "kronos_compression_cache_hits_total " << cacheHits.load() << "\n\n";
+        oss << "# HELP yams_compression_cache_hits_total Cache hit count\n";
+        oss << "# TYPE yams_compression_cache_hits_total counter\n";
+        oss << "yams_compression_cache_hits_total " << cacheHits.load() << "\n\n";
 
-        oss << "# HELP kronos_compression_cache_hit_rate Cache hit rate\n";
-        oss << "# TYPE kronos_compression_cache_hit_rate gauge\n";
-        oss << "kronos_compression_cache_hit_rate " << cacheHitRate() / 100.0 << "\n\n";
+        oss << "# HELP yams_compression_cache_hit_rate Cache hit rate\n";
+        oss << "# TYPE yams_compression_cache_hit_rate gauge\n";
+        oss << "yams_compression_cache_hit_rate " << cacheHitRate() / 100.0 << "\n\n";
 
         return oss.str();
     }

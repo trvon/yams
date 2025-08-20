@@ -6,6 +6,7 @@
 
 #include <yams/api/content_store.h>
 #include <yams/core/types.h>
+#include <yams/downloader/downloader.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_executor.h>
@@ -48,6 +49,11 @@ struct SearchRequest {
     int afterContext{0};
     int context{0};                 // if >0, overrides before/after
     std::string colorMode{"never"}; // "always" | "never" | "auto"
+
+    // Path and tag filters for CLI parity
+    std::string pathPattern;       // glob-like filename/path filter
+    std::vector<std::string> tags; // filter by tags (presence-based)
+    bool matchAllTags{false};      // require all specified tags
 };
 
 struct SearchItem {
@@ -380,9 +386,122 @@ public:
     virtual Result<RestoreResponse> restoreSnapshot(const RestoreSnapshotRequest& req) = 0;
 };
 
+// ===========================
+// Download Service
+// ===========================
+
+struct DownloadServiceRequest {
+    std::string url;
+    std::vector<downloader::Header> headers;
+    std::optional<downloader::Checksum> checksum;
+    int concurrency{4};
+    std::size_t chunkSizeBytes{8'388'608};
+    std::chrono::milliseconds timeout{60'000};
+    downloader::RetryPolicy retry;
+    downloader::RateLimit rateLimit;
+    bool resume{true};
+    std::optional<std::string> proxy;
+    downloader::TlsConfig tls;
+    bool followRedirects{true};
+    bool storeOnly{true};
+    std::optional<std::string> exportPath;
+    downloader::OverwritePolicy overwrite{downloader::OverwritePolicy::Never};
+};
+
+struct DownloadServiceResponse {
+    std::string url;
+    std::string hash;
+    std::filesystem::path storedPath;
+    std::uint64_t sizeBytes{0};
+    bool success{false};
+    std::optional<int> httpStatus;
+    std::optional<std::string> etag;
+    std::optional<std::string> lastModified;
+    std::optional<bool> checksumOk;
+};
+
+class IDownloadService {
+public:
+    virtual ~IDownloadService() = default;
+    virtual Result<DownloadServiceResponse> download(const DownloadServiceRequest& req) = 0;
+};
+
+// ===========================
+// Indexing Service
+// ===========================
+
+struct AddDirectoryRequest {
+    std::string directoryPath;
+    std::string collection;
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    std::unordered_map<std::string, std::string> metadata;
+    bool recursive{true};
+    bool followSymlinks{false};
+};
+
+struct IndexedFileResult {
+    std::string path;
+    std::string hash;
+    std::uint64_t sizeBytes{0};
+    bool success{false};
+    std::optional<std::string> error;
+};
+
+struct AddDirectoryResponse {
+    std::string directoryPath;
+    std::string collection;
+    std::size_t filesProcessed{0};
+    std::size_t filesIndexed{0};
+    std::size_t filesSkipped{0};
+    std::size_t filesFailed{0};
+    std::vector<IndexedFileResult> results;
+};
+
+class IIndexingService {
+public:
+    virtual ~IIndexingService() = default;
+    virtual Result<AddDirectoryResponse> addDirectory(const AddDirectoryRequest& req) = 0;
+};
+
+// ===========================
+// Stats Service
+// ===========================
+
+struct StatsRequest {
+    bool fileTypes{false};
+    bool verbose{false};
+};
+
+struct FileTypeStats {
+    std::string extension;
+    std::size_t count{0};
+    std::uint64_t totalBytes{0};
+};
+
+struct StatsResponse {
+    std::uint64_t totalObjects{0};
+    std::uint64_t totalBytes{0};
+    std::uint64_t uniqueHashes{0};
+    std::uint64_t deduplicationSavings{0};
+    std::vector<FileTypeStats> fileTypes;
+    std::unordered_map<std::string, std::uint64_t> additionalStats;
+};
+
+class IStatsService {
+public:
+    virtual ~IStatsService() = default;
+    virtual Result<StatsResponse> getStats(const StatsRequest& req) = 0;
+};
+
 /**
- * Factory to construct default SearchService implementation from shared context.
+ * Factory functions to construct service implementations from shared context.
  */
 std::shared_ptr<ISearchService> makeSearchService(const AppContext& ctx);
+std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);
+std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx);
+std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx);
+std::shared_ptr<IIndexingService> makeIndexingService(const AppContext& ctx);
+std::shared_ptr<IStatsService> makeStatsService(const AppContext& ctx);
 
 } // namespace yams::app::services

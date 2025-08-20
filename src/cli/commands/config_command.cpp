@@ -7,6 +7,7 @@
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_migration.h>
 
 namespace yams::cli {
 
@@ -142,6 +143,29 @@ public:
                 std::exit(1);
             }
         });
+
+        // Migration subcommand
+        auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v2");
+        migrateCmd->add_option("--config-path", configPath_, "Path to config file");
+        migrateCmd->add_flag("--no-backup", noBackup_, "Skip creating backup");
+        migrateCmd->callback([this]() {
+            auto result = executeMigrate();
+            if (!result) {
+                spdlog::error("Config migration failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        // Check subcommand to verify if migration is needed
+        auto* checkCmd = cmd->add_subcommand("check", "Check if config needs migration");
+        checkCmd->add_option("--config-path", configPath_, "Path to config file");
+        checkCmd->callback([this]() {
+            auto result = executeCheck();
+            if (!result) {
+                spdlog::error("Config check failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
     }
 
     Result<void> execute() override {
@@ -157,6 +181,7 @@ private:
     std::string format_;
     std::string embeddingModel_;
     std::string embeddingPreset_;
+    bool noBackup_ = false;
 
     fs::path getConfigPath() const {
         if (!configPath_.empty()) {
@@ -765,6 +790,130 @@ private:
                 value != "true" && value != "false") {
                 errors.push_back(key + " must be 'true' or 'false'");
             }
+        }
+    }
+
+    Result<void> executeMigrate() {
+        try {
+            auto configPath = getConfigPath();
+            config::ConfigMigrator migrator;
+
+            // Check if migration is needed
+            auto needsResult = migrator.needsMigration(configPath);
+            if (!needsResult) {
+                return Error{needsResult.error()};
+            }
+
+            if (!needsResult.value()) {
+                std::cout << "✓ Configuration is already at version 2\n";
+                return Result<void>();
+            }
+
+            // Get current version
+            auto versionResult = migrator.getConfigVersion(configPath);
+            if (versionResult) {
+                std::cout << "Current config version: " << versionResult.value().toString() << "\n";
+            } else {
+                std::cout << "Current config version: 1.0.0 (assumed)\n";
+            }
+
+            std::cout << "Migrating to version 2...\n";
+
+            // Perform migration
+            auto migrateResult = migrator.migrateToV2(configPath, !noBackup_);
+            if (!migrateResult) {
+                return Error{migrateResult.error()};
+            }
+
+            std::cout << "✓ Successfully migrated configuration to v2\n";
+            std::cout << "  Config file: " << configPath << "\n";
+
+            if (!noBackup_) {
+                std::cout << "  Backup created with .backup.* extension\n";
+            }
+
+            // Validate new config
+            auto validateResult = migrator.validateV2Config(configPath);
+            if (!validateResult) {
+                std::cout << "⚠ Warning: Config validation failed: "
+                          << validateResult.error().message << "\n";
+            } else {
+                std::cout << "✓ Configuration validated successfully\n";
+            }
+
+            std::cout << "\nNew features available in v2:\n";
+            std::cout << "  • Vector database configuration\n";
+            std::cout << "  • Embedding service settings\n";
+            std::cout << "  • MCP server configuration\n";
+            std::cout << "  • WAL (Write-Ahead Logging)\n";
+            std::cout << "  • Experimental features section\n";
+            std::cout << "  • Performance tuning options\n";
+            std::cout << "\nEdit " << configPath << " to customize these settings.\n";
+
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeCheck() {
+        try {
+            auto configPath = getConfigPath();
+            config::ConfigMigrator migrator;
+
+            if (!fs::exists(configPath)) {
+                std::cout << "✗ No configuration file found at: " << configPath << "\n";
+                std::cout << "  Run 'yams config migrate' to create a v2 config\n";
+                return Result<void>();
+            }
+
+            // Get current version
+            auto versionResult = migrator.getConfigVersion(configPath);
+            if (!versionResult) {
+                std::cout << "⚠ Cannot determine config version\n";
+                std::cout << "  Assuming v1 configuration\n";
+                std::cout << "  Run 'yams config migrate' to upgrade to v2\n";
+                return Result<void>();
+            }
+
+            auto version = versionResult.value();
+            std::cout << "Configuration version: " << version.toString() << "\n";
+            std::cout << "Latest version: 2.0.0\n";
+
+            // Check if migration is needed
+            auto needsResult = migrator.needsMigration(configPath);
+            if (!needsResult) {
+                return Error{needsResult.error()};
+            }
+
+            if (needsResult.value()) {
+                std::cout << "\n⚠ Migration needed!\n";
+                std::cout << "  Your configuration is at version " << version.toString() << "\n";
+                std::cout << "  Run 'yams config migrate' to upgrade to v2\n";
+                std::cout << "\nVersion 2 adds support for:\n";
+                std::cout << "  • Vector embeddings and semantic search\n";
+                std::cout << "  • MCP server integration\n";
+                std::cout << "  • Advanced performance tuning\n";
+                std::cout << "  • Experimental BERT NER features\n";
+                std::cout << "  • Smart chunking strategies\n";
+            } else {
+                std::cout << "\n✓ Configuration is up to date\n";
+
+                // Validate current config
+                auto validateResult = migrator.validateV2Config(configPath);
+                if (!validateResult) {
+                    std::cout << "⚠ Warning: Config validation issues found:\n";
+                    std::cout << "  " << validateResult.error().message << "\n";
+                } else {
+                    std::cout << "✓ Configuration is valid\n";
+                }
+            }
+
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
         }
     }
 };

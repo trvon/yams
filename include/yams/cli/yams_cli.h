@@ -12,6 +12,10 @@
 #include <yams/search/search_executor.h>
 #include <yams/vector/vector_index_manager.h>
 
+namespace yams::vector {
+class EmbeddingGenerator;
+}
+
 namespace yams::cli {
 
 /**
@@ -53,6 +57,17 @@ public:
     std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
         return vectorIndexManager_;
     }
+
+    /**
+     * Get the embedding generator instance
+     * Performs lazy initialization on first access to avoid unnecessary daemon connections
+     */
+    std::shared_ptr<vector::EmbeddingGenerator> getEmbeddingGenerator();
+
+    /**
+     * Check if embedding generator already exists (without creating it)
+     */
+    bool hasEmbeddingGenerator() const { return embeddingGenerator_ != nullptr; }
 
     /**
      * Get the connection pool instance
@@ -138,6 +153,11 @@ private:
      */
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
 
+    /**
+     * Check if config migration is needed and prompt user
+     */
+    void checkConfigMigration();
+
 private:
     std::unique_ptr<CLI::App> app_;
     std::vector<std::unique_ptr<ICommand>> commands_;
@@ -150,6 +170,7 @@ private:
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
+    std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_; // Unified embedding generator
 
     // Configuration
     std::filesystem::path dataPath_;

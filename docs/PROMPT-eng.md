@@ -141,8 +141,8 @@ This document establishes a unified, machine-readable, and authoritative policy 
 # Find specific PBI by ID (most reliable method)
 yams get --name "docs/pbi/pbi-001-universal-content-handlers.md"
 
-# Search PBIs by content keywords
-yams search "universal content handler" --paths-only | grep "pbi-"
+# Search PBIs by content keywords (prefer YAMS grep)
+yams grep "universal content handler" --include="docs/pbi/*.md"
 
 # List all PBIs in the system
 yams list --name "docs/pbi/*.md" --recent 50
@@ -156,8 +156,46 @@ for pbi in docs/pbi/pbi-*.md; do
   cat "$pbi" | grep -A 1 "Status:"
 done
 
-# Find active PBIs
-yams search "Status: active" --paths-only | grep "pbi-"
+# Find active PBIs (prefer YAMS grep)
+yams grep "Status: active" --include="docs/pbi/*.md"
+```
+
+#### Quick PBI Lookup
+```bash
+# Get PBI by canonical path (fastest, when you know the file)
+yams get --name "docs/pbi/pbi-002-daemon-architecture.md"
+
+# Fuzzy by ID in content
+yams grep "PBI ID:\s*002" --include="docs/pbi/*.md"
+
+# Fuzzy by filename
+yams search "pbi-002" --paths-only
+```
+
+#### Metadata-driven Search (recommended)
+Add machine-readable metadata when adding/updating PBIs so you can query by fields:
+```bash
+# Initial add (example)
+yams add docs/pbi/pbi-002-daemon-architecture.md \
+  --tags "pbi,backlog,feature" \
+  --metadata "pbi=002" \
+  --metadata "status=in_progress" \
+  --metadata "priority=high" \
+  --metadata "sprint=2025-Q1"
+
+# Update status
+yams update --name "docs/pbi/pbi-002-daemon-architecture.md" \
+  --metadata "status=in_progress" \
+  --metadata "updated=$(date -Iseconds)"
+```
+
+Querying by metadata:
+```bash
+# All active PBIs (prefer YAMS grep)
+yams grep "status=in_progress" --include="docs/pbi/*.md"
+
+# By sprint (prefer YAMS grep)
+yams grep "sprint=2025-Q1" --include="docs/pbi/*.md"
 ```
 
 ### 3.3 PBI Lifecycle & Updates
@@ -192,6 +230,19 @@ yams update --name "docs/pbi/pbi-001-*.md" \
 
 # Track acceptance criteria progress
 yams get --name "docs/pbi/pbi-001-*.md" | sed -n '/## Acceptance Criteria/,/## /p'
+```
+
+#### Single-PBI Progress Snapshot
+```bash
+PBI="docs/pbi/pbi-002-daemon-architecture.md"
+echo "Completed: $(yams get --name "$PBI" | grep -c "\[x\]")"
+echo "Pending:   $(yams get --name "$PBI" | grep -c "\[ \]")"
+
+# Extract Implementation Phases
+yams get --name "$PBI" | sed -n '/## Implementation Phases/,/## /p'
+
+# Extract Acceptance Criteria
+yams get --name "$PBI" | sed -n '/## Acceptance Criteria/,/## /p'
 ```
 
 ### 3.5 PBI Status Reporting
@@ -289,15 +340,3 @@ yams search "sprint=2024-Q1" --paths-only
 - Check current and high-priority tasks.
 - Start, work, document, and complete via YAMS commands.
 - Update and validate all changes and references in YAMS.
-
-### 7.3 Key Advantages
-1. Pure YAMS-based task & knowledge management: no extra tooling needed.
-2. Full, auditable traceability of all project actions.
-3. Flexible and performant task/research queries.
-4. Integrated project knowledge, tasks, and code.
-5. Easy scripting and automation potential.
-6. Portable, shareable artifacts via content hash.
-7. High performance via local storage.
-8. Unix philosophy compatibility—one powerful tool for knowledge.
-
-This policy ensures every collaboration, decision, and artifact is structured, queryable, persistent, and reusable for all team members. YAMS metadata conventions make task, research, and code management efficient and transparent.

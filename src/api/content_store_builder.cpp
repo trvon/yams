@@ -486,7 +486,7 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::createInMemory() {
     // For now, use a temporary directory
     auto tempPath =
         std::filesystem::temp_directory_path() /
-        ("kronos_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        ("yams_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 
     return ContentStoreBuilder().withStoragePath(tempPath).build();
 }

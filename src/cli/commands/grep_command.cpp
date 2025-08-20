@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -13,10 +14,42 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
+// Daemon client API for daemon-first grep
+#include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
 
 class GrepCommand : public ICommand {
+private:
+    // Member variables
+    YamsCLI* cli_ = nullptr;
+    std::string pattern_;
+    std::vector<std::string> paths_;
+    std::string includePatterns_;
+    size_t afterContext_ = 0;
+    size_t beforeContext_ = 0;
+    size_t context_ = 0;
+    bool ignoreCase_ = false;
+    bool wholeWord_ = false;
+    bool invertMatch_ = false;
+    bool showLineNumbers_ = false;
+    bool showFilename_ = false;
+    bool noFilename_ = false;
+    bool countOnly_ = false;
+    bool filesOnly_ = false;
+    bool filesWithoutMatch_ = false;
+    bool pathsOnly_ = false;
+    bool literalText_ = false;
+    bool regexOnly_ = false;
+    size_t semanticLimit_ = 3;
+    std::string filterTags_;
+    bool matchAllTags_ = false;
+    std::string colorMode_ = "auto";
+    size_t maxCount_ = 0;
+
 public:
     std::string getName() const override { return "grep"; }
 
@@ -57,11 +90,19 @@ public:
         cmd->add_flag("-L,--files-without-match", filesWithoutMatch_,
                       "Show only filenames without matches");
         cmd->add_flag("--paths-only", pathsOnly_, "Show only file paths (no content)");
+        cmd->add_flag("--literal-text", literalText_,
+                      "Treat pattern as literal text, not regex (escapes special characters)");
 
         // Hybrid search options
         cmd->add_flag("--regex-only", regexOnly_, "Disable semantic search, use regex only");
         cmd->add_option("--semantic-limit", semanticLimit_, "Number of semantic results to show")
             ->default_val(3);
+
+        // Tag filtering options
+        cmd->add_option("--tags", filterTags_,
+                        "Filter results by tags (comma-separated, e.g., work,important)");
+        cmd->add_flag("--match-all-tags", matchAllTags_,
+                      "Require all specified tags (default: match any)");
 
         // Output options
         cmd->add_option("--color", colorMode_, "Color mode: always, never, auto")
@@ -85,55 +126,197 @@ public:
 
     Result<void> execute() override {
         try {
-            auto ensured = cli_->ensureStorageInitialized();
-            if (!ensured) {
-                return ensured;
+            // Attempt daemon-first grep; fall back to local on failure
+            {
+                yams::daemon::GrepRequest dreq;
+                dreq.pattern = pattern_;
+                dreq.caseInsensitive = ignoreCase_;
+                dreq.invertMatch = invertMatch_;
+                if (!paths_.empty()) {
+                    dreq.path = paths_[0]; // Use first path as filter
+                }
+
+                // Handle context - GrepRequest only has one contextLines field
+                if (context_ > 0) {
+                    dreq.contextLines = static_cast<int>(context_);
+                } else if (beforeContext_ > 0 || afterContext_ > 0) {
+                    // Use the larger of before/after context
+                    dreq.contextLines = static_cast<int>(std::max(beforeContext_, afterContext_));
+                }
+
+                if (maxCount_ > 0) {
+                    dreq.maxMatches = maxCount_;
+                }
+
+                auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                    // Handle different output modes
+                    if (pathsOnly_ || filesOnly_) {
+                        // Collect unique file paths
+                        std::set<std::string> files;
+                        for (const auto& match : resp.matches) {
+                            files.insert(match.file);
+                        }
+                        for (const auto& file : files) {
+                            std::cout << file << std::endl;
+                        }
+                    } else if (countOnly_) {
+                        // Count matches per file
+                        std::map<std::string, size_t> fileCounts;
+                        for (const auto& match : resp.matches) {
+                            fileCounts[match.file]++;
+                        }
+                        for (const auto& [file, count] : fileCounts) {
+                            if (showFilename_ || fileCounts.size() > 1) {
+                                std::cout << file << ":";
+                            }
+                            std::cout << count << std::endl;
+                        }
+                    } else {
+                        // Full match output
+                        for (const auto& match : resp.matches) {
+                            if (showFilename_ || resp.matches.size() > 1) {
+                                std::cout << match.file << ":";
+                            }
+                            if (showLineNumbers_) {
+                                std::cout << match.lineNumber << ":";
+                            }
+                            std::cout << match.line << std::endl;
+
+                            // Show context lines if any
+                            for (const auto& ctx : match.contextBefore) {
+                                std::cout << "  " << ctx << std::endl;
+                            }
+                            for (const auto& ctx : match.contextAfter) {
+                                std::cout << "  " << ctx << std::endl;
+                            }
+                        }
+                    }
+
+                    if (resp.totalMatches > 0) {
+                        spdlog::debug("Found {} matches in {} files", resp.totalMatches,
+                                      resp.matches.size());
+                    }
+                    return Result<void>();
+                };
+
+                auto fallback = [&]() -> Result<void> {
+                    // Fall back to local execution
+                    return executeLocal();
+                };
+
+                if (auto d = daemon_first(dreq, fallback, render); d) {
+                    return Result<void>();
+                }
             }
 
-            auto metadataRepo = cli_->getMetadataRepository();
-            if (!metadataRepo) {
-                return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+            // Fall back to local execution if daemon failed
+            return executeLocal();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+        }
+    }
+
+private:
+    Result<void> executeLocal() {
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured) {
+            return ensured;
+        }
+
+        auto metadataRepo = cli_->getMetadataRepository();
+        if (!metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        auto store = cli_->getContentStore();
+        if (!store) {
+            return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+        }
+
+        // Handle context options
+        if (context_ > 0) {
+            beforeContext_ = afterContext_ = context_;
+        }
+
+        // Determine if we should show filenames
+        bool multipleFiles = paths_.size() != 1;
+        if (!noFilename_ && (showFilename_ || multipleFiles)) {
+            showFilename_ = true;
+        }
+
+        // Build regex pattern for local grep matching
+        std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+        if (ignoreCase_) {
+            flags |= std::regex_constants::icase;
+        }
+
+        std::string regexPattern = pattern_;
+
+        // For local regex matching, we still need to escape for grep functionality
+        // But for search engine queries, we'll pass literalText_ flag separately
+        if (literalText_) {
+            std::string escaped;
+            for (char c : pattern_) {
+                if (c == '.' || c == '*' || c == '?' || c == '+' || c == '[' || c == ']' ||
+                    c == '(' || c == ')' || c == '{' || c == '}' || c == '^' || c == '$' ||
+                    c == '|' || c == '\\') {
+                    escaped += "\\";
+                }
+                escaped += c;
             }
+            regexPattern = escaped;
+        }
 
-            auto store = cli_->getContentStore();
-            if (!store) {
-                return Error{ErrorCode::NotInitialized, "Content store not initialized"};
-            }
+        if (wholeWord_) {
+            regexPattern = "\\b" + regexPattern + "\\b";
+        }
 
-            // Handle context options
-            if (context_ > 0) {
-                beforeContext_ = afterContext_ = context_;
-            }
+        std::regex regex;
+        try {
+            regex = std::regex(regexPattern, flags);
+        } catch (const std::regex_error& e) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Invalid regex pattern: " + std::string(e.what())};
+        }
 
-            // Determine if we should show filenames
-            bool multipleFiles = paths_.size() != 1;
-            if (!noFilename_ && (showFilename_ || multipleFiles)) {
-                showFilename_ = true;
-            }
+        // Get documents to search
+        std::vector<metadata::DocumentInfo> documents;
 
-            // Build regex pattern
-            std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-            if (ignoreCase_) {
-                flags |= std::regex_constants::icase;
-            }
+        if (paths_.empty()) {
+            // Apply tag filter if specified
+            if (!filterTags_.empty()) {
+                // Parse comma-separated tags
+                std::vector<std::string> tags;
+                std::stringstream ss(filterTags_);
+                std::string tag;
+                while (std::getline(ss, tag, ',')) {
+                    // Trim whitespace
+                    tag.erase(0, tag.find_first_not_of(" \t"));
+                    tag.erase(tag.find_last_not_of(" \t") + 1);
+                    if (!tag.empty()) {
+                        tags.push_back(tag);
+                    }
+                }
 
-            std::string regexPattern = pattern_;
-            if (wholeWord_) {
-                regexPattern = "\\b" + regexPattern + "\\b";
-            }
-
-            std::regex regex;
-            try {
-                regex = std::regex(regexPattern, flags);
-            } catch (const std::regex_error& e) {
-                return Error{ErrorCode::InvalidArgument,
-                             "Invalid regex pattern: " + std::string(e.what())};
-            }
-
-            // Get documents to search
-            std::vector<metadata::DocumentInfo> documents;
-
-            if (paths_.empty()) {
+                if (!tags.empty()) {
+                    auto docsResult = metadataRepo->findDocumentsByTags(tags, matchAllTags_);
+                    if (!docsResult) {
+                        return Error{ErrorCode::DatabaseError,
+                                     "Failed to query documents by tags: " +
+                                         docsResult.error().message};
+                    }
+                    documents = docsResult.value();
+                } else {
+                    // No valid tags, search all files
+                    auto docsResult = metadataRepo->findDocumentsByPath("%");
+                    if (!docsResult) {
+                        return Error{ErrorCode::DatabaseError,
+                                     "Failed to query documents: " + docsResult.error().message};
+                    }
+                    documents = docsResult.value();
+                }
+            } else {
                 // Search all indexed files
                 auto docsResult = metadataRepo->findDocumentsByPath("%");
                 if (!docsResult) {
@@ -141,20 +324,38 @@ public:
                                  "Failed to query documents: " + docsResult.error().message};
                 }
                 documents = docsResult.value();
-            } else {
-                // Search specific paths
-                for (const auto& path : paths_) {
+            }
+        } else {
+            // Search specific paths
+            for (const auto& path : paths_) {
+                std::filesystem::path fsPath(path);
+
+                // Check if path is a directory
+                if (std::filesystem::exists(fsPath) && std::filesystem::is_directory(fsPath)) {
+                    // For directories, search all files within
+                    std::string pattern = path;
+                    if (pattern.back() != '/') {
+                        pattern += '/';
+                    }
+                    pattern += '%';
+
+                    auto docsResult = metadataRepo->findDocumentsByPath(pattern);
+                    if (docsResult) {
+                        for (const auto& doc : docsResult.value()) {
+                            documents.push_back(doc);
+                        }
+                    }
+                } else {
+                    // For files or patterns, try exact match first
                     auto docsResult = metadataRepo->findDocumentsByPath(path);
-                    if (!docsResult) {
-                        continue; // Skip if path not found
+                    if (docsResult) {
+                        for (const auto& doc : docsResult.value()) {
+                            documents.push_back(doc);
+                        }
                     }
 
-                    for (const auto& doc : docsResult.value()) {
-                        documents.push_back(doc);
-                    }
-
-                    // Also try path suffix match
-                    if (docsResult.value().empty()) {
+                    // Also try as a suffix pattern if no exact match
+                    if (!docsResult || docsResult.value().empty()) {
                         auto suffixResult = metadataRepo->findDocumentsByPath("%/" + path);
                         if (suffixResult && !suffixResult.value().empty()) {
                             for (const auto& doc : suffixResult.value()) {
@@ -164,207 +365,243 @@ public:
                     }
                 }
             }
+        }
 
-            // Apply include pattern filtering if specified
-            if (!includePatterns_.empty()) {
-                std::vector<metadata::DocumentInfo> filteredDocs;
-                auto expandedPatterns = splitPatterns(includePatterns_);
+        // Apply include pattern filtering if specified
+        if (!includePatterns_.empty()) {
+            std::vector<metadata::DocumentInfo> filteredDocs;
+            auto expandedPatterns = splitPatterns({includePatterns_});
 
-                for (const auto& doc : documents) {
-                    std::string fileName = std::filesystem::path(doc.filePath).filename().string();
-                    bool shouldInclude = false;
+            for (const auto& doc : documents) {
+                bool shouldInclude = false;
 
-                    for (const auto& pattern : expandedPatterns) {
+                for (const auto& pattern : expandedPatterns) {
+                    // Check if pattern contains path components
+                    if (pattern.find('/') != std::string::npos) {
+                        if (matchesPattern(doc.filePath, pattern)) {
+                            shouldInclude = true;
+                            break;
+                        }
+                    } else {
+                        std::string fileName =
+                            std::filesystem::path(doc.filePath).filename().string();
                         if (matchesPattern(fileName, pattern)) {
                             shouldInclude = true;
                             break;
                         }
                     }
-
-                    if (shouldInclude) {
-                        filteredDocs.push_back(doc);
-                    }
                 }
 
-                documents = filteredDocs;
-            }
-
-            if (documents.empty()) {
-                std::cerr << "No files to search" << std::endl;
-                return Result<void>();
-            }
-
-            // Process each document for regex matches
-            // size_t totalMatches = 0;  // Currently only incremented but not used
-            std::vector<std::string> matchingFiles;
-            std::vector<std::string> nonMatchingFiles;
-            std::map<std::string, std::vector<Match>> allRegexMatches;
-
-            for (const auto& doc : documents) {
-                // Retrieve document content
-                auto contentResult = store->retrieveBytes(doc.sha256Hash);
-                if (!contentResult) {
-                    continue; // Skip if can't retrieve
-                }
-
-                std::string content(reinterpret_cast<const char*>(contentResult.value().data()),
-                                    contentResult.value().size());
-
-                // Process the file for regex matches
-                auto matches = processFile(doc.filePath, content, regex);
-
-                if (!matches.empty()) {
-                    allRegexMatches[doc.filePath] = matches;
-                    matchingFiles.push_back(doc.filePath);
-                } else {
-                    nonMatchingFiles.push_back(doc.filePath);
+                if (shouldInclude) {
+                    filteredDocs.push_back(doc);
                 }
             }
 
-            // If not regex-only mode and not in special output modes, also perform semantic search
-            std::vector<search::HybridSearchResult> semanticResults;
-            if (!regexOnly_ && !filesOnly_ && !pathsOnly_ && !countOnly_ && !filesWithoutMatch_) {
-                try {
-                    // Build HybridSearchEngine for semantic search
-                    auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
-                    yams::search::SearchEngineBuilder builder;
-                    builder.withVectorIndex(vecMgr)
-                        .withMetadataRepo(metadataRepo)
-                        .withKGStore(cli_->getKnowledgeGraphStore());
+            documents = filteredDocs;
+        }
 
-                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                    opts.hybrid.final_top_k = semanticLimit_;
-                    opts.hybrid.vector_weight = 0.8f; // Prioritize semantic similarity
-                    opts.hybrid.keyword_weight = 0.2f;
+        if (documents.empty()) {
+            std::cerr << "No files to search" << std::endl;
+            return Result<void>();
+        }
 
-                    auto engRes = builder.buildEmbedded(opts);
-                    if (engRes) {
-                        auto eng = engRes.value();
-                        auto hres = eng->search(pattern_, semanticLimit_);
-                        if (hres) {
-                            semanticResults = hres.value();
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::debug("Semantic search failed (falling back to regex only): {}",
-                                  e.what());
-                }
+        // Process each document for regex matches
+        // size_t totalMatches = 0;  // Currently only incremented but not used
+        std::vector<std::string> matchingFiles;
+        std::vector<std::string> nonMatchingFiles;
+        std::map<std::string, std::vector<Match>> allRegexMatches;
+
+        for (const auto& doc : documents) {
+            // Retrieve document content
+            auto contentResult = store->retrieveBytes(doc.sha256Hash);
+            if (!contentResult) {
+                continue; // Skip if can't retrieve
             }
 
-            // Output results based on mode
-            if (filesOnly_ || pathsOnly_) {
-                // Just output file paths
-                for (const auto& file : matchingFiles) {
-                    std::cout << file << std::endl;
-                }
-            } else if (countOnly_) {
-                // Output counts
-                for (const auto& [filePath, matches] : allRegexMatches) {
-                    if (showFilename_) {
-                        std::cout << filePath << ":";
-                    }
-                    std::cout << matches.size() << std::endl;
-                }
-            } else if (filesWithoutMatch_) {
-                // Handle files-without-match option
-                for (const auto& file : nonMatchingFiles) {
-                    std::cout << file << std::endl;
-                }
+            std::string content(reinterpret_cast<const char*>(contentResult.value().data()),
+                                contentResult.value().size());
+
+            // Process the file for regex matches
+            auto matches = processFile(doc.filePath, content, regex);
+
+            if (!matches.empty()) {
+                allRegexMatches[doc.filePath] = matches;
+                matchingFiles.push_back(doc.filePath);
             } else {
-                // Hybrid output mode - show both regex and semantic results
-                bool hasRegexMatches = !allRegexMatches.empty();
-                bool hasSemanticResults = !semanticResults.empty() && !regexOnly_;
+                nonMatchingFiles.push_back(doc.filePath);
+            }
+        }
 
-                if (hasRegexMatches) {
-                    if (hasSemanticResults) {
-                        std::cout << "=== Text Matches ===" << std::endl;
-                        std::cout << std::endl;
-                    }
+        // If not regex-only mode and not in special output modes, also perform semantic search
+        std::vector<search::HybridSearchResult> semanticResults;
+        if (!regexOnly_ && !filesOnly_ && !pathsOnly_ && !countOnly_ && !filesWithoutMatch_) {
+            try {
+                // Build HybridSearchEngine for semantic search
+                auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                yams::search::SearchEngineBuilder builder;
+                builder.withVectorIndex(vecMgr)
+                    .withMetadataRepo(metadataRepo)
+                    .withKGStore(cli_->getKnowledgeGraphStore());
 
-                    // Show top regex matches (limit to 3 files for balance)
-                    size_t fileCount = 0;
-                    for (const auto& [filePath, matches] : allRegexMatches) {
-                        if (fileCount >= 3 && hasSemanticResults)
-                            break; // Limit when showing both
+                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                opts.hybrid.final_top_k = semanticLimit_ * 3; // Get more results to filter
+                opts.hybrid.vector_weight = 0.8f;             // Prioritize semantic similarity
+                opts.hybrid.keyword_weight = 0.2f;
 
-                        // Retrieve content for printing
-                        auto doc = std::find_if(
-                            documents.begin(), documents.end(),
-                            [&filePath](const auto& d) { return d.filePath == filePath; });
-
-                        if (doc != documents.end()) {
-                            auto contentResult = store->retrieveBytes(doc->sha256Hash);
-                            if (contentResult) {
-                                std::string content(
-                                    reinterpret_cast<const char*>(contentResult.value().data()),
-                                    contentResult.value().size());
-
-                                // Apply per-file limit
-                                auto limitedMatches = matches;
-                                if (maxCount_ > 0 &&
-                                    limitedMatches.size() > static_cast<size_t>(maxCount_)) {
-                                    limitedMatches.resize(maxCount_);
+                auto engRes = builder.buildEmbedded(opts);
+                if (engRes) {
+                    auto eng = engRes.value();
+                    auto hres = eng->search(pattern_, semanticLimit_ * 3);
+                    if (hres) {
+                        // Filter semantic results to only include files from searched paths
+                        if (!paths_.empty()) {
+                            std::vector<search::HybridSearchResult> filteredResults;
+                            for (const auto& result : hres.value()) {
+                                auto pathIt = result.metadata.find("path");
+                                if (pathIt != result.metadata.end()) {
+                                    std::string resultPath = pathIt->second;
+                                    // Check if this result is within any of the specified paths
+                                    bool inSearchPath = false;
+                                    for (const auto& searchPath : paths_) {
+                                        if (resultPath.find(searchPath) != std::string::npos) {
+                                            inSearchPath = true;
+                                            break;
+                                        }
+                                    }
+                                    if (inSearchPath) {
+                                        filteredResults.push_back(result);
+                                        if (filteredResults.size() >= semanticLimit_) {
+                                            break;
+                                        }
+                                    }
                                 }
-
-                                printMatches(filePath, content, limitedMatches);
+                            }
+                            semanticResults = filteredResults;
+                        } else {
+                            // No path filter, take top results
+                            semanticResults = hres.value();
+                            if (semanticResults.size() > semanticLimit_) {
+                                semanticResults.resize(semanticLimit_);
                             }
                         }
-                        fileCount++;
                     }
                 }
+            } catch (const std::exception& e) {
+                spdlog::debug("Semantic search failed (falling back to regex only): {}", e.what());
+            }
+        }
 
+        // Output results based on mode
+        if (filesOnly_ || pathsOnly_) {
+            // Just output file paths
+            for (const auto& file : matchingFiles) {
+                std::cout << file << std::endl;
+            }
+        } else if (countOnly_) {
+            // Output counts
+            for (const auto& [filePath, matches] : allRegexMatches) {
+                if (showFilename_) {
+                    std::cout << filePath << ":";
+                }
+                std::cout << matches.size() << std::endl;
+            }
+        } else if (filesWithoutMatch_) {
+            // Handle files-without-match option
+            for (const auto& file : nonMatchingFiles) {
+                std::cout << file << std::endl;
+            }
+        } else {
+            // Hybrid output mode - show both regex and semantic results
+            bool hasRegexMatches = !allRegexMatches.empty();
+            bool hasSemanticResults = !semanticResults.empty() && !regexOnly_;
+
+            if (hasRegexMatches) {
                 if (hasSemanticResults) {
-                    if (hasRegexMatches) {
-                        std::cout << std::endl;
+                    std::cout << "=== Text Matches ===" << std::endl;
+                    std::cout << std::endl;
+                }
+
+                // Show top regex matches (limit to 3 files for balance)
+                size_t fileCount = 0;
+                for (const auto& [filePath, matches] : allRegexMatches) {
+                    if (fileCount >= 3 && hasSemanticResults)
+                        break; // Limit when showing both
+
+                    // Retrieve content for printing
+                    auto doc =
+                        std::find_if(documents.begin(), documents.end(),
+                                     [&filePath](const auto& d) { return d.filePath == filePath; });
+
+                    if (doc != documents.end()) {
+                        auto contentResult = store->retrieveBytes(doc->sha256Hash);
+                        if (contentResult) {
+                            std::string content(
+                                reinterpret_cast<const char*>(contentResult.value().data()),
+                                contentResult.value().size());
+
+                            // Apply per-file limit
+                            auto limitedMatches = matches;
+                            if (maxCount_ > 0 &&
+                                limitedMatches.size() > static_cast<size_t>(maxCount_)) {
+                                limitedMatches.resize(maxCount_);
+                            }
+
+                            printMatches(filePath, content, limitedMatches);
+                        }
                     }
-                    std::cout << "=== Semantic Matches ===" << std::endl;
+                    fileCount++;
+                }
+            }
+
+            if (hasSemanticResults) {
+                if (hasRegexMatches) {
+                    std::cout << std::endl;
+                }
+                std::cout << "=== Semantic Matches ===" << std::endl;
+                std::cout << std::endl;
+
+                // Show semantic results
+                for (size_t i = 0; i < semanticResults.size() && i < semanticLimit_; i++) {
+                    const auto& result = semanticResults[i];
+
+                    // Extract path from metadata
+                    auto pathIt = result.metadata.find("path");
+                    std::string path = (pathIt != result.metadata.end()) ? pathIt->second : "";
+
+                    // Skip if this file already shown in regex matches
+                    if (allRegexMatches.find(path) != allRegexMatches.end()) {
+                        continue;
+                    }
+
+                    std::cout << (i + 1) << ". ";
+                    auto titleIt = result.metadata.find("title");
+                    if (titleIt != result.metadata.end()) {
+                        std::cout << titleIt->second;
+                    } else {
+                        std::cout << result.id;
+                    }
+
+                    if (!path.empty()) {
+                        std::cout << " (" << path << ")";
+                    }
                     std::cout << std::endl;
 
-                    // Show semantic results
-                    for (size_t i = 0; i < semanticResults.size() && i < semanticLimit_; i++) {
-                        const auto& result = semanticResults[i];
-
-                        // Extract path from metadata
-                        auto pathIt = result.metadata.find("path");
-                        std::string path = (pathIt != result.metadata.end()) ? pathIt->second : "";
-
-                        // Skip if this file already shown in regex matches
-                        if (allRegexMatches.find(path) != allRegexMatches.end()) {
-                            continue;
-                        }
-
-                        std::cout << (i + 1) << ". ";
-                        auto titleIt = result.metadata.find("title");
-                        if (titleIt != result.metadata.end()) {
-                            std::cout << titleIt->second;
-                        } else {
-                            std::cout << result.id;
-                        }
-
-                        if (!path.empty()) {
-                            std::cout << " (" << path << ")";
-                        }
-                        std::cout << std::endl;
-
-                        // Show snippet if available
-                        if (!result.content.empty()) {
-                            std::string snippet = truncateSnippet(result.content, 200);
-                            std::cout << "   " << snippet << std::endl;
-                        }
-                        std::cout << std::endl;
+                    // Show snippet if available
+                    if (!result.content.empty()) {
+                        std::string snippet = truncateSnippet(result.content, 200);
+                        std::cout << "   " << snippet << std::endl;
                     }
+                    std::cout << std::endl;
                 }
+            }
 
-                if (!hasRegexMatches && !hasSemanticResults) {
-                    std::cout << "No matches found for pattern: " << pattern_ << std::endl;
-                }
+            if (!hasRegexMatches && !hasSemanticResults) {
+                std::cout << "No matches found for pattern: " << pattern_ << std::endl;
             }
 
             return Result<void>();
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
+        return Result<void>();
     }
 
 private:
@@ -578,39 +815,6 @@ private:
             return text == pattern;
         }
     }
-
-private:
-    YamsCLI* cli_ = nullptr;
-    std::string pattern_;
-    std::vector<std::string> paths_;
-
-    // Context options
-    size_t beforeContext_ = 0;
-    size_t afterContext_ = 0;
-    size_t context_ = 0;
-
-    // Search options
-    bool ignoreCase_ = false;
-    bool wholeWord_ = false;
-    bool invertMatch_ = false;
-    bool showLineNumbers_ = false;
-    bool showFilename_ = false;
-    bool noFilename_ = false;
-    bool countOnly_ = false;
-    bool filesOnly_ = false;
-    bool filesWithoutMatch_ = false;
-    bool pathsOnly_ = false;
-
-    // Output options
-    std::string colorMode_ = "auto";
-    size_t maxCount_ = 0;
-
-    // Pattern filtering
-    std::vector<std::string> includePatterns_;
-
-    // Hybrid search options
-    bool regexOnly_ = false;
-    size_t semanticLimit_ = 3;
 };
 
 // Factory function

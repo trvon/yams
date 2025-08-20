@@ -90,6 +90,12 @@ public:
     virtual Result<std::vector<std::string>> getSnapshots() = 0;
     virtual Result<std::vector<std::string>> getSnapshotLabels() = 0;
 
+    // Tag operations
+    virtual Result<std::vector<DocumentInfo>>
+    findDocumentsByTags(const std::vector<std::string>& tags, bool matchAll = false) = 0;
+    virtual Result<std::vector<std::string>> getDocumentTags(int64_t documentId) = 0;
+    virtual Result<std::vector<std::string>> getAllTags() = 0;
+
     // Statistics
     virtual Result<int64_t> getDocumentCount() = 0;
     virtual Result<int64_t> getIndexedDocumentCount() = 0;
@@ -172,6 +178,12 @@ public:
     Result<std::vector<std::string>> getCollections() override;
     Result<std::vector<std::string>> getSnapshots() override;
     Result<std::vector<std::string>> getSnapshotLabels() override;
+
+    // Tag operations
+    Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
+                                                          bool matchAll = false) override;
+    Result<std::vector<std::string>> getDocumentTags(int64_t documentId) override;
+    Result<std::vector<std::string>> getAllTags() override;
 
     // Statistics
     Result<int64_t> getDocumentCount() override;

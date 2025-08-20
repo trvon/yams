@@ -1,0 +1,225 @@
+/* Minimal styles for landing hero + forms that harmonize with Material (slate) and retro.css */
+
+:root {
+    /* Prefer Material variables, fall back to retro neon green and dark bg */
+    --yams-accent: var(
+        --md-accent-fg-color,
+        var(--md-primary-fg-color, #00ff7f)
+    );
+    --yams-fg: var(--md-default-fg-color, #e6eef3);
+    --yams-fg-muted: rgba(230, 238, 243, 0.72);
+    --yams-bg: var(--md-default-bg-color, #0b0f10);
+    --yams-panel: var(--md-code-bg-color, #10161a);
+    --yams-border: color-mix(in oklab, var(--yams-accent), transparent 70%);
+}
+
+/* Container: centered card with subtle neon border */
+.md-typeset .hero-cta {
+    margin: 1.25rem 0 1.5rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--yams-border);
+    border-radius: 10px;
+    background: linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--yams-panel), transparent 20%) 0%,
+        color-mix(in oklab, var(--yams-panel), transparent 0%) 100%
+    );
+    box-shadow:
+        0 0 0 1px color-mix(in oklab, var(--yams-accent), transparent 85%) inset,
+        0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+.md-typeset .hero-cta h2 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.2px;
+    font-size: 1.15rem;
+    line-height: 1.35;
+    font-weight: 700;
+}
+
+.md-typeset .hero-cta p {
+    margin-top: 0.25rem;
+    color: var(--yams-fg-muted);
+}
+
+/* Forms: shared layout for waitlist/contact */
+.md-typeset form.waitlist-form,
+.md-typeset form.contact-form {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: 1fr;
+    max-width: 640px;
+    margin: 0.75rem 0 0.25rem 0;
+}
+
+/* Toggle button for showing/hiding the waitlist form */
+.md-typeset .waitlist-toggle-btn {
+    cursor: pointer;
+    display: inline-block;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    border: 1px solid color-mix(in oklab, var(--yams-accent), black 25%);
+    background: linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--yams-accent), white 8%),
+        color-mix(in oklab, var(--yams-accent), black 6%)
+    );
+    color: #0a0f0c;
+    font-weight: 700;
+    letter-spacing: 0.15px;
+    user-select: none;
+}
+
+.md-typeset .waitlist-toggle-btn:hover {
+    filter: brightness(1.04);
+}
+
+.md-typeset .waitlist-toggle-btn:focus-visible {
+    outline: 3px solid color-mix(in oklab, var(--yams-accent), transparent 60%);
+    outline-offset: 2px;
+}
+
+/* Using .waitlist-toggle-btn instead of details/summary; summary styles removed */
+
+/* Wider view: two columns for text inputs, textarea spans both */
+@media (min-width: 780px) {
+    .md-typeset form.waitlist-form,
+    .md-typeset form.contact-form {
+        grid-template-columns: 1fr 1fr;
+    }
+    .md-typeset form.waitlist-form textarea,
+    .md-typeset form.contact-form textarea,
+    .md-typeset form.waitlist-form button[type="submit"],
+    .md-typeset form.contact-form button[type="submit"] {
+        grid-column: 1 / -1;
+    }
+}
+
+/* Labels (for classic label-wrapped inputs) */
+.md-typeset form.waitlist-form label,
+.md-typeset form.contact-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    color: var(--yams-fg);
+    font-weight: 500;
+}
+
+/* Inputs */
+.md-typeset form.waitlist-form input[type="email"],
+.md-typeset form.waitlist-form input[type="text"],
+.md-typeset form.contact-form input[type="email"],
+.md-typeset form.contact-form input[type="text"],
+.md-typeset form.contact-form input[type="tel"],
+.md-typeset form.waitlist-form textarea,
+.md-typeset form.contact-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.65rem 0.75rem;
+    border-radius: 8px;
+    border: 1px solid color-mix(in oklab, var(--yams-border), transparent 10%);
+    background: color-mix(in oklab, var(--yams-panel), black 4%);
+    color: var(--yams-fg);
+    outline: none;
+    transition:
+        border-color 120ms ease,
+        box-shadow 120ms ease,
+        background 120ms ease;
+    font-family: inherit;
+    font-size: 0.95rem;
+}
+
+.md-typeset form.waitlist-form textarea,
+.md-typeset form.contact-form textarea {
+    min-height: 120px;
+    resize: vertical;
+}
+
+/* Placeholder */
+.md-typeset form.waitlist-form ::placeholder,
+.md-typeset form.contact-form ::placeholder {
+    color: color-mix(in oklab, var(--yams-fg), transparent 45%);
+}
+
+/* Focus ring */
+.md-typeset form.waitlist-form input:focus,
+.md-typeset form.contact-form input:focus,
+.md-typeset form.waitlist-form textarea:focus,
+.md-typeset form.contact-form textarea:focus {
+    border-color: color-mix(in oklab, var(--yams-accent), white 10%);
+    box-shadow: 0 0 0 3px
+        color-mix(in oklab, var(--yams-accent), transparent 80%);
+    background: color-mix(in oklab, var(--yams-panel), white 2%);
+}
+
+/* Submit button */
+.md-typeset form.waitlist-form button[type="submit"],
+.md-typeset form.contact-form button[type="submit"] {
+    appearance: none;
+    cursor: pointer;
+    padding: 0.7rem 0.95rem;
+    border-radius: 9px;
+    border: 1px solid color-mix(in oklab, var(--yams-accent), black 25%);
+    background: linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--yams-accent), white 8%),
+        color-mix(in oklab, var(--yams-accent), black 6%)
+    );
+    color: #0a0f0c;
+    font-weight: 700;
+    letter-spacing: 0.15px;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.25);
+    transition:
+        transform 80ms ease,
+        filter 120ms ease,
+        box-shadow 120ms ease;
+    justify-self: start;
+}
+
+.md-typeset form.waitlist-form button[type="submit"]:hover,
+.md-typeset form.contact-form button[type="submit"]:hover {
+    filter: brightness(1.05) saturate(1.02);
+    box-shadow:
+        0 0 0 2px color-mix(in oklab, var(--yams-accent), transparent 80%),
+        0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.md-typeset form.waitlist-form button[type="submit"]:active,
+.md-typeset form.contact-form button[type="submit"]:active {
+    transform: translateY(1px);
+    filter: brightness(0.98);
+}
+
+/* Privacy note */
+.md-typeset .privacy-note {
+    font-size: 0.85rem;
+    color: var(--yams-fg-muted);
+    margin: 0.25rem 0 0;
+}
+
+/* Hide honeypot field if present without inline styles */
+.md-typeset form.waitlist-form input[name="_gotcha"],
+.md-typeset form.contact-form input[name="_gotcha"] {
+    display: none !important;
+}
+
+/* Inline success/error messages appended by JS or Formspree */
+.md-typeset form.waitlist-form p,
+.md-typeset form.contact-form p {
+    margin: 0.25rem 0 0;
+    color: var(--yams-fg-muted);
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+    .md-typeset form.waitlist-form input,
+    .md-typeset form.contact-form input,
+    .md-typeset form.waitlist-form textarea,
+    .md-typeset form.contact-form textarea,
+    .md-typeset form.waitlist-form button,
+    .md-typeset form.contact-form button,
+    .md-typeset .hero-cta {
+        transition: none !important;
+    }
+}

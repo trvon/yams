@@ -27,7 +27,7 @@ protected:
 TEST_F(FTS5Test, CheckFTS5Support) {
     // Create database
     Database db;
-    auto openResult = db.open(dbPath.string());
+    auto openResult = db.open(dbPath.string(), ConnectionMode::Create);
     ASSERT_TRUE(openResult.has_value())
         << "Failed to open database: " << openResult.error().message;
 
@@ -80,7 +80,7 @@ TEST_F(FTS5Test, CheckFTS5Support) {
 TEST_F(FTS5Test, FallbackBehavior) {
     // Create database
     Database db;
-    auto openResult = db.open(dbPath.string());
+    auto openResult = db.open(dbPath.string(), ConnectionMode::Create);
     ASSERT_TRUE(openResult.has_value())
         << "Failed to open database: " << openResult.error().message;
 
@@ -124,7 +124,7 @@ TEST_F(FTS5Test, FallbackBehavior) {
 
 TEST_F(FTS5Test, ReportFTS5Configuration) {
     Database db;
-    auto openResult = db.open(dbPath.string());
+    auto openResult = db.open(dbPath.string(), ConnectionMode::Create);
     ASSERT_TRUE(openResult.has_value())
         << "Failed to open database: " << openResult.error().message;
 

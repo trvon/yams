@@ -1,0 +1,409 @@
+#pragma once
+
+#include <nlohmann/json.hpp>
+#include <concepts>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>
+#include <yams/core/types.h>
+
+namespace yams::mcp {
+
+using json = nlohmann::json;
+
+// C++20 concepts for tool system
+template <typename T>
+concept ToolRequest = requires {
+    typename T::RequestType;
+    std::same_as<T, typename T::RequestType>;
+};
+
+template <typename T>
+concept ToolResponse = requires {
+    typename T::ResponseType;
+    std::same_as<T, typename T::ResponseType>;
+};
+
+template <typename T>
+concept ToolSerializable = requires(const T& t, const json& j) {
+    { T::fromJson(j) } -> std::same_as<T>;
+    { t.toJson() } -> std::same_as<json>;
+};
+
+// Tool request/response DTOs
+struct MCPSearchRequest {
+    using RequestType = MCPSearchRequest;
+
+    std::string query;
+    size_t limit = 10;
+    bool fuzzy = false;
+    float similarity = 0.7f;
+    std::string hash;
+    std::string type = "hybrid";
+    bool verbose = false;
+    bool pathsOnly = false;
+    bool lineNumbers = false;
+    int beforeContext = 0;
+    int afterContext = 0;
+    int context = 0;
+    std::string colorMode = "never";
+    std::string pathPattern;
+    std::vector<std::string> tags;
+    bool matchAllTags = false;
+
+    static MCPSearchRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSearchResponse {
+    using ResponseType = MCPSearchResponse;
+
+    size_t total = 0;
+    std::string type;
+    uint64_t executionTimeMs = 0;
+    std::vector<std::string> paths;
+
+    struct Result {
+        std::string id;
+        std::string hash;
+        std::string title;
+        std::string path;
+        float score = 0.0f;
+        std::string snippet;
+        std::optional<float> vectorScore;
+        std::optional<float> keywordScore;
+        std::optional<float> kgEntityScore;
+        std::optional<float> structuralScore;
+    };
+    std::vector<Result> results;
+
+    static MCPSearchResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPGrepRequest {
+    using RequestType = MCPGrepRequest;
+
+    std::string pattern;
+    std::vector<std::string> paths;
+    bool ignoreCase = false;
+    bool word = false;
+    bool invert = false;
+    bool lineNumbers = false;
+    bool withFilename = true;
+    bool count = false;
+    bool filesWithMatches = false;
+    bool filesWithoutMatch = false;
+    int afterContext = 0;
+    int beforeContext = 0;
+    int context = 0;
+    std::optional<int> maxCount;
+    std::string color = "auto";
+
+    static MCPGrepRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPGrepResponse {
+    using ResponseType = MCPGrepResponse;
+
+    std::string output;
+    size_t matchCount = 0;
+    size_t fileCount = 0;
+
+    static MCPGrepResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Download tool DTOs
+struct MCPDownloadRequest {
+    using RequestType = MCPDownloadRequest;
+
+    std::string url;
+    std::vector<std::string> headers;
+    std::string checksum;
+    int concurrency = 4;
+    size_t chunkSizeBytes = 8'388'608;
+    int timeoutMs = 60'000;
+    bool resume = true;
+    std::string proxy;
+    bool followRedirects = true;
+    bool storeOnly = true;
+    std::string exportPath;
+    std::string overwrite = "never";
+
+    static MCPDownloadRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPDownloadResponse {
+    using ResponseType = MCPDownloadResponse;
+
+    std::string url;
+    std::string hash;
+    std::string storedPath;
+    uint64_t sizeBytes = 0;
+    bool success = false;
+    std::optional<int> httpStatus;
+    std::optional<std::string> etag;
+    std::optional<std::string> lastModified;
+    std::optional<bool> checksumOk;
+
+    static MCPDownloadResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Store document DTOs
+struct MCPStoreDocumentRequest {
+    using RequestType = MCPStoreDocumentRequest;
+
+    std::string path;
+    std::string content;
+    std::string name;
+    std::string mimeType;
+    std::vector<std::string> tags;
+    json metadata;
+
+    static MCPStoreDocumentRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPStoreDocumentResponse {
+    using ResponseType = MCPStoreDocumentResponse;
+
+    std::string hash;
+    uint64_t bytesStored = 0;
+    uint64_t bytesDeduped = 0;
+
+    static MCPStoreDocumentResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Retrieve document DTOs
+struct MCPRetrieveDocumentRequest {
+    using RequestType = MCPRetrieveDocumentRequest;
+
+    std::string hash;
+    std::string outputPath;
+    bool graph = false;
+    int depth = 1;
+    bool includeContent = false;
+
+    static MCPRetrieveDocumentRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPRetrieveDocumentResponse {
+    using ResponseType = MCPRetrieveDocumentResponse;
+
+    std::string hash;
+    std::string path;
+    std::string name;
+    uint64_t size = 0;
+    std::string mimeType;
+    std::optional<std::string> content;
+    bool graphEnabled = false;
+    std::vector<json> related;
+
+    static MCPRetrieveDocumentResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// List documents DTOs
+struct MCPListDocumentsRequest {
+    using RequestType = MCPListDocumentsRequest;
+
+    std::string pattern;
+    std::vector<std::string> tags;
+    std::string type;
+    std::string mime;
+    std::string extension;
+    bool binary = false;
+    bool text = false;
+    int recent = 0;
+    std::string sortBy = "modified";
+    std::string sortOrder = "desc";
+
+    static MCPListDocumentsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListDocumentsResponse {
+    using ResponseType = MCPListDocumentsResponse;
+
+    std::vector<json> documents;
+    size_t total = 0;
+
+    static MCPListDocumentsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Stats DTOs
+struct MCPStatsRequest {
+    using RequestType = MCPStatsRequest;
+
+    bool fileTypes = false;
+    bool verbose = false;
+
+    static MCPStatsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPStatsResponse {
+    using ResponseType = MCPStatsResponse;
+
+    uint64_t totalObjects = 0;
+    uint64_t totalBytes = 0;
+    uint64_t uniqueHashes = 0;
+    uint64_t deduplicationSavings = 0;
+    std::vector<json> fileTypes;
+    json additionalStats;
+
+    static MCPStatsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Add directory DTOs
+struct MCPAddDirectoryRequest {
+    using RequestType = MCPAddDirectoryRequest;
+
+    std::string directoryPath;
+    std::string collection;
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    json metadata;
+    bool recursive = true;
+    bool followSymlinks = false;
+
+    static MCPAddDirectoryRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPAddDirectoryResponse {
+    using ResponseType = MCPAddDirectoryResponse;
+
+    std::string directoryPath;
+    std::string collection;
+    size_t filesProcessed = 0;
+    size_t filesIndexed = 0;
+    size_t filesSkipped = 0;
+    size_t filesFailed = 0;
+    std::vector<json> results;
+
+    static MCPAddDirectoryResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+// Tool descriptor for registry
+struct ToolDescriptor {
+    std::string_view name;
+    std::function<json(const json&)> handler;
+    json schema;
+    std::string_view description;
+
+    ToolDescriptor(std::string_view n, std::function<json(const json&)> h, json s = {},
+                   std::string_view d = {})
+        : name(n), handler(std::move(h)), schema(std::move(s)), description(d) {}
+};
+
+// Generic tool wrapper template
+template <ToolRequest RequestType, ToolResponse ResponseType>
+requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
+class ToolWrapper {
+public:
+    using HandlerFn = std::function<Result<ResponseType>(const RequestType&)>;
+
+    explicit ToolWrapper(HandlerFn handler) : handler_(std::move(handler)) {}
+
+    json operator()(const json& args) {
+        try {
+            auto req = RequestType::fromJson(args);
+            auto result = handler_(req);
+
+            if (!result) {
+                // Return structured error with code for consistency
+                return json{{"error",
+                             {{"code", -32603}, // Internal error
+                              {"message", result.error().message}}}};
+            }
+
+            // Wrap response in content field as per MCP protocol (content must be an array per MCP
+            // spec)
+            auto responseJson = result.value().toJson();
+            return json{
+                {"content", json::array({json{{"type", "text"}, {"text", responseJson.dump()}}})}};
+        } catch (const json::exception& e) {
+            return json{{"error",
+                         {{"code", -32700}, // Parse error
+                          {"message", "JSON error: " + std::string(e.what())}}}};
+        } catch (const std::exception& e) {
+            return json{{"error",
+                         {{"code", -32603}, // Internal error
+                          {"message", "Error: " + std::string(e.what())}}}};
+        }
+    }
+
+private:
+    HandlerFn handler_;
+};
+
+// Tool registry with O(1) lookup
+class ToolRegistry {
+public:
+    using TransparentHash = std::hash<std::string>;
+    using TransparentEqual = std::equal_to<>;
+    using HandlerMap = std::unordered_map<std::string, std::function<json(const json&)>,
+                                          TransparentHash, TransparentEqual>;
+
+    ToolRegistry() {
+        handlers_.reserve(32); // Pre-allocate for performance
+    }
+
+    template <ToolRequest RequestType, ToolResponse ResponseType>
+    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
+    void registerTool(std::string_view name,
+                      std::function<Result<ResponseType>(const RequestType&)> handler,
+                      json schema = {}, std::string_view description = {}) {
+        auto wrapper = ToolWrapper<RequestType, ResponseType>(std::move(handler));
+        auto handlerFn = [wrapper = std::move(wrapper)](const json& args) mutable -> json {
+            return wrapper(args);
+        };
+
+        // Use iterator from emplace to avoid double lookup
+        auto key = std::string(name);
+        auto [it, inserted] = handlers_.emplace(key, std::move(handlerFn));
+        // Use it->first to reference the key stored in the map
+        descriptors_.emplace_back(it->first, it->second, std::move(schema), description);
+    }
+
+    json callTool(std::string_view name, const json& arguments) {
+        if (auto it = handlers_.find(std::string(name)); it != handlers_.end()) {
+            return it->second(arguments);
+        }
+        return json{{"error", "Unknown tool: " + std::string(name)}};
+    }
+
+    json listTools() const {
+        json tools = json::array();
+        for (const auto& desc : descriptors_) {
+            json tool;
+            tool["name"] = desc.name;
+            tool["description"] = desc.description.empty() ? "" : std::string(desc.description);
+            if (!desc.schema.empty()) {
+                tool["inputSchema"] = desc.schema;
+            }
+            tools.push_back(std::move(tool));
+        }
+        return json{{"tools", std::move(tools)}};
+    }
+
+private:
+    HandlerMap handlers_;
+    std::vector<ToolDescriptor> descriptors_;
+};
+
+} // namespace yams::mcp

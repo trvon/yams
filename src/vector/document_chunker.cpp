@@ -163,25 +163,39 @@ DocumentChunker::splitLargeChunks(const std::vector<DocumentChunk>& chunks) {
         if (chunk_size <= config_.max_chunk_size) {
             split_chunks.push_back(chunk);
         } else {
-            // Split the chunk
-            size_t num_splits = (chunk_size + config_.max_chunk_size - 1) / config_.max_chunk_size;
-            size_t split_size = chunk_size / num_splits;
-
+            // Split the chunk - properly respect max_chunk_size
             size_t start = 0;
-            for (size_t i = 0; i < num_splits; ++i) {
-                size_t end = (i == num_splits - 1) ? chunk.content.size() : start + split_size;
+            const std::string& content = chunk.content;
 
-                // Find word boundary if needed
-                if (config_.preserve_words && end < chunk.content.size()) {
-                    while (end > start && !std::isspace(chunk.content[end])) {
-                        --end;
+            while (start < content.size()) {
+                // Calculate end position based on max_chunk_size
+                size_t end = std::min(start + config_.max_chunk_size, content.size());
+
+                // Find word boundary if needed (move back to last space)
+                if (config_.preserve_words && end < content.size()) {
+                    size_t last_space = end;
+                    while (last_space > start && !std::isspace(content[last_space])) {
+                        --last_space;
                     }
+                    // Only use word boundary if we found a space
+                    if (last_space > start && std::isspace(content[last_space])) {
+                        end = last_space;
+                    }
+                }
+
+                // Skip leading whitespace
+                while (start < content.size() && std::isspace(content[start])) {
+                    ++start;
+                }
+
+                if (start >= end) {
+                    break;
                 }
 
                 DocumentChunk split_chunk;
                 split_chunk.chunk_id = generateChunkId(chunk.document_hash, split_chunks.size());
                 split_chunk.document_hash = chunk.document_hash;
-                split_chunk.content = chunk.content.substr(start, end - start);
+                split_chunk.content = content.substr(start, end - start);
                 split_chunk.chunk_index = split_chunks.size();
                 split_chunk.start_offset = chunk.start_offset + start;
                 split_chunk.end_offset = chunk.start_offset + end;
@@ -285,17 +299,43 @@ size_t DocumentChunker::estimateTokenCount(const std::string& text) const {
 std::vector<size_t> DocumentChunker::findSentenceBoundaries(const std::string& text) const {
     std::vector<size_t> boundaries;
 
-    // Simple sentence detection using regex
-    std::regex sentence_end(R"([.!?]+\s+)");
-    auto begin = std::sregex_iterator(text.begin(), text.end(), sentence_end);
-    auto end = std::sregex_iterator();
+    // Find sentence endings (. ! ?)
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (c == '.' || c == '!' || c == '?') {
+            // Check if it's really a sentence boundary (not abbreviation, etc.)
+            bool is_boundary = true;
 
-    for (auto it = begin; it != end; ++it) {
-        boundaries.push_back(it->position() + it->length());
+            // Skip if followed immediately by a letter (likely abbreviation)
+            if (i + 1 < text.size() && std::isalpha(text[i + 1])) {
+                is_boundary = false;
+            }
+
+            // Skip common abbreviations (simple heuristic)
+            if (i > 0 && c == '.') {
+                // Check for common patterns like "Dr.", "Mr.", "Ms.", etc.
+                if (i >= 2) {
+                    std::string prev3 = text.substr(std::max(size_t(0), i - 2), 3);
+                    if (prev3 == "Dr." || prev3 == "Mr." || prev3 == "Ms." || prev3 == "Jr." ||
+                        prev3 == "Sr." || prev3 == "St.") {
+                        is_boundary = false;
+                    }
+                }
+            }
+
+            if (is_boundary) {
+                // Find the end of whitespace after punctuation
+                size_t boundary_pos = i + 1;
+                while (boundary_pos < text.size() && std::isspace(text[boundary_pos])) {
+                    boundary_pos++;
+                }
+                boundaries.push_back(boundary_pos);
+            }
+        }
     }
 
-    // Add end of text as boundary
-    if (!text.empty()) {
+    // Add end of text if not already included
+    if (!text.empty() && (boundaries.empty() || boundaries.back() != text.size())) {
         boundaries.push_back(text.size());
     }
 
@@ -438,248 +478,6 @@ std::vector<DocumentChunk> FixedSizeChunker::doChunking(const std::string& conte
     }
 
     return chunks;
-}
-
-// =============================================================================
-// SentenceBasedChunker Implementation
-// =============================================================================
-
-SentenceBasedChunker::SentenceBasedChunker(const ChunkingConfig& config) : DocumentChunker(config) {
-    config_.strategy = ChunkingStrategy::SENTENCE_BASED;
-}
-
-std::vector<DocumentChunk> SentenceBasedChunker::doChunking(const std::string& content,
-                                                            const std::string& document_hash) {
-    std::vector<DocumentChunk> chunks;
-    auto sentences = splitIntoSentences(content);
-
-    if (sentences.empty()) {
-        return chunks;
-    }
-
-    DocumentChunk current_chunk;
-    current_chunk.chunk_id = generateChunkId(document_hash, 0);
-    current_chunk.document_hash = document_hash;
-    current_chunk.chunk_index = 0;
-    current_chunk.start_offset = 0;
-    current_chunk.strategy_used = ChunkingStrategy::SENTENCE_BASED;
-
-    size_t current_size = 0;
-    size_t position = 0;
-
-    for (const auto& sentence : sentences) {
-        size_t sentence_size =
-            config_.use_token_count ? estimateTokenCount(sentence) : sentence.size();
-
-        // Check if adding this sentence would exceed target size
-        if (current_size > 0 && current_size + sentence_size > config_.target_chunk_size) {
-            // Save current chunk
-            current_chunk.end_offset = position;
-            updateChunkMetadata(current_chunk, current_chunk.content);
-            chunks.push_back(current_chunk);
-
-            // Start new chunk
-            current_chunk = DocumentChunk();
-            current_chunk.chunk_id = generateChunkId(document_hash, chunks.size());
-            current_chunk.document_hash = document_hash;
-            current_chunk.chunk_index = chunks.size();
-            current_chunk.start_offset = position;
-            current_chunk.strategy_used = ChunkingStrategy::SENTENCE_BASED;
-            current_chunk.content = "";
-            current_size = 0;
-        }
-
-        // Add sentence to current chunk
-        if (!current_chunk.content.empty()) {
-            current_chunk.content += " ";
-        }
-        current_chunk.content += sentence;
-        current_size += sentence_size;
-        position += sentence.size();
-    }
-
-    // Add the last chunk
-    if (!current_chunk.content.empty()) {
-        current_chunk.end_offset = content.size();
-        updateChunkMetadata(current_chunk, current_chunk.content);
-        chunks.push_back(current_chunk);
-    }
-
-    return chunks;
-}
-
-std::vector<std::string> SentenceBasedChunker::splitIntoSentences(const std::string& text) const {
-    std::vector<std::string> sentences;
-
-    size_t start = 0;
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (isSentenceEnd(text, i)) {
-            // Include the punctuation in the sentence
-            size_t end = i + 1;
-
-            // Skip trailing whitespace
-            while (end < text.size() && std::isspace(text[end])) {
-                ++end;
-            }
-
-            std::string sentence = text.substr(start, i + 1 - start);
-
-            // Trim leading/trailing whitespace
-            sentence.erase(0, sentence.find_first_not_of(" \t\n\r"));
-            sentence.erase(sentence.find_last_not_of(" \t\n\r") + 1);
-
-            if (!sentence.empty()) {
-                sentences.push_back(sentence);
-            }
-
-            start = end;
-            i = end - 1; // -1 because loop will increment
-        }
-    }
-
-    // Add remaining text as last sentence
-    if (start < text.size()) {
-        std::string sentence = text.substr(start);
-        sentence.erase(0, sentence.find_first_not_of(" \t\n\r"));
-        sentence.erase(sentence.find_last_not_of(" \t\n\r") + 1);
-
-        if (!sentence.empty()) {
-            sentences.push_back(sentence);
-        }
-    }
-
-    return sentences;
-}
-
-bool SentenceBasedChunker::isSentenceEnd(const std::string& text, size_t pos) const {
-    if (pos >= text.size()) {
-        return false;
-    }
-
-    char c = text[pos];
-
-    // Check for sentence-ending punctuation
-    if (c != '.' && c != '!' && c != '?') {
-        return false;
-    }
-
-    // Look ahead for space or end of text
-    if (pos + 1 >= text.size()) {
-        return true; // End of text
-    }
-
-    char next = text[pos + 1];
-
-    // Check for space, newline, or quotation marks after punctuation
-    if (std::isspace(next) || next == '"' || next == '\'' || next == ')') {
-        // Avoid splitting on abbreviations (simple heuristic)
-        if (c == '.' && pos > 0) {
-            // Check if previous character is uppercase (possible abbreviation)
-            char prev = text[pos - 1];
-            if (std::isupper(prev) && pos > 1) {
-                char prev2 = text[pos - 2];
-                if (std::isspace(prev2) || prev2 == '.') {
-                    return false; // Likely an abbreviation
-                }
-            }
-        }
-
-        return true;
-    }
-
-    return false;
-}
-
-// =============================================================================
-// ParagraphBasedChunker Implementation
-// =============================================================================
-
-ParagraphBasedChunker::ParagraphBasedChunker(const ChunkingConfig& config)
-    : DocumentChunker(config) {
-    config_.strategy = ChunkingStrategy::PARAGRAPH_BASED;
-}
-
-std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& content,
-                                                             const std::string& document_hash) {
-    std::vector<DocumentChunk> chunks;
-    auto paragraphs = splitIntoParagraphs(content);
-
-    if (paragraphs.empty()) {
-        return chunks;
-    }
-
-    DocumentChunk current_chunk;
-    current_chunk.chunk_id = generateChunkId(document_hash, 0);
-    current_chunk.document_hash = document_hash;
-    current_chunk.chunk_index = 0;
-    current_chunk.start_offset = 0;
-    current_chunk.strategy_used = ChunkingStrategy::PARAGRAPH_BASED;
-
-    size_t current_size = 0;
-    size_t position = 0;
-
-    for (const auto& paragraph : paragraphs) {
-        size_t para_size =
-            config_.use_token_count ? estimateTokenCount(paragraph) : paragraph.size();
-
-        // Check if adding this paragraph would exceed target size
-        if (current_size > 0 && current_size + para_size > config_.target_chunk_size) {
-            // Save current chunk
-            current_chunk.end_offset = position;
-            updateChunkMetadata(current_chunk, current_chunk.content);
-            chunks.push_back(current_chunk);
-
-            // Start new chunk
-            current_chunk = DocumentChunk();
-            current_chunk.chunk_id = generateChunkId(document_hash, chunks.size());
-            current_chunk.document_hash = document_hash;
-            current_chunk.chunk_index = chunks.size();
-            current_chunk.start_offset = position;
-            current_chunk.strategy_used = ChunkingStrategy::PARAGRAPH_BASED;
-            current_chunk.content = "";
-            current_size = 0;
-        }
-
-        // Add paragraph to current chunk
-        if (!current_chunk.content.empty()) {
-            current_chunk.content += "\n\n";
-        }
-        current_chunk.content += paragraph;
-        current_size += para_size;
-        position += paragraph.size() + 2; // +2 for \n\n
-    }
-
-    // Add the last chunk
-    if (!current_chunk.content.empty()) {
-        current_chunk.end_offset = content.size();
-        updateChunkMetadata(current_chunk, current_chunk.content);
-        chunks.push_back(current_chunk);
-    }
-
-    return chunks;
-}
-
-std::vector<std::string> ParagraphBasedChunker::splitIntoParagraphs(const std::string& text) const {
-    std::vector<std::string> paragraphs;
-
-    // Split on double newlines
-    std::regex paragraph_separator(R"(\n\s*\n)");
-    std::sregex_token_iterator it(text.begin(), text.end(), paragraph_separator, -1);
-    std::sregex_token_iterator end;
-
-    for (; it != end; ++it) {
-        std::string paragraph = *it;
-
-        // Trim whitespace
-        paragraph.erase(0, paragraph.find_first_not_of(" \t\n\r"));
-        paragraph.erase(paragraph.find_last_not_of(" \t\n\r") + 1);
-
-        if (!paragraph.empty()) {
-            paragraphs.push_back(paragraph);
-        }
-    }
-
-    return paragraphs;
 }
 
 // =============================================================================
@@ -1260,6 +1058,8 @@ std::vector<DocumentChunk> SemanticChunker::doChunking(const std::string& conten
 }
 
 double SemanticChunker::computeSimilarity(const std::string& text1, const std::string& text2) {
+    (void)text1; // Suppress unused parameter warning
+    (void)text2; // Suppress unused parameter warning
     // Compute embeddings and calculate cosine similarity
     // Placeholder implementation
     return 0.5;
@@ -1269,6 +1069,261 @@ std::vector<size_t> SemanticChunker::findSemanticBoundaries(const std::string& t
     // Find boundaries where semantic similarity drops
     // Placeholder implementation
     return findSentenceBoundaries(text);
+}
+
+// =============================================================================
+// SentenceBasedChunker Implementation
+// =============================================================================
+
+SentenceBasedChunker::SentenceBasedChunker(const ChunkingConfig& config) : DocumentChunker(config) {
+    config_.strategy = ChunkingStrategy::SENTENCE_BASED;
+}
+
+std::vector<std::string> SentenceBasedChunker::splitIntoSentences(const std::string& text) const {
+    std::vector<std::string> sentences;
+    auto boundaries = findSentenceBoundaries(text);
+
+    size_t start = 0;
+    for (size_t boundary : boundaries) {
+        if (boundary > start) {
+            std::string sentence = text.substr(start, boundary - start);
+            // Trim whitespace
+            while (!sentence.empty() && std::isspace(sentence.back())) {
+                sentence.pop_back();
+            }
+            while (!sentence.empty() && std::isspace(sentence.front())) {
+                sentence.erase(0, 1);
+            }
+            if (!sentence.empty()) {
+                sentences.push_back(sentence);
+            }
+        }
+        start = boundary;
+    }
+
+    return sentences;
+}
+
+bool SentenceBasedChunker::isSentenceEnd(const std::string& text, size_t pos) const {
+    if (pos >= text.size()) {
+        return false;
+    }
+
+    char c = text[pos];
+    if (c != '.' && c != '!' && c != '?') {
+        return false;
+    }
+
+    // Look ahead for space or end of text
+    if (pos + 1 >= text.size()) {
+        return true;
+    }
+
+    char next = text[pos + 1];
+    return std::isspace(next) || next == '"' || next == '\'' || next == ')';
+}
+
+std::vector<DocumentChunk> SentenceBasedChunker::doChunking(const std::string& content,
+                                                            const std::string& document_hash) {
+    std::vector<DocumentChunk> chunks;
+
+    // Find sentence boundaries
+    auto boundaries = findSentenceBoundaries(content);
+    if (boundaries.empty()) {
+        return chunks;
+    }
+
+    size_t start = 0;
+    size_t chunk_index = 0;
+    std::string current_chunk;
+    size_t current_sentence_count = 0;
+
+    for (size_t boundary : boundaries) {
+        // Extract sentence
+        std::string sentence = content.substr(start, boundary - start);
+
+        // Check if adding this sentence would exceed the target size
+        bool should_split = false;
+        if (!current_chunk.empty()) {
+            size_t new_size = current_chunk.size() + sentence.size();
+            if (new_size > config_.target_chunk_size) {
+                should_split = true;
+            } else if (config_.preserve_sentences &&
+                       current_sentence_count >= 3) { // Default to 3 sentences per chunk
+                should_split = true;
+            }
+        }
+
+        if (should_split && !current_chunk.empty()) {
+            // Create chunk from accumulated sentences
+            DocumentChunk chunk;
+            chunk.chunk_id = generateChunkId(document_hash, chunk_index);
+            chunk.document_hash = document_hash;
+            chunk.content = current_chunk;
+            chunk.chunk_index = chunk_index;
+            chunk.start_offset = chunks.empty() ? 0 : chunks.back().end_offset;
+            chunk.end_offset = chunk.start_offset + current_chunk.size();
+            chunk.strategy_used = ChunkingStrategy::SENTENCE_BASED;
+            chunk.sentence_count = current_sentence_count;
+
+            updateChunkMetadata(chunk, chunk.content);
+            chunks.push_back(chunk);
+
+            // Reset for next chunk
+            current_chunk.clear();
+            current_sentence_count = 0;
+            chunk_index++;
+        }
+
+        // Add sentence to current chunk
+        current_chunk += sentence;
+        current_sentence_count++;
+        start = boundary;
+    }
+
+    // Add remaining content as final chunk
+    if (!current_chunk.empty()) {
+        DocumentChunk chunk;
+        chunk.chunk_id = generateChunkId(document_hash, chunk_index);
+        chunk.document_hash = document_hash;
+        chunk.content = current_chunk;
+        chunk.chunk_index = chunk_index;
+        chunk.start_offset = chunks.empty() ? 0 : chunks.back().end_offset;
+        chunk.end_offset = chunk.start_offset + current_chunk.size();
+        chunk.strategy_used = ChunkingStrategy::SENTENCE_BASED;
+        chunk.sentence_count = current_sentence_count;
+
+        updateChunkMetadata(chunk, chunk.content);
+        chunks.push_back(chunk);
+    }
+
+    linkChunks(chunks);
+    return chunks;
+}
+
+// =============================================================================
+// ParagraphBasedChunker Implementation
+// =============================================================================
+
+ParagraphBasedChunker::ParagraphBasedChunker(const ChunkingConfig& config)
+    : DocumentChunker(config) {
+    config_.strategy = ChunkingStrategy::PARAGRAPH_BASED;
+}
+
+std::vector<std::string> ParagraphBasedChunker::splitIntoParagraphs(const std::string& text) const {
+    std::vector<std::string> paragraphs;
+    auto boundaries = findParagraphBoundaries(text);
+
+    size_t start = 0;
+    for (size_t boundary : boundaries) {
+        if (boundary > start) {
+            std::string paragraph = text.substr(start, boundary - start);
+            // Trim whitespace
+            while (!paragraph.empty() && std::isspace(paragraph.back())) {
+                paragraph.pop_back();
+            }
+            while (!paragraph.empty() && std::isspace(paragraph.front())) {
+                paragraph.erase(0, 1);
+            }
+            if (!paragraph.empty()) {
+                paragraphs.push_back(paragraph);
+            }
+        }
+        start = boundary;
+    }
+
+    return paragraphs;
+}
+
+std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& content,
+                                                             const std::string& document_hash) {
+    std::vector<DocumentChunk> chunks;
+
+    // Find paragraph boundaries
+    auto boundaries = findParagraphBoundaries(content);
+    if (boundaries.empty()) {
+        return chunks;
+    }
+
+    size_t start = 0;
+    size_t chunk_index = 0;
+    std::string current_chunk;
+    size_t current_paragraph_count = 0;
+
+    for (size_t boundary : boundaries) {
+        // Extract paragraph
+        std::string paragraph = content.substr(start, boundary - start);
+
+        // Trim trailing whitespace from paragraph
+        while (!paragraph.empty() && std::isspace(paragraph.back())) {
+            paragraph.pop_back();
+        }
+
+        // Skip empty paragraphs
+        if (paragraph.empty()) {
+            start = boundary;
+            continue;
+        }
+
+        // Check if adding this paragraph would exceed the target size
+        bool should_split = false;
+        if (!current_chunk.empty()) {
+            size_t new_size =
+                current_chunk.size() + paragraph.size() + 2; // +2 for paragraph separator
+            if (new_size > config_.target_chunk_size) {
+                should_split = true;
+            } else if (config_.preserve_paragraphs &&
+                       current_paragraph_count >= 2) { // Default to 2 paragraphs per chunk
+                should_split = true;
+            }
+        }
+
+        if (should_split && !current_chunk.empty()) {
+            // Create chunk from accumulated paragraphs
+            DocumentChunk chunk;
+            chunk.chunk_id = generateChunkId(document_hash, chunk_index);
+            chunk.document_hash = document_hash;
+            chunk.content = current_chunk;
+            chunk.chunk_index = chunk_index;
+            chunk.start_offset = chunks.empty() ? 0 : chunks.back().end_offset;
+            chunk.end_offset = chunk.start_offset + current_chunk.size();
+            chunk.strategy_used = ChunkingStrategy::PARAGRAPH_BASED;
+
+            updateChunkMetadata(chunk, chunk.content);
+            chunks.push_back(chunk);
+
+            // Reset for next chunk
+            current_chunk.clear();
+            current_paragraph_count = 0;
+            chunk_index++;
+        }
+
+        // Add paragraph to current chunk
+        if (!current_chunk.empty()) {
+            current_chunk += "\n\n"; // Add paragraph separator
+        }
+        current_chunk += paragraph;
+        current_paragraph_count++;
+        start = boundary;
+    }
+
+    // Add remaining content as final chunk
+    if (!current_chunk.empty()) {
+        DocumentChunk chunk;
+        chunk.chunk_id = generateChunkId(document_hash, chunk_index);
+        chunk.document_hash = document_hash;
+        chunk.content = current_chunk;
+        chunk.chunk_index = chunk_index;
+        chunk.start_offset = chunks.empty() ? 0 : chunks.back().end_offset;
+        chunk.end_offset = chunk.start_offset + current_chunk.size();
+        chunk.strategy_used = ChunkingStrategy::PARAGRAPH_BASED;
+
+        updateChunkMetadata(chunk, chunk.content);
+        chunks.push_back(chunk);
+    }
+
+    linkChunks(chunks);
+    return chunks;
 }
 
 // MarkdownChunker
@@ -1310,6 +1365,7 @@ std::vector<DocumentChunk> MarkdownChunker::doChunking(const std::string& conten
 
 std::vector<MarkdownChunker::MarkdownSection>
 MarkdownChunker::parseMarkdownStructure(const std::string& text) const {
+    (void)text; // Suppress unused parameter warning
     // Parse markdown headers and sections
     // Placeholder implementation
     return {};
@@ -1318,6 +1374,8 @@ MarkdownChunker::parseMarkdownStructure(const std::string& text) const {
 std::vector<DocumentChunk>
 MarkdownChunker::chunksFromSections(const std::vector<MarkdownSection>& sections,
                                     const std::string& document_hash) const {
+    (void)sections;      // Suppress unused parameter warning
+    (void)document_hash; // Suppress unused parameter warning
     // Convert markdown sections to chunks
     // Placeholder implementation
     return {};

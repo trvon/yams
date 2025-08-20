@@ -26,6 +26,8 @@ set(CLI_SOURCES
     commands/repair_mime_command.cpp
     commands/repair_command.cpp
     commands/model_command.cpp
+    commands/daemon_command.cpp
+    commands/download_command.cpp
 )
 
 # Add TUI sources only if enabled
@@ -40,7 +42,7 @@ endif()
 
 # Add serve command only if MCP is enabled
 if(YAMS_BUILD_MCP_SERVER)
-    list(APPEND CLI_SOURCES commands/serve_command.cpp commands/serve_http.cpp)
+    list(APPEND CLI_SOURCES commands/serve_command.cpp)
 endif()
 
 # Create CLI library
@@ -53,12 +55,15 @@ target_link_libraries(yams_cli
         yams_search
         yams_metadata
         yams_detection
+        yams_config
+        yams_daemon
         CLI11::CLI11
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::Crypto
         $<$<BOOL:${YAMS_ENABLE_TUI}>:imtui-ncurses>
-        SQLite::SQLite3
+        sqlite3
+        yams_downloader
 )
 
 # Link MCP library only if enabled

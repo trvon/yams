@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# YAMS Code Formatting Script
 # Formats all C++ source files using clang-format
 
 set -euo pipefail

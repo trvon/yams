@@ -76,8 +76,8 @@ WORKDIR /home/yams
 ENV YAMS_STORAGE="/home/yams/.local/share/yams" \
     XDG_DATA_HOME="/home/yams/.local/share" \
     XDG_CONFIG_HOME="/home/yams/.config"
-EXPOSE 8777
-LABEL org.opencontainers.image.description="YAMS MCP server (stdio and HTTP). For HTTP: run 'yams serve --transport http --host 0.0.0.0 --path /mcp' and map -p 8777:8777. For stdio: 'yams serve'."
+# No network ports exposed; MCP uses stdio only
+LABEL org.opencontainers.image.description="YAMS MCP server (stdio only). Run 'yams serve'."
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 CMD yams --version || exit 1
 ENTRYPOINT ["yams"]
 CMD ["--help"]

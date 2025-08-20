@@ -6,8 +6,12 @@
 #include <iostream>
 #include <sstream>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/response_of.hpp>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
@@ -57,6 +61,11 @@ public:
         group->require_option(1);
 
         cmd->add_option("-o,--output", outputPath_, "Output file path (default: stdout)");
+        cmd->add_flag("--metadata-only", metadataOnly_, "Return only metadata (no bytes)");
+        cmd->add_option("--max-bytes", maxBytes_, "Maximum bytes to transfer (0 = unlimited)")
+            ->default_val(0);
+        cmd->add_option("--chunk-size", chunkSize_, "Streaming chunk size in bytes")
+            ->default_val(262144);
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--latest", getLatest_, "Get the most recently indexed matching document");
         cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document");
@@ -80,6 +89,57 @@ public:
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
+            // Try daemon-first (streaming) for simple hash/name cases (no complex filters/graph)
+            if (!showGraph_ && !hasFilters()) {
+                yams::daemon::GetRequest dreq;
+                if (!hash_.empty()) {
+                    dreq.hash = hash_;
+                } else if (!name_.empty()) {
+                    dreq.byName = true;
+                    dreq.name = name_;
+                }
+                if (!dreq.hash.empty() || dreq.byName) {
+                    // Prefer high-level helpers via DaemonClient
+                    yams::daemon::DaemonClient client;
+                    if (auto c = client.connect(); c) {
+                        yams::daemon::GetInitRequest ireq;
+                        ireq.hash = dreq.hash;
+                        ireq.name = dreq.name;
+                        ireq.byName = dreq.byName;
+                        ireq.metadataOnly = metadataOnly_;
+                        ireq.maxBytes = maxBytes_;
+                        ireq.chunkSize = static_cast<uint32_t>(chunkSize_);
+
+                        if (metadataOnly_) {
+                            auto ir = client.getInit(ireq);
+                            if (ir) {
+                                std::cerr << "Size: " << ir.value().totalSize << " bytes\n";
+                                for (const auto& [k, v] : ir.value().metadata) {
+                                    std::cerr << k << ": " << v << "\n";
+                                }
+                                return Result<void>();
+                            }
+                            // Fall through on failure
+                        } else {
+                            if (outputPath_.empty() || outputPath_ == "-") {
+                                auto r = client.getToStdout(ireq);
+                                if (r)
+                                    return Result<void>();
+                            } else {
+                                auto r = client.getToFile(ireq, outputPath_);
+                                if (r) {
+                                    if (verbose_) {
+                                        std::cerr << "Document retrieved successfully!\n";
+                                        std::cerr << "Output: " << outputPath_ << "\n";
+                                    }
+                                    return Result<void>();
+                                }
+                            }
+                        }
+                        // If we reach here, daemon call failed; fall through to local
+                    }
+                }
+            }
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;
@@ -546,19 +606,41 @@ private:
             }
         }
 
+        // Check if name contains wildcards (* or ?)
+        bool hasWildcards =
+            name.find('*') != std::string::npos || name.find('?') != std::string::npos;
+
         // First try as a path suffix (for real files)
         auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
         if (documentsResult && !documentsResult.value().empty()) {
             const auto& results = documentsResult.value();
             if (results.size() > 1) {
-                std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-                for (const auto& doc : results) {
-                    std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
-                              << std::endl;
+                if (hasWildcards || getLatest_ || getOldest_) {
+                    // For wildcards or explicit latest/oldest flags, select automatically
+                    auto sorted = results;
+                    std::sort(
+                        sorted.begin(), sorted.end(),
+                        [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                            return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                              : (a.indexedTime > b.indexedTime);
+                        });
+                    if (verbose_) {
+                        std::cerr << "Found " << results.size() << " matches for '" << name
+                                  << "', returning " << (getOldest_ ? "oldest" : "newest") << ": "
+                                  << sorted[0].filePath << std::endl;
+                    }
+                    return sorted[0].sha256Hash;
+                } else {
+                    std::cerr << "Multiple documents found with name '" << name
+                              << "':" << std::endl;
+                    for (const auto& doc : results) {
+                        std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - "
+                                  << doc.filePath << std::endl;
+                    }
+                    return Error{ErrorCode::InvalidOperation,
+                                 "Multiple documents with the same name. Please use hash to "
+                                 "specify which one or use --latest/--oldest."};
                 }
-                return Error{
-                    ErrorCode::InvalidOperation,
-                    "Multiple documents with the same name. Please use hash to specify which one."};
             }
             return results[0].sha256Hash;
         }
@@ -566,7 +648,30 @@ private:
         // Try exact path match
         documentsResult = metadataRepo->findDocumentsByPath(name);
         if (documentsResult && !documentsResult.value().empty()) {
+            if (documentsResult.value().size() > 1 && (hasWildcards || getLatest_ || getOldest_)) {
+                auto sorted = documentsResult.value();
+                std::sort(sorted.begin(), sorted.end(),
+                          [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                              return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                                : (a.indexedTime > b.indexedTime);
+                          });
+                if (verbose_) {
+                    std::cerr << "Found " << documentsResult.value().size()
+                              << " exact matches for '" << name << "', returning "
+                              << (getOldest_ ? "oldest" : "newest") << ": " << sorted[0].filePath
+                              << std::endl;
+                }
+                return sorted[0].sha256Hash;
+            }
             return documentsResult.value()[0].sha256Hash;
+        }
+
+        // For wildcard patterns, try wildcard matching before fuzzy
+        if (hasWildcards) {
+            auto wildcardResult = resolveWildcardPath(name);
+            if (wildcardResult) {
+                return wildcardResult.value();
+            }
         }
 
         // Try fuzzy path matching (partial path components)
@@ -734,29 +839,66 @@ private:
         std::sort(candidatesWithScores.begin(), candidatesWithScores.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
 
-        // If multiple matches with same top score, show ambiguity
+        // If multiple matches with same top score, check if this is a wildcard pattern
+        bool hasWildcards =
+            pathQuery.find('*') != std::string::npos || pathQuery.find('?') != std::string::npos;
+
         if (candidatesWithScores.size() > 1 &&
             candidatesWithScores[0].second == candidatesWithScores[1].second) {
-            std::cerr << "Ambiguous fuzzy path '" << pathQuery
-                      << "' matches multiple documents:" << std::endl;
-
-            // Find document paths for display
-            for (size_t i = 0; i < std::min(size_t(5), candidatesWithScores.size()) &&
-                               candidatesWithScores[i].second == candidatesWithScores[0].second;
-                 ++i) {
-                // Find the document path for this hash
-                for (const auto& doc : documentsResult.value()) {
-                    if (doc.sha256Hash == candidatesWithScores[i].first) {
-                        std::cerr << "  " << candidatesWithScores[i].first.substr(0, 12) << "... - "
-                                  << doc.filePath << " (score: " << candidatesWithScores[i].second
-                                  << ")" << std::endl;
-                        break;
+            if (hasWildcards || getLatest_ || getOldest_) {
+                // For wildcards or explicit flags, resolve by selecting newest/oldest
+                std::vector<metadata::DocumentInfo> tiedMatches;
+                for (size_t i = 0; i < candidatesWithScores.size() &&
+                                   candidatesWithScores[i].second == candidatesWithScores[0].second;
+                     ++i) {
+                    // Find the document for this hash
+                    for (const auto& doc : documentsResult.value()) {
+                        if (doc.sha256Hash == candidatesWithScores[i].first) {
+                            tiedMatches.push_back(doc);
+                            break;
+                        }
                     }
                 }
-            }
 
-            return Error{ErrorCode::InvalidOperation,
-                         "Ambiguous fuzzy path match. Please be more specific."};
+                // Sort by indexed time
+                std::sort(tiedMatches.begin(), tiedMatches.end(),
+                          [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                              return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                                : (a.indexedTime > b.indexedTime);
+                          });
+
+                if (verbose_) {
+                    std::cerr << "Fuzzy path '" << pathQuery << "' matched " << tiedMatches.size()
+                              << " documents with equal scores, returning "
+                              << (getOldest_ ? "oldest" : "newest") << ": "
+                              << tiedMatches[0].filePath << std::endl;
+                }
+
+                return tiedMatches[0].sha256Hash;
+            } else {
+                std::cerr << "Ambiguous fuzzy path '" << pathQuery
+                          << "' matches multiple documents:" << std::endl;
+
+                // Find document paths for display
+                for (size_t i = 0; i < std::min(size_t(5), candidatesWithScores.size()) &&
+                                   candidatesWithScores[i].second == candidatesWithScores[0].second;
+                     ++i) {
+                    // Find the document path for this hash
+                    for (const auto& doc : documentsResult.value()) {
+                        if (doc.sha256Hash == candidatesWithScores[i].first) {
+                            std::cerr << "  " << candidatesWithScores[i].first.substr(0, 12)
+                                      << "... - " << doc.filePath
+                                      << " (score: " << candidatesWithScores[i].second << ")"
+                                      << std::endl;
+                            break;
+                        }
+                    }
+                }
+
+                return Error{ErrorCode::InvalidOperation,
+                             "Ambiguous fuzzy path match. Please be more specific or use "
+                             "--latest/--oldest."};
+            }
         }
 
         if (verbose_) {
@@ -771,6 +913,83 @@ private:
         }
 
         return candidatesWithScores[0].first;
+    }
+
+    Result<std::string> resolveWildcardPath(const std::string& pattern) {
+        auto metadataRepo = cli_->getMetadataRepository();
+        if (!metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+        }
+
+        // Get all documents
+        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        if (!documentsResult) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to query documents: " + documentsResult.error().message};
+        }
+
+        std::vector<metadata::DocumentInfo> matches;
+
+        // Match documents against wildcard pattern
+        for (const auto& doc : documentsResult.value()) {
+            if (matchesWildcardPattern(doc.filePath, pattern)) {
+                matches.push_back(doc);
+            }
+        }
+
+        if (matches.empty()) {
+            return Error{ErrorCode::NotFound, "No documents match wildcard pattern: " + pattern};
+        }
+
+        // Sort by indexed time (newest first by default, oldest first if --oldest flag is set)
+        std::sort(matches.begin(), matches.end(),
+                  [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                      return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                        : (a.indexedTime > b.indexedTime);
+                  });
+
+        if (verbose_) {
+            std::cerr << "Wildcard pattern '" << pattern << "' matched " << matches.size()
+                      << " documents, returning " << (getOldest_ ? "oldest" : "newest") << ": "
+                      << matches[0].filePath << std::endl;
+        }
+
+        return matches[0].sha256Hash;
+    }
+
+    bool matchesWildcardPattern(const std::string& path, const std::string& pattern) {
+        // Simple wildcard matching for * and ? characters
+        // This is a basic implementation - could be enhanced with more sophisticated glob matching
+
+        size_t patternIdx = 0;
+        size_t pathIdx = 0;
+        size_t starIdx = std::string::npos;
+        size_t matchIdx = 0;
+
+        while (pathIdx < path.length()) {
+            if (patternIdx < pattern.length() && pattern[patternIdx] == '*') {
+                starIdx = patternIdx;
+                matchIdx = pathIdx;
+                patternIdx++;
+            } else if (patternIdx < pattern.length() &&
+                       (pattern[patternIdx] == '?' || pattern[patternIdx] == path[pathIdx])) {
+                patternIdx++;
+                pathIdx++;
+            } else if (starIdx != std::string::npos) {
+                patternIdx = starIdx + 1;
+                matchIdx++;
+                pathIdx = matchIdx;
+            } else {
+                return false;
+            }
+        }
+
+        // Skip any trailing stars in pattern
+        while (patternIdx < pattern.length() && pattern[patternIdx] == '*') {
+            patternIdx++;
+        }
+
+        return patternIdx == pattern.length();
     }
 
     int calculateFuzzyPathScore(const std::vector<std::string>& queryComponents,
@@ -860,6 +1079,11 @@ private:
     // Knowledge graph options
     bool showGraph_ = false;
     int graphDepth_ = 1;
+
+    // Daemon streaming options
+    bool metadataOnly_ = false;
+    uint64_t maxBytes_ = 0;     // 0 = unlimited
+    size_t chunkSize_ = 262144; // 256KB default
 };
 
 // Factory function

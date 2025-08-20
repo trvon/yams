@@ -3,6 +3,7 @@
 # Collect MCP source files
 set(MCP_SOURCES
     mcp_server.cpp
+    tool_registry.cpp
 )
 
 # Create MCP library
@@ -14,6 +15,7 @@ target_link_libraries(yams_mcp
         yams_api
         yams_search
         yams_app_services
+        yams_downloader
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::SSL

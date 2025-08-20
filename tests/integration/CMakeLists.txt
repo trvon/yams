@@ -1,6 +1,18 @@
 # Integration test subdirectories
 add_subdirectory(manifest)
 add_subdirectory(search)
+add_subdirectory(daemon)
+# MCP downloader integration test (header-only MCP tool registry)
+add_executable(mcp_downloader_integration_test
+    mcp/mcp_downloader_integration_test.cpp
+)
+target_link_libraries(mcp_downloader_integration_test PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+    yams_mcp
+)
+add_test(NAME mcp_downloader_integration_test COMMAND mcp_downloader_integration_test)
 option(YAMS_ENABLE_NEW_INTEGRATION_TESTS "Build ported integration tests" OFF)
 
 # Integration tests - temporarily disabled due to GoogleTest configuration issues
@@ -17,27 +29,27 @@ add_executable(integration_tests
 
 # New comprehensive integration tests
 if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)
-add_executable(document_lifecycle_test
+    add_executable(document_lifecycle_test
     document_lifecycle_test.cpp
 )
 
-add_executable(multi_command_test
+    add_executable(multi_command_test
     multi_command_test.cpp
 )
 
-add_executable(concurrency_test
+    add_executable(concurrency_test
     concurrency_test.cpp
 )
 
-add_executable(pdf_integration_test
+    add_executable(pdf_integration_test
     pdf_integration_test.cpp
 )
 
-add_executable(task_management_test
+    add_executable(task_management_test
     task_management_test.cpp
 )
 
-target_link_libraries(integration_tests
+    target_link_libraries(integration_tests
     PRIVATE
         # Minimal dependencies for placeholder - no GoogleTest needed
         yams::api
@@ -52,61 +64,61 @@ target_link_libraries(integration_tests
         # GoogleTest targets removed since placeholder doesn't use them
 )
 
-# Debug: Check which GoogleTest targets exist (disabled for placeholder)
-# TODO: Re-enable debugging when fixing GoogleTest issues
-# message(STATUS "Integration tests: Checking GoogleTest targets")
-# if(TARGET gtest::gtest)
-#     message(STATUS "Integration tests: Found gtest::gtest")
-# endif()
-# if(TARGET GTest::gtest)
-#     message(STATUS "Integration tests: Found GTest::gtest")
-# endif()
-# if(TARGET gtest)
-#     message(STATUS "Integration tests: Found gtest")
-# endif()
-# if(TARGET gtest_main)
-#     message(STATUS "Integration tests: Found gtest_main")
-# endif()
-# if(TARGET gtest::gtest_main)
-#     message(STATUS "Integration tests: Found gtest::gtest_main")
-# endif()
-# if(TARGET GTest::gtest_main)
-#     message(STATUS "Integration tests: Found GTest::gtest_main")
-# endif()
-# if(TARGET gmock)
-#     message(STATUS "Integration tests: Found gmock")
-# endif()
-# if(TARGET gmock_main)
-#     message(STATUS "Integration tests: Found gmock_main")
-# endif()
+    # Debug: Check which GoogleTest targets exist (disabled for placeholder)
+    # TODO: Re-enable debugging when fixing GoogleTest issues
+    # message(STATUS "Integration tests: Checking GoogleTest targets")
+    # if(TARGET gtest::gtest)
+    #     message(STATUS "Integration tests: Found gtest::gtest")
+    # endif()
+    # if(TARGET GTest::gtest)
+    #     message(STATUS "Integration tests: Found GTest::gtest")
+    # endif()
+    # if(TARGET gtest)
+    #     message(STATUS "Integration tests: Found gtest")
+    # endif()
+    # if(TARGET gtest_main)
+    #     message(STATUS "Integration tests: Found gtest_main")
+    # endif()
+    # if(TARGET gtest::gtest_main)
+    #     message(STATUS "Integration tests: Found gtest::gtest_main")
+    # endif()
+    # if(TARGET GTest::gtest_main)
+    #     message(STATUS "Integration tests: Found GTest::gtest_main")
+    # endif()
+    # if(TARGET gmock)
+    #     message(STATUS "Integration tests: Found gmock")
+    # endif()
+    # if(TARGET gmock_main)
+    #     message(STATUS "Integration tests: Found gmock_main")
+    # endif()
 
-# GoogleTest include directory logic disabled for placeholder
-# TODO: Re-enable when actual integration tests are restored
-# if(TARGET gtest::gtest)
-#     message(STATUS "Integration tests: Using gtest::gtest for includes")
-#     target_include_directories(integration_tests PRIVATE 
-#         $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-# elseif(TARGET GTest::gtest)
-#     message(STATUS "Integration tests: Using GTest::gtest for includes")
-#     target_include_directories(integration_tests PRIVATE 
-#         $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-# elseif(TARGET gtest)
-#     message(STATUS "Integration tests: Using gtest for includes")
-#     target_include_directories(integration_tests PRIVATE 
-#         $<TARGET_PROPERTY:gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-# else()
-#     message(WARNING "Integration tests: No GoogleTest target found for include directories")
-# endif()
+    # GoogleTest include directory logic disabled for placeholder
+    # TODO: Re-enable when actual integration tests are restored
+    # if(TARGET gtest::gtest)
+    #     message(STATUS "Integration tests: Using gtest::gtest for includes")
+    #     target_include_directories(integration_tests PRIVATE
+    #         $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+    # elseif(TARGET GTest::gtest)
+    #     message(STATUS "Integration tests: Using GTest::gtest for includes")
+    #     target_include_directories(integration_tests PRIVATE
+    #         $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+    # elseif(TARGET gtest)
+    #     message(STATUS "Integration tests: Using gtest for includes")
+    #     target_include_directories(integration_tests PRIVATE
+    #         $<TARGET_PROPERTY:gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+    # else()
+    #     message(WARNING "Integration tests: No GoogleTest target found for include directories")
+    # endif()
 
-# Link new integration tests
-foreach(_test_target IN ITEMS
+    # Link new integration tests
+    foreach(_test_target IN ITEMS
     document_lifecycle_test
     multi_command_test
     concurrency_test
     pdf_integration_test
     task_management_test
 )
-    target_link_libraries(${_test_target}
+        target_link_libraries(${_test_target}
         PRIVATE
             test_utils
             yams::api
@@ -116,26 +128,22 @@ foreach(_test_target IN ITEMS
             $<IF:$<TARGET_EXISTS:gtest::gtest>,gtest::gtest,$<IF:$<TARGET_EXISTS:GTest::gtest>,GTest::gtest,gtest>>
             $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,$<IF:$<TARGET_EXISTS:GTest::gtest_main>,GTest::gtest_main,gtest_main>>
     )
-    
-    if(YAMS_CXX17_MODE)
-        target_compile_features(${_test_target} PRIVATE cxx_std_17)
-    else()
+
         target_compile_features(${_test_target} PRIVATE cxx_std_20)
-    endif()
-    target_include_directories(${_test_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../)
-    
-    # Ensure GoogleTest include directories are available for new test targets
-    if(TARGET gtest::gtest)
-        target_include_directories(${_test_target} PRIVATE 
+        target_include_directories(${_test_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../)
+
+        # Ensure GoogleTest include directories are available for new test targets
+        if(TARGET gtest::gtest)
+            target_include_directories(${_test_target} PRIVATE
             $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-    elseif(TARGET GTest::gtest)
-        target_include_directories(${_test_target} PRIVATE 
+        elseif(TARGET GTest::gtest)
+            target_include_directories(${_test_target} PRIVATE
             $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-    elseif(TARGET gtest)
-        target_include_directories(${_test_target} PRIVATE 
+        elseif(TARGET gtest)
+            target_include_directories(${_test_target} PRIVATE
             $<TARGET_PROPERTY:gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-    endif()
-endforeach()
+        endif()
+    endforeach()
 endif()
 
 gtest_discover_tests(integration_tests
@@ -146,17 +154,17 @@ gtest_discover_tests(integration_tests
 
 # Discover new integration tests
 if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)
-foreach(_test_target IN ITEMS
+    foreach(_test_target IN ITEMS
     document_lifecycle_test
     multi_command_test
     concurrency_test
     pdf_integration_test
     task_management_test
 )
-    gtest_discover_tests(${_test_target}
+        gtest_discover_tests(${_test_target}
         PROPERTIES
             LABELS "integration"
             TIMEOUT 120
     )
-endforeach()
+    endforeach()
 endif()

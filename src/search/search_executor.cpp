@@ -34,7 +34,9 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
 
     // Parse query
     auto parseStartTime = std::chrono::high_resolution_clock::now();
-    auto parseResult = queryParser_->parse(request.query);
+    QueryParser::ParseOptions parseOptions;
+    parseOptions.literalText = request.literalText;
+    auto parseResult = queryParser_->parse(request.query, parseOptions);
     auto parseEndTime = std::chrono::high_resolution_clock::now();
     stats.queryTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(parseEndTime - parseStartTime);
@@ -467,7 +469,7 @@ std::string SearchExecutor::generateCacheKey(const SearchRequest& request) const
     std::ostringstream oss;
     oss << request.query << "|" << request.offset << "|" << request.limit << "|"
         << static_cast<int>(request.sortOrder) << "|" << request.includeHighlights << "|"
-        << request.includeFacets;
+        << request.includeFacets << "|lt=" << (request.literalText ? 1 : 0);
 
     // Include filter information in cache key
     if (request.filters.hasFilters()) {

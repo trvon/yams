@@ -9,11 +9,23 @@
 #include <vector>
 #include <gtest/gtest.h>
 
+// Helper to check if we're in test discovery mode
+static bool isTestDiscoveryMode() {
+    if (std::getenv("GTEST_DISCOVERY_MODE")) {
+        return true;
+    }
+    return false;
+}
+
 using namespace yams::vector;
 
 class VectorDatabaseTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Skip database initialization during test discovery
+        if (isTestDiscoveryMode()) {
+            return;
+        }
         // Use unique database file per test
         const ::testing::TestInfo* test_info =
             ::testing::UnitTest::GetInstance()->current_test_info();
@@ -445,6 +457,10 @@ TEST_F(VectorDatabaseTest, DISABLED_PerformanceTest) {
 class VectorDatabasePersistenceTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Skip initialization during test discovery
+        if (isTestDiscoveryMode()) {
+            return;
+        }
         config_.database_path = "test_persistence_vectors.db";
         config_.table_name = "test_embeddings";
         config_.embedding_dim = 384;

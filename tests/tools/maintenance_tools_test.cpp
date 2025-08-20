@@ -14,7 +14,7 @@ protected:
     void SetUp() override {
         // Create temporary test directory
         testDir = std::filesystem::temp_directory_path() /
-                  ("kronos_tools_test_" + std::to_string(std::random_device{}()));
+                  ("yams_tools_test_" + std::to_string(std::random_device{}()));
         std::filesystem::create_directories(testDir);
 
         // Create storage configuration
@@ -97,21 +97,52 @@ protected:
 };
 
 TEST_F(MaintenanceToolsTest, StatsToolExecution) {
-    // Test that we can run the stats tool on our test storage
-    std::string command =
-        "/Volumes/picaso/work/tools/kronos/tools/kronos-stats " + testDir.string();
+    // Test storage statistics functionality directly instead of calling external tool
+    auto storageStats = storage->getStats();
 
-    int result = std::system(command.c_str());
-    EXPECT_EQ(result, 0) << "Stats tool should execute successfully";
+    // Verify we have the expected test data
+    EXPECT_EQ(storageStats.totalObjects.load(), storedHashes.size() + unreferencedHashes.size())
+        << "Storage should contain all test objects";
+    EXPECT_GT(storageStats.totalBytes.load(), 0) << "Storage should have non-zero size";
+
+    // Verify reference counter statistics
+    auto refStatsResult = refCounter->getStats();
+    ASSERT_TRUE(refStatsResult.has_value()) << "Should be able to get reference statistics";
+
+    const auto& refStats = refStatsResult.value();
+    EXPECT_EQ(refStats.totalBlocks, storedHashes.size())
+        << "Should have correct number of referenced blocks";
+    EXPECT_GT(refStats.totalReferences, 0) << "Should have references";
+    EXPECT_GT(refStats.totalBytes, 0) << "Referenced blocks should have non-zero size";
 }
 
 TEST_F(MaintenanceToolsTest, GCToolDryRun) {
-    // Test that we can run the GC tool in dry-run mode
-    std::string command = "/Volumes/picaso/work/tools/kronos/tools/kronos-gc " + testDir.string() +
-                          " --dry-run --force";
+    // Test garbage collection functionality directly (simulating dry-run mode)
 
-    int result = std::system(command.c_str());
-    EXPECT_EQ(result, 0) << "GC tool should execute successfully in dry-run mode";
+    // First verify we have unreferenced blocks
+    EXPECT_EQ(unreferencedHashes.size(), 1) << "Should have one unreferenced block";
+
+    // Check that unreferenced blocks have zero reference count
+    for (const auto& hash : unreferencedHashes) {
+        auto refCount = refCounter->getRefCount(hash);
+        ASSERT_TRUE(refCount.has_value()) << "Should be able to get reference count";
+        EXPECT_EQ(refCount.value(), 0) << "Unreferenced block should have zero references";
+
+        // Verify the block exists in storage
+        auto existsResult = storage->exists(hash);
+        ASSERT_TRUE(existsResult.has_value());
+        EXPECT_TRUE(existsResult.value()) << "Unreferenced block should still exist in storage";
+    }
+
+    // Check that referenced blocks have non-zero reference count
+    for (const auto& hash : storedHashes) {
+        auto refCount = refCounter->getRefCount(hash);
+        ASSERT_TRUE(refCount.has_value()) << "Should be able to get reference count";
+        EXPECT_GT(refCount.value(), 0) << "Referenced block should have positive reference count";
+    }
+
+    // In a real GC dry-run, we would identify unreferenced blocks but not delete them
+    // This test verifies we can identify them correctly
 }
 
 TEST_F(MaintenanceToolsTest, StorageHasTestData) {
@@ -144,19 +175,35 @@ TEST_F(MaintenanceToolsTest, VerifyStoredData) {
     }
 }
 
-// Test that requires filesystem access to verify tool behavior
+// Test that storage and reference counter handle nonexistent paths gracefully
 TEST_F(MaintenanceToolsTest, ToolsHandleNonexistentPath) {
-    std::string nonexistentPath = "/tmp/nonexistent_kronos_storage";
+    std::string nonexistentPath = "/tmp/nonexistent_yams_storage";
 
-    // Stats tool should handle nonexistent path gracefully
-    std::string statsCommand =
-        "/Volumes/picaso/work/tools/kronos/tools/kronos-stats " + nonexistentPath + " 2>/dev/null";
-    int statsResult = std::system(statsCommand.c_str());
-    EXPECT_NE(statsResult, 0) << "Stats tool should return error for nonexistent path";
+    // Test that StorageEngine handles nonexistent path appropriately
+    {
+        storage::StorageConfig badConfig{.basePath =
+                                             std::filesystem::path(nonexistentPath) / "blocks",
+                                         .shardDepth = 2,
+                                         .mutexPoolSize = 64};
 
-    // GC tool should handle nonexistent path gracefully
-    std::string gcCommand = "/Volumes/picaso/work/tools/kronos/tools/kronos-gc " + nonexistentPath +
-                            " --dry-run 2>/dev/null";
-    int gcResult = std::system(gcCommand.c_str());
-    EXPECT_NE(gcResult, 0) << "GC tool should return error for nonexistent path";
+        // Creating storage with nonexistent path should work (it creates the directory)
+        EXPECT_NO_THROW({ storage::StorageEngine testStorage(std::move(badConfig)); })
+            << "StorageEngine should handle creating new directories";
+    }
+
+    // Test that ReferenceCounter handles nonexistent database path
+    {
+        storage::ReferenceCounter::Config badConfig{
+            .databasePath = std::filesystem::path(nonexistentPath) / "refs.db",
+            .enableWAL = true,
+            .enableStatistics = true};
+
+        // Creating reference counter with nonexistent path should work (it creates the database)
+        EXPECT_NO_THROW({ storage::ReferenceCounter testRefCounter(std::move(badConfig)); })
+            << "ReferenceCounter should handle creating new database";
+    }
+
+    // Clean up any created directories
+    std::error_code ec;
+    std::filesystem::remove_all(nonexistentPath, ec);
 }

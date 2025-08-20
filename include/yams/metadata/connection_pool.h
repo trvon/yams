@@ -101,8 +101,8 @@ public:
     /**
      * @brief Acquire a connection from the pool
      */
-    Result<std::unique_ptr<PooledConnection>>
-    acquire(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    Result<std::unique_ptr<PooledConnection>> acquire(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(30000)); // 30 seconds default
 
     /**
      * @brief Execute a function with a connection

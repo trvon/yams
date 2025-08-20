@@ -20,6 +20,7 @@ std::unique_ptr<ICommand> createStatusCommand();
 std::unique_ptr<ICommand> createUninstallCommand();
 std::unique_ptr<ICommand> createMigrateCommand();
 std::unique_ptr<ICommand> createUpdateCommand();
+std::unique_ptr<ICommand> createDownloadCommand();
 #ifdef YAMS_ENABLE_TUI
 std::unique_ptr<ICommand> createBrowseCommand();
 #endif
@@ -27,6 +28,7 @@ std::unique_ptr<ICommand> createCompletionCommand();
 std::unique_ptr<ICommand> createRepairMimeCommand();
 std::unique_ptr<ICommand> createRepairCommand();
 std::unique_ptr<ICommand> createModelCommand();
+std::unique_ptr<ICommand> createDaemonCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -48,6 +50,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createUninstallCommand());
     cli->registerCommand(CommandRegistry::createMigrateCommand());
     cli->registerCommand(CommandRegistry::createUpdateCommand());
+    cli->registerCommand(::yams::cli::createDownloadCommand());
 #ifdef YAMS_ENABLE_TUI
     cli->registerCommand(CommandRegistry::createBrowseCommand());
 #endif
@@ -55,6 +58,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createRepairMimeCommand());
     cli->registerCommand(CommandRegistry::createRepairCommand());
     cli->registerCommand(CommandRegistry::createModelCommand());
+    cli->registerCommand(CommandRegistry::createDaemonCommand());
 #ifdef YAMS_BUILD_MCP_SERVER
     cli->registerCommand(CommandRegistry::createServeCommand());
 #endif
@@ -145,6 +149,10 @@ std::unique_ptr<ICommand> CommandRegistry::createRepairCommand() {
 std::unique_ptr<ICommand> CommandRegistry::createModelCommand() {
     // The standalone createModelCommand function is in this namespace
     return ::yams::cli::createModelCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createDaemonCommand() {
+    return ::yams::cli::createDaemonCommand();
 }
 
 #ifdef YAMS_BUILD_MCP_SERVER

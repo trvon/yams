@@ -24,6 +24,70 @@ bool looksLikeHash(const std::string& s) {
     return isHex(s);
 }
 
+static bool hasWildcard(const std::string& s) {
+    return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
+}
+
+// Simple glob matcher supporting '*' and '?'
+static bool wildcardMatch(const std::string& text, const std::string& pattern) {
+    const size_t n = text.size();
+    const size_t m = pattern.size();
+    std::vector<std::vector<bool>> dp(n + 1, std::vector<bool>(m + 1, false));
+    dp[0][0] = true;
+    for (size_t j = 1; j <= m; ++j) {
+        if (pattern[j - 1] == '*')
+            dp[0][j] = dp[0][j - 1];
+    }
+    for (size_t i = 1; i <= n; ++i) {
+        for (size_t j = 1; j <= m; ++j) {
+            if (pattern[j - 1] == '*') {
+                dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
+            } else if (pattern[j - 1] == '?' || pattern[j - 1] == text[i - 1]) {
+                dp[i][j] = dp[i - 1][j - 1];
+            }
+        }
+    }
+    return dp[n][m];
+}
+
+// Presence-based tag match using metadata repository
+static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
+                            const std::vector<std::string>& tags, bool matchAll) {
+    if (!repo || tags.empty())
+        return true;
+    auto md = repo->getAllMetadata(docId);
+    if (!md)
+        return false;
+    auto& all = md.value();
+
+    auto hasTag = [&](const std::string& t) {
+        // Match if key equals tag OR string value equals tag
+        auto it = all.find(t);
+        if (it != all.end())
+            return true;
+        for (const auto& [k, v] : all) {
+            (void)k;
+            if (v.asString() == t)
+                return true;
+        }
+        return false;
+    };
+
+    if (matchAll) {
+        for (const auto& t : tags) {
+            if (!hasTag(t))
+                return false;
+        }
+        return true;
+    } else {
+        for (const auto& t : tags) {
+            if (hasTag(t))
+                return true;
+        }
+        return false;
+    }
+}
+
 } // namespace
 
 class SearchServiceImpl final : public ISearchService {
@@ -46,13 +110,13 @@ public:
                 return Error{ErrorCode::InvalidArgument,
                              "Invalid hash format (expected hex, 8-64 chars)"};
             }
-            auto result = searchByHashPrefix(req.hash, req.limit, req.pathsOnly);
+            auto result = searchByHashPrefix(req);
             setExecTime(result, t0);
             return result;
         }
 
         if (looksLikeHash(req.query)) {
-            auto result = searchByHashPrefix(req.query, req.limit, req.pathsOnly);
+            auto result = searchByHashPrefix(req);
             setExecTime(result, t0);
             return result;
         }
@@ -100,15 +164,14 @@ private:
         using namespace std::chrono;
         if (r) {
             auto dur = duration_cast<milliseconds>(steady_clock::now() - t0).count();
-            // Can't modify through const reference, need to reconstruct
+            // Extract value, modify, and reconstruct Result
             auto resp = std::move(r).value();
             resp.executionTimeMs = static_cast<int64_t>(dur);
-            r = std::move(resp);
+            r = Result<SearchResponse>(std::move(resp));
         }
     }
 
-    Result<SearchResponse> searchByHashPrefix(const std::string& prefix, std::size_t limit,
-                                              bool pathsOnly) {
+    Result<SearchResponse> searchByHashPrefix(const SearchRequest& req) {
         auto docsResult = ctx_.metadataRepo->findDocumentsByPath("%");
         if (!docsResult) {
             return Error{ErrorCode::InternalError,
@@ -116,6 +179,7 @@ private:
                              docsResult.error().message};
         }
 
+        const std::string& prefix = !req.hash.empty() ? req.hash : req.query;
         SearchResponse resp;
         resp.type = "hash";
         resp.usedHybrid = false;
@@ -128,7 +192,20 @@ private:
             if (doc.sha256Hash.compare(0, prefix.size(), prefix) != 0)
                 continue;
 
-            if (pathsOnly) {
+            // Optional path and tag filters for CLI parity
+            bool pathOk = true;
+            if (!req.pathPattern.empty()) {
+                if (hasWildcard(req.pathPattern))
+                    pathOk = wildcardMatch(doc.filePath, req.pathPattern);
+                else
+                    pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
+            }
+            if (!pathOk)
+                continue;
+            if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags))
+                continue;
+
+            if (req.pathsOnly) {
                 resp.paths.push_back(doc.filePath);
             } else {
                 SearchItem it;
@@ -141,11 +218,11 @@ private:
                 resp.results.push_back(std::move(it));
             }
 
-            if (++count >= limit)
+            if (++count >= req.limit)
                 break;
         }
 
-        resp.total = pathsOnly ? resp.paths.size() : resp.results.size();
+        resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();
         return resp;
     }
 
@@ -225,13 +302,36 @@ private:
 
             if (req.pathsOnly) {
                 for (const auto& item : res.results) {
-                    resp.paths.push_back(item.document.filePath);
+                    const auto& d = item.document;
+                    bool pathOk = true;
+                    if (!req.pathPattern.empty()) {
+                        if (hasWildcard(req.pathPattern))
+                            pathOk = wildcardMatch(d.filePath, req.pathPattern);
+                        else
+                            pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                    }
+                    if (pathOk && metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                                  req.matchAllTags)) {
+                        resp.paths.push_back(d.filePath);
+                    }
                 }
                 resp.total = resp.paths.size();
                 return resp;
             }
 
             for (const auto& item : res.results) {
+                const auto& d = item.document;
+                bool pathOk = true;
+                if (!req.pathPattern.empty()) {
+                    if (hasWildcard(req.pathPattern))
+                        pathOk = wildcardMatch(d.filePath, req.pathPattern);
+                    else
+                        pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                }
+                if (!pathOk ||
+                    !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) {
+                    continue;
+                }
                 SearchItem it;
                 it.id = item.document.id;
                 it.hash = item.document.sha256Hash;
@@ -259,13 +359,36 @@ private:
 
             if (req.pathsOnly) {
                 for (const auto& item : res.results) {
-                    resp.paths.push_back(item.document.filePath);
+                    const auto& d = item.document;
+                    bool pathOk = true;
+                    if (!req.pathPattern.empty()) {
+                        if (hasWildcard(req.pathPattern))
+                            pathOk = wildcardMatch(d.filePath, req.pathPattern);
+                        else
+                            pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                    }
+                    if (pathOk && metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                                  req.matchAllTags)) {
+                        resp.paths.push_back(d.filePath);
+                    }
                 }
                 resp.total = resp.paths.size();
                 return resp;
             }
 
             for (const auto& item : res.results) {
+                const auto& d = item.document;
+                bool pathOk = true;
+                if (!req.pathPattern.empty()) {
+                    if (hasWildcard(req.pathPattern))
+                        pathOk = wildcardMatch(d.filePath, req.pathPattern);
+                    else
+                        pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                }
+                if (!pathOk ||
+                    !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) {
+                    continue;
+                }
                 SearchItem it;
                 it.id = item.document.id;
                 it.hash = item.document.sha256Hash;

@@ -43,6 +43,11 @@ public:
         id_to_index_[id] = index;
 
         stats_.num_vectors++;
+        // Update memory usage stats
+        stats_.memory_usage_bytes = vectors_.size() * config_.dimension * sizeof(float) +
+                                    ids_.size() * sizeof(std::string) +
+                                    id_to_index_.size() * (sizeof(std::string) + sizeof(size_t));
+        stats_.index_size_bytes = stats_.memory_usage_bytes;
         return Result<void>();
     }
 
@@ -76,6 +81,12 @@ public:
         deleted_indices_.insert(index);
         id_to_index_.erase(it);
         stats_.num_vectors--;
+
+        // Update memory usage stats
+        stats_.memory_usage_bytes = vectors_.size() * config_.dimension * sizeof(float) +
+                                    ids_.size() * sizeof(std::string) +
+                                    id_to_index_.size() * (sizeof(std::string) + sizeof(size_t));
+        stats_.index_size_bytes = stats_.memory_usage_bytes;
 
         return Result<void>();
     }
@@ -205,6 +216,13 @@ public:
         }
 
         stats_.num_vectors += ids.size();
+
+        // Update memory usage stats
+        stats_.memory_usage_bytes = vectors_.size() * config_.dimension * sizeof(float) +
+                                    ids_.size() * sizeof(std::string) +
+                                    id_to_index_.size() * (sizeof(std::string) + sizeof(size_t));
+        stats_.index_size_bytes = stats_.memory_usage_bytes;
+
         return Result<void>();
     }
 
@@ -359,8 +377,11 @@ public:
         stats_.dimension = config_.dimension;
         stats_.type = IndexType::FLAT;
         stats_.metric = config_.distance_metric;
-        stats_.memory_usage_bytes =
-            vectors_.size() * config_.dimension * sizeof(float) + ids_.size() * sizeof(std::string);
+        // Ensure consistency with the updates in add/remove/addBatch
+        stats_.memory_usage_bytes = vectors_.size() * config_.dimension * sizeof(float) +
+                                    ids_.size() * sizeof(std::string) +
+                                    id_to_index_.size() * (sizeof(std::string) + sizeof(size_t));
+        stats_.index_size_bytes = stats_.memory_usage_bytes;
         stats_.fragmentation_ratio =
             static_cast<double>(deleted_indices_.size()) / std::max(size_t(1), vectors_.size());
         stats_.needs_optimization = needsOptimization();
@@ -714,12 +735,19 @@ public:
 
     IndexType getIndexType() const { return config_.type; }
 
+    // Accessor methods for VectorIndexManager
+    void setConfig(const IndexConfig& config) { config_ = config; }
+    const IndexConfig& getConfig() const { return config_; }
+    std::string getLastError() const { return lastError_; }
+    void setLastError(const std::string& error) const { lastError_ = error; }
+
 private:
     mutable std::shared_mutex mutex_;
     mutable std::shared_mutex metadata_mutex_;
 
     IndexConfig config_;
     bool initialized_;
+    mutable std::string lastError_;
 
     std::unique_ptr<VectorIndex> main_index_;
     std::unique_ptr<VectorIndex> delta_index_;
@@ -798,16 +826,19 @@ Result<void> VectorIndexManager::buildIndex() {
 }
 
 Result<void> VectorIndexManager::removeVector(const std::string& id) {
+    (void)id; // Suppress unused parameter warning
     // TODO: Implement single vector removal
     return Error{ErrorCode::NotSupported, "removeVector not yet implemented"};
 }
 
 Result<void> VectorIndexManager::saveIndex(const std::string& path) {
+    (void)path; // Suppress unused parameter warning
     // TODO: Implement index persistence
     return Error{ErrorCode::NotSupported, "saveIndex not yet implemented"};
 }
 
 Result<void> VectorIndexManager::loadIndex(const std::string& path) {
+    (void)path; // Suppress unused parameter warning
     // TODO: Implement index loading
     return Error{ErrorCode::NotSupported, "loadIndex not yet implemented"};
 }
@@ -982,5 +1013,18 @@ std::vector<float> dequantizeVector(const std::vector<uint8_t>& quantized, size_
 }
 
 } // namespace vector_utils
+
+// VectorIndexManager missing method implementations
+void VectorIndexManager::setConfig(const IndexConfig& config) {
+    pImpl->setConfig(config);
+}
+
+const IndexConfig& VectorIndexManager::getConfig() const {
+    return pImpl->getConfig();
+}
+
+std::string VectorIndexManager::getLastError() const {
+    return pImpl->getLastError();
+}
 
 } // namespace yams::vector
