@@ -5,34 +5,7 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.4.1] - 2025-08-20 (Unreleased)
-
-### Added
-- **Code Quality Analysis System** (PBI-001 related)
-  - Comprehensive `scripts/check-quality.sh` with multiple quality profiles
-  - cppcheck integration with `.cppcheck-suppressions` configuration
-  - CMake integration for quality targets
-  - Profile-based analysis (strict, normal, quick, ci)
-
-### Fixed
-- **Critical Compilation Errors**
-  - Fixed `ChunkingStrategy` enum reference mismatch in document chunker (FixedSize → FIXED_SIZE)
-  - Fixed constructor initialization order in VectorIndexOptimizer to match member declaration order
-  - Fixed compression level configuration in RecoveryManager (now uses level 3 per performance benchmarks)
-- **Code Quality Issues**
-  - Fixed hundreds of uninitialized variable errors identified by cppcheck analysis
-  - Eliminated critical errors in recovery_manager.cpp, error_handler.cpp, and metadata_api.cpp
-  - Added proper RAII initialization patterns across vector and compression components
-- **Build System Stability**
-  - All modules now compile successfully without errors
-  - Fixed warning configurations that were breaking dependency builds
-  - Improved cross-platform compilation compatibility
-
-### Changed
-- **Development Workflow**
-  - Conservative, manual approach to code quality fixes to prevent build breakage
-  - Systematic error classification and targeted fixes
-  - Build validation after each major fix to ensure stability
+## [v0.4.1] - 2025-08-20
 
 ## [v0.4.0] - 2025-08-20
 
@@ -97,6 +70,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic sanitization prevents syntax errors from `()[]{}*"` characters
   - All search paths (fuzzy, hybrid, metadata) handle special characters safely
   - Raw query strings flow through pipeline unchanged until FTS5 level
+- **Critical Compilation Errors**
+  - Fixed `ChunkingStrategy` enum reference mismatch in document chunker (FixedSize → FIXED_SIZE)
+  - Fixed constructor initialization order in VectorIndexOptimizer to match member declaration order
+  - Fixed compression level configuration in RecoveryManager (now uses level 3 per performance benchmarks)
+- **Code Quality Issues**
+  - Fixed hundreds of uninitialized variable errors identified by cppcheck analysis
+  - Eliminated critical errors in recovery_manager.cpp, error_handler.cpp, and metadata_api.cpp
+  - Added proper RAII initialization patterns across vector and compression components
+- **Build System Stability**
+  - All modules now compile successfully without errors
+  - Fixed warning configurations that were breaking dependency builds
+  - Improved cross-platform compilation compatibility
 
 ## [v0.3.4] - 2025-08-16
 

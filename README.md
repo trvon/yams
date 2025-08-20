@@ -216,21 +216,19 @@ Start the MCP server (stdio transport only):
 yams serve
 ```
 
-### Claude Desktop (MCP) Integration
+### MCP Integration
 
-Use stdio (recommended). Add this to your Claude Desktop config (e.g., ~/Library/Application Support/Claude/claude_desktop_config.json):
 ```json
 {
   "mcpServers": {
     "yams": {
       "command": "/usr/local/bin/yams",
       "args": ["serve"],
-      "env": {
-      }
+      "env": {}
     }
   }
 }
-
+```
 
 ### CLI Usage
 
