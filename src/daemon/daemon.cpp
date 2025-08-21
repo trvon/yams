@@ -1357,7 +1357,7 @@ bool YamsDaemon::isDaemonRunning() const {
     if (fd < 0) {
         return true; // Process exists; assume running
     }
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, config_.socketPath.c_str(), sizeof(addr.sun_path) - 1);
     bool connect_ok = (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);

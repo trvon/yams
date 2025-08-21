@@ -1002,8 +1002,7 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
     // Build SQL query with KNN search using vec_distance_cosine function
     std::stringstream sql;
     sql << "SELECT m.chunk_id, m.document_hash, m.chunk_text, m.model_id, m.metadata, "
-        << "vec_distance_cosine(e.embedding, ?) as distance "
-        << "FROM doc_embeddings e "
+        << "vec_distance_cosine(e.embedding, ?) as distance " << "FROM doc_embeddings e "
         << "JOIN doc_metadata m ON e.rowid = m.rowid ";
 
     // Build WHERE clause for filters
@@ -1029,8 +1028,7 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
         sql << " ";
     }
 
-    sql << "ORDER BY distance ASC "
-        << "LIMIT " << k;
+    sql << "ORDER BY distance ASC " << "LIMIT " << k;
 
     spdlog::info("Search SQL: {}", sql.str());
     spdlog::info("Search query JSON length: {}, k: {}", query_json.str().length(), k);

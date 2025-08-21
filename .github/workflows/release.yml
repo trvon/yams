@@ -27,6 +27,7 @@ jobs:
             cmake_args: ""
             suffix: linux-x86_64
             hosted: false
+            build_packages: true
           - os: macos-self-hosted-arm64
             runs_on: '["self-hosted", "macOS", "ARM64"]'
             packaging: zip
@@ -298,6 +299,48 @@ jobs:
           echo "asset_path=$OUTDIR/$ASSET" >> "$GITHUB_OUTPUT"
           echo "Created asset: $OUTDIR/$ASSET"
 
+      - name: Build Linux packages (DEB/RPM)
+        if: matrix.build_packages == true && matrix.os == 'linux-self-hosted'
+        shell: bash
+        run: |
+          cd "$BUILD_DIR"
+          VERSION="${{ steps.v.outputs.version }}"
+          
+          # Generate DEB package
+          cpack -G DEB -D CPACK_PACKAGE_VERSION="${VERSION}"
+          DEB_FILE=$(ls *.deb 2>/dev/null | head -1)
+          if [ -n "$DEB_FILE" ]; then
+            mv "$DEB_FILE" "$GITHUB_WORKSPACE/yams-${VERSION}-amd64.deb"
+            echo "Created DEB package: yams-${VERSION}-amd64.deb"
+          fi
+          
+          # Generate RPM package
+          if command -v rpmbuild >/dev/null 2>&1; then
+            cpack -G RPM -D CPACK_PACKAGE_VERSION="${VERSION}"
+            RPM_FILE=$(ls *.rpm 2>/dev/null | head -1)
+            if [ -n "$RPM_FILE" ]; then
+              mv "$RPM_FILE" "$GITHUB_WORKSPACE/yams-${VERSION}-x86_64.rpm"
+              echo "Created RPM package: yams-${VERSION}-x86_64.rpm"
+            fi
+          else
+            echo "rpmbuild not found, skipping RPM generation"
+          fi
+          
+          # Generate AppImage if appimage-builder is available
+          if command -v appimage-builder >/dev/null 2>&1; then
+            cd "$GITHUB_WORKSPACE"
+            cp packaging/appimage/AppImageBuilder.yml .
+            export YAMS_VERSION="${VERSION}"
+            appimage-builder --skip-tests || echo "AppImage build failed, skipping"
+            APPIMAGE_FILE=$(ls YAMS-*.AppImage 2>/dev/null | head -1)
+            if [ -n "$APPIMAGE_FILE" ]; then
+              mv "$APPIMAGE_FILE" "yams-${VERSION}-x86_64.AppImage"
+              echo "Created AppImage: yams-${VERSION}-x86_64.AppImage"
+            fi
+          else
+            echo "appimage-builder not found, skipping AppImage generation"
+          fi
+
       - name: Combine release notes with build information
         shell: bash
         run: |
@@ -321,6 +364,9 @@ jobs:
             ${{ steps.pkg.outputs.asset_path }}
             ${{ env.BUILD_DIR }}/release_summary.md
             ${{ env.BUILD_DIR }}/bench_results/*.json
+            yams-*.deb
+            yams-*.rpm
+            yams-*.AppImage
           retention-days: 1
 
   create-release:
@@ -366,6 +412,10 @@ jobs:
             if [ -d "$dir" ]; then
               # Move main archive
               mv $dir/*.{tar.gz,zip} assets/ 2>/dev/null || true
+              # Move Linux packages
+              mv $dir/*.deb assets/ 2>/dev/null || true
+              mv $dir/*.rpm assets/ 2>/dev/null || true
+              mv $dir/*.AppImage assets/ 2>/dev/null || true
               # Collect benchmark results
               cp $dir/bench_results/*.json assets/ 2>/dev/null || true
             fi

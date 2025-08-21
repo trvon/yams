@@ -247,7 +247,7 @@ private:
     // C++20: consteval for compile-time constants
     static consteval size_t maxArchiveFileSize() noexcept {
         return 5ULL * 1024 * 1024 * 1024;
-    }                                                                    // 5GB
+    } // 5GB
     static consteval size_t minArchiveFileSize() noexcept { return 22; } // ZIP minimum
     static consteval std::chrono::milliseconds maxProcessingTime() noexcept {
         return std::chrono::milliseconds{600000}; // 10 minutes

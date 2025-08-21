@@ -72,6 +72,11 @@ target_compile_features(yams_content PUBLIC cxx_std_20)
 # Create alias
 add_library(yams::content ALIAS yams_content)
 
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_content PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Installation
 install(TARGETS yams_content
     EXPORT YamsTargets

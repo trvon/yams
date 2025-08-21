@@ -1363,6 +1363,56 @@ if(YAMS_BUILD_PROFILE STREQUAL "release")
     set(CPACK_COMPONENTS_ALL runtime)
 endif()
 
+# Platform-specific packaging
+if(UNIX AND NOT APPLE)
+    # Determine Linux distribution
+    find_program(LSB_RELEASE_EXEC lsb_release)
+    if(LSB_RELEASE_EXEC)
+        execute_process(COMMAND ${LSB_RELEASE_EXEC} -is
+            OUTPUT_VARIABLE LSB_RELEASE_ID
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    endif()
+    
+    # DEB packaging for Debian/Ubuntu
+    if(LSB_RELEASE_ID MATCHES "Debian|Ubuntu")
+        set(CPACK_GENERATOR "DEB;TGZ")
+        set(CPACK_DEBIAN_PACKAGE_MAINTAINER "YAMS Team")
+        set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+        set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+        set(CPACK_DEBIAN_PACKAGE_DEPENDS "libssl3, libstdc++6, libgcc-s1, zlib1g, libzstd1, liblzma5, libsqlite3-0")
+        set(CPACK_DEBIAN_PACKAGE_SUGGESTS "libmagic1")
+        set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/trvon/yams")
+    # RPM packaging for RedHat/Fedora/CentOS
+    elseif(LSB_RELEASE_ID MATCHES "RedHat|Fedora|CentOS|Rocky|AlmaLinux")
+        set(CPACK_GENERATOR "RPM;TGZ")
+        set(CPACK_RPM_PACKAGE_GROUP "Applications/System")
+        set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+        set(CPACK_RPM_PACKAGE_URL "https://github.com/trvon/yams")
+        set(CPACK_RPM_PACKAGE_REQUIRES "openssl, libstdc++, libgcc, zlib, zstd, xz-libs, sqlite")
+        set(CPACK_RPM_PACKAGE_SUGGESTS "file-libs")
+    else()
+        # Generic Linux packaging
+        set(CPACK_GENERATOR "TGZ;STGZ")
+    endif()
+    
+    # AppImage support
+    option(YAMS_BUILD_APPIMAGE "Build AppImage package" OFF)
+    if(YAMS_BUILD_APPIMAGE)
+        list(APPEND CPACK_GENERATOR "External")
+        set(CPACK_EXTERNAL_PACKAGE_SCRIPT "${CMAKE_SOURCE_DIR}/packaging/appimage/build_appimage.cmake")
+    endif()
+elseif(APPLE)
+    set(CPACK_GENERATOR "DragNDrop;TGZ")
+    set(CPACK_DMG_VOLUME_NAME "YAMS")
+    set(CPACK_DMG_FORMAT "UDZO")
+elseif(WIN32)
+    set(CPACK_GENERATOR "NSIS;ZIP")
+    set(CPACK_NSIS_DISPLAY_NAME "YAMS")
+    set(CPACK_NSIS_PACKAGE_NAME "YAMS")
+    set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/trvon/yams")
+endif()
+
 include(CPack)
 
 # Create package config

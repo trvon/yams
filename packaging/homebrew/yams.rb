@@ -53,7 +53,7 @@ class Yams < Formula
         yams init --non-interactive
 
       Documentation and examples:
-        https://github.com/your-username/yams/tree/main/docs
+        https://github.com/trvon/yams/tree/main/docs
     EOS
   end
 

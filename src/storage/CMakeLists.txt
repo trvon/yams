@@ -33,6 +33,11 @@ target_include_directories(yams_storage_engine
 
 target_compile_features(yams_storage_engine PUBLIC cxx_std_20)
 
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_storage_engine PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Platform-specific definitions
 if(UNIX)
     target_compile_definitions(yams_storage_engine PRIVATE YAMS_PLATFORM_POSIX)
@@ -63,6 +68,11 @@ target_include_directories(yams_reference_counter
 )
 
 target_compile_features(yams_reference_counter PUBLIC cxx_std_20)
+
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_reference_counter PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
 
 # Link Tracy if profiling is enabled
 if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)

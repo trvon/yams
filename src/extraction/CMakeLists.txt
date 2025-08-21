@@ -42,6 +42,11 @@ if(YAMS_HAS_PDF_SUPPORT)
     message(STATUS "PDF text extraction support enabled in yams_extraction")
 endif()
 
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_extraction PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Create alias
 add_library(yams::extraction ALIAS yams_extraction)
 

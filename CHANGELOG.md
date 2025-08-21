@@ -5,6 +5,32 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.2] - 2025-08-20
+
+### Added
+- **Linux Package Support in CI**
+  - Added AppImage support for universal Linux distribution
+  - CPack configuration with platform-specific dependencies and metadata
+
+### Fixed
+- **Linux Build Compilation**
+  - Fixed C++ template name lookup issues in `message_serializer.cpp` for GCC 13
+  - Added namespace qualification to 31 deserialize calls for proper template resolution
+  - Fixed missing `<utility>` header in `async_socket.h` and `connection_pool.h` for `std::exchange`
+  - Fixed missing `<netinet/in.h>` header in `async_socket.cpp` for `IPPROTO_TCP` constant
+- **Position-Independent Code (-fPIC) Linker Errors**
+  - Fixed shared library linking errors by enabling PIC for all static libraries in dependency chain
+  - Added `POSITION_INDEPENDENT_CODE ON` property to 11 static libraries
+  - Resolved `yams_onnx_plugin.so` build failure on Linux x86_64
+- **Missing Symbol Linker Errors**
+  - Fixed undefined reference to `HybridFuzzySearch` by linking `yams_metadata` to `yams::search`
+  - Resolved circular dependency issues in library linking order
+- **CLI Output Cleanup**
+  - Changed TextExtractorFactory initialization logging from info to debug level
+  - Removed spurious log messages from normal CLI output
+- **Homebrew Formula**
+  - Fixed documentation URL in Homebrew formula to point to correct repository
+
 ## [v0.4.1] - 2025-08-20
 
 ### Added

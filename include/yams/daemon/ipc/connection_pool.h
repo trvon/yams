@@ -10,6 +10,7 @@
 #include <semaphore>
 #include <stop_token>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace yams::daemon {

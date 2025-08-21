@@ -10,6 +10,7 @@
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 

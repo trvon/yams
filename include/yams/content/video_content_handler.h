@@ -362,7 +362,7 @@ private:
     // C++20: consteval for compile-time constants
     static consteval size_t maxVideoFileSize() noexcept {
         return 10ULL * 1024 * 1024 * 1024;
-    }                                                                    // 10GB
+    } // 10GB
     static consteval size_t minVideoFileSize() noexcept { return 1024; } // 1KB
     static consteval std::chrono::milliseconds maxProcessingTime() noexcept {
         return std::chrono::milliseconds{300000}; // 5 minutes

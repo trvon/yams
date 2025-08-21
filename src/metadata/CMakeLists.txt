@@ -17,7 +17,13 @@ target_link_libraries(yams_metadata
         yams::core
         sqlite3
     PRIVATE
+        yams::search
         spdlog::spdlog
+)
+
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_metadata PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
 )
 
 # Install library

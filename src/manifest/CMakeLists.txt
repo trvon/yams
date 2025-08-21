@@ -29,6 +29,11 @@ target_include_directories(yams_manifest
 
 target_compile_features(yams_manifest PUBLIC cxx_std_20)
 
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_manifest PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Export target
 install(TARGETS yams_manifest
     EXPORT YamsTargets

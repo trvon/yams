@@ -315,147 +315,147 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
     switch (msgType) {
         // Request types
         case MessageType::SearchRequest: {
-            auto reqResult = deserialize<SearchRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<SearchRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::AddRequest: {
-            auto reqResult = deserialize<AddRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<AddRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GetRequest: {
-            auto reqResult = deserialize<GetRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GetRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GetInitRequest: {
-            auto reqResult = deserialize<GetInitRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GetInitRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GetChunkRequest: {
-            auto reqResult = deserialize<GetChunkRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GetChunkRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GetEndRequest: {
-            auto reqResult = deserialize<GetEndRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GetEndRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::DeleteRequest: {
-            auto reqResult = deserialize<DeleteRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<DeleteRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::ListRequest: {
-            auto reqResult = deserialize<ListRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<ListRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::ShutdownRequest: {
-            auto reqResult = deserialize<ShutdownRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<ShutdownRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::StatusRequest: {
-            auto reqResult = deserialize<StatusRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<StatusRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::PingRequest: {
-            auto reqResult = deserialize<PingRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<PingRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GenerateEmbeddingRequest: {
-            auto reqResult = deserialize<GenerateEmbeddingRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GenerateEmbeddingRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::BatchEmbeddingRequest: {
-            auto reqResult = deserialize<BatchEmbeddingRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<BatchEmbeddingRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::LoadModelRequest: {
-            auto reqResult = deserialize<LoadModelRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<LoadModelRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::UnloadModelRequest: {
-            auto reqResult = deserialize<UnloadModelRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<UnloadModelRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::ModelStatusRequest: {
-            auto reqResult = deserialize<ModelStatusRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<ModelStatusRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::DownloadRequest: {
-            auto reqResult = deserialize<DownloadRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<DownloadRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::AddDocumentRequest: {
-            auto reqResult = deserialize<AddDocumentRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<AddDocumentRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GrepRequest: {
-            auto reqResult = deserialize<GrepRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GrepRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::UpdateDocumentRequest: {
-            auto reqResult = deserialize<UpdateDocumentRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<UpdateDocumentRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
             break;
         }
         case MessageType::GetStatsRequest: {
-            auto reqResult = deserialize<GetStatsRequest>(deser);
+            auto reqResult = ::yams::daemon::deserialize<GetStatsRequest>(deser);
             if (!reqResult)
                 return reqResult.error();
             msg.payload = Request{std::move(reqResult.value())};
@@ -464,7 +464,7 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
 
         // Response types
         case MessageType::SearchResponse: {
-            auto resResult = deserialize<SearchResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<SearchResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
@@ -472,21 +472,21 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             break;
         }
         case MessageType::AddResponse: {
-            auto resResult = deserialize<AddResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<AddResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload = Response{std::in_place_type<AddResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GetResponse: {
-            auto resResult = deserialize<GetResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<GetResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload = Response{std::in_place_type<GetResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::GetInitResponse: {
-            auto resResult = deserialize<GetInitResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<GetInitResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
@@ -494,7 +494,7 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             break;
         }
         case MessageType::GetChunkResponse: {
-            auto resResult = deserialize<GetChunkResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<GetChunkResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
@@ -502,7 +502,7 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             break;
         }
         case MessageType::StatusResponse: {
-            auto resResult = deserialize<StatusResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<StatusResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
@@ -510,7 +510,7 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             break;
         }
         case MessageType::SuccessResponse: {
-            auto resResult = deserialize<SuccessResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<SuccessResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
@@ -518,21 +518,21 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             break;
         }
         case MessageType::ErrorResponse: {
-            auto resResult = deserialize<ErrorResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<ErrorResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload = Response{std::in_place_type<ErrorResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::PongResponse: {
-            auto resResult = deserialize<PongResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<PongResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload = Response{std::in_place_type<PongResponse>, std::move(resResult.value())};
             break;
         }
         case MessageType::EmbeddingResponse: {
-            auto resResult = deserialize<EmbeddingResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<EmbeddingResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
@@ -540,73 +540,73 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
             break;
         }
         case MessageType::BatchEmbeddingResponse: {
-            auto resResult = deserialize<BatchEmbeddingResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<BatchEmbeddingResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<BatchEmbeddingResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<BatchEmbeddingResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::ModelLoadResponse: {
-            auto resResult = deserialize<ModelLoadResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<ModelLoadResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<ModelLoadResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<ModelLoadResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::ModelStatusResponse: {
-            auto resResult = deserialize<ModelStatusResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<ModelStatusResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<ModelStatusResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<ModelStatusResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::ListResponse: {
-            auto resResult = deserialize<ListResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<ListResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::in_place_type<ListResponse>, std::move(resResult.value())};
+            msg.payload = Response(std::in_place_type<ListResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::DownloadResponse: {
-            auto resResult = deserialize<DownloadResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<DownloadResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<DownloadResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<DownloadResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::AddDocumentResponse: {
-            auto resResult = deserialize<AddDocumentResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<AddDocumentResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<AddDocumentResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<AddDocumentResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::GrepResponse: {
-            auto resResult = deserialize<GrepResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<GrepResponse>(deser);
             if (!resResult)
                 return resResult.error();
-            msg.payload = Response{std::in_place_type<GrepResponse>, std::move(resResult.value())};
+            msg.payload = Response(std::in_place_type<GrepResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::UpdateDocumentResponse: {
-            auto resResult = deserialize<UpdateDocumentResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<UpdateDocumentResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<UpdateDocumentResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<UpdateDocumentResponse>, std::move(resResult.value()));
             break;
         }
         case MessageType::GetStatsResponse: {
-            auto resResult = deserialize<GetStatsResponse>(deser);
+            auto resResult = ::yams::daemon::deserialize<GetStatsResponse>(deser);
             if (!resResult)
                 return resResult.error();
             msg.payload =
-                Response{std::in_place_type<GetStatsResponse>, std::move(resResult.value())};
+                Response(std::in_place_type<GetStatsResponse>, std::move(resResult.value()));
             break;
         }
 

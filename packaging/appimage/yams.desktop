@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=YAMS
+Comment=Yet Another Memory System - High-performance content-addressed storage
+Icon=yams
+Exec=yams
+Terminal=true
+Categories=Development;Utility;FileTools;
+Keywords=storage;cas;deduplication;content;memory;
+StartupNotify=false

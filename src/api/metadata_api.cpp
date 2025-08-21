@@ -755,10 +755,9 @@ Result<void> MetadataApi::exportToCsv(const std::vector<metadata::DocumentMetada
 
         // Write data
         for (const auto& doc : documents) {
-            file << doc.info.id << ","
-                 << "\"" << doc.info.fileName << "\","
-                 << "\"" << doc.info.filePath << "\"," << doc.info.mimeType << ","
-                 << doc.info.fileSize << "," << doc.info.sha256Hash << "\n";
+            file << doc.info.id << "," << "\"" << doc.info.fileName << "\"," << "\""
+                 << doc.info.filePath << "\"," << doc.info.mimeType << "," << doc.info.fileSize
+                 << "," << doc.info.sha256Hash << "\n";
         }
 
         // TODO: Add compression if requested

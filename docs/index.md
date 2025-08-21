@@ -68,6 +68,36 @@ YAMS provides comprehensive versioning through content-addressed storage. Every 
 docker run --rm -it ghcr.io/trvon/yams:latest --version
 ```
 
+### Linux Packages
+
+**DEB (Debian/Ubuntu):**
+```bash
+# Download and install the .deb package
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-amd64.deb -o yams.deb
+sudo dpkg -i yams.deb
+# Fix any dependency issues
+sudo apt-get install -f
+```
+
+**RPM (Fedora/RedHat/CentOS):**
+```bash
+# Download and install the .rpm package
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.rpm -o yams.rpm
+sudo rpm -i yams.rpm
+# Or with yum/dnf
+sudo dnf install ./yams.rpm
+```
+
+**AppImage (Universal Linux):**
+```bash
+# Download AppImage (works on most Linux distributions)
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.AppImage -o yams
+chmod +x yams
+./yams --version
+# Optionally move to PATH
+sudo mv yams /usr/local/bin/
+```
+
 ### Native Binary
 
 ```bash

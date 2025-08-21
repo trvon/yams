@@ -45,7 +45,7 @@ protected:
         if (fd < 0)
             return -1;
 
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
 

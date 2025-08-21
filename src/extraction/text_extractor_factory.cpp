@@ -28,7 +28,7 @@ TextExtractorFactory::TextExtractorFactory() {
                 extList += ", ";
             extList += e;
         }
-        spdlog::info("TextExtractorFactory initialized with extensions: {}", extList);
+        spdlog::debug("TextExtractorFactory initialized with extensions: {}", extList);
     }
 }
 

@@ -42,6 +42,11 @@ target_link_libraries(yams_detection
 
 target_compile_features(yams_detection PUBLIC cxx_std_20)
 
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_detection PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Create alias
 add_library(yams::detection ALIAS yams_detection)
 

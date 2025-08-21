@@ -165,8 +165,7 @@ TEST(CLIInitIntegration, CreatesXDGLayoutAndMasksSecrets) {
 
     // Act: run non-interactive init with explicit storage and print sanitized config
     std::ostringstream cmd;
-    cmd << shellQuote(yams) << " "
-        << "--storage " << shellQuote(storage_dir.string()) << " "
+    cmd << shellQuote(yams) << " " << "--storage " << shellQuote(storage_dir.string()) << " "
         << "init --non-interactive --print";
 
     const auto res = runCommandCapture(cmd.str());
@@ -217,8 +216,7 @@ TEST(CLIInitIntegration, IdempotentWithoutForcePreservesFiles) {
     // First run
     {
         std::ostringstream cmd;
-        cmd << shellQuote(yams) << " "
-            << "--storage " << shellQuote(storage_dir.string()) << " "
+        cmd << shellQuote(yams) << " " << "--storage " << shellQuote(storage_dir.string()) << " "
             << "init --non-interactive";
         const auto res = runCommandCapture(cmd.str());
         ASSERT_EQ(res.exit_code, 0) << "First init failed. stdout:\n" << res.stdout_str;
@@ -243,8 +241,7 @@ TEST(CLIInitIntegration, IdempotentWithoutForcePreservesFiles) {
     // Second run without --force should be idempotent (no changes)
     {
         std::ostringstream cmd;
-        cmd << shellQuote(yams) << " "
-            << "--storage " << shellQuote(storage_dir.string()) << " "
+        cmd << shellQuote(yams) << " " << "--storage " << shellQuote(storage_dir.string()) << " "
             << "init --non-interactive";
         const auto res = runCommandCapture(cmd.str());
         ASSERT_EQ(res.exit_code, 0) << "Second init (idempotent) failed. stdout:\n"
@@ -281,8 +278,7 @@ TEST(CLIInitIntegration, ForceOverwritesAndChangesTimestamps) {
     // First run
     {
         std::ostringstream cmd;
-        cmd << shellQuote(yams) << " "
-            << "--storage " << shellQuote(storage_dir.string()) << " "
+        cmd << shellQuote(yams) << " " << "--storage " << shellQuote(storage_dir.string()) << " "
             << "init --non-interactive";
         const auto res = runCommandCapture(cmd.str());
         ASSERT_EQ(res.exit_code, 0) << "First init failed. stdout:\n" << res.stdout_str;
@@ -307,8 +303,7 @@ TEST(CLIInitIntegration, ForceOverwritesAndChangesTimestamps) {
     // Second run with --force should overwrite and thus change timestamps
     {
         std::ostringstream cmd;
-        cmd << shellQuote(yams) << " "
-            << "--storage " << shellQuote(storage_dir.string()) << " "
+        cmd << shellQuote(yams) << " " << "--storage " << shellQuote(storage_dir.string()) << " "
             << "init --non-interactive --force --print";
         const auto res = runCommandCapture(cmd.str());
         ASSERT_EQ(res.exit_code, 0) << "Forced init failed. stdout:\n" << res.stdout_str;

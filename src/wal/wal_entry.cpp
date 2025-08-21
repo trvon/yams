@@ -301,8 +301,7 @@ std::ostream& operator<<(std::ostream& os, WALEntry::OpType op) {
 }
 
 std::ostream& operator<<(std::ostream& os, const WALEntry& entry) {
-    os << "WALEntry{"
-       << "seq=" << entry.header.sequenceNum << ", op=" << entry.header.operation
+    os << "WALEntry{" << "seq=" << entry.header.sequenceNum << ", op=" << entry.header.operation
        << ", txn=" << entry.header.transactionId << ", size=" << entry.header.dataSize
        << ", checksum=" << std::hex << entry.header.checksum << std::dec << "}";
     return os;

@@ -178,7 +178,7 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
         explicit FileLock(const fs::path& p) : path(p) {
             fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
             if (fd >= 0) {
-                struct flock fl{};
+                struct flock fl {};
                 fl.l_type = F_WRLCK;
                 fl.l_whence = SEEK_SET;
                 fl.l_start = 0;
@@ -192,7 +192,7 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
         bool locked() const { return fd >= 0; }
         ~FileLock() {
             if (fd >= 0) {
-                struct flock fl{};
+                struct flock fl {};
                 fl.l_type = F_UNLCK;
                 fl.l_whence = SEEK_SET;
                 fl.l_start = 0;

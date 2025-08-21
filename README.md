@@ -31,9 +31,45 @@ YAMS provides comprehensive versioning through content-addressed storage. Every 
 docker run --rm -it ghcr.io/trvon/yams:latest --version
 ```
 
+**Linux Packages:**
+
+```bash
+# DEB (Debian/Ubuntu)
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-amd64.deb -o yams.deb
+sudo dpkg -i yams.deb
+sudo apt-get install -f  # Fix any dependency issues
+
+# RPM (Fedora/RedHat/CentOS)  
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.rpm -o yams.rpm
+sudo dnf install ./yams.rpm
+
+# AppImage (Universal Linux - no installation required)
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.AppImage -o yams
+chmod +x yams
+./yams --version
+```
+
 **Homebrew (coming soon):**
 ```bash
 brew tap trvon/yams && brew install yams
+```
+
+### Binary Downloads
+
+For systems where packages aren't available:
+
+```bash
+# Linux x86_64
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-linux-x86_64.tar.gz | tar xz
+sudo mv bin/yams /usr/local/bin/
+
+# macOS ARM64 (Apple Silicon)
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-arm64.zip -o yams.zip
+unzip yams.zip && sudo mv bin/yams /usr/local/bin/
+
+# macOS x86_64 (Intel)
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip  
+unzip yams.zip && sudo mv bin/yams /usr/local/bin/
 ```
 
 ### Build

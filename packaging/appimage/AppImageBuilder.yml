@@ -1,0 +1,83 @@
+version: 1
+script:
+  # Build the application
+  - rm -rf AppDir || true
+  - mkdir -p AppDir
+  - cmake -S ../.. -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DYAMS_BUILD_PROFILE=release
+  - cmake --build build --parallel
+  - DESTDIR=AppDir cmake --install build
+
+AppDir:
+  path: ./AppDir
+  
+  app_info:
+    id: io.github.trvon.yams
+    name: YAMS
+    icon: yams
+    version: !ENV ${YAMS_VERSION}
+    exec: usr/bin/yams
+    exec_args: "$@"
+
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: 'deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse'
+        key_url: 'http://keyserver.ubuntu.com/pks/lookup?op=get&search=0x3b4fe6acc0b21f32'
+    
+    include:
+      - libssl3
+      - libstdc++6
+      - libgcc-s1
+      - zlib1g
+      - libzstd1
+      - liblzma5
+      - libsqlite3-0
+      - libmagic1
+      
+    exclude:
+      - usr/share/man
+      - usr/share/doc
+      
+  files:
+    include:
+      - usr/bin/yams
+      - usr/bin/yams-daemon
+      - usr/bin/yams-mcp-server
+      - usr/lib/libyams*.so*
+      - usr/share/yams
+      
+    exclude:
+      - usr/include
+      - usr/lib/cmake
+      - usr/lib/*.a
+      - usr/lib/pkgconfig
+      
+  runtime:
+    env:
+      APPDIR_LIBRARY_PATH: $APPDIR/usr/lib:$APPDIR/lib/x86_64-linux-gnu:$APPDIR/usr/lib/x86_64-linux-gnu
+      
+  test:
+    fedora:
+      image: appimagecrafters/tests-env:fedora-30
+      command: ./AppRun --version
+      
+    debian:
+      image: appimagecrafters/tests-env:debian-stable
+      command: ./AppRun --version
+      
+    arch:
+      image: appimagecrafters/tests-env:archlinux-latest
+      command: ./AppRun --version
+      
+    centos:
+      image: appimagecrafters/tests-env:centos-7
+      command: ./AppRun --version
+      
+    ubuntu:
+      image: appimagecrafters/tests-env:ubuntu-xenial
+      command: ./AppRun --version
+
+AppImage:
+  arch: x86_64
+  update-information: gh-releases-zsync|trvon|yams|latest|YAMS-*x86_64.AppImage.zsync
+  sign-key: None

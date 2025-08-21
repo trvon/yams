@@ -16,6 +16,11 @@ target_include_directories(yams_crypto
         $<INSTALL_INTERFACE:include>
 )
 
+# Enable position-independent code for linking into shared libraries
+set_target_properties(yams_crypto PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Export target
 install(TARGETS yams_crypto
     EXPORT YamsTargets
