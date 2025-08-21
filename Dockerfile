@@ -6,9 +6,11 @@ ARG GIT_COMMIT=""
 ARG GIT_TAG=""
 
 # Base toolchain + headers
+# Note: libncurses-dev is needed for CLI/TUI build, consider -DYAMS_BUILD_CLI=OFF for containers
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git curl pkg-config ca-certificates \
     libssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev \
+    libncurses-dev libcurl4-openssl-dev \
     python3 python3-venv python3-pip \
     gcc-13 g++-13 \
     && rm -rf /var/lib/apt/lists/*
@@ -42,6 +44,10 @@ RUN conan install . \
 # Compute a semver for CMake and an optional suffix for runtime info
 # - If GIT_TAG looks like vMAJOR.MINOR.PATCH, use that (strip leading v)
 # - Else use 0.0.0 and keep a dev suffix with the short commit
+# Build configuration:
+# - CLI=ON: Include CLI with TUI browser (requires ncurses)
+# - MCP_SERVER=ON: Include MCP server for LLM integration
+# - Set CLI=OFF if you only need the MCP server and want a smaller image
 RUN if printf '%s' "${GIT_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then \
     CMAKE_VERSION="${GIT_TAG#v}"; \
     VERSION_SUFFIX=""; \
@@ -53,6 +59,7 @@ RUN if printf '%s' "${GIT_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then \
     -DYAMS_BUILD_PROFILE=release \
     -DYAMS_BUILD_DOCS=OFF \
     -DYAMS_BUILD_TESTS=OFF \
+    -DYAMS_BUILD_CLI=ON \
     -DYAMS_BUILD_MCP_SERVER=ON \
     -DYAMS_VERSION="${CMAKE_VERSION}" \
     -DYAMS_VERSION_SUFFIX="${VERSION_SUFFIX}" && \

@@ -20,6 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Note: Validation (tests + benchmarks) runs only on linux-self-hosted
+        # Other platforms do optimized release builds only
         include:
           - os: linux-self-hosted
             runs_on: '["self-hosted", "Linux", "X64"]'
@@ -99,7 +101,7 @@ jobs:
         with:
           changelog_file: CHANGELOG.md
 
-      # Hosted-only: install and configure Conan (self-hosted must already be configured)
+      # Hosted runners: install and configure Conan (self-hosted must already be configured)
       - name: Install Conan (hosted only)
         if: ${{ matrix.hosted }}
         shell: bash
@@ -128,7 +130,7 @@ jobs:
         shell: bash
         run: conan --version || echo "Conan is expected to be pre-installed and configured on self-hosted runners"
 
-      # Hosted-only: clean corrupted cache if needed
+      # Hosted runners: clean corrupted cache if needed
       - name: Clean corrupted Conan cache if needed (hosted only)
         if: ${{ matrix.hosted }}
         shell: bash
@@ -139,12 +141,12 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
-      # Hosted-only: Validation build (tests + benchmarks)
-      - name: Configure with Conan (Validation Build) [hosted only]
-        if: ${{ matrix.hosted }}
+      # Linux self-hosted only: Validation build (tests + benchmarks)
+      - name: Configure with Conan (Validation Build) [Linux self-hosted only]
+        if: ${{ matrix.os == 'linux-self-hosted' }}
         shell: bash
         run: |
-          echo "Phase 1: Validation build with tests and benchmarks for ${{ matrix.suffix }}"
+          echo "Phase 1: Validation build with tests and benchmarks on Linux"
           conan install . \
             --output-folder=build/conan-validation \
             -s build_type=Release \
@@ -156,8 +158,8 @@ jobs:
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             ${{ matrix.cmake_args}}
 
-      - name: Build and Test (Validation) [hosted only]
-        if: ${{ matrix.hosted }}
+      - name: Build and Test (Validation) [Linux self-hosted only]
+        if: ${{ matrix.os == 'linux-self-hosted' }}
         shell: bash
         run: |
           echo "Building with tests and benchmarks for validation..."
@@ -168,11 +170,11 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           echo "Validation complete, now building optimized release..."
 
-      # Release build for ALL targets (self-hosted + hosted)
+      # Release build for ALL targets
       - name: Configure and Build Release (Optimized)
         shell: bash
         run: |
-          echo "Phase 2: Optimized release build for ${{ matrix.suffix }}"
+          echo "Optimized release build for ${{ matrix.suffix }}"
           conan install . \
             --output-folder=build/conan-release \
             -s build_type=Release \
