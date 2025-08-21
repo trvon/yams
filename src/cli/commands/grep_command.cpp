@@ -136,17 +136,65 @@ public:
                     dreq.path = paths_[0]; // Use first path as filter
                 }
 
-                // Handle context - GrepRequest only has one contextLines field
+                // Handle context - use separate before/after if specified
                 if (context_ > 0) {
                     dreq.contextLines = static_cast<int>(context_);
-                } else if (beforeContext_ > 0 || afterContext_ > 0) {
-                    // Use the larger of before/after context
+                    dreq.beforeContext = static_cast<int>(context_);
+                    dreq.afterContext = static_cast<int>(context_);
+                } else {
+                    dreq.beforeContext = static_cast<int>(beforeContext_);
+                    dreq.afterContext = static_cast<int>(afterContext_);
+                    // Keep contextLines for backward compatibility
                     dreq.contextLines = static_cast<int>(std::max(beforeContext_, afterContext_));
                 }
 
                 if (maxCount_ > 0) {
                     dreq.maxMatches = maxCount_;
                 }
+
+                // Pass all additional fields for feature parity
+                // Parse comma-separated includePatterns
+                if (!includePatterns_.empty()) {
+                    std::stringstream ss(includePatterns_);
+                    std::string pattern;
+                    while (std::getline(ss, pattern, ',')) {
+                        // Trim whitespace
+                        pattern.erase(0, pattern.find_first_not_of(" \t"));
+                        pattern.erase(pattern.find_last_not_of(" \t") + 1);
+                        if (!pattern.empty()) {
+                            dreq.includePatterns.push_back(pattern);
+                        }
+                    }
+                }
+
+                dreq.wholeWord = wholeWord_;
+                dreq.showLineNumbers = showLineNumbers_;
+                dreq.showFilename = showFilename_;
+                dreq.noFilename = noFilename_;
+                dreq.countOnly = countOnly_;
+                dreq.filesOnly = filesOnly_;
+                dreq.filesWithoutMatch = filesWithoutMatch_;
+                dreq.pathsOnly = pathsOnly_;
+                dreq.literalText = literalText_;
+                dreq.regexOnly = regexOnly_;
+                dreq.semanticLimit = semanticLimit_;
+
+                // Parse comma-separated filterTags
+                if (!filterTags_.empty()) {
+                    std::stringstream ss(filterTags_);
+                    std::string tag;
+                    while (std::getline(ss, tag, ',')) {
+                        // Trim whitespace
+                        tag.erase(0, tag.find_first_not_of(" \t"));
+                        tag.erase(tag.find_last_not_of(" \t") + 1);
+                        if (!tag.empty()) {
+                            dreq.filterTags.push_back(tag);
+                        }
+                    }
+                }
+
+                dreq.matchAllTags = matchAllTags_;
+                dreq.colorMode = colorMode_;
 
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
                     // Handle different output modes

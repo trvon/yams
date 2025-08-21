@@ -41,11 +41,25 @@ struct SearchRequest {
     double similarity = 0.7;
     std::chrono::milliseconds timeout{5000};
 
+    // Additional fields for feature parity
+    std::string searchType = "keyword"; // Search type (keyword/semantic/hybrid)
+    bool pathsOnly = false;             // Output only file paths
+    bool showHash = false;              // Show document hashes
+    bool verbose = false;               // Show detailed info
+    bool jsonOutput = false;            // Output as JSON
+    bool showLineNumbers = false;       // Show line numbers
+    int afterContext = 0;               // Lines after match
+    int beforeContext = 0;              // Lines before match
+    int context = 0;                    // Lines before and after
+    std::string hashQuery;              // Search by file hash
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << query << static_cast<uint32_t>(limit) << fuzzy << literalText << similarity
-            << timeout;
+            << timeout << searchType << pathsOnly << showHash << verbose << jsonOutput
+            << showLineNumbers << static_cast<int32_t>(afterContext)
+            << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(context) << hashQuery;
     }
 
     template <typename Deserializer>
@@ -82,6 +96,57 @@ struct SearchRequest {
         if (!timeoutResult)
             return timeoutResult.error();
         req.timeout = timeoutResult.value();
+
+        // Deserialize new fields
+        auto st = deser.readString();
+        if (!st)
+            return st.error();
+        req.searchType = std::move(st.value());
+
+        auto po = deser.template read<bool>();
+        if (!po)
+            return po.error();
+        req.pathsOnly = po.value();
+
+        auto sh = deser.template read<bool>();
+        if (!sh)
+            return sh.error();
+        req.showHash = sh.value();
+
+        auto v = deser.template read<bool>();
+        if (!v)
+            return v.error();
+        req.verbose = v.value();
+
+        auto jo = deser.template read<bool>();
+        if (!jo)
+            return jo.error();
+        req.jsonOutput = jo.value();
+
+        auto sln = deser.template read<bool>();
+        if (!sln)
+            return sln.error();
+        req.showLineNumbers = sln.value();
+
+        auto ac = deser.template read<int32_t>();
+        if (!ac)
+            return ac.error();
+        req.afterContext = ac.value();
+
+        auto bc = deser.template read<int32_t>();
+        if (!bc)
+            return bc.error();
+        req.beforeContext = bc.value();
+
+        auto c = deser.template read<int32_t>();
+        if (!c)
+            return c.error();
+        req.context = c.value();
+
+        auto hq = deser.readString();
+        if (!hq)
+            return hq.error();
+        req.hashQuery = std::move(hq.value());
 
         return req;
     }
@@ -725,10 +790,26 @@ struct AddDocumentRequest {
     bool recursive = false; // For directories
     bool includeHidden = false;
 
+    // Pattern matching for recursive operations
+    std::vector<std::string> includePatterns; // File patterns to include (e.g., "*.cpp")
+    std::vector<std::string> excludePatterns; // File patterns to exclude
+
+    // Collection and snapshot options
+    std::string collection;    // Collection name for organizing documents
+    std::string snapshotId;    // Unique snapshot identifier
+    std::string snapshotLabel; // User-friendly snapshot label
+
+    // Content handling options
+    std::string mimeType;         // MIME type of the document
+    bool disableAutoMime = false; // Disable automatic MIME type detection
+    bool noEmbeddings = false;    // Disable automatic embedding generation
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << path << content << name << tags << metadata << recursive << includeHidden;
+        ser << path << content << name << tags << metadata << recursive << includeHidden
+            << includePatterns << excludePatterns << collection << snapshotId << snapshotLabel
+            << mimeType << disableAutoMime << noEmbeddings;
     }
 
     template <typename Deserializer>
@@ -763,6 +844,48 @@ struct AddDocumentRequest {
         if (!h)
             return h.error();
         req.includeHidden = h.value();
+
+        // Read new fields
+        auto incPat = deser.readStringVector();
+        if (!incPat)
+            return incPat.error();
+        req.includePatterns = std::move(incPat.value());
+
+        auto excPat = deser.readStringVector();
+        if (!excPat)
+            return excPat.error();
+        req.excludePatterns = std::move(excPat.value());
+
+        auto col = deser.readString();
+        if (!col)
+            return col.error();
+        req.collection = std::move(col.value());
+
+        auto snapId = deser.readString();
+        if (!snapId)
+            return snapId.error();
+        req.snapshotId = std::move(snapId.value());
+
+        auto snapLbl = deser.readString();
+        if (!snapLbl)
+            return snapLbl.error();
+        req.snapshotLabel = std::move(snapLbl.value());
+
+        auto mime = deser.readString();
+        if (!mime)
+            return mime.error();
+        req.mimeType = std::move(mime.value());
+
+        auto disAutoMime = deser.template read<bool>();
+        if (!disAutoMime)
+            return disAutoMime.error();
+        req.disableAutoMime = disAutoMime.value();
+
+        auto noEmb = deser.template read<bool>();
+        if (!noEmb)
+            return noEmb.error();
+        req.noEmbeddings = noEmb.value();
+
         return req;
     }
 };
@@ -775,11 +898,34 @@ struct GrepRequest {
     int contextLines = 0;
     size_t maxMatches = 0; // 0 = unlimited
 
+    // Additional fields for feature parity
+    std::vector<std::string> includePatterns; // File patterns to include
+    bool wholeWord = false;                   // Match whole words only
+    bool showLineNumbers = false;             // Show line numbers
+    bool showFilename = false;                // Show filename with matches
+    bool noFilename = false;                  // Never show filename
+    bool countOnly = false;                   // Show only count of matching lines
+    bool filesOnly = false;                   // Show only filenames with matches
+    bool filesWithoutMatch = false;           // Show only filenames without matches
+    bool pathsOnly = false;                   // Show only file paths
+    bool literalText = false;                 // Treat pattern as literal text
+    bool regexOnly = false;                   // Disable semantic search
+    size_t semanticLimit = 3;                 // Number of semantic results
+    std::vector<std::string> filterTags;      // Filter by tags
+    bool matchAllTags = false;                // Require all tags
+    std::string colorMode = "auto";           // Color output mode
+    int beforeContext = 0;                    // Lines before match
+    int afterContext = 0;                     // Lines after match
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << pattern << path << caseInsensitive << invertMatch
-            << static_cast<int32_t>(contextLines) << static_cast<uint64_t>(maxMatches);
+            << static_cast<int32_t>(contextLines) << static_cast<uint64_t>(maxMatches)
+            << includePatterns << wholeWord << showLineNumbers << showFilename << noFilename
+            << countOnly << filesOnly << filesWithoutMatch << pathsOnly << literalText << regexOnly
+            << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags << colorMode
+            << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(afterContext);
     }
 
     template <typename Deserializer>
@@ -810,6 +956,77 @@ struct GrepRequest {
         if (!mm)
             return mm.error();
         req.maxMatches = mm.value();
+
+        // Deserialize new fields
+        auto ip = deser.readStringVector();
+        if (!ip)
+            return ip.error();
+        req.includePatterns = std::move(ip.value());
+        auto ww = deser.template read<bool>();
+        if (!ww)
+            return ww.error();
+        req.wholeWord = ww.value();
+        auto sln = deser.template read<bool>();
+        if (!sln)
+            return sln.error();
+        req.showLineNumbers = sln.value();
+        auto sf = deser.template read<bool>();
+        if (!sf)
+            return sf.error();
+        req.showFilename = sf.value();
+        auto nf = deser.template read<bool>();
+        if (!nf)
+            return nf.error();
+        req.noFilename = nf.value();
+        auto co = deser.template read<bool>();
+        if (!co)
+            return co.error();
+        req.countOnly = co.value();
+        auto fo = deser.template read<bool>();
+        if (!fo)
+            return fo.error();
+        req.filesOnly = fo.value();
+        auto fwm = deser.template read<bool>();
+        if (!fwm)
+            return fwm.error();
+        req.filesWithoutMatch = fwm.value();
+        auto po = deser.template read<bool>();
+        if (!po)
+            return po.error();
+        req.pathsOnly = po.value();
+        auto lt = deser.template read<bool>();
+        if (!lt)
+            return lt.error();
+        req.literalText = lt.value();
+        auto ro = deser.template read<bool>();
+        if (!ro)
+            return ro.error();
+        req.regexOnly = ro.value();
+        auto sl = deser.template read<uint64_t>();
+        if (!sl)
+            return sl.error();
+        req.semanticLimit = sl.value();
+        auto ft = deser.readStringVector();
+        if (!ft)
+            return ft.error();
+        req.filterTags = std::move(ft.value());
+        auto mat = deser.template read<bool>();
+        if (!mat)
+            return mat.error();
+        req.matchAllTags = mat.value();
+        auto cm = deser.readString();
+        if (!cm)
+            return cm.error();
+        req.colorMode = std::move(cm.value());
+        auto bc = deser.template read<int32_t>();
+        if (!bc)
+            return bc.error();
+        req.beforeContext = bc.value();
+        auto ac = deser.template read<int32_t>();
+        if (!ac)
+            return ac.error();
+        req.afterContext = ac.value();
+
         return req;
     }
 };

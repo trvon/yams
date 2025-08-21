@@ -475,7 +475,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wall -Wextra -Wpedantic
         -Wcast-align -Wcast-qual
         -Wdouble-promotion -Wformat=2
-        -Wnon-virtual-dtor -Wshadow
+        -Wshadow
+        $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
         $<$<CONFIG:Debug>:-Og>
         $<$<CONFIG:Debug>:-g3>
         $<$<CONFIG:Release>:-O3>

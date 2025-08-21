@@ -651,22 +651,107 @@ Result<void> YamsDaemon::start() {
 
                     AddDocumentResponse res;
 
+                    // Helper function to check if file matches patterns
+                    auto matchesPattern = [](const std::string& str,
+                                             const std::string& pattern) -> bool {
+                        // Efficient iterative wildcard matching (* and ?)
+                        size_t strIdx = 0, patIdx = 0;
+                        size_t strLen = str.length(), patLen = pattern.length();
+                        size_t lastWildcard = std::string::npos, lastMatch = 0;
+
+                        while (strIdx < strLen) {
+                            if (patIdx < patLen &&
+                                (pattern[patIdx] == '?' || pattern[patIdx] == str[strIdx])) {
+                                strIdx++;
+                                patIdx++;
+                            } else if (patIdx < patLen && pattern[patIdx] == '*') {
+                                lastWildcard = patIdx;
+                                lastMatch = strIdx;
+                                patIdx++;
+                            } else if (lastWildcard != std::string::npos) {
+                                patIdx = lastWildcard + 1;
+                                lastMatch++;
+                                strIdx = lastMatch;
+                            } else {
+                                return false;
+                            }
+                        }
+
+                        while (patIdx < patLen && pattern[patIdx] == '*') {
+                            patIdx++;
+                        }
+
+                        return patIdx == patLen;
+                    };
+
+                    auto shouldIncludeFile = [&](const std::filesystem::path& filePath) -> bool {
+                        std::string fileName = filePath.filename().string();
+
+                        // Check hidden files
+                        if (!r.includeHidden && fileName[0] == '.') {
+                            return false;
+                        }
+
+                        // Check exclude patterns first
+                        for (const auto& pattern : r.excludePatterns) {
+                            if (matchesPattern(fileName, pattern)) {
+                                return false;
+                            }
+                        }
+
+                        // If no include patterns, include all (that weren't excluded)
+                        if (r.includePatterns.empty()) {
+                            return true;
+                        }
+
+                        // Check include patterns
+                        for (const auto& pattern : r.includePatterns) {
+                            if (matchesPattern(fileName, pattern)) {
+                                return true;
+                            }
+                        }
+
+                        return false;
+                    };
+
                     // Handle single file or directory
                     if (!r.path.empty()) {
                         std::filesystem::path p(r.path);
 
                         if (std::filesystem::is_directory(p) && r.recursive) {
-                            // Recursive directory add
+                            // Recursive directory add with pattern matching
                             size_t count = 0;
                             for (const auto& entry :
                                  std::filesystem::recursive_directory_iterator(p)) {
                                 if (entry.is_regular_file()) {
-                                    if (!r.includeHidden &&
-                                        entry.path().filename().string()[0] == '.') {
+                                    if (!shouldIncludeFile(entry.path())) {
                                         continue;
                                     }
 
-                                    auto result = contentStore_->store(entry.path());
+                                    // Build metadata with collection/snapshot info
+                                    api::ContentMetadata metadata;
+                                    // Convert tags vector to map
+                                    for (const auto& tag : r.tags) {
+                                        metadata.tags[tag] = "true";
+                                    }
+                                    // Add custom metadata
+                                    for (const auto& [key, value] : r.metadata) {
+                                        metadata.tags[key] = value;
+                                    }
+                                    if (!r.collection.empty()) {
+                                        metadata.tags["collection"] = r.collection;
+                                    }
+                                    if (!r.snapshotId.empty()) {
+                                        metadata.tags["snapshot_id"] = r.snapshotId;
+                                    }
+                                    if (!r.snapshotLabel.empty()) {
+                                        metadata.tags["snapshot_label"] = r.snapshotLabel;
+                                    }
+                                    if (!r.mimeType.empty()) {
+                                        metadata.mimeType = r.mimeType;
+                                    }
+
+                                    auto result = contentStore_->store(entry.path(), metadata);
                                     if (result) {
                                         count++;
                                         if (res.hash.empty()) {
@@ -678,8 +763,31 @@ Result<void> YamsDaemon::start() {
                             }
                             res.documentsAdded = count;
                         } else if (std::filesystem::is_regular_file(p)) {
-                            // Single file add
-                            auto result = contentStore_->store(std::filesystem::path(r.path));
+                            // Single file add with metadata
+                            api::ContentMetadata metadata;
+                            // Convert tags vector to map
+                            for (const auto& tag : r.tags) {
+                                metadata.tags[tag] = "true";
+                            }
+                            // Add custom metadata
+                            for (const auto& [key, value] : r.metadata) {
+                                metadata.tags[key] = value;
+                            }
+                            if (!r.collection.empty()) {
+                                metadata.tags["collection"] = r.collection;
+                            }
+                            if (!r.snapshotId.empty()) {
+                                metadata.tags["snapshot_id"] = r.snapshotId;
+                            }
+                            if (!r.snapshotLabel.empty()) {
+                                metadata.tags["snapshot_label"] = r.snapshotLabel;
+                            }
+                            if (!r.mimeType.empty()) {
+                                metadata.mimeType = r.mimeType;
+                            }
+
+                            auto result =
+                                contentStore_->store(std::filesystem::path(r.path), metadata);
                             if (!result) {
                                 return ErrorResponse{result.error().code, result.error().message};
                             }
@@ -687,6 +795,19 @@ Result<void> YamsDaemon::start() {
                             res.path = r.path;
                             res.size = std::filesystem::file_size(p);
                             res.documentsAdded = 1;
+                        } else {
+                            // Handle non-recursive directory or non-existent path
+                            if (std::filesystem::is_directory(p)) {
+                                return ErrorResponse{ErrorCode::InvalidArgument,
+                                                     "Directory specified but --recursive not set"};
+                            } else if (!std::filesystem::exists(p)) {
+                                return ErrorResponse{ErrorCode::FileNotFound,
+                                                     "Path not found: " + r.path};
+                            } else {
+                                return ErrorResponse{ErrorCode::InvalidArgument,
+                                                     "Path is not a regular file or directory: " +
+                                                         r.path};
+                            }
                         }
                     } else if (!r.content.empty() && !r.name.empty()) {
                         // Store content directly

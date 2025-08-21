@@ -5,7 +5,43 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+
+## [v0.4.8] - 2025-08-21
+
+### Added
+- **Shell Wildcard Expansion Support**
+  - `add` command now accepts multiple file paths from shell expansion
+  - Commands like `yams add *.md` now work correctly without "arguments were not expected" errors
+  - Properly handles shell wildcard expansion (e.g., `*.cpp`, `*.md`, `*.txt`)
+
+### Fixed
+- **Tag Storage and Filtering**
+  - Fixed tag filtering in `list` command not working (`--tags` option)
+  - Tags are now properly parsed as comma-separated values when stored
+  - Fixed tag filtering logic to correctly match against stored comma-separated tag values
+  - Multiple tags in filter work with OR logic (e.g., `--tags "work,important"` shows documents with either tag)
+- **Daemon Path Resolution**
+  - Fixed "Added 0 documents" issue when using relative paths with daemon
+  - CLI now converts relative paths to absolute paths before sending to daemon
+  - Added proper error messages for invalid paths and non-recursive directory attempts
+  - Daemon now returns helpful error messages instead of silently returning 0
+- **Feature Parity Between CLI and Daemon**
+  - Added all missing fields to GrepRequest for complete CLI feature parity
+  - Added all missing fields to SearchRequest for complete CLI feature parity
+  - Updated serialization/deserialization for both request types
+  - CLI commands now pass all parameters to daemon requests
+  - Ensures consistent behavior whether using daemon or local execution
+- **Wildcard Pattern Matching Bug**
+  - Fixed broken wildcard pattern matching in `add` and `restore` commands
+  - Replaced regex-based implementation with efficient iterative algorithm
+  - Patterns like `*.sol`, `*.cpp`, `*.js` now work correctly
+  - Dots and other special characters in patterns are now handled properly
+- **Linux Build Errors**
+  - Fixed missing `#include <cstring>` in compression_benchmark.cpp for `std::strlen`
+  - Fixed C++ compiler flag `-Wnon-virtual-dtor` being incorrectly applied to C files
+  - Used CMake generator expression `$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>` for language-specific flags
+
+## [v0.4.7] - 2025-08-21
 
 ### Fixed
 - **Release Workflow Build Failures**

@@ -36,8 +36,10 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("add", getDescription());
-        cmd->add_option("path", targetPath_, "Path to file/directory to add (use '-' for stdin)")
-            ->default_val("-");
+        // Accept multiple paths as positional arguments - use expected(-1) for unlimited
+        cmd->add_option("paths", targetPaths_,
+                        "Path(s) to file/directory to add (use '-' for stdin)")
+            ->expected(-1);
 
         cmd->add_option("-n,--name", documentName_,
                         "Name for the document (especially useful for stdin)");
@@ -71,62 +73,90 @@ public:
 
     Result<void> execute() override {
         try {
-            // Attempt daemon-first add; fall back to local on failure
-            {
-                // Skip daemon for stdin input (requires special handling)
-                if (targetPath_.string() != "-") {
-                    yams::daemon::AddDocumentRequest dreq;
-                    dreq.path = targetPath_;
-                    dreq.name = documentName_;
-                    dreq.tags = tags_;
+            // Handle default stdin case
+            if (targetPaths_.empty()) {
+                targetPaths_.push_back("-");
+            }
 
-                    // Parse metadata key=value pairs
-                    for (const auto& kv : metadata_) {
-                        auto pos = kv.find('=');
-                        if (pos != std::string::npos) {
-                            std::string key = kv.substr(0, pos);
-                            std::string value = kv.substr(pos + 1);
-                            dreq.metadata[key] = value;
-                        }
-                    }
-
-                    dreq.recursive = recursive_;
-                    // These fields don't exist in AddDocumentRequest yet
-                    // dreq.includePattern = includePatterns_;
-                    // dreq.excludePattern = excludePatterns_;
-                    // dreq.collection = collection_;
-                    // dreq.generateEmbeddings = !noEmbeddings_;
-
-                    auto render =
-                        [&](const yams::daemon::AddDocumentResponse& resp) -> Result<void> {
-                        // Display results
-                        if (resp.documentsAdded == 1) {
-                            std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
-                                      << std::endl;
-                        } else {
-                            std::cout << "Added " << resp.documentsAdded << " documents"
-                                      << std::endl;
-                        }
-                        return Result<void>();
-                    };
-
-                    auto fallback = [&]() -> Result<void> {
-                        // Fall back to local execution
-                        return executeLocal();
-                    };
-
-                    if (auto d = daemon_first(dreq, fallback, render); d) {
-                        return Result<void>();
-                    }
+            // Process each path
+            for (const auto& pathStr : targetPaths_) {
+                auto result = processPath(pathStr);
+                if (!result) {
+                    return result; // Return error immediately
                 }
             }
 
-            // Fall back to local execution for stdin or if daemon failed
-            return executeLocal();
-
+            return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
+    }
+
+private:
+    Result<void> processPath(const std::string& pathStr) {
+        std::filesystem::path targetPath(pathStr);
+
+        // Attempt daemon-first add; fall back to local on failure
+        {
+            // Skip daemon for stdin input (requires special handling)
+            if (pathStr != "-") {
+                yams::daemon::AddDocumentRequest dreq;
+                // Convert to absolute path so daemon can find it regardless of its working
+                // directory
+                dreq.path = std::filesystem::absolute(targetPath).string();
+                dreq.name = documentName_;
+                dreq.tags = tags_;
+
+                // Parse metadata key=value pairs
+                for (const auto& kv : metadata_) {
+                    auto pos = kv.find('=');
+                    if (pos != std::string::npos) {
+                        std::string key = kv.substr(0, pos);
+                        std::string value = kv.substr(pos + 1);
+                        dreq.metadata[key] = value;
+                    }
+                }
+
+                dreq.recursive = recursive_;
+                dreq.includePatterns = includePatterns_;
+                dreq.excludePatterns = excludePatterns_;
+                dreq.collection = collection_;
+                dreq.snapshotId = snapshotId_;
+                dreq.snapshotLabel = snapshotLabel_;
+                dreq.mimeType = mimeType_;
+                dreq.disableAutoMime = disableAutoMime_;
+                dreq.noEmbeddings = noEmbeddings_;
+
+                auto render = [&](const yams::daemon::AddDocumentResponse& resp) -> Result<void> {
+                    // Display results
+                    if (resp.documentsAdded == 1) {
+                        std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
+                                  << std::endl;
+                    } else {
+                        std::cout << "Added " << resp.documentsAdded << " documents" << std::endl;
+                    }
+                    return Result<void>();
+                };
+
+                auto fallback = [&, targetPath]() -> Result<void> {
+                    // Fall back to local execution
+                    return executeLocal(targetPath);
+                };
+
+                auto d = daemon_first(dreq, fallback, render);
+                if (d) {
+                    return Result<void>();
+                }
+                // If daemon returned an actual error (not network/not-implemented), return it
+                if (d.error().code != ErrorCode::NetworkError &&
+                    d.error().code != ErrorCode::NotImplemented) {
+                    return d.error();
+                }
+            }
+        }
+
+        // Fall back to local execution for stdin or if daemon failed to connect
+        return executeLocal(targetPath);
     }
 
 private:
@@ -143,7 +173,7 @@ private:
         return oss.str();
     }
 
-    Result<void> executeLocal() {
+    Result<void> executeLocal(const std::filesystem::path& targetPath) {
         auto ensured = cli_->ensureStorageInitialized();
         if (!ensured) {
             return ensured;
@@ -154,13 +184,13 @@ private:
         }
 
         // Check if reading from stdin
-        if (targetPath_.string() == "-") {
+        if (targetPath.string() == "-") {
             return storeFromStdin(store);
         }
 
         // Validate path exists
-        if (!std::filesystem::exists(targetPath_)) {
-            return Error{ErrorCode::FileNotFound, "Path not found: " + targetPath_.string()};
+        if (!std::filesystem::exists(targetPath)) {
+            return Error{ErrorCode::FileNotFound, "Path not found: " + targetPath.string()};
         }
 
         // Generate snapshot ID if not provided but snapshot label is given
@@ -169,10 +199,10 @@ private:
         }
 
         // Handle directory vs file
-        if (std::filesystem::is_directory(targetPath_)) {
-            return storeDirectory(store);
+        if (std::filesystem::is_directory(targetPath)) {
+            return storeDirectory(store, targetPath);
         } else {
-            return storeFile(store, targetPath_);
+            return storeFile(store, targetPath);
         }
     }
 
@@ -274,9 +304,19 @@ private:
 
             // Add tags and metadata for both new and existing documents
             if (docId > 0) {
-                // Add tags as metadata
-                for (const auto& tag : tags_) {
-                    metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
+                // Add tags as metadata - parse comma-separated values
+                for (const auto& tagStr : tags_) {
+                    // Each element in tags_ might contain comma-separated tags
+                    std::stringstream ss(tagStr);
+                    std::string tag;
+                    while (std::getline(ss, tag, ',')) {
+                        // Trim whitespace
+                        tag.erase(0, tag.find_first_not_of(" \t"));
+                        tag.erase(tag.find_last_not_of(" \t") + 1);
+                        if (!tag.empty()) {
+                            metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
+                        }
+                    }
                 }
 
                 // Add custom metadata
@@ -335,7 +375,8 @@ private:
         return Result<void>();
     }
 
-    Result<void> storeDirectory(std::shared_ptr<api::IContentStore> store) {
+    Result<void> storeDirectory(std::shared_ptr<api::IContentStore> store,
+                                const std::filesystem::path& targetPath) {
         if (!recursive_) {
             return Error{ErrorCode::InvalidArgument, "Directory specified but --recursive not set"};
         }
@@ -344,7 +385,7 @@ private:
 
         // Collect files to add
         try {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(targetPath_)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(targetPath)) {
                 if (!entry.is_regular_file())
                     continue;
 
@@ -384,7 +425,7 @@ private:
             }
 
             // Store metadata in database
-            auto storeMetadataResult = storeFileMetadata(filePath, result.value());
+            auto storeMetadataResult = storeFileMetadata(filePath, result.value(), targetPath);
             if (!storeMetadataResult) {
                 spdlog::warn("Failed to store metadata for {}: {}", filePath.string(),
                              storeMetadataResult.error().message);
@@ -433,9 +474,19 @@ private:
         }
         // If both user MIME type and auto-detection are disabled, leave empty
 
-        // Convert vector tags to unordered_map
-        for (const auto& tag : tags_) {
-            metadata.tags[tag] = "";
+        // Convert vector tags to unordered_map - parse comma-separated values
+        for (const auto& tagStr : tags_) {
+            // Each element in tags_ might contain comma-separated tags
+            std::stringstream ss(tagStr);
+            std::string tag;
+            while (std::getline(ss, tag, ',')) {
+                // Trim whitespace
+                tag.erase(0, tag.find_first_not_of(" \t"));
+                tag.erase(tag.find_last_not_of(" \t") + 1);
+                if (!tag.empty()) {
+                    metadata.tags[tag] = "";
+                }
+            }
         }
 
         // Add custom metadata
@@ -514,7 +565,8 @@ private:
     }
 
     Result<void> storeFileMetadata(const std::filesystem::path& filePath,
-                                   const api::StoreResult& storeResult) {
+                                   const api::StoreResult& storeResult,
+                                   const std::filesystem::path& baseDirectory = {}) {
         auto metadataRepo = cli_->getMetadataRepository();
         if (!metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
@@ -578,9 +630,19 @@ private:
             return Error{ErrorCode::Unknown, "Failed to get document ID"};
         }
 
-        // Add tags as metadata
-        for (const auto& tag : tags_) {
-            metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
+        // Add tags as metadata - parse comma-separated values
+        for (const auto& tagStr : tags_) {
+            // Each element in tags_ might contain comma-separated tags
+            std::stringstream ss(tagStr);
+            std::string tag;
+            while (std::getline(ss, tag, ',')) {
+                // Trim whitespace
+                tag.erase(0, tag.find_first_not_of(" \t"));
+                tag.erase(tag.find_last_not_of(" \t") + 1);
+                if (!tag.empty()) {
+                    metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue(tag));
+                }
+            }
         }
 
         // Add custom metadata
@@ -606,8 +668,8 @@ private:
         }
 
         // Add relative path metadata for directory operations
-        if (std::filesystem::is_directory(targetPath_)) {
-            auto relativePath = std::filesystem::relative(filePath, targetPath_);
+        if (!baseDirectory.empty() && std::filesystem::is_directory(baseDirectory)) {
+            auto relativePath = std::filesystem::relative(filePath, baseDirectory);
             metadataRepo->setMetadata(docId, "path",
                                       metadata::MetadataValue(relativePath.string()));
         }
@@ -688,30 +750,34 @@ private:
         return false;
     }
 
-    bool matchesPattern(const std::string& text, const std::string& pattern) {
-        // Simple wildcard matching (* and ?)
-        std::regex regexPattern;
-        std::string regexString = pattern;
+    bool matchesPattern(const std::string& str, const std::string& pattern) {
+        // Efficient iterative wildcard matching (* and ?)
+        size_t strIdx = 0, patIdx = 0;
+        size_t strLen = str.length(), patLen = pattern.length();
+        size_t lastWildcard = std::string::npos, lastMatch = 0;
 
-        // Convert wildcards to regex
-        size_t pos = 0;
-        while ((pos = regexString.find('*', pos)) != std::string::npos) {
-            regexString.replace(pos, 1, ".*");
-            pos += 2;
-        }
-        pos = 0;
-        while ((pos = regexString.find('?', pos)) != std::string::npos) {
-            regexString.replace(pos, 1, ".");
-            pos += 1;
+        while (strIdx < strLen) {
+            if (patIdx < patLen && (pattern[patIdx] == '?' || pattern[patIdx] == str[strIdx])) {
+                strIdx++;
+                patIdx++;
+            } else if (patIdx < patLen && pattern[patIdx] == '*') {
+                lastWildcard = patIdx;
+                lastMatch = strIdx;
+                patIdx++;
+            } else if (lastWildcard != std::string::npos) {
+                patIdx = lastWildcard + 1;
+                lastMatch++;
+                strIdx = lastMatch;
+            } else {
+                return false;
+            }
         }
 
-        try {
-            regexPattern = std::regex(regexString, std::regex_constants::icase);
-            return std::regex_match(text, regexPattern);
-        } catch (const std::regex_error&) {
-            // If regex fails, fall back to simple string comparison
-            return text == pattern;
+        while (patIdx < patLen && pattern[patIdx] == '*') {
+            patIdx++;
         }
+
+        return patIdx == patLen;
     }
 
     std::string generateSnapshotId() {
@@ -759,7 +825,7 @@ private:
 
 private:
     YamsCLI* cli_ = nullptr;
-    std::filesystem::path targetPath_;
+    std::vector<std::string> targetPaths_; // Changed to vector for multiple paths
     std::string documentName_;
     std::vector<std::string> tags_;
     std::vector<std::string> metadata_;

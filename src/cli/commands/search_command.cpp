@@ -85,6 +85,18 @@ public:
                 dreq.literalText = literalText_;
                 dreq.similarity = static_cast<double>(minSimilarity_);
 
+                // Pass all additional fields for feature parity
+                dreq.searchType = searchType_;
+                dreq.pathsOnly = pathsOnly_;
+                dreq.showHash = showHash_;
+                dreq.verbose = verbose_;
+                dreq.jsonOutput = jsonOutput_;
+                dreq.showLineNumbers = showLineNumbers_;
+                dreq.afterContext = static_cast<int>(afterContext_);
+                dreq.beforeContext = static_cast<int>(beforeContext_);
+                dreq.context = static_cast<int>(context_);
+                dreq.hashQuery = hashQuery_;
+
                 auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
                     const auto& items = resp.results;
                     if (pathsOnly_) {

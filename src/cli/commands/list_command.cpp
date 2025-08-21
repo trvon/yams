@@ -88,6 +88,10 @@ public:
         cmd->add_option("--indexed-after", indexedAfter_, "Show files indexed after this time");
         cmd->add_option("--indexed-before", indexedBefore_, "Show files indexed before this time");
 
+        // Filter options
+        cmd->add_option("--tags", filterTags_,
+                        "Filter documents by tags (comma-separated, e.g., 'work,important')");
+
         // Change tracking options
         cmd->add_flag("--changes", showChanges_,
                       "Show documents with recent modifications (last 24h)");
@@ -221,10 +225,58 @@ public:
                 doc.info = docInfo;
 
                 // Get additional metadata
-                if (showMetadata_ || showTags_) {
+                if (showMetadata_ || showTags_ || !filterTags_.empty()) {
                     auto metadataResult = metadataRepo->getAllMetadata(docInfo.id);
                     if (metadataResult) {
                         doc.metadata = metadataResult.value();
+                    }
+                }
+
+                // Apply tag filter if specified
+                if (!filterTags_.empty()) {
+                    // Parse comma-separated tags
+                    std::vector<std::string> requiredTags;
+                    std::stringstream ss(filterTags_);
+                    std::string tag;
+                    while (std::getline(ss, tag, ',')) {
+                        // Trim whitespace
+                        tag.erase(0, tag.find_first_not_of(" \t"));
+                        tag.erase(tag.find_last_not_of(" \t") + 1);
+                        if (!tag.empty()) {
+                            requiredTags.push_back(tag);
+                        }
+                    }
+
+                    // Check if document has any of the required tags
+                    bool hasTag = false;
+                    for (const auto& [key, value] : doc.metadata) {
+                        // Tags are stored with key="tag" as comma-separated values
+                        if (key == "tag") {
+                            // Parse the stored tags
+                            std::stringstream storedTagStream(value.value);
+                            std::string storedTag;
+                            while (std::getline(storedTagStream, storedTag, ',')) {
+                                // Trim whitespace from stored tag
+                                storedTag.erase(0, storedTag.find_first_not_of(" \t"));
+                                storedTag.erase(storedTag.find_last_not_of(" \t") + 1);
+
+                                // Check if this stored tag matches any required tag
+                                for (const auto& reqTag : requiredTags) {
+                                    if (storedTag == reqTag) {
+                                        hasTag = true;
+                                        break;
+                                    }
+                                }
+                                if (hasTag)
+                                    break;
+                            }
+                            if (hasTag)
+                                break;
+                        }
+                    }
+
+                    if (!hasTag) {
+                        continue; // Skip this document
                     }
                 }
 
@@ -1005,7 +1057,8 @@ private:
     int limit_ = 100;
     bool verbose_ = false;
     int offset_ = 0;
-    int recentCount_ = 0; // 0 means not set, show all
+    int recentCount_ = 0;    // 0 means not set, show all
+    std::string filterTags_; // Comma-separated tags to filter by
 
     // New enhanced display options
     bool showSnippets_ = true;
@@ -1037,8 +1090,6 @@ private:
     bool showDeleted_ = false;
     std::string changeWindow_;
 
-    // Tag filtering
-    std::string filterTags_;
     // bool matchAllTags_ = false;  // Currently unused - reserved for future tag matching logic
 
     std::string getFileTypeIndicator(const EnhancedDocumentInfo& doc) {

@@ -1,3 +1,4 @@
+#include <cstring> // For std::strlen
 #include <memory>
 #include <random>
 #include <vector>

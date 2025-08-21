@@ -173,30 +173,34 @@ private:
         return false;
     }
 
-    bool matchesPattern(const std::string& text, const std::string& pattern) {
-        // Simple wildcard matching (* and ?)
-        std::regex regexPattern;
-        std::string regexString = pattern;
+    bool matchesPattern(const std::string& str, const std::string& pattern) {
+        // Efficient iterative wildcard matching (* and ?)
+        size_t strIdx = 0, patIdx = 0;
+        size_t strLen = str.length(), patLen = pattern.length();
+        size_t lastWildcard = std::string::npos, lastMatch = 0;
 
-        // Convert wildcards to regex
-        size_t pos = 0;
-        while ((pos = regexString.find('*', pos)) != std::string::npos) {
-            regexString.replace(pos, 1, ".*");
-            pos += 2;
-        }
-        pos = 0;
-        while ((pos = regexString.find('?', pos)) != std::string::npos) {
-            regexString.replace(pos, 1, ".");
-            pos += 1;
+        while (strIdx < strLen) {
+            if (patIdx < patLen && (pattern[patIdx] == '?' || pattern[patIdx] == str[strIdx])) {
+                strIdx++;
+                patIdx++;
+            } else if (patIdx < patLen && pattern[patIdx] == '*') {
+                lastWildcard = patIdx;
+                lastMatch = strIdx;
+                patIdx++;
+            } else if (lastWildcard != std::string::npos) {
+                patIdx = lastWildcard + 1;
+                lastMatch++;
+                strIdx = lastMatch;
+            } else {
+                return false;
+            }
         }
 
-        try {
-            regexPattern = std::regex(regexString, std::regex_constants::icase);
-            return std::regex_match(text, regexPattern);
-        } catch (const std::regex_error&) {
-            // If regex fails, fall back to simple string comparison
-            return text == pattern;
+        while (patIdx < patLen && pattern[patIdx] == '*') {
+            patIdx++;
         }
+
+        return patIdx == patLen;
     }
 
     Result<std::string>
