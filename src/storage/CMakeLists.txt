@@ -12,6 +12,8 @@ endif()
 add_library(yams_storage_engine
     storage_engine.cpp
     compressed_storage_engine.cpp
+    storage_backend_factory.cpp
+    url_backend.cpp
     ${PLATFORM_SOURCES}
 )
 
@@ -23,6 +25,7 @@ target_link_libraries(yams_storage_engine
     PRIVATE
         spdlog::spdlog
         Threads::Threads
+        CURL::libcurl  # For URL backend
 )
 
 target_include_directories(yams_storage_engine

@@ -5,6 +5,23 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.5] - 2025-08-21
+
+### Fixed
+- **MCP Server**
+  - Added mutex protection to StdioTransport for thread-safe I/O operations
+  - Fixed potential JSON response interleaving when multiple clients connect
+  - Prevents "Expected ',' or ']' after array element" errors in concurrent scenarios
+  - Fixed missing includes for file operations
+- **Test Failures**
+  - Fixed FilesystemBackend::list() key reconstruction from sharded paths
+  - Fixed ManifestManager statistics by moving static counters to member variables
+  - Fixed file type detection consistency in CommandIntegrationTest
+  - Fixed heap-use-after-free in IPC server async socket handling
+- **Detection Module**
+  - Ensured FileSignature creation uses consistent methods for isBinary and fileType
+  - Fixed mismatch between FileSignature fields and classification methods
+
 ## [v0.4.4] - 2025-08-21
 **CI version bump**
 

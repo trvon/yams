@@ -27,6 +27,8 @@ struct ManifestManager::Impl {
     Config config;
     mutable std::mutex statsMutex;
     mutable ManifestStats stats;
+    mutable size_t serCount = 0;
+    mutable size_t deserCount = 0;
 
     // Simple LRU cache for manifests
     struct CacheEntry {
@@ -48,8 +50,6 @@ struct ManifestManager::Impl {
 
         // Only update serialization time if non-zero
         if (serTime.count() > 0) {
-            // Keep track of serialization count separately for accurate average
-            static size_t serCount = 0;
             serCount++;
             int64_t totalSerTime =
                 stats.avgSerializationTime.count() * (serCount - 1) + serTime.count();
@@ -58,8 +58,6 @@ struct ManifestManager::Impl {
 
         // Only update deserialization time if non-zero
         if (deserTime.count() > 0) {
-            // Keep track of deserialization count separately for accurate average
-            static size_t deserCount = 0;
             deserCount++;
             int64_t totalDeserTime =
                 stats.avgDeserializationTime.count() * (deserCount - 1) + deserTime.count();

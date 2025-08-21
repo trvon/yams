@@ -60,8 +60,8 @@ private:
 } // namespace
 
 SqliteVecBackend::SqliteVecBackend()
-    : db_(nullptr), embedding_dim_(0), initialized_(false), in_transaction_(false) {
-    std::memset(&stmts_, 0, sizeof(stmts_));
+    : db_(nullptr), embedding_dim_(0), initialized_(false), in_transaction_(false), stmts_{} {
+    // Initialize all statement pointers to nullptr (done by stmts_{} above)
 }
 
 SqliteVecBackend::~SqliteVecBackend() {
@@ -74,7 +74,7 @@ SqliteVecBackend::SqliteVecBackend(SqliteVecBackend&& other) noexcept
       stmts_(other.stmts_) {
     other.db_ = nullptr;
     other.initialized_ = false;
-    std::memset(&other.stmts_, 0, sizeof(other.stmts_));
+    other.stmts_ = {}; // Reset all statement pointers to nullptr
 }
 
 SqliteVecBackend& SqliteVecBackend::operator=(SqliteVecBackend&& other) noexcept {
@@ -89,7 +89,7 @@ SqliteVecBackend& SqliteVecBackend::operator=(SqliteVecBackend&& other) noexcept
 
         other.db_ = nullptr;
         other.initialized_ = false;
-        std::memset(&other.stmts_, 0, sizeof(other.stmts_));
+        other.stmts_ = {}; // Reset all statement pointers to nullptr
     }
     return *this;
 }

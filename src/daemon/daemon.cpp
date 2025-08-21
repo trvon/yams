@@ -390,7 +390,7 @@ Result<void> YamsDaemon::start() {
                     if (!bytesRes) {
                         return ErrorResponse{bytesRes.error().code, bytesRes.error().message};
                     }
-                    auto bytes = std::move(bytesRes.value());
+                    auto bytes = bytesRes.value();
                     uint64_t total = bytes.size();
                     // metadataOnly path returns only metadata without starting a session
                     GetInitResponse ir;
@@ -455,7 +455,7 @@ Result<void> YamsDaemon::start() {
                     if (!docsRes) {
                         return ErrorResponse{docsRes.error().code, docsRes.error().message};
                     }
-                    auto docs = std::move(docsRes.value());
+                    auto docs = docsRes.value();
                     // Sort by indexed time if recent flag
                     if (r.recent) {
                         std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {

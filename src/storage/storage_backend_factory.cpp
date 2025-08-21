@@ -1,10 +1,10 @@
 #include <yams/storage/storage_backend.h>
-#include <yams/core/error.h>
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <regex>
 #include <unordered_map>
 
@@ -173,14 +173,14 @@ Result<void> FilesystemBackend::initialize(const BackendConfig& config) {
     std::error_code ec;
     std::filesystem::create_directories(basePath_ / "objects", ec);
     if (ec) {
-        return Result<void>(ErrorCode::PermissionDenied, 
-                           "Failed to create storage directory: " + ec.message());
+        return Result<void>(Error{ErrorCode::PermissionDenied, 
+                           "Failed to create storage directory: " + ec.message()});
     }
     
     std::filesystem::create_directories(basePath_ / "temp", ec);
     if (ec) {
-        return Result<void>(ErrorCode::PermissionDenied,
-                           "Failed to create temp directory: " + ec.message());
+        return Result<void>(Error{ErrorCode::PermissionDenied,
+                           "Failed to create temp directory: " + ec.message()});
     }
     
     spdlog::info("Initialized filesystem backend at: {}", basePath_.string());
@@ -204,8 +204,8 @@ Result<void> FilesystemBackend::ensureDirectoryExists(const std::filesystem::pat
     std::filesystem::create_directories(path.parent_path(), ec);
     
     if (ec) {
-        return Result<void>(ErrorCode::PermissionDenied,
-                           "Failed to create directory: " + ec.message());
+        return Result<void>(Error{ErrorCode::PermissionDenied,
+                           "Failed to create directory: " + ec.message()});
     }
     
     return {};
@@ -225,8 +225,8 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
     {
         std::ofstream file(tempPath, std::ios::binary);
         if (!file) {
-            return Result<void>(ErrorCode::PermissionDenied,
-                               "Failed to create temp file");
+            return Result<void>(Error{ErrorCode::PermissionDenied,
+                               "Failed to create temp file"});
         }
         
         file.write(reinterpret_cast<const char*>(data.data()),
@@ -234,7 +234,7 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
         
         if (!file) {
             std::filesystem::remove(tempPath);
-            return Result<void>(ErrorCode::Unknown, "Failed to write data");
+            return Result<void>(Error{ErrorCode::Unknown, "Failed to write data"});
         }
     }
     
@@ -250,8 +250,8 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
             return {};
         }
         
-        return Result<void>(ErrorCode::Unknown,
-                           "Failed to rename file: " + ec.message());
+        return Result<void>(Error{ErrorCode::Unknown,
+                           "Failed to rename file: " + ec.message()});
     }
     
     return {};
@@ -261,12 +261,12 @@ Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key)
     auto objectPath = getObjectPath(key);
     
     if (!std::filesystem::exists(objectPath)) {
-        return Result<std::vector<std::byte>>(ErrorCode::ChunkNotFound);
+        return Result<std::vector<std::byte>>(Error{ErrorCode::ChunkNotFound});
     }
     
     std::ifstream file(objectPath, std::ios::binary | std::ios::ate);
     if (!file) {
-        return Result<std::vector<std::byte>>(ErrorCode::PermissionDenied);
+        return Result<std::vector<std::byte>>(Error{ErrorCode::PermissionDenied});
     }
     
     auto fileSize = file.tellg();
@@ -276,8 +276,8 @@ Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key)
     file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
     
     if (!file) {
-        return Result<std::vector<std::byte>>(ErrorCode::Unknown,
-                                              "Failed to read file");
+        return Result<std::vector<std::byte>>(Error{ErrorCode::Unknown,
+                                              "Failed to read file"});
     }
     
     return buffer;
@@ -295,8 +295,8 @@ Result<void> FilesystemBackend::remove(std::string_view key) {
     std::filesystem::remove(objectPath, ec);
     
     if (ec && std::filesystem::exists(objectPath)) {
-        return Result<void>(ErrorCode::PermissionDenied,
-                           "Failed to remove file: " + ec.message());
+        return Result<void>(Error{ErrorCode::PermissionDenied,
+                           "Failed to remove file: " + ec.message()});
     }
     
     return {};
@@ -309,11 +309,36 @@ Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix
         for (const auto& entry : std::filesystem::recursive_directory_iterator(basePath_ / "objects")) {
             if (entry.is_regular_file()) {
                 auto relativePath = std::filesystem::relative(entry.path(), basePath_ / "objects");
-                std::string key = relativePath.string();
+                std::string pathStr = relativePath.string();
                 
-                // Remove directory separators from sharded path to get original key
-                key.erase(std::remove(key.begin(), key.end(), '/'), key.end());
-                key.erase(std::remove(key.begin(), key.end(), '\\'), key.end());
+                // Extract the original key from the sharded path
+                // Sharding creates: ab/cd/original_key_here
+                // We need to skip the first two directory levels if they exist
+                std::string key;
+                size_t slashCount = 0;
+                size_t pos = 0;
+                
+                // Count and skip first 2 directory levels (sharding directories)
+                for (size_t i = 0; i < pathStr.length(); ++i) {
+                    if (pathStr[i] == '/' || pathStr[i] == '\\') {
+                        slashCount++;
+                        if (slashCount == 2) {
+                            pos = i + 1;
+                            break;
+                        }
+                    }
+                }
+                
+                // If we have sharding (2+ slashes), use the part after sharding
+                // Otherwise use the whole path (for short keys without sharding)
+                if (slashCount >= 2 && pos < pathStr.length()) {
+                    key = pathStr.substr(pos);
+                } else {
+                    key = pathStr;
+                }
+                
+                // Normalize path separators to forward slashes
+                std::replace(key.begin(), key.end(), '\\', '/');
                 
                 if (prefix.empty() || key.starts_with(prefix)) {
                     results.push_back(key);
@@ -321,14 +346,14 @@ Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix
             }
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        return Result<std::vector<std::string>>(ErrorCode::PermissionDenied, e.what());
+        return Result<std::vector<std::string>>(Error{ErrorCode::PermissionDenied, e.what()});
     }
     
     return results;
 }
 
-Result<StorageStats> FilesystemBackend::getStats() const {
-    StorageStats stats;
+Result<::yams::StorageStats> FilesystemBackend::getStats() const {
+    ::yams::StorageStats stats;
     
     try {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(basePath_ / "objects")) {

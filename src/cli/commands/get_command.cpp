@@ -281,7 +281,7 @@ public:
             if (!result) {
                 return Error{result.error().code, result.error().message};
             }
-            std::vector<std::byte> contentBytes = std::move(result.value());
+            std::vector<std::byte> contentBytes = result.value();
 
             // Apply text extraction if needed
             if (shouldExtract) {

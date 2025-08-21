@@ -27,6 +27,19 @@ add_library(yams_vector
     ${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
 )
 
+# Suppress warnings for sqlite-vec.c (third-party code)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
+        PROPERTIES
+        COMPILE_FLAGS "-w"  # Suppress all warnings
+    )
+elseif(MSVC)
+    set_source_files_properties(${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
+        PROPERTIES
+        COMPILE_FLAGS "/w"  # Suppress all warnings
+    )
+endif()
+
 # Set properties
 set_target_properties(yams_vector PROPERTIES
     CXX_STANDARD 20

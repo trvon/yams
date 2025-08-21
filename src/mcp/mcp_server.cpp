@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <regex>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
@@ -26,6 +27,9 @@
 
 namespace yams::mcp {
 
+// Define static mutex for StdioTransport
+std::mutex StdioTransport::io_mutex_;
+
 // StdioTransport implementation
 StdioTransport::StdioTransport() {
     // Ensure unbuffered I/O for stdio communication
@@ -36,6 +40,8 @@ StdioTransport::StdioTransport() {
 void StdioTransport::send(const json& message) {
     auto currentState = state_.load();
     if (currentState == TransportState::Connected) {
+        // Lock mutex to ensure atomic write
+        std::lock_guard<std::mutex> lock(io_mutex_);
         const std::string payload = message.dump();
         std::cout << payload << "\n";
         std::cout.flush();
@@ -97,19 +103,23 @@ MessageResult StdioTransport::receive() {
             std::string line;
             std::cin.clear();
 
-            if (!std::getline(std::cin, line)) {
-                if (std::cin.eof()) {
-                    spdlog::debug("EOF on stdin, closing transport");
-                    state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
+            // Lock mutex for thread-safe getline
+            {
+                std::lock_guard<std::mutex> lock(io_mutex_);
+                if (!std::getline(std::cin, line)) {
+                    if (std::cin.eof()) {
+                        spdlog::debug("EOF on stdin, closing transport");
+                        state_.store(TransportState::Disconnected);
+                        return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
+                    }
+                    // Clear error and retry if we should
+                    std::cin.clear();
+                    if (!shouldRetryAfterError()) {
+                        state_.store(TransportState::Error);
+                        return Error{ErrorCode::NetworkError, "Too many consecutive I/O errors"};
+                    }
+                    continue;
                 }
-                // Clear error and retry if we should
-                std::cin.clear();
-                if (!shouldRetryAfterError()) {
-                    state_.store(TransportState::Error);
-                    return Error{ErrorCode::NetworkError, "Too many consecutive I/O errors"};
-                }
-                continue;
             }
 
             // Handle CRLF: strip trailing '\r' if present
@@ -2274,19 +2284,19 @@ MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
 }
 
 Result<MCPRestoreSnapshotResponse>
-MCPServer::handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req) {
+MCPServer::handleRestoreSnapshot(const MCPRestoreSnapshotRequest& /*req*/) {
     return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
 }
 
 Result<MCPListCollectionsResponse>
-MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
+MCPServer::handleListCollections(const MCPListCollectionsRequest& /*req*/) {
     MCPListCollectionsResponse response;
     // TODO: Implement collection listing
     return response;
 }
 
 Result<MCPListSnapshotsResponse>
-MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
+MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& /*req*/) {
     MCPListSnapshotsResponse response;
     // TODO: Implement snapshot listing
     return response;

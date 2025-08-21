@@ -174,39 +174,27 @@ public:
         FileSignature sig;
         sig.mimeType = mimeType;
         sig.magicNumber = FileTypeDetector::bytesToHex(data, 16);
-        sig.isBinary = isBinaryData(data);
+        // Use the instance methods to ensure consistency
+        sig.isBinary = FileTypeDetector::instance().isBinaryMimeType(mimeType);
+        sig.fileType = FileTypeDetector::instance().getFileTypeCategory(mimeType);
         sig.confidence = 0.95f; // High confidence from libmagic
 
-        // Determine file type category from MIME type
-        if (sig.mimeType.find("image/") == 0) {
-            sig.fileType = "image";
+        // Set description based on file type
+        if (sig.fileType == "image") {
             sig.description = "Image file";
-        } else if (sig.mimeType.find("video/") == 0) {
-            sig.fileType = "video";
+        } else if (sig.fileType == "video") {
             sig.description = "Video file";
-        } else if (sig.mimeType.find("audio/") == 0) {
-            sig.fileType = "audio";
+        } else if (sig.fileType == "audio") {
             sig.description = "Audio file";
-        } else if (sig.mimeType.find("text/") == 0) {
-            sig.fileType = "text";
+        } else if (sig.fileType == "text" || sig.fileType == "code") {
             sig.description = "Text file";
-            sig.isBinary = false;
-        } else if (sig.mimeType.find("application/") == 0) {
-            if (sig.mimeType.find("zip") != std::string::npos ||
-                sig.mimeType.find("tar") != std::string::npos ||
-                sig.mimeType.find("compressed") != std::string::npos) {
-                sig.fileType = "archive";
-                sig.description = "Archive file";
-            } else if (sig.mimeType.find("pdf") != std::string::npos ||
-                       sig.mimeType.find("office") != std::string::npos) {
-                sig.fileType = "document";
-                sig.description = "Document file";
-            } else {
-                sig.fileType = "application";
-                sig.description = "Application file";
-            }
+        } else if (sig.fileType == "archive") {
+            sig.description = "Archive file";
+        } else if (sig.fileType == "document") {
+            sig.description = "Document file";
+        } else if (sig.fileType == "application") {
+            sig.description = "Application file";
         } else {
-            sig.fileType = "unknown";
             sig.description = "Unknown file type";
         }
 
@@ -538,19 +526,9 @@ Result<FileSignature> FileTypeDetector::detectFromFile(const std::filesystem::pa
             sig.mimeType = mimeType;
             sig.confidence = 0.6f; // Medium confidence for extension-based
             sig.magicNumber = extractMagicNumber(buffer);
-            sig.isBinary = isBinaryData(buffer);
-
-            // Set file type based on MIME type
-            if (mimeType.find("image/") == 0)
-                sig.fileType = "image";
-            else if (mimeType.find("video/") == 0)
-                sig.fileType = "video";
-            else if (mimeType.find("audio/") == 0)
-                sig.fileType = "audio";
-            else if (mimeType.find("text/") == 0)
-                sig.fileType = "text";
-            else
-                sig.fileType = "unknown";
+            // Use the instance methods to ensure consistency
+            sig.isBinary = FileTypeDetector::instance().isBinaryMimeType(mimeType);
+            sig.fileType = FileTypeDetector::instance().getFileTypeCategory(mimeType);
 
             return sig;
         }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <yams/core/result.h>
+#include <yams/core/types.h>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -11,9 +11,6 @@
 #include <vector>
 
 namespace yams::storage {
-
-// Forward declarations
-struct StorageStats;
 
 /**
  * Storage backend configuration
@@ -76,7 +73,7 @@ public:
     /**
      * Get storage statistics
      */
-    virtual Result<StorageStats> getStats() const = 0;
+    virtual Result<::yams::StorageStats> getStats() const = 0;
     
     /**
      * Async store operation
@@ -118,7 +115,7 @@ public:
     Result<bool> exists(std::string_view key) const override;
     Result<void> remove(std::string_view key) override;
     Result<std::vector<std::string>> list(std::string_view prefix) const override;
-    Result<StorageStats> getStats() const override;
+    Result<::yams::StorageStats> getStats() const override;
     
     std::future<Result<void>> storeAsync(std::string_view key,
                                          std::span<const std::byte> data) override;
@@ -140,7 +137,8 @@ private:
  */
 class URLBackend : public IStorageBackend {
 public:
-    URLBackend() = default;
+    URLBackend();
+    ~URLBackend();
     
     Result<void> initialize(const BackendConfig& config) override;
     Result<void> store(std::string_view key, std::span<const std::byte> data) override;
@@ -148,7 +146,7 @@ public:
     Result<bool> exists(std::string_view key) const override;
     Result<void> remove(std::string_view key) override;
     Result<std::vector<std::string>> list(std::string_view prefix) const override;
-    Result<StorageStats> getStats() const override;
+    Result<::yams::StorageStats> getStats() const override;
     
     std::future<Result<void>> storeAsync(std::string_view key,
                                          std::span<const std::byte> data) override;

@@ -10,7 +10,9 @@
 #include <yams/content/image_content_handler.h>
 #include <yams/content/pdf_content_handler.h>
 #include <yams/content/text_content_handler.h>
+#if defined(YAMS_HAVE_FFPROBE) || defined(YAMS_HAVE_MEDIAINFO)
 #include <yams/content/video_content_handler.h>
+#endif
 #include <yams/detection/file_type_detector.h>
 
 namespace yams::content {
@@ -174,17 +176,17 @@ void ContentHandlerRegistry::initializeDefaultHandlers() {
     // C++20: Define handler factories with priority order (highest to lowest)
     // Using structured bindings and lambda factories for clean initialization
     using HandlerFactory = std::function<std::shared_ptr<IContentHandler>()>;
-    const std::array<std::pair<std::string, HandlerFactory>, 7> handlerFactories = {
-        {std::make_pair("ImageContentHandler", []() { return createImageHandler(); }),
-         std::make_pair("VideoContentHandler", []() { return createVideoHandler(); }),
-         std::make_pair("AudioContentHandler", []() { return createAudioHandler(); }),
-         std::make_pair("ArchiveContentHandler", []() { return createArchiveHandler(); }),
-         std::make_pair("TextContentHandler",
-                        []() { return std::make_shared<TextContentHandler>(); }),
-         std::make_pair("PdfContentHandler",
-                        []() { return std::make_shared<PdfContentHandler>(); }),
-         std::make_pair("BinaryContentHandler",
-                        []() { return std::make_shared<BinaryContentHandler>(); })}};
+    std::vector<std::pair<std::string, HandlerFactory>> handlerFactories = {
+        {"ImageContentHandler", []() { return std::shared_ptr<IContentHandler>(createImageHandler().release()); }},
+#if defined(YAMS_HAVE_FFPROBE) || defined(YAMS_HAVE_MEDIAINFO)
+        {"VideoContentHandler", []() { return std::shared_ptr<IContentHandler>(createVideoHandler().release()); }},
+#endif
+        {"AudioContentHandler", []() { return std::shared_ptr<IContentHandler>(createAudioHandler().release()); }},
+        {"ArchiveContentHandler", []() { return std::shared_ptr<IContentHandler>(createArchiveHandler().release()); }},
+        {"TextContentHandler", []() { return std::make_shared<TextContentHandler>(); }},
+        {"PdfContentHandler", []() { return std::make_shared<PdfContentHandler>(); }},
+        {"BinaryContentHandler", []() { return std::make_shared<BinaryContentHandler>(); }}
+    };
 
     // C++20: Use ranges to register all handlers
     size_t successCount = 0;

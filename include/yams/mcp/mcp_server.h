@@ -15,6 +15,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <regex>
 #include <string>
 #include <thread>
@@ -55,6 +56,9 @@ private:
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
+    
+    // Mutex for thread-safe I/O operations
+    static std::mutex io_mutex_;
 
     // Helper for non-blocking stdin check
     bool isInputAvailable(int timeoutMs = 100) const;

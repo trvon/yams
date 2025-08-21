@@ -1,6 +1,7 @@
 #include <yams/daemon/ipc/async_socket.h>
 
 #include <spdlog/spdlog.h>
+#include <atomic>
 
 #include <cerrno>
 #include <chrono>
@@ -242,6 +243,10 @@ public:
         std::coroutine_handle<> handle;
         void* awaiter;
         bool isWrite;
+        // Use atomic to ensure thread-safe access
+        std::atomic<bool> completed{false};
+        ssize_t result = -1;
+        int error_code = 0;
     };
 
     void submit_read(int fd, void* buffer, size_t size, std::coroutine_handle<> h,
@@ -288,19 +293,34 @@ public:
 
             auto* op = reinterpret_cast<UringOp*>(io_uring_cqe_get_data(cqe));
             if (op) {
-                if (op->isWrite) {
-                    auto* awaiter = reinterpret_cast<AsyncSocket::WriteAwaiter*>(op->awaiter);
-                    awaiter->result = cqe->res;
-                    awaiter->error_code = (cqe->res < 0) ? -cqe->res : 0;
+                // Store results first
+                op->result = cqe->res;
+                op->error_code = (cqe->res < 0) ? -cqe->res : 0;
+                
+                // Mark as completed atomically
+                bool was_completed = op->completed.exchange(true);
+                
+                if (!was_completed && op->awaiter) {
+                    // Copy results to the awaiter
+                    if (op->isWrite) {
+                        auto* awaiter = reinterpret_cast<AsyncSocket::WriteAwaiter*>(op->awaiter);
+                        awaiter->result = op->result;
+                        awaiter->error_code = op->error_code;
+                    } else {
+                        auto* awaiter = reinterpret_cast<AsyncSocket::ReadAwaiter*>(op->awaiter);
+                        awaiter->result = op->result;
+                        awaiter->error_code = op->error_code;
+                    }
+                    
+                    // Resume the coroutine
+                    auto h2 = op->handle;
+                    delete op;
+                    if (h2) {
+                        h2.resume();
+                    }
                 } else {
-                    auto* awaiter = reinterpret_cast<AsyncSocket::ReadAwaiter*>(op->awaiter);
-                    awaiter->result = cqe->res;
-                    awaiter->error_code = (cqe->res < 0) ? -cqe->res : 0;
-                }
-                auto h2 = op->handle;
-                delete op;
-                if (h2) {
-                    h2.resume();
+                    // Already completed or awaiter invalid, just clean up
+                    delete op;
                 }
             }
 

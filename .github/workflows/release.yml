@@ -151,8 +151,7 @@ jobs:
             --output-folder=build/conan-validation \
             -s build_type=Release \
             --build=missing
-          cmake -B build/conan-validation/build/Release -S . \
-            -DCMAKE_TOOLCHAIN_FILE="$(pwd)/build/conan-validation/conan_toolchain.cmake" \
+          cmake --preset conan-validation \
             -DYAMS_BUILD_TESTS=ON \
             -DYAMS_BUILD_BENCHMARKS=ON \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
@@ -163,10 +162,10 @@ jobs:
         shell: bash
         run: |
           echo "Building with tests and benchmarks for validation..."
-          cmake --build build/conan-validation/build/Release --parallel
+          cmake --build --preset conan-validation --parallel
           echo "Running tests..."
-          cd build/conan-validation/build/Release/tests
-          ctest --output-on-failure --timeout 300 || true
+          cd build/conan-validation
+          ctest --preset conan-validation --output-on-failure --timeout 300 || true
           cd "$GITHUB_WORKSPACE"
           echo "Validation complete, now building optimized release..."
 
@@ -191,9 +190,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
-          # Collect from validation build
-          if [ -f "build/conan-validation/build/Release/bench_results.json" ]; then
-            cp build/conan-validation/build/Release/bench_results.json "$BUILD_DIR/bench_results/"
+          # Collect from validation build (if Linux self-hosted ran validation)
+          if [ -f "build/conan-validation/bench_results.json" ]; then
+            cp build/conan-validation/bench_results.json "$BUILD_DIR/bench_results/"
             echo "Collected benchmark results from validation build"
           fi
           # Also check CI artifacts if available

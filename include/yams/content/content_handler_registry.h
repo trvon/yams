@@ -228,8 +228,8 @@ public:
                                            std::make_pair(archiveHandlers, "archive"),
                                            std::make_pair(binaryHandlers, "binary")};
 
-            auto maxElement = std::ranges::max_element(
-                counts, [](const auto& a, const auto& b) { return a.first < b.first; });
+            auto maxElement = std::max_element(
+                counts.begin(), counts.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
             return maxElement != counts.end() ? maxElement->second : "unknown";
         }

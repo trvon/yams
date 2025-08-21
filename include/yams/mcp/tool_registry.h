@@ -19,13 +19,13 @@ using json = nlohmann::json;
 template <typename T>
 concept ToolRequest = requires {
     typename T::RequestType;
-    std::same_as<T, typename T::RequestType>;
+    requires std::same_as<T, typename T::RequestType>;
 };
 
 template <typename T>
 concept ToolResponse = requires {
     typename T::ResponseType;
-    std::same_as<T, typename T::ResponseType>;
+    requires std::same_as<T, typename T::ResponseType>;
 };
 
 template <typename T>
@@ -501,7 +501,7 @@ struct MCPListSnapshotsResponse {
 
 // Generic tool wrapper template
 template <ToolRequest RequestType, ToolResponse ResponseType>
-requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
+    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
 class ToolWrapper {
 public:
     using HandlerFn = std::function<Result<ResponseType>(const RequestType&)>;
@@ -553,7 +553,7 @@ public:
     }
 
     template <ToolRequest RequestType, ToolResponse ResponseType>
-    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
+        requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
     void registerTool(std::string_view name,
                       std::function<Result<ResponseType>(const RequestType&)> handler,
                       json schema = {}, std::string_view description = {}) {

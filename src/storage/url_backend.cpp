@@ -1,12 +1,12 @@
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_engine.h>
-#include <yams/core/error.h>
 
 #include <curl/curl.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
+#include <list>
 #include <mutex>
 #include <regex>
 #include <sstream>
@@ -139,7 +139,7 @@ public:
         std::smatch match;
         
         if (!std::regex_match(url, match, urlRegex)) {
-            return Result<void>(ErrorCode::InvalidArgument, "Invalid URL format");
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Invalid URL format"});
         }
         
         scheme = match[2].str();
@@ -163,8 +163,8 @@ public:
         
         // Validate scheme
         if (scheme != "s3" && scheme != "http" && scheme != "https" && scheme != "ftp") {
-            return Result<void>(ErrorCode::InvalidArgument, 
-                               "Unsupported URL scheme: " + scheme);
+            return Result<void>(Error{ErrorCode::InvalidArgument, 
+                               "Unsupported URL scheme: " + scheme});
         }
         
         return {};
@@ -211,7 +211,7 @@ public:
     Result<std::vector<std::byte>> performGET(const std::string& url) {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            return Result<std::vector<std::byte>>(ErrorCode::Unknown, "Failed to initialize CURL");
+            return Result<std::vector<std::byte>>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
         }
         
         std::vector<uint8_t> buffer;
@@ -229,17 +229,17 @@ public:
         curl_easy_cleanup(curl);
         
         if (res != CURLE_OK) {
-            return Result<std::vector<std::byte>>(ErrorCode::NetworkError, 
-                                                  curl_easy_strerror(res));
+            return Result<std::vector<std::byte>>(Error{ErrorCode::NetworkError, 
+                                                  curl_easy_strerror(res)});
         }
         
         if (httpCode == 404) {
-            return Result<std::vector<std::byte>>(ErrorCode::ChunkNotFound);
+            return Result<std::vector<std::byte>>(Error{ErrorCode::ChunkNotFound});
         }
         
         if (httpCode >= 400) {
-            return Result<std::vector<std::byte>>(ErrorCode::NetworkError,
-                                                  "HTTP error: " + std::to_string(httpCode));
+            return Result<std::vector<std::byte>>(Error{ErrorCode::NetworkError,
+                                                  "HTTP error: " + std::to_string(httpCode)});
         }
         
         // Convert to std::byte vector
@@ -253,7 +253,7 @@ public:
     Result<void> performPUT(const std::string& url, std::span<const std::byte> data) {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            return Result<void>(ErrorCode::Unknown, "Failed to initialize CURL");
+            return Result<void>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
         }
         
         ReadData readData{data.data(), data.size(), 0};
@@ -273,12 +273,12 @@ public:
         curl_easy_cleanup(curl);
         
         if (res != CURLE_OK) {
-            return Result<void>(ErrorCode::NetworkError, curl_easy_strerror(res));
+            return Result<void>(Error{ErrorCode::NetworkError, curl_easy_strerror(res)});
         }
         
         if (httpCode >= 400) {
-            return Result<void>(ErrorCode::NetworkError,
-                               "HTTP error: " + std::to_string(httpCode));
+            return Result<void>(Error{ErrorCode::NetworkError,
+                               "HTTP error: " + std::to_string(httpCode)});
         }
         
         return {};
@@ -287,7 +287,7 @@ public:
     Result<void> performDELETE(const std::string& url) {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            return Result<void>(ErrorCode::Unknown, "Failed to initialize CURL");
+            return Result<void>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
         }
         
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -302,12 +302,12 @@ public:
         curl_easy_cleanup(curl);
         
         if (res != CURLE_OK) {
-            return Result<void>(ErrorCode::NetworkError, curl_easy_strerror(res));
+            return Result<void>(Error{ErrorCode::NetworkError, curl_easy_strerror(res)});
         }
         
         if (httpCode >= 400 && httpCode != 404) {
-            return Result<void>(ErrorCode::NetworkError,
-                               "HTTP error: " + std::to_string(httpCode));
+            return Result<void>(Error{ErrorCode::NetworkError,
+                               "HTTP error: " + std::to_string(httpCode)});
         }
         
         return {};
@@ -360,7 +360,7 @@ Result<std::vector<std::byte>> URLBackend::retrieve(std::string_view key) const 
     // Check cache first
     if (auto cached = pImpl->cache->get(keyStr)) {
         spdlog::debug("Cache hit for key: {}", key);
-        return *cached;
+        return cached.value();
     }
     
     // Fetch from remote
@@ -369,7 +369,7 @@ Result<std::vector<std::byte>> URLBackend::retrieve(std::string_view key) const 
     
     if (result) {
         // Update cache
-        pImpl->cache->put(keyStr, *result);
+        pImpl->cache->put(keyStr, result.value());
     }
     
     return result;
@@ -397,9 +397,9 @@ Result<std::vector<std::string>> URLBackend::list(std::string_view prefix) const
     return std::vector<std::string>{};
 }
 
-Result<StorageStats> URLBackend::getStats() const {
+Result<::yams::StorageStats> URLBackend::getStats() const {
     // Return basic stats - could be enhanced with remote metrics
-    StorageStats stats;
+    ::yams::StorageStats stats;
     return stats;
 }
 

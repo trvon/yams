@@ -29,7 +29,9 @@ public:
         if constexpr (std::is_same_v<T, std::filesystem::path>) {
             return hashFile(data);
         } else {
-            auto span = yams::as_bytes(yams::span{data});
+            // Use std::as_bytes directly with explicit span construction for compatibility
+            // This works because ByteSpanConvertible ensures data can be converted to byte span
+            auto span = std::as_bytes(std::span(data));
             update(span);
             return finalize();
         }
