@@ -15,7 +15,21 @@ namespace yams::vector {
 // DocumentChunker Base Class Implementation
 // =============================================================================
 
-DocumentChunker::DocumentChunker(const ChunkingConfig& config) : config_(config) {}
+DocumentChunker::DocumentChunker(const ChunkingConfig& config) : config_(config) {
+    // Validate and fix invalid configuration
+    if (config_.min_chunk_size > config_.max_chunk_size) {
+        // Swap them if min > max
+        std::swap(config_.min_chunk_size, config_.max_chunk_size);
+    }
+
+    // Ensure target is within bounds
+    if (config_.target_chunk_size < config_.min_chunk_size) {
+        config_.target_chunk_size = config_.min_chunk_size;
+    }
+    if (config_.target_chunk_size > config_.max_chunk_size) {
+        config_.target_chunk_size = config_.max_chunk_size;
+    }
+}
 
 std::vector<DocumentChunk> DocumentChunker::chunkDocument(const std::string& content,
                                                           const std::string& document_hash) {
@@ -348,7 +362,8 @@ std::vector<size_t> DocumentChunker::findParagraphBoundaries(const std::string& 
     // Find double newlines
     size_t pos = 0;
     while ((pos = text.find("\n\n", pos)) != std::string::npos) {
-        boundaries.push_back(pos);
+        // Push the position AFTER the double newline
+        boundaries.push_back(pos + 2);
         pos += 2;
     }
 
@@ -774,6 +789,16 @@ std::string preprocessText(const std::string& text) {
         std::remove_if(processed.begin(), processed.end(),
                        [](char c) { return std::iscntrl(c) && c != '\n' && c != '\t'; }),
         processed.end());
+
+    // Trim leading and trailing whitespace
+    size_t first = processed.find_first_not_of(" \t\n\r");
+    size_t last = processed.find_last_not_of(" \t\n\r");
+    if (first != std::string::npos && last != std::string::npos) {
+        processed = processed.substr(first, last - first + 1);
+    } else if (first == std::string::npos) {
+        // All whitespace
+        processed.clear();
+    }
 
     return processed;
 }
@@ -1300,7 +1325,8 @@ std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& 
 
         // Add paragraph to current chunk
         if (!current_chunk.empty()) {
-            current_chunk += "\n\n"; // Add paragraph separator
+            // Only add separator between paragraphs, not at the end
+            current_chunk += "\n\n";
         }
         current_chunk += paragraph;
         current_paragraph_count++;

@@ -1147,7 +1147,8 @@ Result<void> YamsDaemon::start() {
                     try {
                         // Check if core resources are initialized
                         if (!metadataRepo_) {
-                            spdlog::warn("Stats request received but metadata repository not initialized");
+                            spdlog::warn(
+                                "Stats request received but metadata repository not initialized");
                             return ErrorResponse{ErrorCode::NotInitialized,
                                                  "Repository not initialized"};
                         }
@@ -1161,7 +1162,8 @@ Result<void> YamsDaemon::start() {
                                 res.totalDocuments = static_cast<size_t>(docCount.value());
                                 res.indexedDocuments = static_cast<size_t>(docCount.value());
                             } else {
-                                spdlog::debug("Failed to get document count: {}", docCount.error().message);
+                                spdlog::debug("Failed to get document count: {}",
+                                              docCount.error().message);
                                 res.totalDocuments = 0;
                                 res.indexedDocuments = 0;
                             }
@@ -1197,20 +1199,22 @@ Result<void> YamsDaemon::start() {
                                         res.documentsByType[ext] = static_cast<size_t>(count);
                                     }
                                 } else {
-                                    spdlog::debug("Failed to get document types: {}", typeStats.error().message);
+                                    spdlog::debug("Failed to get document types: {}",
+                                                  typeStats.error().message);
                                 }
                             } catch (const std::exception& e) {
                                 spdlog::warn("Exception getting document types: {}", e.what());
                             }
                         }
 
-                    // Add cache stats if requested
-                    if (r.includeCache) {
-                        // Add cache-specific statistics
-                        res.additionalStats["cache_hits"] = "0"; // TODO: Track actual cache hits
-                        res.additionalStats["cache_misses"] = "0";
-                        res.additionalStats["cache_size"] = "0";
-                    }
+                        // Add cache stats if requested
+                        if (r.includeCache) {
+                            // Add cache-specific statistics
+                            res.additionalStats["cache_hits"] =
+                                "0"; // TODO: Track actual cache hits
+                            res.additionalStats["cache_misses"] = "0";
+                            res.additionalStats["cache_size"] = "0";
+                        }
 
                         // Calculate compression ratio if available
                         if (res.totalSize > 0 && contentStore_) {
@@ -1555,7 +1559,7 @@ Result<void> YamsDaemon::initializeResources() {
                 spdlog::info("Connection pool initialized successfully");
                 metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
                 spdlog::info("Metadata repository initialized successfully");
-                
+
                 // SearchExecutor (keyword/FTS fallback)
                 searchExecutor_ =
                     std::make_shared<search::SearchExecutor>(database_, metadataRepo_);

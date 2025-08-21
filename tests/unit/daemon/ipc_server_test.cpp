@@ -1,10 +1,10 @@
 #include <atomic>
 #include <thread>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <arpa/inet.h>
 #include <yams/daemon/ipc/async_ipc_server.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/message_serializer.h>

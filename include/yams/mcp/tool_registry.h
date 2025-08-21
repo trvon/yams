@@ -501,7 +501,7 @@ struct MCPListSnapshotsResponse {
 
 // Generic tool wrapper template
 template <ToolRequest RequestType, ToolResponse ResponseType>
-    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
+requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
 class ToolWrapper {
 public:
     using HandlerFn = std::function<Result<ResponseType>(const RequestType&)>;
@@ -553,7 +553,7 @@ public:
     }
 
     template <ToolRequest RequestType, ToolResponse ResponseType>
-        requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
+    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
     void registerTool(std::string_view name,
                       std::function<Result<ResponseType>(const RequestType&)> handler,
                       json schema = {}, std::string_view description = {}) {

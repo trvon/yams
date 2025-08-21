@@ -760,8 +760,10 @@ private:
             cfg.count("downloader.max_file_bytes") ? cfg.at("downloader.max_file_bytes") : "", 0);
 
         // TLS and proxy
-        bool cfgTlsVerify =
-            toBool(cfg.count("downloader.tls.verify") ? cfg.at("downloader.tls.verify") : "", true);
+        // Note: cfgTlsVerify not used in local downloads
+        // bool cfgTlsVerify =
+        //     toBool(cfg.count("downloader.tls.verify") ? cfg.at("downloader.tls.verify") : "",
+        //     true);
         std::string cfgCaPath =
             cfg.count("downloader.tls.ca_path") ? cfg.at("downloader.tls.ca_path") : "";
         std::string cfgProxy =

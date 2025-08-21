@@ -56,7 +56,7 @@ private:
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
-    
+
     // Mutex for thread-safe I/O operations
     static std::mutex io_mutex_;
 

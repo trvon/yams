@@ -1722,26 +1722,28 @@ EmbeddingGenerator::EmbeddingGenerator(EmbeddingGenerator&&) noexcept = default;
 EmbeddingGenerator& EmbeddingGenerator::operator=(EmbeddingGenerator&&) noexcept = default;
 
 bool EmbeddingGenerator::initialize() {
-    return pImpl->initialize();
+    return pImpl ? pImpl->initialize() : false;
 }
 
 bool EmbeddingGenerator::isInitialized() const {
-    return pImpl->isInitialized();
+    return pImpl && pImpl->isInitialized();
 }
 
 void EmbeddingGenerator::shutdown() {
-    pImpl->shutdown();
+    if (pImpl) {
+        pImpl->shutdown();
+    }
 }
 
 std::vector<float> EmbeddingGenerator::generateEmbedding(const std::string& text) {
     YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbedding");
-    return pImpl->generateEmbedding(text);
+    return pImpl ? pImpl->generateEmbedding(text) : std::vector<float>();
 }
 
 std::vector<std::vector<float>>
 EmbeddingGenerator::generateEmbeddings(const std::vector<std::string>& texts) {
     YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbeddings");
-    return pImpl->generateEmbeddings(texts);
+    return pImpl ? pImpl->generateEmbeddings(texts) : std::vector<std::vector<float>>();
 }
 
 std::future<std::vector<float>>
@@ -1776,15 +1778,16 @@ void EmbeddingGenerator::unloadModel() {
 }
 
 size_t EmbeddingGenerator::getEmbeddingDimension() const {
-    return pImpl->getEmbeddingDimension();
+    return pImpl ? pImpl->getEmbeddingDimension() : 0;
 }
 
 size_t EmbeddingGenerator::getMaxSequenceLength() const {
-    return pImpl->getMaxSequenceLength();
+    return pImpl ? pImpl->getMaxSequenceLength() : 0;
 }
 
 const EmbeddingConfig& EmbeddingGenerator::getConfig() const {
-    return pImpl->getConfig();
+    static const EmbeddingConfig empty_config{};
+    return pImpl ? pImpl->getConfig() : empty_config;
 }
 
 void EmbeddingGenerator::updateConfig(const EmbeddingConfig& new_config) {
@@ -1793,11 +1796,13 @@ void EmbeddingGenerator::updateConfig(const EmbeddingConfig& new_config) {
 }
 
 GenerationStats EmbeddingGenerator::getStats() const {
-    return pImpl->getStats();
+    return pImpl ? pImpl->getStats() : GenerationStats{};
 }
 
 void EmbeddingGenerator::resetStats() {
-    pImpl->resetStats();
+    if (pImpl) {
+        pImpl->resetStats();
+    }
 }
 
 bool EmbeddingGenerator::validateText(const std::string& text) const {

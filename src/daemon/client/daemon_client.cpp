@@ -105,11 +105,11 @@ Result<void> DaemonClient::connect() {
             // Wait for daemon to start with exponential backoff
             const int maxRetries = 10;
             const auto baseDelay = std::chrono::milliseconds(100);
-            
+
             for (int i = 0; i < maxRetries; ++i) {
                 auto delay = baseDelay * (1 << std::min(i, 5)); // Cap at 3.2 seconds
                 std::this_thread::sleep_for(delay);
-                
+
                 // Check if daemon is now running and ready
                 if (isDaemonRunning(pImpl->config_.socketPath)) {
                     spdlog::debug("Daemon started successfully after {} retries", i + 1);
@@ -117,7 +117,7 @@ Result<void> DaemonClient::connect() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     break;
                 }
-                
+
                 if (i == maxRetries - 1) {
                     spdlog::warn("Daemon failed to start after {} retries", maxRetries);
                 }

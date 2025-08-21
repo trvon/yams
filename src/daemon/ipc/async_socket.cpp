@@ -8,9 +8,11 @@
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -227,7 +229,24 @@ public:
         }
     }
 
-    ~Impl() { io_uring_queue_exit(&ring_); }
+    ~Impl() {
+        // Cancel all pending operations before destroying
+        stop_requested_ = true;
+
+        // Cancel pending operations
+        {
+            std::lock_guard<std::mutex> lock(pending_ops_mutex_);
+            for (auto* op : pending_ops_) {
+                if (op) {
+                    op->cancelled.store(true);
+                    op->completed.store(true);
+                }
+            }
+            pending_ops_.clear();
+        }
+
+        io_uring_queue_exit(&ring_);
+    }
 
     Result<void> register_socket(int fd) {
         // io_uring doesn't require explicit registration for basic I/O
@@ -245,8 +264,15 @@ public:
         bool isWrite;
         // Use atomic to ensure thread-safe access
         std::atomic<bool> completed{false};
+        std::atomic<bool> cancelled{false}; // Track if operation was cancelled
         ssize_t result = -1;
         int error_code = 0;
+
+        ~UringOp() {
+            // Ensure we don't have dangling operations
+            completed.store(true);
+            cancelled.store(true);
+        }
     };
 
     void submit_read(int fd, void* buffer, size_t size, std::coroutine_handle<> h,
@@ -262,6 +288,13 @@ public:
 
         io_uring_prep_recv(sqe, fd, buffer, size, 0);
         auto* op = new UringOp{h, awaiterPtr, false};
+
+        // Track the operation
+        {
+            std::lock_guard<std::mutex> lock(pending_ops_mutex_);
+            pending_ops_.insert(op);
+        }
+
         io_uring_sqe_set_data(sqe, op);
         io_uring_submit(&ring_);
     }
@@ -279,6 +312,13 @@ public:
 
         io_uring_prep_send(sqe, fd, buffer, size, MSG_NOSIGNAL);
         auto* op = new UringOp{h, awaiterPtr, true};
+
+        // Track the operation
+        {
+            std::lock_guard<std::mutex> lock(pending_ops_mutex_);
+            pending_ops_.insert(op);
+        }
+
         io_uring_sqe_set_data(sqe, op);
         io_uring_submit(&ring_);
     }
@@ -296,26 +336,56 @@ public:
                 // Store results first
                 op->result = cqe->res;
                 op->error_code = (cqe->res < 0) ? -cqe->res : 0;
-                
+
+                // Remove from pending operations
+                {
+                    std::lock_guard<std::mutex> lock(pending_ops_mutex_);
+                    pending_ops_.erase(op);
+                }
+
+                // Check if operation was cancelled
+                bool was_cancelled = op->cancelled.load();
+                if (was_cancelled) {
+                    // Operation was cancelled, just clean up
+                    delete op;
+                    io_uring_cqe_seen(&ring_, cqe);
+                    continue;
+                }
+
                 // Mark as completed atomically
                 bool was_completed = op->completed.exchange(true);
-                
+
                 if (!was_completed && op->awaiter) {
-                    // Copy results to the awaiter
-                    if (op->isWrite) {
-                        auto* awaiter = reinterpret_cast<AsyncSocket::WriteAwaiter*>(op->awaiter);
-                        awaiter->result = op->result;
-                        awaiter->error_code = op->error_code;
-                    } else {
-                        auto* awaiter = reinterpret_cast<AsyncSocket::ReadAwaiter*>(op->awaiter);
-                        awaiter->result = op->result;
-                        awaiter->error_code = op->error_code;
-                    }
-                    
-                    // Resume the coroutine
+                    // Use a local copy to avoid race conditions
+                    void* awaiter_ptr = op->awaiter;
+                    bool is_write = op->isWrite;
+                    ssize_t result = op->result;
+                    int error_code = op->error_code;
                     auto h2 = op->handle;
+
+                    // Clear the awaiter pointer before accessing it
+                    op->awaiter = nullptr;
+
+                    // Copy results to the awaiter (if still valid)
+                    if (awaiter_ptr) {
+                        if (is_write) {
+                            auto* awaiter =
+                                reinterpret_cast<AsyncSocket::WriteAwaiter*>(awaiter_ptr);
+                            awaiter->result = result;
+                            awaiter->error_code = error_code;
+                        } else {
+                            auto* awaiter =
+                                reinterpret_cast<AsyncSocket::ReadAwaiter*>(awaiter_ptr);
+                            awaiter->result = result;
+                            awaiter->error_code = error_code;
+                        }
+                    }
+
+                    // Delete op before resuming to avoid use-after-free
                     delete op;
-                    if (h2) {
+
+                    // Resume the coroutine if valid
+                    if (h2 && awaiter_ptr) {
                         h2.resume();
                     }
                 } else {
@@ -334,6 +404,10 @@ private:
     static constexpr unsigned QUEUE_DEPTH = 256;
     struct io_uring ring_;
     std::atomic<bool> stop_requested_{false};
+
+    // Track pending operations to prevent use-after-free
+    std::mutex pending_ops_mutex_;
+    std::unordered_set<UringOp*> pending_ops_;
 };
 
 #elif defined(HAVE_KQUEUE)

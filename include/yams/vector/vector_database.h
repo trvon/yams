@@ -55,7 +55,7 @@ struct VectorRecord {
     VectorRecord() = default;
 
     // Constructor with basic fields
-    VectorRecord(std::string chunk_id_param, std::string document_hash_param, 
+    VectorRecord(std::string chunk_id_param, std::string document_hash_param,
                  std::vector<float> embedding_param, std::string content_param)
         : chunk_id(std::move(chunk_id_param)), document_hash(std::move(document_hash_param)),
           embedding(std::move(embedding_param)), content(std::move(content_param)),

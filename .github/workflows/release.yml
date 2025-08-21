@@ -151,7 +151,7 @@ jobs:
             --output-folder=build/conan-validation \
             -s build_type=Release \
             --build=missing
-          cmake --preset conan-validation \
+          cmake --preset conan-release \
             -DYAMS_BUILD_TESTS=ON \
             -DYAMS_BUILD_BENCHMARKS=ON \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
@@ -162,10 +162,10 @@ jobs:
         shell: bash
         run: |
           echo "Building with tests and benchmarks for validation..."
-          cmake --build --preset conan-validation --parallel
+          cmake --build --preset conan-release --parallel
           echo "Running tests..."
           cd build/conan-validation
-          ctest --preset conan-validation --output-on-failure --timeout 300 || true
+          ctest --preset conan-release --output-on-failure --timeout 300 || true
           cd "$GITHUB_WORKSPACE"
           echo "Validation complete, now building optimized release..."
 

@@ -431,7 +431,7 @@ json MCPServer::listTools() {
         {"tools",
          json::array(
              {// Core document operations
-              {{"name", "search_documents"},
+              {{"name", "search"},
                {"description",
                 "Search for documents using keywords, fuzzy matching, or similarity"},
                {"inputSchema",
@@ -505,7 +505,7 @@ json MCPServer::listTools() {
                      {"description", "Require all specified tags to be present"},
                      {"default", false}}}}},
                  {"required", {"query"}}}}},
-              {{"name", "grep_documents"},
+              {{"name", "grep"},
                {"description", "Search document contents using regular expressions"},
                {"inputSchema",
                 {{"type", "object"},
@@ -610,7 +610,7 @@ json MCPServer::listTools() {
                      {"description", "Overwrite policy: never|if-different-etag|always"},
                      {"default", "never"}}}}},
                  {"required", json::array({"url"})}}}},
-              {{"name", "store_document"},
+              {{"name", "add"},
                {"description", "Store a document in YAMS"},
                {"inputSchema",
                 {{"type", "object"},
@@ -626,7 +626,7 @@ json MCPServer::listTools() {
                    {"metadata",
                     {{"type", "object"}, {"description", "Additional metadata key-value pairs"}}}}},
                  {"required", json::array()}}}}, // Note: either path OR (content+name) required
-              {{"name", "retrieve_document"},
+              {{"name", "get"},
                {"description", "Retrieve a document by hash or name"},
                {"inputSchema",
                 {{"type", "object"},
@@ -647,14 +647,14 @@ json MCPServer::listTools() {
                     {{"type", "boolean"},
                      {"description", "Include full content in graph results"},
                      {"default", false}}}}}}}},
-              {{"name", "delete_document"},
+              {{"name", "delete"},
                {"description", "Delete a document by hash or name"},
                {"inputSchema",
                 {{"type", "object"},
                  {"properties",
                   {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
                    {"name", {{"type", "string"}, {"description", "Document name"}}}}}}}},
-              {{"name", "update_metadata"},
+              {{"name", "update"},
                {"description", "Update document metadata"},
                {"inputSchema",
                 {{"type", "object"},
@@ -670,7 +670,7 @@ json MCPServer::listTools() {
                      {"description", "Tags to add or update"}}}}}}}},
 
               // List and filter operations
-              {{"name", "list_documents"},
+              {{"name", "list"},
                {"description", "List documents with optional filtering"},
                {"inputSchema",
                 {{"type", "object"},
@@ -718,7 +718,7 @@ json MCPServer::listTools() {
                      {"default", "desc"}}}}}}}},
 
               // Statistics and maintenance
-              {{"name", "get_stats"},
+              {{"name", "stats"},
                {"description", "Get storage statistics and health status"},
                {"inputSchema",
                 {{"type", "object"},
@@ -761,7 +761,7 @@ json MCPServer::listTools() {
                      {"description", "Extract text from HTML/PDF files"},
                      {"default", true}}}}},
                  {"required", json::array({"name"})}}}},
-              {{"name", "cat_document"},
+              {{"name", "cat"},
                {"description", "Display document content (like cat command)"},
                {"inputSchema",
                 {{"type", "object"},
@@ -1398,10 +1398,8 @@ Result<MCPAddDirectoryResponse> MCPServer::handleAddDirectory(const MCPAddDirect
 void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
-    // Register modern type-safe handlers with descriptions
     toolRegistry_->registerTool<MCPSearchRequest, MCPSearchResponse>(
-        "search_documents",
-        [this](const MCPSearchRequest& req) { return handleSearchDocuments(req); },
+        "search", [this](const MCPSearchRequest& req) { return handleSearchDocuments(req); },
         json{
             {"type", "object"},
             {"properties",
@@ -1422,7 +1420,7 @@ void MCPServer::initializeToolRegistry() {
         "Search documents using hybrid search (vector + full-text + knowledge graph)");
 
     toolRegistry_->registerTool<MCPGrepRequest, MCPGrepResponse>(
-        "grep_documents", [this](const MCPGrepRequest& req) { return handleGrepDocuments(req); },
+        "grep", [this](const MCPGrepRequest& req) { return handleGrepDocuments(req); },
         json{{"type", "object"},
              {"properties",
               {{"pattern", {{"type", "string"}, {"description", "Regex pattern to search"}}},
@@ -1441,10 +1439,8 @@ void MCPServer::initializeToolRegistry() {
              {"required", json::array({"pattern"})}},
         "Search documents using regular expressions with grep-like functionality");
 
-    // Register download tool
     toolRegistry_->registerTool<MCPDownloadRequest, MCPDownloadResponse>(
-        "downloader.download",
-        [this](const MCPDownloadRequest& req) { return handleDownload(req); },
+        "download", [this](const MCPDownloadRequest& req) { return handleDownload(req); },
         json{{"type", "object"},
              {"properties",
               {{"url", {{"type", "string"}, {"description", "URL to download"}}},
@@ -1460,10 +1456,8 @@ void MCPServer::initializeToolRegistry() {
              {"required", json::array({"url"})}},
         "Download files from URLs and store them in YAMS content-addressed storage");
 
-    // Register document management tools
     toolRegistry_->registerTool<MCPStoreDocumentRequest, MCPStoreDocumentResponse>(
-        "store_document",
-        [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
+        "store", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
         json{{"type", "object"},
              {"properties",
               {{"path", {{"type", "string"}, {"description", "File path to store"}}},
@@ -1476,7 +1470,7 @@ void MCPServer::initializeToolRegistry() {
         "Store documents with deduplication and content-based addressing");
 
     toolRegistry_->registerTool<MCPRetrieveDocumentRequest, MCPRetrieveDocumentResponse>(
-        "retrieve_document",
+        "get",
         [this](const MCPRetrieveDocumentRequest& req) { return handleRetrieveDocument(req); },
         json{{"type", "object"},
              {"properties",
@@ -1490,8 +1484,7 @@ void MCPServer::initializeToolRegistry() {
         "Retrieve documents from storage by hash with optional knowledge graph expansion");
 
     toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
-        "list_documents",
-        [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
+        "list", [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
         json{
             {"type", "object"},
             {"properties",
@@ -1503,9 +1496,8 @@ void MCPServer::initializeToolRegistry() {
               {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}}}}},
         "List documents with filtering by pattern, tags, type, or recency");
 
-    // Register stats tool
     toolRegistry_->registerTool<MCPStatsRequest, MCPStatsResponse>(
-        "get_stats", [this](const MCPStatsRequest& req) { return handleGetStats(req); },
+        "stats", [this](const MCPStatsRequest& req) { return handleGetStats(req); },
         json{{"type", "object"},
              {"properties",
               {{"file_types",
@@ -1518,10 +1510,8 @@ void MCPServer::initializeToolRegistry() {
                  {"default", false}}}}}},
         "Get storage statistics including deduplication savings and file type breakdown");
 
-    // Register indexing tool
     toolRegistry_->registerTool<MCPAddDirectoryRequest, MCPAddDirectoryResponse>(
-        "add_directory",
-        [this](const MCPAddDirectoryRequest& req) { return handleAddDirectory(req); },
+        "add", [this](const MCPAddDirectoryRequest& req) { return handleAddDirectory(req); },
         json{{"type", "object"},
              {"properties",
               {{"directory_path", {{"type", "string"}, {"description", "Directory path to index"}}},
@@ -1535,7 +1525,6 @@ void MCPServer::initializeToolRegistry() {
              {"required", json::array({"directory_path"})}},
         "Index all files from a directory into YAMS storage with optional filtering");
 
-    // Register missing tools that were causing empty responses
     toolRegistry_->registerTool<MCPGetByNameRequest, MCPGetByNameResponse>(
         "get_by_name", [this](const MCPGetByNameRequest& req) { return handleGetByName(req); },
         json{{"type", "object"},
@@ -1553,8 +1542,7 @@ void MCPServer::initializeToolRegistry() {
         "Retrieve document content by name");
 
     toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
-        "delete_by_name",
-        [this](const MCPDeleteByNameRequest& req) { return handleDeleteByName(req); },
+        "delete", [this](const MCPDeleteByNameRequest& req) { return handleDeleteByName(req); },
         json{
             {"type", "object"},
             {"properties",
@@ -1571,7 +1559,7 @@ void MCPServer::initializeToolRegistry() {
         "Delete documents by name, names array, or pattern");
 
     toolRegistry_->registerTool<MCPCatDocumentRequest, MCPCatDocumentResponse>(
-        "cat_document", [this](const MCPCatDocumentRequest& req) { return handleCatDocument(req); },
+        "cat", [this](const MCPCatDocumentRequest& req) { return handleCatDocument(req); },
         json{{"type", "object"},
              {"properties",
               {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
@@ -1587,8 +1575,7 @@ void MCPServer::initializeToolRegistry() {
         "Display document content by hash or name");
 
     toolRegistry_->registerTool<MCPUpdateMetadataRequest, MCPUpdateMetadataResponse>(
-        "update_metadata",
-        [this](const MCPUpdateMetadataRequest& req) { return handleUpdateMetadata(req); },
+        "update", [this](const MCPUpdateMetadataRequest& req) { return handleUpdateMetadata(req); },
         json{{"type", "object"},
              {"properties",
               {{"hash", {{"type", "string"}, {"description", "Document hash"}}},

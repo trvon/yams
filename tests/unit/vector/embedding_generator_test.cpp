@@ -160,7 +160,7 @@ TEST_F(EmbeddingGeneratorTest, MPNetModelTest) {
         // Check normalization
         double magnitude = 0.0;
         for (float val : embedding) {
-            magnitude += val * val;
+            magnitude += static_cast<double>(val) * static_cast<double>(val);
         }
         magnitude = std::sqrt(magnitude);
         std::cout << "MPNet embedding magnitude: " << magnitude << std::endl;
@@ -211,7 +211,7 @@ TEST_F(EmbeddingGeneratorTest, SingleEmbeddingGeneration) {
     // Check normalization (should be close to unit length for sentence-transformers)
     double magnitude = 0.0;
     for (float val : embedding) {
-        magnitude += val * val;
+        magnitude += static_cast<double>(val) * static_cast<double>(val);
     }
     magnitude = std::sqrt(magnitude);
     std::cout << "Embedding magnitude: " << magnitude << "\n";
@@ -236,7 +236,7 @@ TEST_F(EmbeddingGeneratorTest, BatchEmbeddingGeneration) {
         double magnitude = 0.0;
         for (float val : embedding) {
             EXPECT_TRUE(std::isfinite(val));
-            magnitude += val * val;
+            magnitude += static_cast<double>(val) * static_cast<double>(val);
         }
         magnitude = std::sqrt(magnitude);
         EXPECT_NEAR(magnitude, 1.0, 0.01);
@@ -246,7 +246,7 @@ TEST_F(EmbeddingGeneratorTest, BatchEmbeddingGeneration) {
     if (embeddings.size() >= 2) {
         bool embeddings_different = false;
         for (size_t i = 0; i < embeddings[0].size(); ++i) {
-            if (std::abs(embeddings[0][i] - embeddings[1][i]) > 1e-6) {
+            if (std::abs(embeddings[0][i] - embeddings[1][i]) > 1e-6f) {
                 embeddings_different = true;
                 break;
             }
@@ -613,7 +613,9 @@ TEST(EmbeddingGeneratorFactoryTest, CreateEmbeddingGenerator) {
 
     auto generator = createEmbeddingGenerator(config);
     EXPECT_NE(generator, nullptr);
-    EXPECT_TRUE(generator->isInitialized());
+    if (generator) {
+        EXPECT_TRUE(generator->isInitialized());
+    }
 
     // Clean up
     std::filesystem::remove_all("test_factory");
@@ -775,7 +777,7 @@ TEST_F(RealModelPerformanceTest, MPNetPerformanceBaseline) {
     double magnitude = 0.0;
     for (float val : embedding) {
         EXPECT_TRUE(std::isfinite(val));
-        magnitude += val * val;
+        magnitude += static_cast<double>(val) * static_cast<double>(val);
     }
     magnitude = std::sqrt(magnitude);
     EXPECT_NEAR(magnitude, 1.0, 0.01);

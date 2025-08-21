@@ -5,6 +5,36 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.6] - 2025-08-21
+
+### Changed
+- **MCP Server Tool Naming**
+  - Simplified tool names to match CLI commands for better consistency
+  - Tools now use generic names: `search`, `grep`, `download`, `get`, `list`, `store`, `add`, `delete`, `cat`, `update`, `stats`
+
+### Fixed
+- Added proper lifetime management for io_uring operations to prevent accessing freed memory
+- Implemented operation tracking and cancellation to ensure clean shutdown
+- **Storage Backend Improvements**
+  - Fixed FilesystemBackend sharding to use hash-based approach for consistent key distribution
+  - Replaced key-prefix sharding with SHA256 hash-based sharding to avoid path conflicts
+- **Chunking Deduplication**
+  - Fixed RabinChunker deduplication by resetting window state at chunk boundaries
+  - Ensures identical data patterns produce identical chunks for proper deduplication
+- **Code Improvements**
+  - Added automatic configuration correction for invalid chunking configs (when min > max)
+  - Enhanced preprocessText() to trim leading/trailing whitespace
+  - Improved paragraph boundary detection to point after "\n\n" markers
+- **CI/CD**
+  - Fixed release workflow by changing preset from `conan-validation` to `conan-release`
+
+### Known Issues
+- **Temporarily Disabled Tests** (to be fixed in v0.5.0)
+  - VectorIndexManager: removeVector, index persistence, HNSW operations not implemented
+  - ModelManagement: Registry initialization issues in test environment
+  - OnnxRuntime: Tests timeout waiting for non-existent model files
+  - All disabled tests are marked with TODO(v0.5.0) comments for tracking
+
 ## [v0.4.5] - 2025-08-21
 
 ### Fixed

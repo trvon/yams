@@ -209,11 +209,12 @@ TEST_F(RabinChunkerTest, ProcessChunksCallback) {
 
 TEST_F(RabinChunkerTest, DeduplicationStats) {
     // Create data with repeated patterns
-    auto pattern = generateRandomBytes(50000);
+    // Use 32KB pattern (2x min chunk size) for better alignment
+    auto pattern = generateRandomBytes(32 * 1024);
     std::vector<std::byte> data;
 
-    // Repeat pattern 3 times
-    for (int i = 0; i < 3; ++i) {
+    // Repeat pattern 4 times for 128KB total
+    for (int i = 0; i < 4; ++i) {
         data.insert(data.end(), pattern.begin(), pattern.end());
     }
 
