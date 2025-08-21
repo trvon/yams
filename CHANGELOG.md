@@ -5,6 +5,16 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Release Workflow Build Failures**
+  - Fixed `std::from_chars` compilation error on macOS hosted runners (Xcode 15.2)
+  - Replaced `std::from_chars` with portable `std::stoull` in http_adapter_curl.cpp for parsing Content-Length headers
+  - Fixed missing benchmark package in Linux self-hosted validation builds
+  - Added proper Conan options (`-o build_tests=True -o build_benchmarks=True`) to validation build step
+  - Ensures compatibility with older macOS standard libraries that lack full C++20 support
+
 ## [v0.4.6] - 2025-08-21
 
 ### Changed

@@ -41,7 +41,7 @@ public:
         }
 
         // Connect to server
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, config_.socketPath.c_str(), sizeof(addr.sun_path) - 1);
 
@@ -533,7 +533,7 @@ bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
         return false;
     }
 
-    struct sockaddr_un addr {};
+    struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
 

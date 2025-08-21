@@ -150,6 +150,8 @@ jobs:
           conan install . \
             --output-folder=build/conan-validation \
             -s build_type=Release \
+            -o build_tests=True \
+            -o build_benchmarks=True \
             --build=missing
           cmake --preset conan-release \
             -DYAMS_BUILD_TESTS=ON \

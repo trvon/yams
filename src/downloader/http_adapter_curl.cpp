@@ -128,15 +128,15 @@ static size_t header_cb(char* buffer, size_t size, size_t nitems, void* userdata
             ctx->acceptRangesBytes = true;
         }
     } else if (key == "content-length") {
-        // Parse uint64 content length
-        std::uint64_t tmp{0};
+        // Parse uint64 content length (portable implementation)
         auto sv = trim(val);
-        auto sv_view = std::string_view(sv);
-        const char* first = sv_view.data();
-        const char* last = sv_view.data() + sv_view.size();
-        auto res = std::from_chars(first, last, tmp);
-        if (res.ec == std::errc()) {
-            ctx->contentLength = tmp;
+        if (!sv.empty()) {
+            try {
+                std::uint64_t tmp = std::stoull(sv);
+                ctx->contentLength = tmp;
+            } catch (const std::exception&) {
+                // Invalid content-length, ignore
+            }
         }
     } else if (key == "etag") {
         // Strip surrounding quotes if present
