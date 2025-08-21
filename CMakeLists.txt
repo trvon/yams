@@ -1060,10 +1060,13 @@ if(YAMS_ENABLE_PDF)
     if(NOT PDFium_FOUND)
         # Determine platform and architecture
         if(APPLE)
-            if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+            # More robust architecture detection for macOS
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
                 set(PDFIUM_PLATFORM "mac-arm64")
+                message(STATUS "Detected macOS ARM64 architecture for PDFium")
             else()
                 set(PDFIUM_PLATFORM "mac-x64")
+                message(STATUS "Detected macOS x64 architecture for PDFium")
             endif()
         elseif(UNIX)
             if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
@@ -1096,6 +1099,44 @@ if(YAMS_ENABLE_PDF)
             if(NOT EXISTS "${pdfium_SOURCE_DIR}/include/fpdfview.h")
                 message(WARNING "PDFium download failed or incomplete. PDF support will be disabled.")
                 set(YAMS_ENABLE_PDF OFF)
+                return()
+            endif()
+            
+            # Additional verification for library file
+            if(APPLE)
+                if(NOT EXISTS "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib")
+                    message(WARNING "PDFium library not found at ${pdfium_SOURCE_DIR}/lib/libpdfium.dylib")
+                    message(WARNING "PDF support will be disabled.")
+                    set(YAMS_ENABLE_PDF OFF CACHE BOOL "Enable PDF text extraction support" FORCE)
+                    set(YAMS_PDFIUM_FOUND FALSE CACHE BOOL "PDFium library found and configured" FORCE)
+                else()
+                    # Verify it's the correct architecture
+                    execute_process(
+                        COMMAND file "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib"
+                        OUTPUT_VARIABLE DYLIB_INFO
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET
+                    )
+                    message(STATUS "PDFium library info: ${DYLIB_INFO}")
+                    
+                    # Check if the architecture matches what we expect
+                    if(CMAKE_OSX_ARCHITECTURES MATCHES "arm64" AND NOT DYLIB_INFO MATCHES "arm64")
+                        message(WARNING "PDFium library architecture mismatch - expected arm64")
+                        message(WARNING "PDF support will be disabled for this build")
+                        set(YAMS_ENABLE_PDF OFF CACHE BOOL "Enable PDF text extraction support" FORCE)
+                        set(YAMS_PDFIUM_FOUND FALSE CACHE BOOL "PDFium library found and configured" FORCE)
+                    elseif(CMAKE_OSX_ARCHITECTURES MATCHES "x86_64" AND NOT DYLIB_INFO MATCHES "x86_64")
+                        message(WARNING "PDFium library architecture mismatch - expected x86_64")
+                        message(WARNING "PDF support will be disabled for this build")
+                        set(YAMS_ENABLE_PDF OFF CACHE BOOL "Enable PDF text extraction support" FORCE)
+                        set(YAMS_PDFIUM_FOUND FALSE CACHE BOOL "PDFium library found and configured" FORCE)
+                    endif()
+                endif()
+            endif()
+
+            # Only create imported target if PDF is still enabled
+            if(NOT YAMS_ENABLE_PDF)
+                message(STATUS "Skipping PDFium target creation due to disabled PDF support")
                 return()
             endif()
 

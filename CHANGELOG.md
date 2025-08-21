@@ -5,12 +5,23 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.3] - 2025-08-21
+
+### Fixed
+- **Build System**
+  - Updated GTest from 1.14.0 to 1.15.0 for Conan 2.0 compatibility
+- **Homebrew Formula**
+  - Fixed documentation URL in Homebrew formula to point to correct repository
+
+### Known Issues
+- Daemon may crash when processing certain stats requests (investigation ongoing)
+
 ## [v0.4.2] - 2025-08-20
 
 ### Added
-- **Linux Package Support in CI**
+- **Linux Package Support**
   - Added AppImage support for universal Linux distribution
-  - CPack configuration with platform-specific dependencies and metadata
+  - Integrated package building into GitHub release workflow
 
 ### Fixed
 - **Linux Build Compilation**

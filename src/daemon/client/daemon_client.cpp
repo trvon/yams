@@ -102,8 +102,26 @@ Result<void> DaemonClient::connect() {
             spdlog::warn("Failed to auto-start daemon: {}", result.error().message);
             spdlog::info("Please manually start the daemon with: yams daemon start");
         } else {
-            // Wait a bit for daemon to start
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Wait for daemon to start with exponential backoff
+            const int maxRetries = 10;
+            const auto baseDelay = std::chrono::milliseconds(100);
+            
+            for (int i = 0; i < maxRetries; ++i) {
+                auto delay = baseDelay * (1 << std::min(i, 5)); // Cap at 3.2 seconds
+                std::this_thread::sleep_for(delay);
+                
+                // Check if daemon is now running and ready
+                if (isDaemonRunning(pImpl->config_.socketPath)) {
+                    spdlog::debug("Daemon started successfully after {} retries", i + 1);
+                    // Give it a bit more time to fully initialize
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    break;
+                }
+                
+                if (i == maxRetries - 1) {
+                    spdlog::warn("Daemon failed to start after {} retries", maxRetries);
+                }
+            }
         }
     }
 

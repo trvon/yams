@@ -37,8 +37,6 @@ RUN conan install . \
     -s build_type=Release \
     --build=missing \
     -o "*:shared=False" \
-    -o "boost/*:without_locale=True" \
-    -o "boost/*:without_stacktrace=True" \
     -c tools.cmake.cmaketoolchain:generator=Ninja
 
 # Compute a semver for CMake and an optional suffix for runtime info

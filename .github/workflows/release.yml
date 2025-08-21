@@ -233,15 +233,15 @@ jobs:
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             coverage_pct=$(python3 <<'PY' 2>/dev/null || echo 'N/A'
-            import xml.etree.ElementTree as ET
-            try:
+          import xml.etree.ElementTree as ET
+          try:
               root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
               line_rate = float(root.get('line-rate', 0))
               print(f"{line_rate * 100:.1f}%")
-              except Exception:
-                print('N/A')
-                PY
-                )
+          except Exception:
+              print('N/A')
+          PY
+            )
             echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
           fi
@@ -256,23 +256,23 @@ jobs:
             for json_file in "$BUILD_DIR/bench_results"/*.json; do
               if [ -f "$json_file" ]; then
                 python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
-                import json, sys
-                try:
-                  path = sys.argv[1]
-                  with open(path) as f:
-                    data = json.load(f)
-                    if 'benchmarks' in data:
+          import json, sys
+          try:
+              path = sys.argv[1]
+              with open(path) as f:
+                  data = json.load(f)
+                  if 'benchmarks' in data:
                       for bench in data['benchmarks']:
-                        name = bench.get('name', 'Unknown')
-                        real_time = bench.get('real_time', 0.0)
-                        cpu_time = bench.get('cpu_time', 0.0)
-                        bytes_per_sec = bench.get('bytes_per_second', 0.0)
-                        items_per_sec = bench.get('items_per_second', 0.0)
-                        memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
-                        print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
-                        except Exception:
-                          pass
-                          PY
+                          name = bench.get('name', 'Unknown')
+                          real_time = bench.get('real_time', 0.0)
+                          cpu_time = bench.get('cpu_time', 0.0)
+                          bytes_per_sec = bench.get('bytes_per_second', 0.0)
+                          items_per_sec = bench.get('items_per_second', 0.0)
+                          memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
+                          print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
+          except Exception:
+              pass
+          PY
               fi
             done
             echo "" >> "$SUMMARY_FILE"

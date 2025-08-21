@@ -1,0 +1,194 @@
+#pragma once
+
+#include <yams/core/result.h>
+#include <filesystem>
+#include <future>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+namespace yams::storage {
+
+// Forward declarations
+struct StorageStats;
+
+/**
+ * Storage backend configuration
+ */
+struct BackendConfig {
+    std::string type = "filesystem";  // filesystem, s3, http, ftp
+    std::string url;                  // URL for remote backends (e.g., s3://bucket/prefix)
+    std::filesystem::path localPath;  // Path for local filesystem backend
+    
+    // Credential configuration
+    std::unordered_map<std::string, std::string> credentials;
+    
+    // Cache configuration for remote backends
+    size_t cacheSize = 256 * 1024 * 1024;  // 256MB default cache
+    size_t cacheTTL = 3600;                 // 1 hour TTL
+    
+    // Performance tuning
+    size_t maxConcurrentOps = 10;
+    size_t requestTimeout = 30;  // seconds
+};
+
+/**
+ * Abstract interface for storage backends
+ * Implementations can be local filesystem, S3, HTTP, FTP, etc.
+ */
+class IStorageBackend {
+public:
+    virtual ~IStorageBackend() = default;
+    
+    /**
+     * Initialize the backend with configuration
+     */
+    virtual Result<void> initialize(const BackendConfig& config) = 0;
+    
+    /**
+     * Store data with the given key
+     */
+    virtual Result<void> store(std::string_view key, std::span<const std::byte> data) = 0;
+    
+    /**
+     * Retrieve data for the given key
+     */
+    virtual Result<std::vector<std::byte>> retrieve(std::string_view key) const = 0;
+    
+    /**
+     * Check if a key exists
+     */
+    virtual Result<bool> exists(std::string_view key) const = 0;
+    
+    /**
+     * Remove data for the given key
+     */
+    virtual Result<void> remove(std::string_view key) = 0;
+    
+    /**
+     * List all keys with optional prefix filter
+     */
+    virtual Result<std::vector<std::string>> list(std::string_view prefix = "") const = 0;
+    
+    /**
+     * Get storage statistics
+     */
+    virtual Result<StorageStats> getStats() const = 0;
+    
+    /**
+     * Async store operation
+     */
+    virtual std::future<Result<void>> storeAsync(std::string_view key,
+                                                 std::span<const std::byte> data) = 0;
+    
+    /**
+     * Async retrieve operation
+     */
+    virtual std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view key) const = 0;
+    
+    /**
+     * Get backend type identifier
+     */
+    virtual std::string getType() const = 0;
+    
+    /**
+     * Check if backend is remote (network-based)
+     */
+    virtual bool isRemote() const = 0;
+    
+    /**
+     * Flush any pending operations or caches
+     */
+    virtual Result<void> flush() = 0;
+};
+
+/**
+ * Local filesystem backend implementation
+ */
+class FilesystemBackend : public IStorageBackend {
+public:
+    FilesystemBackend() = default;
+    
+    Result<void> initialize(const BackendConfig& config) override;
+    Result<void> store(std::string_view key, std::span<const std::byte> data) override;
+    Result<std::vector<std::byte>> retrieve(std::string_view key) const override;
+    Result<bool> exists(std::string_view key) const override;
+    Result<void> remove(std::string_view key) override;
+    Result<std::vector<std::string>> list(std::string_view prefix) const override;
+    Result<StorageStats> getStats() const override;
+    
+    std::future<Result<void>> storeAsync(std::string_view key,
+                                         std::span<const std::byte> data) override;
+    std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view key) const override;
+    
+    std::string getType() const override { return "filesystem"; }
+    bool isRemote() const override { return false; }
+    Result<void> flush() override { return {}; }
+    
+private:
+    std::filesystem::path basePath_;
+    std::filesystem::path getObjectPath(std::string_view key) const;
+    Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;
+};
+
+/**
+ * URL-based backend implementation (S3, HTTP, FTP)
+ * Uses libcurl for network operations
+ */
+class URLBackend : public IStorageBackend {
+public:
+    URLBackend() = default;
+    
+    Result<void> initialize(const BackendConfig& config) override;
+    Result<void> store(std::string_view key, std::span<const std::byte> data) override;
+    Result<std::vector<std::byte>> retrieve(std::string_view key) const override;
+    Result<bool> exists(std::string_view key) const override;
+    Result<void> remove(std::string_view key) override;
+    Result<std::vector<std::string>> list(std::string_view prefix) const override;
+    Result<StorageStats> getStats() const override;
+    
+    std::future<Result<void>> storeAsync(std::string_view key,
+                                         std::span<const std::byte> data) override;
+    std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view key) const override;
+    
+    std::string getType() const override;
+    bool isRemote() const override { return true; }
+    Result<void> flush() override;
+    
+private:
+    class Impl;
+    std::unique_ptr<Impl> pImpl;
+};
+
+/**
+ * Factory for creating storage backends
+ */
+class StorageBackendFactory {
+public:
+    /**
+     * Create a backend from configuration
+     * Automatically detects type from URL scheme or explicit type
+     */
+    static std::unique_ptr<IStorageBackend> create(const BackendConfig& config);
+    
+    /**
+     * Parse a storage URL and create appropriate backend config
+     * Examples:
+     *   - /path/to/local/storage -> filesystem backend
+     *   - s3://bucket/prefix -> S3 backend
+     *   - http://server/path -> HTTP backend
+     *   - ftp://server/path -> FTP backend
+     */
+    static BackendConfig parseURL(const std::string& url);
+    
+    /**
+     * Register a custom backend implementation
+     */
+    static void registerBackend(const std::string& type,
+                                std::function<std::unique_ptr<IStorageBackend>()> factory);
+};
+
+} // namespace yams::storage

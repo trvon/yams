@@ -1144,36 +1144,65 @@ Result<void> YamsDaemon::start() {
                 }
                 // Phase 3: Stats handler
                 else if constexpr (std::is_same_v<T, GetStatsRequest>) {
-                    if (!metadataRepo_) {
-                        return ErrorResponse{ErrorCode::NotInitialized,
-                                             "Repository not initialized"};
-                    }
+                    try {
+                        // Check if core resources are initialized
+                        if (!metadataRepo_) {
+                            spdlog::warn("Stats request received but metadata repository not initialized");
+                            return ErrorResponse{ErrorCode::NotInitialized,
+                                                 "Repository not initialized"};
+                        }
 
-                    GetStatsResponse res;
+                        GetStatsResponse res;
 
-                    // Get basic stats
-                    auto docCount = metadataRepo_->getDocumentCount();
-                    if (docCount) {
-                        res.totalDocuments = static_cast<size_t>(docCount.value());
-                        res.indexedDocuments = static_cast<size_t>(docCount.value());
-                    }
+                        // Get basic stats with error handling
+                        try {
+                            auto docCount = metadataRepo_->getDocumentCount();
+                            if (docCount) {
+                                res.totalDocuments = static_cast<size_t>(docCount.value());
+                                res.indexedDocuments = static_cast<size_t>(docCount.value());
+                            } else {
+                                spdlog::debug("Failed to get document count: {}", docCount.error().message);
+                                res.totalDocuments = 0;
+                                res.indexedDocuments = 0;
+                            }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("Exception getting document count: {}", e.what());
+                            res.totalDocuments = 0;
+                            res.indexedDocuments = 0;
+                        }
 
-                    // Get content store stats if available
-                    if (contentStore_) {
-                        auto storeStats = contentStore_->getStats();
-                        res.totalSize = storeStats.totalBytes;
-                        res.compressionRatio = storeStats.dedupRatio();
-                    }
+                        // Get content store stats if available
+                        if (contentStore_) {
+                            try {
+                                auto storeStats = contentStore_->getStats();
+                                res.totalSize = storeStats.totalBytes;
+                                res.compressionRatio = storeStats.dedupRatio();
+                            } catch (const std::exception& e) {
+                                spdlog::warn("Exception getting content store stats: {}", e.what());
+                                res.totalSize = 0;
+                                res.compressionRatio = 1.0;
+                            }
+                        } else {
+                            spdlog::debug("Content store not available for stats");
+                            res.totalSize = 0;
+                            res.compressionRatio = 1.0;
+                        }
 
-                    // Get detailed breakdown if requested
-                    if (r.detailed) {
-                        auto typeStats = metadataRepo_->getDocumentCountsByExtension();
-                        if (typeStats) {
-                            for (const auto& [ext, count] : typeStats.value()) {
-                                res.documentsByType[ext] = static_cast<size_t>(count);
+                        // Get detailed breakdown if requested
+                        if (r.detailed && metadataRepo_) {
+                            try {
+                                auto typeStats = metadataRepo_->getDocumentCountsByExtension();
+                                if (typeStats) {
+                                    for (const auto& [ext, count] : typeStats.value()) {
+                                        res.documentsByType[ext] = static_cast<size_t>(count);
+                                    }
+                                } else {
+                                    spdlog::debug("Failed to get document types: {}", typeStats.error().message);
+                                }
+                            } catch (const std::exception& e) {
+                                spdlog::warn("Exception getting document types: {}", e.what());
                             }
                         }
-                    }
 
                     // Add cache stats if requested
                     if (r.includeCache) {
@@ -1183,12 +1212,17 @@ Result<void> YamsDaemon::start() {
                         res.additionalStats["cache_size"] = "0";
                     }
 
-                    // Calculate compression ratio if available
-                    if (res.totalSize > 0 && contentStore_) {
-                        // Compression ratio already set from content store stats above
-                    }
+                        // Calculate compression ratio if available
+                        if (res.totalSize > 0 && contentStore_) {
+                            // Compression ratio already set from content store stats above
+                        }
 
-                    return res;
+                        return res;
+                    } catch (const std::exception& e) {
+                        spdlog::error("Unexpected exception in stats handler: {}", e.what());
+                        return ErrorResponse{ErrorCode::InternalError,
+                                             std::string("Stats request failed: ") + e.what()};
+                    }
                 } else {
                     spdlog::warn("Received unsupported request type");
                     return ErrorResponse{ErrorCode::NotImplemented,
@@ -1469,25 +1503,32 @@ Result<void> YamsDaemon::initializeResources() {
         }
 
         // Initialize content store under dataDir/storage
+        spdlog::info("Initializing content store at: {}", (dataDir / "storage").string());
         try {
             auto storeRes = yams::api::ContentStoreBuilder::createDefault(dataDir / "storage");
             if (!storeRes) {
-                spdlog::warn("Content store init failed: {}", storeRes.error().message);
+                spdlog::error("Content store init failed: {}", storeRes.error().message);
+                // Don't fail completely - daemon can still serve some requests
             } else {
                 auto uniqueStore = std::move(
                     const_cast<std::unique_ptr<yams::api::IContentStore>&>(storeRes.value()));
                 contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
+                spdlog::info("Content store initialized successfully");
             }
         } catch (const std::exception& e) {
-            spdlog::warn("Content store init exception: {}", e.what());
+            spdlog::error("Content store init exception: {}", e.what());
+            // Continue without content store - some functionality will be limited
         }
 
         auto dbPath = dataDir / "yams.db";
+        spdlog::info("Initializing database at: {}", dbPath.string());
         database_ = std::make_shared<metadata::Database>();
         auto dbRes = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
         if (!dbRes) {
-            spdlog::warn("Daemon DB open failed: {}", dbRes.error().message);
+            spdlog::error("Daemon DB open failed: {}", dbRes.error().message);
+            // Database is critical - but continue to allow status queries
         } else {
+            spdlog::info("Database opened successfully");
             // Run migrations
             metadata::MigrationManager mm(*database_);
             auto initRes = mm.initialize();
@@ -1509,12 +1550,16 @@ Result<void> YamsDaemon::initializeResources() {
             connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolCfg);
             auto poolInit = connectionPool_->initialize();
             if (!poolInit) {
-                spdlog::warn("ConnectionPool init failed: {}", poolInit.error().message);
+                spdlog::error("ConnectionPool init failed: {}", poolInit.error().message);
             } else {
+                spdlog::info("Connection pool initialized successfully");
                 metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
+                spdlog::info("Metadata repository initialized successfully");
+                
                 // SearchExecutor (keyword/FTS fallback)
                 searchExecutor_ =
                     std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
+                spdlog::info("Search executor initialized successfully");
             }
 
             // Initialize hybrid search resources

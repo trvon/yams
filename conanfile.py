@@ -60,7 +60,7 @@ class YamsConan(ConanFile):
 
     def build_requirements(self):
         if self.options.build_tests:
-            self.test_requires("gtest/1.14.0")
+            self.test_requires("gtest/1.15.0")
         if self.options.build_benchmarks:
             self.test_requires("benchmark/1.8.3")
         # Add Tracy profiler for Debug builds
