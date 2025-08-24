@@ -346,8 +346,12 @@ Task<void> AsyncIpcServer::accept_loop(std::stop_token token) {
         // Create async socket for the client
         AsyncSocket client_socket(client_fd, *io_context_);
 
-        // Spawn coroutine to handle the client
+        // Spawn coroutine to handle the client and retain task to keep coroutine alive
         auto client_task = handle_client(std::move(client_socket), token);
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            client_tasks_.push_back(std::move(client_task));
+        }
 
         // The coroutine will run on the worker threads via io_context
         // It begins immediately (initial_suspend = never); resumes on I/O ready

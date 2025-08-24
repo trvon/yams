@@ -1,9 +1,14 @@
 #include <yams/app/services/services.hpp>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_engine_builder.h>
+#include <yams/vector/vector_index_manager.h>
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <future>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -193,6 +198,8 @@ public:
 
         GrepResponse response;
         response.totalMatches = 0;
+        response.regexMatches = 0;
+        response.semanticMatches = 0;
 
         const auto& docs = docsRes.value();
         for (const auto& doc : docs) {
@@ -254,6 +261,7 @@ public:
 
                 fileResult.matchCount++;
                 response.totalMatches++;
+                response.regexMatches++;
 
                 if (!req.count) {
                     GrepMatch gm;
@@ -304,9 +312,81 @@ public:
             }
         }
 
-        // If filesWithMatches mode is intended for presentation, the caller can read filesWith.
-        // If filesWithoutMatch intended, caller can read filesWithout.
-        // If count mode intended, caller can sum fileResult.matchCount or use totalMatches.
+        // Perform semantic search unless disabled or incompatible output modes
+        if (!req.regexOnly && !req.count && !req.filesWithMatches && !req.filesWithoutMatch &&
+            !req.pathsOnly && req.semanticLimit > 0) {
+            try {
+                auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                yams::search::SearchEngineBuilder builder;
+                builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
+                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                opts.hybrid.final_top_k = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
+                auto engRes = builder.buildEmbedded(opts);
+                if (engRes) {
+                    auto eng = engRes.value();
+                    auto hres = eng->search(req.pattern, opts.hybrid.final_top_k);
+                    if (hres) {
+                        std::set<std::string> regexFiles;
+                        for (const auto& fr : response.results)
+                            regexFiles.insert(fr.file);
+                        std::vector<yams::search::HybridSearchResult> sem = hres.value();
+                        int taken = 0;
+                        for (const auto& r : sem) {
+                            auto itPath = r.metadata.find("path");
+                            if (itPath == r.metadata.end())
+                                continue;
+                            const std::string& path = itPath->second;
+                            if (!pathFilterMatch(path, req.paths))
+                                continue;
+                            if (!req.includePatterns.empty()) {
+                                bool ok = false;
+                                for (const auto& p : req.includePatterns) {
+                                    if (hasWildcard(p)) {
+                                        if (wildcardMatch(path, p)) {
+                                            ok = true;
+                                            break;
+                                        }
+                                    } else {
+                                        if (path.find(p) != std::string::npos) {
+                                            ok = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!ok)
+                                    continue;
+                            }
+                            if (regexFiles.find(path) != regexFiles.end())
+                                continue;
+                            GrepFileResult fr;
+                            fr.file = path;
+                            fr.fileName = std::filesystem::path(path).filename().string();
+                            GrepMatch gm;
+                            gm.matchType = "semantic";
+                            double conf = r.hybrid_score > 0 ? r.hybrid_score : r.vector_score;
+                            if (conf < 0.0)
+                                conf = 0.0;
+                            if (conf > 1.0)
+                                conf = 1.0;
+                            gm.confidence = conf;
+                            gm.lineNumber = 0;
+                            if (!r.content.empty())
+                                gm.line = r.content;
+                            fr.matches.push_back(std::move(gm));
+                            fr.matchCount = 1;
+                            fr.wasSemanticSearch = true;
+                            response.results.push_back(std::move(fr));
+                            response.semanticMatches += 1;
+                            response.totalMatches += 0; // semantic items are not line hits
+                            taken++;
+                            if (taken >= req.semanticLimit)
+                                break;
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
 
         return Result<GrepResponse>(std::move(response));
     }

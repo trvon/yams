@@ -42,6 +42,12 @@ jobs:
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
             hosted: true
+          - os: windows-hosted-x64
+            runs_on: '"windows-2022"'
+            packaging: zip
+            cmake_args: ""
+            suffix: windows-x86_64
+            hosted: true
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     env:
       BUILD_DIR: build/conan-release/build/Release
@@ -103,7 +109,7 @@ jobs:
 
       # Hosted runners: install and configure Conan (self-hosted must already be configured)
       - name: Install Conan (hosted only)
-        if: ${{ matrix.hosted }}
+        if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
           pip3 install conan || python3 -m pip install conan || python -m pip install conan
@@ -124,6 +130,14 @@ jobs:
           fi
           echo "Conan profile configured:" >&2
           conan profile show >&2
+
+      - name: Setup Conan Profile (hosted Windows)
+        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
+        shell: pwsh
+        run: |
+          conan profile detect --force
+          conan profile update "settings.compiler.cppstd=20" default
+          conan profile show
 
       - name: Check Conan (self-hosted sanity)
         if: ${{ !matrix.hosted }}
@@ -179,6 +193,7 @@ jobs:
 
       # Release build for ALL targets
       - name: Configure and Build Release (Optimized)
+        if: ${{ !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
@@ -196,6 +211,33 @@ jobs:
             ${{ matrix.cmake_args}}
           cmake --build --preset conan-release --parallel
           echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
+
+      - name: Configure and Build Release (Optimized) [Windows]
+        if: ${{ startsWith(matrix.os, 'windows') }}
+        shell: pwsh
+        run: |
+          Write-Host "Optimized release build for ${{ matrix.suffix }}"
+          Remove-Item -Recurse -Force build\conan-release -ErrorAction SilentlyContinue
+          Remove-Item -Force CMakeUserPresets.json -ErrorAction SilentlyContinue
+
+          python -m pip install --upgrade pip
+          python -m pip install conan
+          conan --version
+
+          conan install . `
+            --output-folder=build/conan-release `
+            -s build_type=Release `
+            --build=missing
+
+          cmake --preset conan-release `
+            -DYAMS_BUILD_PROFILE=release `
+            -DYAMS_VERSION="${{ steps.v.outputs.version }}" `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\${{ env.STAGE_DIR }}" `
+            ${{ matrix.cmake_args }}
+
+          cmake --build --preset conan-release --parallel
+
+          "BUILD_DIR=build/conan-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: Collect benchmark results
         shell: bash
@@ -294,6 +336,7 @@ jobs:
           cat "$SUMMARY_FILE"
 
       - name: Package
+        if: ${{ !startsWith(matrix.os, 'windows') }}
         id: pkg
         shell: bash
         run: |
@@ -310,6 +353,20 @@ jobs:
           fi
           echo "asset_path=$OUTDIR/$ASSET" >> "$GITHUB_OUTPUT"
           echo "Created asset: $OUTDIR/$ASSET"
+
+      - name: Package (Windows)
+        if: ${{ startsWith(matrix.os, 'windows') }}
+        id: pkg
+        shell: pwsh
+        run: |
+          $stage = "${{ github.workspace }}\${{ env.STAGE_DIR }}"
+          $version = "${{ steps.v.outputs.version }}"
+          $suffix = "${{ matrix.suffix }}"
+          $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
+          if (Test-Path $out) { Remove-Item $out -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
+          "asset_path=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          Write-Host "Created asset: $out"
 
       - name: Build Linux packages (DEB/RPM)
         if: matrix.build_packages == true && matrix.os == 'linux-self-hosted'
@@ -385,10 +442,49 @@ jobs:
     name: Create GitHub Release
     needs: build-release
     runs-on: ubuntu-latest
-    if: success()
+    # Run unconditionally; dynamic threshold enforced inside the job
+    if: always() && !cancelled()
     permissions:
       contents: write
+      actions: read
     steps:
+      - name: Check job completion status
+        id: check-status
+        shell: bash
+        run: |
+          # Discover expected platforms from matrix job names in this run
+          JOBS_JSON=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                           -H "Accept: application/vnd.github.v3+json" \
+                           -s "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+          # Extract unique platform identifiers from "Build and Release (<platform>)" job names
+          EXPECTED_PLATFORMS=$(echo "$JOBS_JSON" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(Build and Release ([^"]*)\)".*/\1/p' | sed -n 's/Build and Release (\(.*\))/\1/p' | sort -u)
+          TOTAL_EXPECTED=$(echo "$EXPECTED_PLATFORMS" | grep -c . || true)
+
+          # Count successful artifacts (platforms that produced release-* artifacts)
+          ARTIFACTS_JSON=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                                -H "Accept: application/vnd.github.v3+json" \
+                                -s "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100")
+          SUCCESS_COUNT=$(echo "$ARTIFACTS_JSON" | grep -o '"name":"release-[^"]*' | sed -E 's/.*"name":"release-([^"]*).*/\1/' | sort -u | grep -c . || true)
+
+          # Fallback: if we failed to detect expected platforms, assume expected equals number of artifacts found
+          if [ -z "$TOTAL_EXPECTED" ] || [ "$TOTAL_EXPECTED" -eq 0 ]; then
+            TOTAL_EXPECTED="$SUCCESS_COUNT"
+          fi
+
+          # Compute dynamic threshold = ceil(TOTAL_EXPECTED / 2)
+          THRESHOLD=$(( (TOTAL_EXPECTED + 1) / 2 ))
+
+          echo "Successful builds: $SUCCESS_COUNT out of $TOTAL_EXPECTED (threshold: $THRESHOLD)"
+
+          if [ "$SUCCESS_COUNT" -lt "$THRESHOLD" ]; then
+            echo "ERROR: Need at least $THRESHOLD successful builds to create release (out of $TOTAL_EXPECTED expected)"
+            exit 1
+          fi
+
+          echo "success_count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+          echo "total_expected=$TOTAL_EXPECTED" >> $GITHUB_OUTPUT
+          echo "threshold=$THRESHOLD" >> $GITHUB_OUTPUT
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -408,6 +504,52 @@ jobs:
         uses: ffurrer2/extract-release-notes@v2
         with:
           changelog_file: CHANGELOG.md
+
+      - name: Extract grouped changelogs for minor version
+        id: grouped-changelog
+        shell: bash
+        run: |
+          # Extract minor version from current tag
+          CURRENT_VERSION="${{ steps.v.outputs.version }}"
+          MINOR_VERSION=$(echo "$CURRENT_VERSION" | sed -E 's/^v?([0-9]+\.[0-9]+).*/\1/')
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "Extracting all changes for minor version: $MINOR_VERSION"
+
+          # Create grouped changelog file
+          GROUPED_FILE="grouped_changelog_${MINOR_VERSION}.md"
+
+          # Extract all entries for this minor version from CHANGELOG.md
+          echo "# Release Notes for v${MINOR_VERSION}.x Series" > "$GROUPED_FILE"
+          echo "" >> "$GROUPED_FILE"
+          echo "This release is part of the v${MINOR_VERSION}.x series. Below are all changes in this series:" >> "$GROUPED_FILE"
+          echo "" >> "$GROUPED_FILE"
+
+          # Parse CHANGELOG.md and extract all sections matching the minor version
+          awk -v minor="$MINOR_VERSION" '
+            /^## \[v?[0-9]+\.[0-9]+\.[0-9]+/ {
+              # Extract version parts using simpler approach
+              version_str = $2
+              gsub(/\[v?/, "", version_str)
+              gsub(/\]/, "", version_str)
+              split(version_str, version_parts, ".")
+              version_minor = version_parts[1] "." version_parts[2]
+
+              if (version_minor == minor) {
+                in_section = 1
+                print $0
+                next
+              } else {
+                in_section = 0
+              }
+            }
+            /^## \[/ && in_section { in_section = 0 }
+            in_section { print }
+          ' CHANGELOG.md >> "$GROUPED_FILE"
+
+          # Store path for later use
+          echo "grouped_changelog_file=$GROUPED_FILE" >> $GITHUB_OUTPUT
+          echo "minor_version=$MINOR_VERSION" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -439,19 +581,54 @@ jobs:
         shell: bash
         run: |
           COMBINED_NOTES="combined_release_notes.md"
-          echo "${{ steps.changelog.outputs.release_notes }}" > "$COMBINED_NOTES"
+
+          # Start with current version changes
+          echo "# YAMS ${{ steps.v.outputs.version }}" > "$COMBINED_NOTES"
           echo "" >> "$COMBINED_NOTES"
+          echo "${{ steps.changelog.outputs.release_notes }}" >> "$COMBINED_NOTES"
+          echo "" >> "$COMBINED_NOTES"
+
+          # Add platform build status
           echo "## Platform Builds" >> "$COMBINED_NOTES"
           echo "" >> "$COMBINED_NOTES"
+          echo "Successfully built for ${{ steps.check-status.outputs.success_count }} out of ${{ steps.check-status.outputs.total_expected }} platforms:" >> "$COMBINED_NOTES"
+          echo "" >> "$COMBINED_NOTES"
+
           # Add summaries from each platform
           for summary in release-artifacts/release-*/release_summary.md; do
             if [ -f "$summary" ]; then
               platform=$(basename $(dirname "$summary") | sed 's/release-//')
-              echo "### $platform" >> "$COMBINED_NOTES"
+              echo "### ✅ $platform" >> "$COMBINED_NOTES"
               tail -n +2 "$summary" >> "$COMBINED_NOTES"
               echo "" >> "$COMBINED_NOTES"
             fi
           done
+
+          # List missing platforms if any
+          if [ "${{ steps.check-status.outputs.success_count }}" -lt "3" ]; then
+            echo "### ⚠️ Missing Platforms" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            echo "Some platforms failed to build. They may be added in a future patch release." >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+          fi
+
+          # Add series changelog if not a patch 0 release
+          PATCH_VERSION=$(echo "${{ steps.v.outputs.version }}" | sed -E 's/^v?[0-9]+\.[0-9]+\.([0-9]+).*/\1/')
+          if [ "$PATCH_VERSION" != "0" ]; then
+            echo "---" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            echo "## All Changes in v${{ steps.grouped-changelog.outputs.minor_version }}.x Series" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            echo "<details>" >> "$COMBINED_NOTES"
+            echo "<summary>Click to expand full series changelog</summary>" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            # Include grouped changelog content
+            if [ -f "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" ]; then
+              tail -n +4 "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" >> "$COMBINED_NOTES"
+            fi
+            echo "" >> "$COMBINED_NOTES"
+            echo "</details>" >> "$COMBINED_NOTES"
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

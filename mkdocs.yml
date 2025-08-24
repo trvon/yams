@@ -3,7 +3,6 @@ site_description: Yet Another Memory System — persistent memory for LLMs and a
 site_url: https://trvon.github.io/yams
 repo_url: https://github.com/trvon/yams
 repo_name: trvon/yams
-
 docs_dir: docs
 site_dir: public
 use_directory_urls: true
@@ -70,6 +69,8 @@ theme:
   font:
     text: "JetBrains Mono"
     code: "JetBrains Mono"
+  logo: assets/yams.png
+  favicon: assets/yams.png
 
 markdown_extensions:
   - admonition

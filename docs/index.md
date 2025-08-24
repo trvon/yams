@@ -1,6 +1,6 @@
 # YAMS — Yet Another Memory System
 
-[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)
+[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)[![Discord](https://discord.gg/Jee5ux2Y3e)]
 **Note**: Pre‑1.0 releases (v0.x) are not considered stable. Expect breaking changes until v1.0.
 
 

@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.5.4] - 2025-08-24
 
+**CI version bump**
+- Releases now generate regardless of build failures
+
+### Fixed
+- Grep supports semantics search using embeddings
+
+## [v0.5.4] - 2025-08-24
+
 ### Fixed
 - Resolved MCP tool listing error
 - Added mutex imports for macos x86 ci builds
 
-
 ## [v0.5.3] - 2025-08-24
+
 **CI version bump**
 
 ## [v0.5.2] - 2025-08-24
@@ -29,7 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Daemon connection exhaustion: running many concurrent yams processes (e.g., find -exec yams add …) can hit the default max_connections=100 and cause rejections. Mitigation: prefer recursive/batched commands or cap concurrency (e.g., xargs -P 4). Consider raising max_connections for CI.
 - Regex alternation in yams search: search currently treats queries as keyword/FTS; compound regex expressions (e.g., A|B) aren’t supported there yet. Use yams grep for regex, or await a future --regex mode in search.
 
-### Fixed
 ## [v0.5.0] - 2025-08-22
 
 ### Added

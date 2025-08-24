@@ -107,6 +107,10 @@ private:
     std::thread accept_thread_;
     std::thread io_thread_; // Single thread for IO event loop
 
+    // Retain client tasks to ensure coroutine lifetime across threads
+    std::mutex tasks_mutex_;
+    std::vector<Task<void>> client_tasks_;
+
     // Internal stats with atomics
     struct InternalStats {
         std::atomic<size_t> total_connections{0};
