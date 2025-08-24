@@ -1,4 +1,5 @@
-[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)[![Discord](https://discord.gg/Jee5ux2Y3e)]
+[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)
+[Discord](https://discord.gg/Jee5ux2Y3e)
 
 # YAMS - Yet Another Memory System
 

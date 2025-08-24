@@ -1,6 +1,7 @@
 # YAMS — Yet Another Memory System
 
-[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)[![Discord](https://discord.gg/Jee5ux2Y3e)]
+[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)
+[Discord](https://discord.gg/Jee5ux2Y3e)
 **Note**: Pre‑1.0 releases (v0.x) are not considered stable. Expect breaking changes until v1.0.
 
 
@@ -16,7 +17,7 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 - Compression: zstd and LZMA
 - Search: full‑text (SQLite FTS5) + semantic (vector)
 - Crash safety: WAL
-- Fast and portable CLI + MCP server 
+- Fast and portable CLI + MCP server
 
 <div class="hero-cta">
   <h2>Managed hosting coming soon</h2>
@@ -105,7 +106,7 @@ sudo mv yams /usr/local/bin/
 curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-arm64.zip -o yams.zip
 unzip yams.zip && sudo mv yams /usr/local/bin/
 
-# macOS x86_64  
+# macOS x86_64
 curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip
 unzip yams.zip && sudo mv yams /usr/local/bin/
 
