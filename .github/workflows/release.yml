@@ -337,7 +337,7 @@ jobs:
 
       - name: Package
         if: ${{ !startsWith(matrix.os, 'windows') }}
-        id: pkg
+
         shell: bash
         run: |
           cd "$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}"
@@ -351,12 +351,12 @@ jobs:
             ASSET="yams-${VERSION}-${SUFFIX}.tar.gz"
             tar czf "$OUTDIR/$ASSET" .
           fi
-          echo "asset_path=$OUTDIR/$ASSET" >> "$GITHUB_OUTPUT"
+          echo "ASSET_PATH=$OUTDIR/$ASSET" >> "$GITHUB_ENV"
           echo "Created asset: $OUTDIR/$ASSET"
 
       - name: Package (Windows)
         if: ${{ startsWith(matrix.os, 'windows') }}
-        id: pkg
+
         shell: pwsh
         run: |
           $stage = "${{ github.workspace }}\${{ env.STAGE_DIR }}"
@@ -365,7 +365,7 @@ jobs:
           $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
           if (Test-Path $out) { Remove-Item $out -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
-          "asset_path=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "ASSET_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
           Write-Host "Created asset: $out"
 
       - name: Build Linux packages (DEB/RPM)
@@ -430,7 +430,7 @@ jobs:
         with:
           name: release-${{ matrix.suffix }}
           path: |
-            ${{ steps.pkg.outputs.asset_path }}
+            ${{ env.ASSET_PATH }}
             ${{ env.BUILD_DIR }}/release_summary.md
             ${{ env.BUILD_DIR }}/bench_results/*.json
             yams-*.deb
