@@ -5,6 +5,18 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.1] - 2025-08-24
+
+### Changed
+- Release workflow: made Linux validation build non-blocking in release pipeline to allow packaging and publishing artifacts even if validation step fails. Validation failures are surfaced in job logs and summary but no longer block artifact creation.
+
+### Fixed
+- Linux build: guarded macOS-specific Mach headers in RequestDispatcher with __APPLE__ and added Linux-friendly memory/CPU sampling using /proc, fixing fatal includes on Linux targets.
+
+### Known Issues
+- Daemon connection exhaustion: running many concurrent yams processes (e.g., find -exec yams add …) can hit the default max_connections=100 and cause rejections. Mitigation: prefer recursive/batched commands or cap concurrency (e.g., xargs -P 4). Consider raising max_connections for CI.
+- Regex alternation in yams search: search currently treats queries as keyword/FTS; compound regex expressions (e.g., A|B) aren’t supported there yet. Use yams grep for regex, or await a future --regex mode in search.
+
 ### Fixed
 ## [v0.5.0] - 2025-08-22
 

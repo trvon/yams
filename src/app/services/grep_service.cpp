@@ -67,7 +67,6 @@ static std::vector<std::string> splitToLines(const std::string& content) {
 #endif
         lines.push_back(std::move(line));
     }
-    // Handle trailing newline producing an extra empty line? std::getline handles ok.
     return lines;
 }
 
@@ -259,6 +258,7 @@ public:
                 if (!req.count) {
                     GrepMatch gm;
                     gm.matchType = "regex"; // Set match type for all regex matches
+                    gm.confidence = 1.0;    // Regex matches have full confidence
                     if (req.lineNumbers)
                         gm.lineNumber = i + 1;
                     gm.line = line;

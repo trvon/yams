@@ -1,4 +1,5 @@
-[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml) [![CI](https://github.com/trvon/yams/actions/workflows/ci.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/ci.yml)
+[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)
+
 # YAMS - Yet Another Memory System
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
@@ -39,7 +40,7 @@ curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-amd64
 sudo dpkg -i yams.deb
 sudo apt-get install -f  # Fix any dependency issues
 
-# RPM (Fedora/RedHat/CentOS)  
+# RPM (Fedora/RedHat/CentOS)
 curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.rpm -o yams.rpm
 sudo dnf install ./yams.rpm
 
@@ -68,7 +69,7 @@ curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-arm64.
 unzip yams.zip && sudo mv bin/yams /usr/local/bin/
 
 # macOS x86_64 (Intel)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip  
+curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip
 unzip yams.zip && sudo mv bin/yams /usr/local/bin/
 ```
 

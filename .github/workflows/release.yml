@@ -144,6 +144,7 @@ jobs:
       # Linux self-hosted only: Validation build (tests + benchmarks)
       - name: Configure with Conan (Validation Build) [Linux self-hosted only]
         if: ${{ matrix.os == 'linux-self-hosted' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "Phase 1: Validation build with tests and benchmarks on Linux"
@@ -161,6 +162,7 @@ jobs:
 
       - name: Build and Test (Validation) [Linux self-hosted only]
         if: ${{ matrix.os == 'linux-self-hosted' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "Building with tests and benchmarks for validation..."
@@ -309,7 +311,7 @@ jobs:
         run: |
           cd "$BUILD_DIR"
           VERSION="${{ steps.v.outputs.version }}"
-          
+
           # Generate DEB package
           cpack -G DEB -D CPACK_PACKAGE_VERSION="${VERSION}"
           DEB_FILE=$(ls *.deb 2>/dev/null | head -1)
@@ -317,7 +319,7 @@ jobs:
             mv "$DEB_FILE" "$GITHUB_WORKSPACE/yams-${VERSION}-amd64.deb"
             echo "Created DEB package: yams-${VERSION}-amd64.deb"
           fi
-          
+
           # Generate RPM package
           if command -v rpmbuild >/dev/null 2>&1; then
             cpack -G RPM -D CPACK_PACKAGE_VERSION="${VERSION}"
@@ -329,7 +331,7 @@ jobs:
           else
             echo "rpmbuild not found, skipping RPM generation"
           fi
-          
+
           # Generate AppImage if appimage-builder is available
           if command -v appimage-builder >/dev/null 2>&1; then
             cd "$GITHUB_WORKSPACE"

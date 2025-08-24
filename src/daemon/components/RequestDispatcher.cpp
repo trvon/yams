@@ -7,9 +7,11 @@
 #include <regex>
 #include <sstream>
 #include <thread>
+#ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/task.h>
 #include <mach/task_info.h>
+#endif
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/name_resolver.h>
@@ -33,17 +35,35 @@ namespace yams::daemon {
 
 // Helper functions for system metrics (moved from daemon.cpp)
 double getMemoryUsage() {
+#ifdef __APPLE__
     task_vm_info_data_t info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
         return static_cast<double>(info.resident_size) / (1024.0 * 1024.0); // MB
     }
+#else
+    // Linux implementation using /proc/self/status
+    std::ifstream status("/proc/self/status");
+    if (status.is_open()) {
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.find("VmRSS:") == 0) {
+                std::istringstream iss(line);
+                std::string label;
+                long rss_kb;
+                iss >> label >> rss_kb;
+                return static_cast<double>(rss_kb) / 1024.0; // Convert KB to MB
+            }
+        }
+    }
+#endif
     return 0.0;
 }
 
 double getCpuUsage() {
     // Simple CPU usage approximation - in a real implementation,
     // you'd track CPU time over intervals
+#ifdef __APPLE__
     task_info_data_t tinfo __attribute__((unused));
     unsigned thread_count;
     thread_act_array_t thread_list;
@@ -52,6 +72,29 @@ double getCpuUsage() {
         vm_deallocate(mach_task_self(), (vm_offset_t)thread_list, thread_count * sizeof(thread_t));
         return static_cast<double>(thread_count) * 0.1; // Rough approximation
     }
+#else
+    // Linux implementation - count threads from /proc/self/stat
+    std::ifstream stat("/proc/self/stat");
+    if (stat.is_open()) {
+        std::string line;
+        std::getline(stat, line);
+        // Parse the stat line to get thread count (field 20)
+        std::istringstream iss(line);
+        std::string field;
+        int field_num = 0;
+        while (iss >> field && field_num < 20) {
+            field_num++;
+            if (field_num == 20) {
+                try {
+                    int thread_count = std::stoi(field);
+                    return static_cast<double>(thread_count) * 0.1; // Rough approximation
+                } catch (...) {
+                    // Ignore parsing errors
+                }
+            }
+        }
+    }
+#endif
     return 0.0;
 }
 
