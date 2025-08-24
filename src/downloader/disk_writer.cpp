@@ -206,9 +206,11 @@ public:
         return stagingFile;
     }
 
-    Expected<std::filesystem::path> createOrOpenStagingFile(
-        const StorageConfig& storage, std::string_view sessionId, std::string_view tempExtension,
-        std::optional<std::uint64_t> expectedSize, std::uint64_t& currentSize) override {
+    Expected<std::filesystem::path>
+    createOrOpenStagingFile(const StorageConfig& storage, std::string_view sessionId,
+                            std::string_view tempExtension,
+                            [[maybe_unused]] std::optional<std::uint64_t> expectedSize,
+                            std::uint64_t& currentSize) override {
         std::error_code ec;
 
         // Ensure staging directory exists with restrictive permissions

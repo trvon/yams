@@ -401,11 +401,11 @@ void saveResults(const std::vector<BenchmarkResult>& results, const std::string&
 std::string formatTime(double microseconds) {
 #if YAMS_HAVE_STD_FORMAT
     if (microseconds < 1000) {
-        return std::format("{:.2f} μs", microseconds);
+        return fmt::format("{:.2f} μs", microseconds);
     } else if (microseconds < 1000000) {
-        return std::format("{:.2f} ms", microseconds / 1000);
+        return fmt::format("{:.2f} ms", microseconds / 1000);
     } else {
-        return std::format("{:.2f} s", microseconds / 1000000);
+        return fmt::format("{:.2f} s", microseconds / 1000000);
     }
 #else
     auto to_fixed = [](double v, const char* unit) {
@@ -429,13 +429,13 @@ std::string formatTime(double microseconds) {
 std::string formatMemory(size_t bytes) {
 #if YAMS_HAVE_STD_FORMAT
     if (bytes < 1024) {
-        return std::format("{} B", bytes);
+        return fmt::format("{} B", bytes);
     } else if (bytes < 1024 * 1024) {
-        return std::format("{:.2f} KB", bytes / 1024.0);
+        return fmt::format("{:.2f} KB", bytes / 1024.0);
     } else if (bytes < 1024 * 1024 * 1024) {
-        return std::format("{:.2f} MB", bytes / (1024.0 * 1024));
+        return fmt::format("{:.2f} MB", bytes / (1024.0 * 1024));
     } else {
-        return std::format("{:.2f} GB", bytes / (1024.0 * 1024 * 1024));
+        return fmt::format("{:.2f} GB", bytes / (1024.0 * 1024 * 1024));
     }
 #else
     auto to_fixed = [](double v, const char* unit) {

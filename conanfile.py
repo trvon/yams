@@ -4,7 +4,7 @@ from conan.tools.build import check_min_cppstd
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.0.3"
+    version = "0.5.1"
     license = "MIT"
     author = "YAMS Contributors"
     url = "https://github.com/your-org/yams"

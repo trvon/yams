@@ -83,7 +83,7 @@ bool PdfExtractor::isPdfiumInitialized() {
 
 // Main extraction methods
 Result<ExtractionResult> PdfExtractor::extract(const std::filesystem::path& path,
-                                               const ExtractionConfig& config) {
+                                               [[maybe_unused]] const ExtractionConfig& config) {
     if (!std::filesystem::exists(path)) {
         return Error{ErrorCode::FileNotFound, "PDF file not found: " + path.string()};
     }
@@ -111,8 +111,9 @@ Result<ExtractionResult> PdfExtractor::extract(const std::filesystem::path& path
     return extractInternal(buffer, options);
 }
 
-Result<ExtractionResult> PdfExtractor::extractFromBuffer(std::span<const std::byte> data,
-                                                         const ExtractionConfig& config) {
+Result<ExtractionResult>
+PdfExtractor::extractFromBuffer(std::span<const std::byte> data,
+                                [[maybe_unused]] const ExtractionConfig& config) {
     PdfExtractOptions options;
     options.extractAll = true;
     options.extractMetadata = true;
@@ -120,7 +121,8 @@ Result<ExtractionResult> PdfExtractor::extractFromBuffer(std::span<const std::by
     return extractInternal(data, options);
 }
 
-Result<ExtractionResult> PdfExtractor::extractPage(const std::filesystem::path& path, int page) {
+Result<ExtractionResult> PdfExtractor::extractPage(const std::filesystem::path& path,
+                                                   [[maybe_unused]] int page) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         return Error{ErrorCode::FileNotFound, "Cannot open PDF file"};

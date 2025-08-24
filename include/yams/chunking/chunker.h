@@ -21,8 +21,11 @@ struct Chunk {
     size_t offset;
     size_t size;
 
-    // C++20 spaceship operator for comparisons
-    auto operator<=>(const Chunk&) const = default;
+    // Comparison operators
+    bool operator==(const Chunk&) const = default;
+    bool operator<(const Chunk& other) const {
+        return std::tie(offset, size, hash) < std::tie(other.offset, other.size, other.hash);
+    }
 };
 
 // Lightweight chunk reference (no data)
@@ -31,7 +34,10 @@ struct ChunkRef {
     size_t offset;
     size_t size;
 
-    auto operator<=>(const ChunkRef&) const = default;
+    bool operator==(const ChunkRef&) const = default;
+    bool operator<(const ChunkRef& other) const {
+        return std::tie(offset, size, hash) < std::tie(other.offset, other.size, other.hash);
+    }
 };
 
 // Chunking configuration
@@ -47,7 +53,7 @@ struct ChunkingConfig {
 // Concepts for chunking
 template <typename T>
 concept ChunkableData = requires(T t) {
-    { yams::span{t} } -> std::convertible_to<yams::span<const std::byte>>;
+    { yams::span<const std::byte>{t} } -> std::convertible_to<yams::span<const std::byte>>;
 };
 
 template <typename T>

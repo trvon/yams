@@ -148,6 +148,8 @@ jobs:
         shell: bash
         run: |
           echo "Phase 1: Validation build with tests and benchmarks on Linux"
+          # Clean any existing build directory to avoid duplicate preset issues
+          rm -rf build/conan-validation
           conan install . \
             --output-folder=build/conan-validation \
             -s build_type=Release \
@@ -179,6 +181,8 @@ jobs:
         shell: bash
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
+          # Clean any existing build directory to avoid duplicate preset issues
+          rm -rf build/conan-release
           conan install . \
             --output-folder=build/conan-release \
             -s build_type=Release \

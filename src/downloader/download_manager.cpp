@@ -180,7 +180,7 @@ static std::string makeSessionId(std::string_view url) {
 }
 
 // ---- Utility: bytes to size_t guard ----
-static std::size_t to_size_t_checked(std::uint64_t v) {
+[[maybe_unused]] static std::size_t to_size_t_checked(std::uint64_t v) {
     if (v > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
         return static_cast<std::size_t>(std::numeric_limits<std::size_t>::max());
     }
@@ -215,7 +215,7 @@ public:
     Expected<FinalResult> download(const DownloadRequest& request,
                                    const ProgressCallback& onProgress,
                                    const ShouldCancel& shouldCancel,
-                                   const LogCallback& onLog) override {
+                                   [[maybe_unused]] const LogCallback& onLog) override {
         try {
             // Apply per-request rate limit override if provided
             if (request.rateLimit.globalBps != 0 || request.rateLimit.perConnectionBps != 0) {

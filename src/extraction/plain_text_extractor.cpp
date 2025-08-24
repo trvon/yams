@@ -127,8 +127,9 @@ std::vector<std::string> PlainTextExtractor::supportedExtensions() const {
             ".cfg",  ".ini", ".toml", ".tex", ".bib",  ".rst",  ".adoc", ".org"};
 }
 
-Result<std::string> PlainTextExtractor::readFileWithEncoding(const std::filesystem::path& path,
-                                                             const ExtractionConfig& config) {
+Result<std::string>
+PlainTextExtractor::readFileWithEncoding(const std::filesystem::path& path,
+                                         [[maybe_unused]] const ExtractionConfig& config) {
     // Read entire file using simpler approach
     std::ifstream file(path, std::ios::in);
     if (!file.is_open()) {
