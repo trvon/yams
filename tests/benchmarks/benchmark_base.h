@@ -36,11 +36,14 @@ public:
     };
 
     struct Config {
-        size_t warmup_iterations = 3;
-        size_t benchmark_iterations = 10;
-        bool verbose = false;
-        bool track_memory = true;
+        size_t warmup_iterations;
+        size_t benchmark_iterations;
+        bool verbose;
+        bool track_memory;
         std::string output_file;
+
+        Config()
+            : warmup_iterations(3), benchmark_iterations(10), verbose(false), track_memory(true) {}
     };
 
     BenchmarkBase(const std::string& name, const Config& config = Config())
@@ -133,7 +136,7 @@ protected:
     virtual size_t runIteration() = 0;
 
     // Override to collect custom metrics
-    virtual void collectCustomMetrics(std::map<std::string, double>& metrics) {
+    virtual void collectCustomMetrics([[maybe_unused]] std::map<std::string, double>& metrics) {
         // Default: no custom metrics
     }
 

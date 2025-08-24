@@ -11,11 +11,43 @@
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_executor.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// Forward declarations for LLM-optimized utilities
+namespace yams::app::services::utils {
+
+/// Parse natural language time expressions into Unix epoch seconds
+/// Supports: ISO 8601, relative times ("7d", "2h", "30m"), natural language ("yesterday", "last
+/// week") Returns Unix epoch seconds, or error if parsing fails
+Result<std::int64_t> parseTimeExpression(const std::string& timeExpr);
+
+/// Check if a string looks like a content hash (hex string, 8-64 chars)
+bool looksLikeHash(const std::string& str);
+
+/// Classify file type from MIME type and extension for enhanced filtering
+/// Returns: "text", "binary", "image", "document", "archive", "audio", "video", "executable"
+std::string classifyFileType(const std::string& mimeType, const std::string& extension);
+
+/// Create content snippet with configurable length and word boundaries
+std::string createSnippet(const std::string& content, size_t maxLength,
+                          bool preserveWordBoundary = true);
+
+/// Format output as structured JSON for LLM consumption
+template <typename T> std::string formatAsJson(const T& data, bool pretty = false);
+
+/// Escape regex special characters for literal text search
+std::string escapeRegex(const std::string& text);
+
+/// Match glob patterns (supporting * and ? wildcards)
+bool matchGlob(const std::string& text, const std::string& pattern);
+
+} // namespace yams::app::services::utils
 
 namespace yams::app::services {
 
@@ -35,25 +67,58 @@ struct SearchRequest {
     std::string query;
     std::size_t limit{10};
 
-    // Modes and ergonomics
+    // Search modes
     bool fuzzy{false};
-    float similarity{0.7f};
-    std::string hash;           // explicit hash search (full or partial)
-    std::string type{"hybrid"}; // "keyword" | "semantic" | "hybrid"
-    bool verbose{false};
+    float similarity{0.7f};     // minimum similarity for fuzzy search (0.0-1.0)
+    std::string hash;           // explicit hash search (full or partial, min 8 chars)
+    std::string type{"hybrid"}; // "keyword" | "semantic" | "hybrid" | "hash"
+    bool autoDetectHash{true};  // auto-detect if query looks like a hash
 
-    // LLM ergonomics / output shaping
-    bool pathsOnly{false};
-    bool lineNumbers{false};
-    int beforeContext{0};
-    int afterContext{0};
-    int context{0};                 // if >0, overrides before/after
+    // Query processing
+    bool verbose{false};
+    bool literalText{false}; // escape regex special characters
+    bool showHash{false};    // show document hashes in results
+
+    // Output formats (LLM ergonomics)
+    bool pathsOnly{false};       // output only file paths (for scripting/LLM)
+    bool jsonOutput{false};      // structured JSON output for LLM parsing
+    std::string format{"table"}; // "table" | "json" | "minimal" | "paths"
+
+    // Line-level context (like grep)
+    bool showLineNumbers{false};    // show line numbers with matches
+    int beforeContext{0};           // show N lines before match
+    int afterContext{0};            // show N lines after match
+    int context{0};                 // show N lines before and after (overrides before/after)
     std::string colorMode{"never"}; // "always" | "never" | "auto"
 
-    // Path and tag filters for CLI parity
+    // Filtering
     std::string pathPattern;       // glob-like filename/path filter
     std::vector<std::string> tags; // filter by tags (presence-based)
     bool matchAllTags{false};      // require all specified tags
+
+    // File type filters
+    std::string fileType;  // "image", "document", "text", etc.
+    std::string mimeType;  // MIME type filter
+    std::string extension; // file extension filter
+    bool textOnly{false};
+    bool binaryOnly{false};
+
+    // Time filters (for comprehensive search)
+    std::string createdAfter; // ISO 8601, relative, or natural language
+    std::string createdBefore;
+    std::string modifiedAfter;
+    std::string modifiedBefore;
+    std::string indexedAfter;
+    std::string indexedBefore;
+};
+
+struct SearchMatchContext {
+    std::size_t lineNumber{0};            // line number of the match
+    std::string line;                     // the matching line
+    std::vector<std::string> beforeLines; // context lines before
+    std::vector<std::string> afterLines;  // context lines after
+    std::size_t columnStart{0};           // start column of match
+    std::size_t columnEnd{0};             // end column of match
 };
 
 struct SearchItem {
@@ -61,23 +126,53 @@ struct SearchItem {
     std::string hash;
     std::string title;
     std::string path;
+    std::string fileName;
     double score{0.0};
-    std::string snippet;
+    std::string snippet; // content preview
+
+    // Metadata for LLM context
+    std::string mimeType;
+    std::string fileType;
+    std::uint64_t size{0};
+    std::int64_t created{0};
+    std::int64_t modified{0};
+    std::int64_t indexed{0};
+    std::vector<std::string> tags;
+    std::unordered_map<std::string, std::string> metadata;
+
+    // Line-level matches (when line context is requested)
+    std::vector<SearchMatchContext> matches;
 
     // Optional score breakdowns if verbose=true
     std::optional<double> vectorScore;
     std::optional<double> keywordScore;
     std::optional<double> kgEntityScore;
     std::optional<double> structuralScore;
+
+    // Match explanation for LLM understanding
+    std::optional<std::string> matchReason;  // why this result matched
+    std::optional<std::string> searchMethod; // how it was found
 };
 
 struct SearchResponse {
-    std::size_t total{0};
-    std::string type; // actual search type used
-    int64_t executionTimeMs{0};
-    std::vector<SearchItem> results; // normal detailed results
-    std::vector<std::string> paths;  // pathsOnly=true output
+    std::size_t total{0};       // total results found
+    std::string type;           // actual search type used ("keyword", "semantic", "hybrid", "hash")
+    int64_t executionTimeMs{0}; // query execution time
+    std::vector<SearchItem> results; // detailed results
+
+    // LLM-optimized outputs
+    std::vector<std::string> paths; // pathsOnly=true output
+    std::string jsonOutput;         // pre-formatted JSON for LLM parsing
+
+    // Search metadata
     bool usedHybrid{false};
+    bool wasHashSearch{false};     // true if query was treated as hash
+    std::string detectedHashQuery; // if hash was auto-detected
+    std::string appliedFormat;     // format used for output
+
+    // Performance and debugging
+    std::string queryInfo; // description of how query was processed
+    std::unordered_map<std::string, std::string> searchStats; // detailed stats for debugging
 };
 
 class ISearchService {
@@ -94,6 +189,10 @@ struct GrepRequest {
     std::string pattern;
     std::vector<std::string> paths; // optional subset to search (files/dirs)
 
+    // File selection
+    std::vector<std::string> includePatterns; // file patterns to include
+    bool recursive{true};                     // recursive directory search
+
     // Context
     int beforeContext{0};
     int afterContext{0};
@@ -103,6 +202,7 @@ struct GrepRequest {
     bool ignoreCase{false};
     bool word{false}; // match whole words
     bool invert{false};
+    bool literalText{false}; // escape regex special characters
 
     // Output modes
     bool lineNumbers{false};
@@ -110,7 +210,16 @@ struct GrepRequest {
     bool count{false};
     bool filesWithMatches{false};
     bool filesWithoutMatch{false};
+    bool pathsOnly{false};          // output paths only, no content
     std::string colorMode{"never"}; // "always" | "never" | "auto"
+
+    // Hybrid search options
+    bool regexOnly{false}; // disable semantic search
+    int semanticLimit{10}; // limit for semantic results
+
+    // Tag filtering
+    std::vector<std::string> tags; // filter by tags
+    bool matchAllTags{false};      // require all specified tags
 
     // Limits
     int maxCount{0}; // stop after N matches per file (0 => unlimited)
@@ -123,21 +232,53 @@ struct GrepMatch {
     std::string line;
     std::vector<std::string> before; // context lines
     std::vector<std::string> after;  // context lines
+
+    // Enhanced match info
+    std::string matchText;  // the actual matched text
+    double confidence{1.0}; // match confidence (for semantic results)
+    std::string matchType;  // "regex" | "semantic" | "hybrid"
 };
 
 struct GrepFileResult {
     std::string file;
+    std::string fileName;
     std::size_t matchCount{0};
     std::vector<GrepMatch> matches;
+
+    // File metadata for LLM context
+    std::string mimeType;
+    std::string fileType;
+    std::uint64_t size{0};
+    std::vector<std::string> tags;
+    std::unordered_map<std::string, std::string> metadata;
+
+    // Search method used for this file
+    std::string searchMethod;      // how this file was searched
+    bool wasSemanticSearch{false}; // true if semantic search was used
 };
 
 struct GrepResponse {
     std::vector<GrepFileResult> results;
 
-    // Aggregates suitable for count/files_with_matches/files_without_match modes
+    // Aggregates for different output modes
     std::vector<std::string> filesWith;    // file paths with >=1 match
     std::vector<std::string> filesWithout; // file paths with 0 matches
+    std::vector<std::string> pathsOnly;    // paths-only output for LLM/scripting
     std::size_t totalMatches{0};
+    std::size_t filesSearched{0};
+
+    // Hybrid search breakdown
+    std::size_t regexMatches{0};    // matches from regex search
+    std::size_t semanticMatches{0}; // matches from semantic search
+
+    // LLM-optimized output
+    std::string jsonOutput;      // pre-formatted JSON
+    std::string format{"table"}; // format used
+
+    // Performance info
+    std::int64_t executionTimeMs{0};                          // search execution time
+    std::string queryInfo;                                    // description of search strategy
+    std::unordered_map<std::string, std::string> searchStats; // detailed performance stats
 };
 
 class IGrepService {
@@ -156,10 +297,24 @@ struct StoreDocumentRequest {
     std::string content;
     std::string name; // used when content is provided directly
     std::string mimeType;
+    bool disableAutoMime{false}; // disable automatic MIME type detection
 
     // Extra attributes
     std::vector<std::string> tags;                         // tag list
     std::unordered_map<std::string, std::string> metadata; // key-value metadata
+
+    // Collection and snapshot support
+    std::string collection;    // collection name for organizing documents
+    std::string snapshotId;    // unique snapshot identifier
+    std::string snapshotLabel; // user-friendly snapshot label
+
+    // Embedding control
+    bool noEmbeddings{false}; // disable embedding generation
+
+    // Directory recursion options (when path is a directory)
+    bool recursive{false};                    // recursively add files from directories
+    std::vector<std::string> includePatterns; // glob patterns to include
+    std::vector<std::string> excludePatterns; // glob patterns to exclude
 };
 
 struct StoreDocumentResponse {
@@ -169,51 +324,126 @@ struct StoreDocumentResponse {
 };
 
 struct RetrieveDocumentRequest {
-    std::string hash;
-    std::string outputPath; // optional: if non-empty, write to this path
+    // Target selection (exactly one must be specified)
+    std::string hash;               // full or partial hash
+    std::string name;               // document name/pattern
+    std::vector<std::string> names; // multiple names for batch retrieval
+    std::string pattern;            // glob pattern for multiple docs
 
-    // Graph options
-    bool graph{false};
-    int depth{1};
-    bool includeContent{false};
+    // Output options
+    std::string outputPath;     // optional: write to this path instead of memory
+    bool metadataOnly{false};   // return only metadata, no content
+    uint64_t maxBytes{0};       // max bytes to transfer (0 = unlimited)
+    uint32_t chunkSize{262144}; // streaming chunk size
+
+    // Content options
+    bool includeContent{true}; // include document content
+    bool raw{false};           // raw content without text extraction
+    bool extract{false};       // force text extraction
+
+    // Knowledge graph options
+    bool graph{false}; // show related documents
+    int depth{1};      // graph traversal depth (1-5)
+
+    // Selection criteria (for pattern/multiple selection)
+    bool latest{false}; // get most recent matching doc
+    bool oldest{false}; // get oldest matching doc
+
+    // File type filters (for pattern matching)
+    std::string fileType;  // "image", "document", "archive", etc.
+    std::string mimeType;  // MIME type filter
+    std::string extension; // file extension filter
+    bool binaryOnly{false};
+    bool textOnly{false};
+
+    // Time filters (for pattern matching)
+    std::string createdAfter; // ISO 8601, relative, or natural language
+    std::string createdBefore;
+    std::string modifiedAfter;
+    std::string modifiedBefore;
+    std::string indexedAfter;
+    std::string indexedBefore;
+
+    // Display options
+    bool verbose{false}; // detailed output
 };
 
 struct RetrievedDocument {
     std::string hash;
     std::string path;
     std::string name;
+    std::string fileName;
     std::uint64_t size{0};
     std::string mimeType;
-    std::optional<std::string> content; // set if includeContent=true and available
+    std::string fileType; // "text", "binary", etc.
+
+    // Time information
+    std::int64_t created{0}; // Unix epoch seconds
+    std::int64_t modified{0};
+    std::int64_t indexed{0};
+
+    // Content
+    std::optional<std::string> content;       // set if includeContent=true
+    std::optional<std::string> extractedText; // text extraction result
+
+    // Metadata
+    std::unordered_map<std::string, std::string> metadata;
+    std::vector<std::string> tags;
+
+    // Streaming info
+    bool isStreaming{false};      // true if content is being streamed
+    uint64_t bytesTransferred{0}; // for streaming progress
 };
 
 struct RelatedDocument {
     std::string hash;
     std::string path;
+    std::string name;
     std::optional<std::string> relationship;
     int distance{1};
+    double relevanceScore{0.0};
 };
 
 struct RetrieveDocumentResponse {
-    bool graphEnabled{false};
+    // Single document result (for hash/name queries)
     std::optional<RetrievedDocument> document;
-    std::vector<RelatedDocument> related; // optional; non-empty if graphEnabled=true
+
+    // Multiple documents result (for pattern/batch queries)
+    std::vector<RetrievedDocument> documents;
+
+    // Graph traversal results
+    bool graphEnabled{false};
+    std::vector<RelatedDocument> related;
+
+    // Result metadata
+    std::size_t totalFound{0}; // total matches for pattern queries
+    bool hasMore{false};       // more results available
+
+    // Output information
+    std::optional<std::string> outputPath; // if written to file
+    uint64_t totalBytes{0};                // total bytes processed
 };
 
 struct ListDocumentsRequest {
+    // Pagination
     int limit{100};
     int offset{0};
+    std::optional<int> recent; // show N most recent documents
 
+    // Filtering
     std::string pattern;           // glob-like filename filter
     std::vector<std::string> tags; // filter by tags
-    std::string type;              // "text" | "binary" | ""
-    std::string mime;              // MIME pattern
-    std::string extension;         // "md" or ".md"
+    bool matchAllTags{false};      // require all tags vs any tag
 
-    bool binary{false};
-    bool text{false};
+    // File type filters
+    std::string type;      // "image" | "document" | "archive" | "audio" | "video" | "text" |
+                           // "executable" | "binary"
+    std::string mime;      // MIME type filter (exact match)
+    std::string extension; // file extension filter (e.g., ".jpg,.png")
+    bool binary{false};    // show only binary files
+    bool text{false};      // show only text files
 
-    // Time-based filters: ISO 8601 or relative times (interpreted by implementation)
+    // Time-based filters (ISO 8601, relative like "7d", or natural like "yesterday")
     std::string createdAfter;
     std::string createdBefore;
     std::string modifiedAfter;
@@ -221,22 +451,39 @@ struct ListDocumentsRequest {
     std::string indexedAfter;
     std::string indexedBefore;
 
-    // Recent N documents
-    std::optional<int> recent;
+    // Change tracking
+    bool changes{false};     // show documents with recent modifications (last 24h)
+    std::string since;       // show documents changed since specified time
+    bool diffTags{false};    // show documents grouped by change type (added/modified/deleted)
+    bool showDeleted{false}; // include documents deleted from filesystem
+    std::string changeWindow{"24h"}; // time window for "recent changes"
+
+    // Display options
+    std::string format{"table"}; // "table" | "json" | "csv" | "minimal" | "paths"
+    bool showSnippets{true};     // show content previews
+    int snippetLength{50};       // preview length in characters
+    bool showMetadata{false};    // show all metadata for each document
+    bool showTags{true};         // show document tags
+    bool groupBySession{false};  // group documents by time periods
+    bool verbose{false};         // show detailed information
+    bool pathsOnly{false};       // output only file paths (for LLM/scripting)
 
     // Sorting
-    std::string sortBy{"indexed"}; // "name" | "size" | "created" | "modified" | "indexed"
+    std::string sortBy{
+        "indexed"}; // "name" | "size" | "created" | "modified" | "indexed" | "date" | "hash"
     std::string sortOrder{"desc"}; // "asc" | "desc"
+    bool reverse{false};           // reverse sort order (alternative to sortOrder)
 };
 
 struct DocumentEntry {
     std::string name;
+    std::string fileName;
     std::string hash;
     std::string path;
     std::string extension;
     std::uint64_t size{0};
     std::string mimeType;
-    std::string fileType; // "text" | "binary" | ""
+    std::string fileType; // "text" | "binary" | "image" | "document" | etc.
 
     // Unix epoch seconds for simplicity in interfaces
     std::int64_t created{0};
@@ -244,18 +491,47 @@ struct DocumentEntry {
     std::int64_t indexed{0};
 
     std::vector<std::string> tags;
+    std::unordered_map<std::string, std::string> metadata; // full metadata for verbose mode
+
+    // Content preview
+    std::optional<std::string> snippet; // content preview
+
+    // Change tracking info
+    std::optional<std::string> changeType;  // "added" | "modified" | "deleted"
+    std::optional<std::int64_t> changeTime; // when the change was detected
+
+    // Scoring/ranking info
+    double relevanceScore{0.0};             // search/filter relevance
+    std::optional<std::string> matchReason; // why this document matched
 };
 
 struct ListDocumentsResponse {
     std::vector<DocumentEntry> documents;
-    std::size_t count{0};
-    std::size_t totalFound{0};
+    std::size_t count{0};      // documents returned in this response
+    std::size_t totalFound{0}; // total matching documents
+    bool hasMore{false};       // more results available via pagination
 
-    // Echo filters used (for traceability / debugging)
+    // Paths-only mode (for LLM/scripting efficiency)
+    std::vector<std::string> paths; // populated when pathsOnly=true
+
+    // Change tracking results
+    std::vector<DocumentEntry> addedDocuments; // when diffTags=true
+    std::vector<DocumentEntry> modifiedDocuments;
+    std::vector<DocumentEntry> deletedDocuments;
+
+    // Grouping results (when groupBySession=true)
+    std::unordered_map<std::string, std::vector<DocumentEntry>> groupedResults;
+
+    // Echo filters used (for traceability / debugging / LLM context)
     std::optional<std::string> pattern;
     std::vector<std::string> filteredByTags;
     std::string sortBy;
     std::string sortOrder;
+    std::string appliedFormat; // format used
+
+    // Performance info
+    std::int64_t executionTimeMs{0}; // query execution time
+    std::string queryInfo;           // description of query for debugging
 };
 
 struct UpdateMetadataRequest {
@@ -267,6 +543,13 @@ struct UpdateMetadataRequest {
     std::unordered_map<std::string, std::string> keyValues;
     std::vector<std::string> pairs;
 
+    // Enhanced update capabilities
+    std::string newContent;              // Optional: update document content
+    std::vector<std::string> addTags;    // Tags to add
+    std::vector<std::string> removeTags; // Tags to remove
+    bool atomic{true};                   // All-or-nothing transaction
+    bool createBackup{false};            // Create backup before updating
+
     bool verbose{false};
 };
 
@@ -275,6 +558,12 @@ struct UpdateMetadataResponse {
     std::string hash; // resolved hash (when available)
     std::size_t updatesApplied{0};
     std::optional<int64_t> documentId;
+
+    // Enhanced response fields
+    bool contentUpdated{false};
+    std::size_t tagsAdded{0};
+    std::size_t tagsRemoved{0};
+    std::string backupHash; // if backup was created
 };
 
 struct CatDocumentRequest {
@@ -291,9 +580,14 @@ struct CatDocumentResponse {
 
 struct DeleteByNameRequest {
     std::string name;
+    std::string hash; // delete by hash (full or partial)
     std::vector<std::string> names;
     std::string pattern; // glob-like
     bool dryRun{false};
+    bool force{false};     // skip confirmation
+    bool keepRefs{false};  // keep reference counts (don't decrement)
+    bool recursive{false}; // delete directory contents recursively
+    bool verbose{false};   // verbose output
 };
 
 struct DeleteByNameResult {

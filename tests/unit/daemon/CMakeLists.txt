@@ -9,6 +9,8 @@ target_link_libraries(daemon_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+# Define YAMS_TESTING to enable test API
+target_compile_definitions(daemon_test PRIVATE YAMS_TESTING)
 add_test(NAME daemon_test COMMAND daemon_test)
 
 # IPC server tests
@@ -55,6 +57,18 @@ target_link_libraries(resource_pool_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME resource_pool_test COMMAND resource_pool_test)
+
+# Plugin loader tests
+add_executable(plugin_loader_test
+    plugin_loader_test.cpp
+)
+target_link_libraries(plugin_loader_test PRIVATE
+    yams::daemon
+    ${CMAKE_DL_LIBS}  # For dlopen/dlsym
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME plugin_loader_test COMMAND plugin_loader_test)
 
 # ONNX Model pool tests - only if ONNX plugin is available
 find_package(onnxruntime QUIET)

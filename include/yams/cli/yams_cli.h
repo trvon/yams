@@ -1,9 +1,11 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <CLI/CLI.hpp>
 #include <yams/api/content_store.h>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -78,6 +80,12 @@ public:
      * Get the database instance
      */
     std::shared_ptr<metadata::Database> getDatabase() const { return database_; }
+
+    /**
+     * Get the application context for services
+     * Lazily initializes the context on first access
+     */
+    std::shared_ptr<app::services::AppContext> getAppContext();
 
     /**
      * Get the data directory path
@@ -171,6 +179,10 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_; // Unified embedding generator
+
+    // App services context
+    std::shared_ptr<app::services::AppContext> appContext_;
+    mutable std::mutex appContextMutex_;
 
     // Configuration
     std::filesystem::path dataPath_;

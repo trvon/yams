@@ -36,10 +36,20 @@ int main(int argc, char* argv[]) {
     app.add_option("--log-level", config.logLevel, "Log level (trace/debug/info/warn/error)")
         ->default_val("info");
 
+    // Plugin configuration options
+    app.add_option("--plugin-dir", config.pluginDir, "Directory containing plugins");
+    bool noPlugins = false;
+    app.add_flag("--no-plugins", noPlugins, "Disable plugin loading");
+
     bool foreground = false;
     app.add_flag("-f,--foreground", foreground, "Run in foreground (don't daemonize)");
 
     CLI11_PARSE(app, argc, argv);
+
+    // Apply the no-plugins flag
+    if (noPlugins) {
+        config.autoLoadPlugins = false;
+    }
 
     // Load configuration from TOML file
     namespace fs = std::filesystem;
@@ -104,12 +114,22 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("enable") != daemonSection.end()) {
                     config.enableModelProvider = (daemonSection.at("enable") == "true");
                 }
+
+                // Plugin configuration
+                if (config.pluginDir.empty() &&
+                    daemonSection.find("plugin_dir") != daemonSection.end()) {
+                    config.pluginDir = fs::path(daemonSection.at("plugin_dir"));
+                }
+
+                if (daemonSection.find("auto_load_plugins") != daemonSection.end()) {
+                    config.autoLoadPlugins = (daemonSection.at("auto_load_plugins") == "true");
+                }
             } else {
                 // Daemon section missing (probably old config) - use safe defaults
                 spdlog::info(
                     "Daemon configuration section not found in config file, using defaults");
-                // Don't enable model provider by default for backward compatibility
-                config.enableModelProvider = false;
+                // Enable model provider by default if plugins will be loaded
+                config.enableModelProvider = config.autoLoadPlugins;
             }
 
             // Load daemon.models configuration if present
@@ -299,9 +319,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Keep running until shutdown signal
-        while (daemon.isRunning()) {
+        while (daemon.isRunning() && !daemon.isStopRequested()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
+
+        // Ensure proper cleanup
+        daemon.stop();
 
         return 0;
 

@@ -660,11 +660,11 @@ MetadataApi::applyFilter(const std::vector<metadata::DocumentMetadata>& document
         }
 
         // Apply size filters
-        if (matches && filter.minSize && doc.info.fileSize < *filter.minSize) {
+        if (matches && filter.minSize && static_cast<size_t>(doc.info.fileSize) < *filter.minSize) {
             matches = false;
         }
 
-        if (matches && filter.maxSize && doc.info.fileSize > *filter.maxSize) {
+        if (matches && filter.maxSize && static_cast<size_t>(doc.info.fileSize) > *filter.maxSize) {
             matches = false;
         }
 
@@ -1132,11 +1132,11 @@ GetStatisticsResponse MetadataApi::getStatistics(const GetStatisticsRequest& req
 
             if (request.includeSizeStats) {
                 if (response.sizeStats.minSize == 0 ||
-                    doc.info.fileSize < response.sizeStats.minSize) {
-                    response.sizeStats.minSize = doc.info.fileSize;
+                    static_cast<size_t>(doc.info.fileSize) < response.sizeStats.minSize) {
+                    response.sizeStats.minSize = static_cast<size_t>(doc.info.fileSize);
                 }
-                if (doc.info.fileSize > response.sizeStats.maxSize) {
-                    response.sizeStats.maxSize = doc.info.fileSize;
+                if (static_cast<size_t>(doc.info.fileSize) > response.sizeStats.maxSize) {
+                    response.sizeStats.maxSize = static_cast<size_t>(doc.info.fileSize);
                 }
             }
         }

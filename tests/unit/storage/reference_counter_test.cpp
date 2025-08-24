@@ -540,7 +540,8 @@ TEST_F(GarbageCollectorTest, BasicCollection) {
     }
 
     // Run garbage collection (with 0 second min age for testing)
-    GCOptions options{.maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false};
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false, .progressCallback = nullptr};
 
     auto result = gc->collect(options);
     ASSERT_TRUE(result.has_value());
@@ -582,7 +583,8 @@ TEST_F(GarbageCollectorTest, DryRunCollection) {
     }
 
     // Run dry-run collection
-    GCOptions options{.maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true};
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
 
     auto result = gc->collect(options);
     ASSERT_TRUE(result.has_value());
@@ -609,7 +611,8 @@ TEST_F(GarbageCollectorTest, AsyncCollection) {
     refCounter->decrement(hash);
 
     // Run async collection
-    GCOptions options{.maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false};
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false, .progressCallback = nullptr};
 
     auto future = gc->collectAsync(options);
     auto result = future.get();
@@ -684,7 +687,8 @@ TEST_F(GarbageCollectorTest, GetLastStats) {
     EXPECT_EQ(stats.blocksDeleted, 0);
 
     // Run collection
-    GCOptions options{.maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true};
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
 
     gc->collect(options);
 

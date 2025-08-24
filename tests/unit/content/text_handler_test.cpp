@@ -1,5 +1,7 @@
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <gtest/gtest.h>
 #include <yams/content/text_content_handler.h>
 #include <yams/detection/file_type_detector.h>
@@ -70,7 +72,7 @@ TEST_F(TextHandlerTest, BasicTextFile) {
 
 // Test UTF-8 encoding
 TEST_F(TextHandlerTest, Utf8Encoding) {
-    std::string content = u8"Hello, 世界! 🌍\nÜnicode test: ñ, é, ü";
+    std::string content = "Hello, 世界! 🌍\nÜnicode test: ñ, é, ü";
     auto filePath = createTestFile("utf8.txt", content);
 
     auto result = handler_->process(filePath);
@@ -112,7 +114,7 @@ TEST_F(TextHandlerTest, LargeTextFile) {
     EXPECT_LT(elapsedMs, 1000) << "Large file processing took too long";
 
     // Processing time should be recorded
-    EXPECT_GT(contentResult.processingTime, 0);
+    EXPECT_GT(contentResult.processingTimeMs, 0);
 }
 
 // Test empty file
@@ -184,16 +186,16 @@ TEST_F(TextHandlerTest, MetadataExtraction) {
 
     // Check for common metadata fields
     if (metadata.find("lineCount") != metadata.end()) {
-        EXPECT_EQ(metadata["lineCount"], "2");
+        EXPECT_EQ(metadata.at("lineCount"), "2");
     }
 
     if (metadata.find("wordCount") != metadata.end()) {
-        int wordCount = std::stoi(metadata["wordCount"]);
+        int wordCount = std::stoi(metadata.at("wordCount"));
         EXPECT_GT(wordCount, 0);
     }
 
     if (metadata.find("charCount") != metadata.end()) {
-        int charCount = std::stoi(metadata["charCount"]);
+        int charCount = std::stoi(metadata.at("charCount"));
         EXPECT_EQ(charCount, content.length());
     }
 }
@@ -208,9 +210,9 @@ TEST_F(TextHandlerTest, CanHandle) {
     auto jsonFile = createTestFile("test.json", "{\"key\": \"value\"}");
 
     // Get signatures
-    auto txtSig = detector.detectFileType(txtFile);
-    auto mdSig = detector.detectFileType(mdFile);
-    auto jsonSig = detector.detectFileType(jsonFile);
+    auto txtSig = detector.detectFromFile(txtFile);
+    auto mdSig = detector.detectFromFile(mdFile);
+    auto jsonSig = detector.detectFromFile(jsonFile);
 
     ASSERT_TRUE(txtSig);
     ASSERT_TRUE(mdSig);
@@ -224,7 +226,7 @@ TEST_F(TextHandlerTest, CanHandle) {
     // Should not handle binary files (if we had a binary signature)
     detection::FileSignature binarySig;
     binarySig.mimeType = "application/octet-stream";
-    binarySig.category = "binary";
+    binarySig.fileType = "binary";
     EXPECT_FALSE(handler_->canHandle(binarySig));
 }
 
@@ -244,7 +246,7 @@ TEST_F(TextHandlerTest, ProcessDirectory) {
     auto result = handler_->process(testDir_);
     EXPECT_FALSE(result);
     if (!result) {
-        EXPECT_NE(result.error().code, ErrorCode::None);
+        EXPECT_EQ(result.error().code, ErrorCode::FileNotFound);
     }
 }
 

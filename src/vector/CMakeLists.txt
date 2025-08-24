@@ -55,6 +55,7 @@ target_include_directories(yams_vector
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/hnswlib  # HNSWlib headers
 )
 
 # Link dependencies

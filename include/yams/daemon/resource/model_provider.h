@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -156,8 +157,9 @@ public:
 
 /**
  * Factory function type for creating model providers
+ * Using std::function to support lambdas and captured state from plugins
  */
-using ModelProviderFactory = std::unique_ptr<IModelProvider> (*)();
+using ModelProviderFactory = std::function<std::unique_ptr<IModelProvider>()>;
 
 /**
  * Create a model provider based on available backends

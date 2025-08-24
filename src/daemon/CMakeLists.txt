@@ -34,6 +34,9 @@ add_library(yams::daemon_client ALIAS yams_daemon_client)
 # ============================================================================
 add_library(yams_daemon STATIC
     daemon.cpp
+    components/RequestDispatcher.cpp
+    components/LifecycleComponent.cpp
+    components/ServiceManager.cpp
     ipc/async_socket.cpp
     ipc/async_ipc_server.cpp
     ipc/connection_pool.cpp
@@ -41,6 +44,7 @@ add_library(yams_daemon STATIC
     ipc/retrieval_session.cpp
     ipc/thread_pool.cpp
     resource/mock_model_provider.cpp
+    resource/plugin_loader.cpp
 )
 
 target_include_directories(yams_daemon
@@ -58,18 +62,17 @@ target_link_libraries(yams_daemon
         yams::vector
         yams::api
         yams_downloader
+        yams_repair
+        yams_app_services
     PRIVATE
         spdlog::spdlog
         pthread
+        ${CMAKE_DL_LIBS}  # For dlopen/dlsym
         # Removed: onnxruntime::onnxruntime (moved to plugin)
         ZLIB::ZLIB  # For CRC32
 )
 
-# Link with ONNX plugin if available
-if(TARGET yams_onnx_plugin)
-    target_link_libraries(yams_daemon PRIVATE yams_onnx_plugin)
-    target_compile_definitions(yams_daemon PRIVATE HAVE_ONNX_PLUGIN=1)
-endif()
+# Note: ONNX plugin is now loaded dynamically at runtime, not linked statically
 
 # Platform-specific async I/O dependencies
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -169,10 +172,13 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
     
     target_compile_features(yams_onnx_plugin PUBLIC cxx_std_20)
     
-    # Install ONNX plugin
+    # Install ONNX plugin to plugins directory
     install(TARGETS yams_onnx_plugin
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins
     )
+    
+    # Create plugins directory during installation
+    install(DIRECTORY DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins)
     
     # Make plugin available for tests
     add_library(yams::onnx_plugin ALIAS yams_onnx_plugin)

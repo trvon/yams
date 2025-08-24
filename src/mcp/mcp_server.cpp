@@ -560,7 +560,7 @@ json MCPServer::listTools() {
                      {"description", "Color highlighting (values: always, never, auto)"},
                      {"default", "auto"}}}}},
                  {"required", {"pattern"}}}}},
-              {{"name", "downloader.download"},
+              {{"name", "download"},
                {"description",
                 "Robust downloader: store into CAS (store-only by default) with optional export"},
                {"inputSchema",
@@ -616,9 +616,13 @@ json MCPServer::listTools() {
                 {{"type", "object"},
                  {"properties",
                   {{"path", {{"type", "string"}, {"description", "File path to store"}}},
+                   {"directory_path",
+                    {{"type", "string"}, {"description", "Directory path to add files from"}}},
                    {"content", {{"type", "string"}, {"description", "Document content"}}},
                    {"name", {{"type", "string"}, {"description", "Document name/filename"}}},
                    {"mime_type", {{"type", "string"}, {"description", "MIME type of the content"}}},
+                   {"collection",
+                    {{"type", "string"}, {"description", "Collection name for grouping"}}},
                    {"tags",
                     {{"type", "array"},
                      {"items", {{"type", "string"}}},
@@ -633,6 +637,9 @@ json MCPServer::listTools() {
                  {"properties",
                   {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
                    {"name", {{"type", "string"}, {"description", "Document name"}}},
+                   {"outputPath",
+                    {{"type", "string"},
+                     {"description", "Output file path for retrieved content"}}},
                    {"graph",
                     {{"type", "boolean"},
                      {"description", "Include knowledge graph relationships"},
@@ -647,7 +654,7 @@ json MCPServer::listTools() {
                     {{"type", "boolean"},
                      {"description", "Include full content in graph results"},
                      {"default", false}}}}}}}},
-              {{"name", "delete"},
+              {{"name", "delete_by_name"},
                {"description", "Delete a document by hash or name"},
                {"inputSchema",
                 {{"type", "object"},
@@ -715,7 +722,11 @@ json MCPServer::listTools() {
                    {"sort_order",
                     {{"type", "string"},
                      {"description", "Sort order (values: asc, desc)"},
-                     {"default", "desc"}}}}}}}},
+                     {"default", "desc"}}},
+                   {"with_labels",
+                    {{"type", "boolean"},
+                     {"description", "Include snapshot labels in results"},
+                     {"default", false}}}}}}}},
 
               // Statistics and maintenance
               {{"name", "stats"},
@@ -878,6 +889,19 @@ json MCPServer::listTools() {
                      {"description", "Show what would be restored without writing files"},
                      {"default", false}}}}},
                  {"required", json::array({"snapshot_id", "output_directory"})}}}},
+              {{"name", "restore"},
+               {"description", "Restore documents from a collection or snapshot"},
+               {"inputSchema",
+                {{"type", "object"},
+                 {"properties",
+                  {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
+                   {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
+                   {"overwrite",
+                    {{"type", "boolean"},
+                     {"description", "Overwrite existing files"},
+                     {"default", false}}}}},
+                 {"required", json::array({"output_directory"})}}}},
               {{"name", "list_collections"},
                {"description", "List available collections"},
                {"inputSchema", {{"type", "object"}}}},
@@ -943,7 +967,7 @@ Result<MCPSearchResponse> MCPServer::handleSearchDocuments(const MCPSearchReques
         searchReq.type = req.type;
         searchReq.verbose = req.verbose;
         searchReq.pathsOnly = req.pathsOnly;
-        searchReq.lineNumbers = req.lineNumbers;
+        searchReq.showLineNumbers = req.lineNumbers;
         searchReq.beforeContext = req.beforeContext;
         searchReq.afterContext = req.afterContext;
         searchReq.context = req.context;
@@ -1542,7 +1566,8 @@ void MCPServer::initializeToolRegistry() {
         "Retrieve document content by name");
 
     toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
-        "delete", [this](const MCPDeleteByNameRequest& req) { return handleDeleteByName(req); },
+        "delete_by_name",
+        [this](const MCPDeleteByNameRequest& req) { return handleDeleteByName(req); },
         json{
             {"type", "object"},
             {"properties",

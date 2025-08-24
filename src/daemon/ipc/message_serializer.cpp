@@ -609,6 +609,14 @@ Result<Message> MessageSerializer::deserialize(std::span<const std::byte> data) 
                 Response(std::in_place_type<GetStatsResponse>, std::move(resResult.value()));
             break;
         }
+        case MessageType::DeleteResponse: {
+            auto resResult = ::yams::daemon::deserialize<DeleteResponse>(deser);
+            if (!resResult)
+                return resResult.error();
+            msg.payload =
+                Response(std::in_place_type<DeleteResponse>, std::move(resResult.value()));
+            break;
+        }
 
         default:
             return Error{ErrorCode::InvalidData,

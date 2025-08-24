@@ -44,7 +44,8 @@ TEST_F(ResponseOfTest, CompileTimeMappings) {
 // Test that the trait works with actual request/response instances
 TEST_F(ResponseOfTest, RuntimeUsage) {
     // Create a search request
-    SearchRequest searchReq{"test query", 10};
+    SearchRequest searchReq{"test query", 10,    false, false, 0.7, {}, "keyword", false,
+                            false,        false, false, false, 0,   0,  0,         ""};
 
     // The response type should be SearchResponse
     using SearchResType = ResponseOfT<decltype(searchReq)>;
@@ -88,7 +89,8 @@ TEST_F(ResponseOfTest, SfinaeFriendly) {
 // Test variant compatibility
 TEST_F(ResponseOfTest, VariantCompatibility) {
     // All request types should be constructible into Request variant
-    Request req1 = SearchRequest{"query", 10};
+    Request req1 = SearchRequest{"query", 10,    false, false, 0.7, {}, "keyword", false,
+                                 false,   false, false, false, 0,   0,  0,         ""};
     Request req2 = GetRequest{"hash123", ""};
     Request req3 = StatusRequest{true};
 
@@ -137,7 +139,8 @@ bool verifyRequestResponsePair([[maybe_unused]] const Req& req, const Response& 
 
 TEST_F(ResponseOfTest, RequestResponsePairVerification) {
     // Create various requests and their expected responses
-    SearchRequest searchReq{"test", 10};
+    SearchRequest searchReq{"test", 10,    false, false, 0.7, {}, "keyword", false,
+                            false,  false, false, false, 0,   0,  0,         ""};
     Response searchRes = SearchResponse{{}, 10, std::chrono::milliseconds(0)};
     EXPECT_TRUE(verifyRequestResponsePair(searchReq, searchRes));
 
@@ -171,7 +174,8 @@ TEST_F(ResponseOfTest, AllRequestsHaveMapping) {
         return std::is_default_constructible_v<ResType>;
     };
 
-    EXPECT_TRUE(testMapping(SearchRequest{}));
+    EXPECT_TRUE(testMapping(SearchRequest{
+        "", 10, false, false, 0.7, {}, "keyword", false, false, false, false, false, 0, 0, 0, ""}));
     EXPECT_TRUE(testMapping(AddRequest{}));
     EXPECT_TRUE(testMapping(GetRequest{}));
     EXPECT_TRUE(testMapping(DeleteRequest{}));

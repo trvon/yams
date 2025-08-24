@@ -106,11 +106,8 @@ TEST(MCPSchemaTest, ListTools_ContainsAllExpectedTools) {
     ASSERT_TRUE(result["tools"].is_array());
 
     // Expected set of core tools per CHANGELOG and implementation
-    std::vector<std::string> expected = {
-        "search_documents", "grep_documents",   "store_document", "retrieve_document",
-        "get_stats",        "update_metadata",  "delete_by_name", "get_by_name",
-        "cat_document",     "list_documents",   "add_directory",  "restore_collection",
-        "restore_snapshot", "list_collections", "list_snapshots"};
+    std::vector<std::string> expected = {"search", "grep", "store", "get", "stats",  "update",
+                                         "delete", "cat",  "list",  "add", "restore"};
 
     // Gather actual names
     std::vector<std::string> actual;
@@ -128,8 +125,8 @@ TEST(MCPSchemaTest, ListTools_ContainsAllExpectedTools) {
 TEST(MCPSchemaTest, SearchDocuments_SchemaHasErgonomicAndContextParams) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "search_documents");
-    ASSERT_TRUE(t.has_value()) << "search_documents not found in tools/list";
+    auto t = findTool(tools, "search");
+    ASSERT_TRUE(t.has_value()) << "search not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -159,8 +156,8 @@ TEST(MCPSchemaTest, SearchDocuments_SchemaHasErgonomicAndContextParams) {
 TEST(MCPSchemaTest, GrepDocuments_SchemaHasExpectedGrepOptions) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "grep_documents");
-    ASSERT_TRUE(t.has_value()) << "grep_documents not found in tools/list";
+    auto t = findTool(tools, "grep");
+    ASSERT_TRUE(t.has_value()) << "grep not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -193,8 +190,8 @@ TEST(MCPSchemaTest, GrepDocuments_SchemaHasExpectedGrepOptions) {
 TEST(MCPSchemaTest, RetrieveDocument_SchemaHasGraphParams) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "retrieve_document");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "get");
+    ASSERT_TRUE(t.has_value()) << "get not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -209,8 +206,8 @@ TEST(MCPSchemaTest, RetrieveDocument_SchemaHasGraphParams) {
 TEST(MCPSchemaTest, UpdateMetadata_SchemaSupportsNameOrHashAndMultiplePairs) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "update_metadata");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "update");
+    ASSERT_TRUE(t.has_value()) << "update not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -224,8 +221,8 @@ TEST(MCPSchemaTest, UpdateMetadata_SchemaSupportsNameOrHashAndMultiplePairs) {
 TEST(MCPSchemaTest, ListDocuments_SchemaSupportsFiltersAndSorting) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "list_documents");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "list");
+    ASSERT_TRUE(t.has_value()) << "list not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -257,8 +254,8 @@ TEST(MCPSchemaTest, ListDocuments_SchemaSupportsFiltersAndSorting) {
 TEST(MCPSchemaTest, GetStats_SchemaSupportsFileTypesBreakdown) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "get_stats");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "stats");
+    ASSERT_TRUE(t.has_value()) << "stats not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -327,8 +324,8 @@ protected:
 TEST(MCPSchemaTest, AddDirectory_SchemaHasExpectedProperties) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "add_directory");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "add");
+    ASSERT_TRUE(t.has_value()) << "add not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -347,8 +344,8 @@ TEST(MCPSchemaTest, AddDirectory_SchemaHasExpectedProperties) {
 TEST(MCPSchemaTest, RestoreCollection_SchemaHasExpectedProperties) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "restore_collection");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "restore");
+    ASSERT_TRUE(t.has_value()) << "restore not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -386,8 +383,8 @@ TEST(MCPSchemaTest, RestoreSnapshot_SchemaHasExpectedProperties) {
 TEST(MCPSchemaTest, ListCollections_SchemaMinimal) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "list_collections");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "list");
+    ASSERT_TRUE(t.has_value()) << "list not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -397,8 +394,8 @@ TEST(MCPSchemaTest, ListCollections_SchemaMinimal) {
 TEST(MCPSchemaTest, ListSnapshots_SchemaHasWithLabels) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "list_snapshots");
-    ASSERT_TRUE(t.has_value());
+    auto t = findTool(tools, "list");
+    ASSERT_TRUE(t.has_value()) << "list not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());

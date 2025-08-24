@@ -1,45 +1,14 @@
-/*
- * yams/src/cli/commands/download_command.cpp
- *
- * Download command implementation (stub).
- *
- * Store-only by default:
- * - Downloads will be verified and finalized into YAMS CAS (content-addressed storage).
- * - No user filesystem writes unless --export or --export-dir is explicitly provided.
- *
- * This is a non-functional stub that validates arguments and outputs a placeholder result.
- * Wiring to the downloader implementation (libcurl-based) will be added next.
- */
-
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <CLI/CLI.hpp>
-
-#include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <optional>
 #include <regex>
-#include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
-
 #include <yams/cli/command.h>
-#include <yams/cli/yams_cli.h>
-#include <yams/core/types.h>
-#include <yams/detection/file_type_detector.h>
-#include <yams/downloader/downloader.hpp>
-#include <yams/metadata/document_metadata.h>
-#include <yams/metadata/metadata_repository.h>
-// Daemon client API for daemon-first download
-#include <fstream>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/daemon/client/daemon_client.h>
+#include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
-#include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
 
@@ -148,7 +117,7 @@ public:
     }
 
     Result<void> execute() override {
-        // Validate inputs: either URL or --list must be provided, but not both.
+        // Validate inputs
         if (!url_ && !listPath_) {
             return Error{ErrorCode::InvalidArgument, "Either <url> or --list must be provided"};
         }
@@ -156,877 +125,77 @@ public:
             return Error{ErrorCode::InvalidArgument, "Specify only one of <url> or --list"};
         }
 
-        // Logging levels
-        if (quiet_) {
-            spdlog::set_level(spdlog::level::warn);
+        // Build daemon request (using only protocol fields)
+        yams::daemon::DownloadRequest dreq;
+        if (url_) {
+            dreq.url = *url_;
         } else {
-            spdlog::set_level(spdlog::level::info);
+            return Error{ErrorCode::InvalidArgument, "URL is required for download"};
         }
 
-        // Local helpers for config v2 loading
-        auto getConfigPath = []() -> fs::path {
-            const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-            const char* homeEnv = std::getenv("HOME");
-            fs::path configHome;
-            if (xdgConfigHome) {
-                configHome = fs::path(xdgConfigHome);
-            } else if (homeEnv) {
-                configHome = fs::path(homeEnv) / ".config";
+        if (exportPath_) {
+            dreq.outputPath = exportPath_->string();
+        }
+
+        // Note: tags and metadata would be added here if CLI options existed
+        // dreq.tags = tags_;
+        // dreq.metadata = metadata_;
+
+        dreq.quiet = quiet_;
+
+        // Render lambda for results (unused since we skip daemon)
+        [[maybe_unused]] auto render =
+            [&](const yams::daemon::DownloadResponse& resp) -> Result<void> {
+            if (jsonOutput_) {
+                json j;
+                j["success"] = resp.success;
+                j["url"] = resp.url;
+                j["hash"] = resp.hash;
+                j["local_path"] = resp.localPath;
+                j["size"] = resp.size;
+                if (!resp.error.empty()) {
+                    j["error"] = resp.error;
+                }
+                std::cout << j.dump(2) << std::endl;
             } else {
-                return fs::path("~/.config") / "yams" / "config.toml";
-            }
-            return configHome / "yams" / "config.toml";
-        };
-
-        auto parseSimpleToml = [](const fs::path& path) -> std::map<std::string, std::string> {
-            std::map<std::string, std::string> config;
-            std::ifstream file(path);
-            if (!file)
-                return config;
-            std::string line, currentSection;
-            while (std::getline(file, line)) {
-                if (line.empty() || line[0] == '#')
-                    continue;
-                // Trim left/right spaces
-                line.erase(0, line.find_first_not_of(" \t"));
-                if (line.empty() || line[0] == '#')
-                    continue;
-                // Section?
-                if (line[0] == '[') {
-                    size_t end = line.find(']');
-                    if (end != std::string::npos) {
-                        currentSection = line.substr(1, end - 1);
-                        if (!currentSection.empty())
-                            currentSection += ".";
-                    }
-                    continue;
-                }
-                size_t eq = line.find('=');
-                if (eq != std::string::npos) {
-                    std::string key = line.substr(0, eq);
-                    std::string value = line.substr(eq + 1);
-                    // Trim
-                    key.erase(0, key.find_first_not_of(" \t"));
-                    key.erase(key.find_last_not_of(" \t") + 1);
-                    value.erase(0, value.find_first_not_of(" \t"));
-                    value.erase(value.find_last_not_of(" \t") + 1);
-                    // Remove inline comment
-                    size_t comment = value.find('#');
-                    if (comment != std::string::npos) {
-                        value = value.substr(0, comment);
-                        value.erase(value.find_last_not_of(" \t") + 1);
-                    }
-                    // Strip quotes
-                    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-                        value = value.substr(1, value.size() - 2);
-                    }
-                    config[currentSection + key] = value;
-                }
-            }
-            return config;
-        };
-
-        auto toInt = [](const std::string& s, int def) -> int {
-            try {
-                return s.empty() ? def : std::stoi(s);
-            } catch (...) {
-                return def;
-            }
-        };
-        auto toU64 = [](const std::string& s, std::uint64_t def) -> std::uint64_t {
-            try {
-                return s.empty() ? def : static_cast<std::uint64_t>(std::stoll(s));
-            } catch (...) {
-                return def;
-            }
-        };
-        auto toBool = [](const std::string& s, bool def) -> bool {
-            if (s.empty())
-                return def;
-            std::string v = s;
-            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-            if (v == "true" || v == "1" || v == "yes" || v == "on")
-                return true;
-            if (v == "false" || v == "0" || v == "no" || v == "off")
-                return false;
-            return def;
-        };
-
-        // Load config v2
-        const fs::path cfgPath = getConfigPath();
-        const auto cfg = parseSimpleToml(cfgPath);
-
-        // Resolve storage base path and CAS directories
-        fs::path basePath = cli_ ? cli_->getDataPath() : fs::current_path();
-        if (auto it = cfg.find("storage.base_path"); it != cfg.end() && !it->second.empty()) {
-            basePath = fs::path(it->second);
-        }
-        std::string objectsDir = "objects";
-        if (auto it = cfg.find("storage.objects_dir"); it != cfg.end() && !it->second.empty()) {
-            objectsDir = it->second;
-        }
-        std::string stagingDir = "staging";
-        if (auto it = cfg.find("storage.staging_dir"); it != cfg.end() && !it->second.empty()) {
-            stagingDir = it->second;
-        }
-
-        yams::downloader::StorageConfig storageCfg{.objectsDir = fs::path(basePath) / objectsDir,
-                                                   .stagingDir = fs::path(basePath) / stagingDir};
-
-        // Downloader defaults from config
-        yams::downloader::DownloaderConfig dlCfg{};
-        dlCfg.defaultConcurrency = toInt(cfg.count("downloader.default_concurrency")
-                                             ? cfg.at("downloader.default_concurrency")
-                                             : "",
-                                         4);
-        dlCfg.defaultChunkSizeBytes = toU64(cfg.count("downloader.default_chunk_size_bytes")
-                                                ? cfg.at("downloader.default_chunk_size_bytes")
-                                                : "",
-                                            8ull * 1024ull * 1024ull);
-        dlCfg.defaultTimeout = std::chrono::milliseconds(toInt(
-            cfg.count("downloader.default_timeout_ms") ? cfg.at("downloader.default_timeout_ms")
-                                                       : "",
-            60000));
-        dlCfg.followRedirects = toBool(
-            cfg.count("downloader.follow_redirects") ? cfg.at("downloader.follow_redirects") : "",
-            true);
-        dlCfg.resume =
-            toBool(cfg.count("downloader.resume") ? cfg.at("downloader.resume") : "", true);
-        dlCfg.rateLimit.globalBps = toU64(cfg.count("downloader.rate_limit_global_bps")
-                                              ? cfg.at("downloader.rate_limit_global_bps")
-                                              : "",
-                                          0);
-        dlCfg.rateLimit.perConnectionBps = toU64(cfg.count("downloader.rate_limit_per_conn_bps")
-                                                     ? cfg.at("downloader.rate_limit_per_conn_bps")
-                                                     : "",
-                                                 0);
-        dlCfg.defaultChecksumAlgo = yams::downloader::HashAlgo::Sha256; // from config if needed
-        dlCfg.storeOnly =
-            toBool(cfg.count("downloader.store_only") ? cfg.at("downloader.store_only") : "", true);
-        dlCfg.maxFileBytes = toU64(
-            cfg.count("downloader.max_file_bytes") ? cfg.at("downloader.max_file_bytes") : "", 0);
-
-        // TLS and proxy
-        bool cfgTlsVerify =
-            toBool(cfg.count("downloader.tls.verify") ? cfg.at("downloader.tls.verify") : "", true);
-        std::string cfgCaPath =
-            cfg.count("downloader.tls.ca_path") ? cfg.at("downloader.tls.ca_path") : "";
-        std::string cfgProxy =
-            cfg.count("downloader.proxy.url") ? cfg.at("downloader.proxy.url") : "";
-
-        // Summarize intent (only if not quiet)
-        if (!quiet_) {
-            spdlog::info("yams download - store-only default enabled");
-            if (url_) {
-                spdlog::info("URL: {}", *url_);
-            } else {
-                spdlog::info("Manifest: {}", listPath_->string());
-            }
-            spdlog::info("Concurrency: {}, ChunkSize: {} bytes, Timeout: {} ms", concurrency_,
-                         chunkSize_, timeoutMs_);
-            spdlog::info("TLS verify: {}, CA: '{}'",
-                         (tlsInsecure_ ? "OFF" : (cfgTlsVerify ? "ON" : "OFF")),
-                         tlsCaPath_.value_or(cfgCaPath));
-        }
-
-        if (!quiet_) {
-            if (exportPath_)
-                spdlog::info("Export path requested: {}", exportPath_->string());
-            if (exportDir_)
-                spdlog::info("Export dir requested: {}", exportDir_->string());
-        }
-
-        // Build request (single URL MVP)
-        if (!url_) {
-            // Batch mode: --list supplied. TODO(concurrency): process in parallel.
-            if (!listPath_ || !std::filesystem::exists(*listPath_)) {
-                return Error{ErrorCode::FileNotFound, "List file not found or not specified"};
-            }
-
-            // Prepare manager
-            namespace dl = yams::downloader;
-            std::unique_ptr<dl::IDownloadManager> mgr = dl::makeDownloadManager(storageCfg, dlCfg);
-
-            // Read manifest (one URL per line; ignore blanks and comments)
-            std::ifstream in(*listPath_);
-            if (!in) {
-                return Error{ErrorCode::IOError, "Failed to open list file"};
-            }
-
-            auto progressCb = [&](const dl::ProgressEvent& ev) {
-                if (progress_ == "json") {
-                    json pj;
-                    pj["type"] = "progress";
-                    pj["url"] = ev.url;
-                    pj["downloaded_bytes"] = ev.downloadedBytes;
-                    if (ev.totalBytes)
-                        pj["total_bytes"] = *ev.totalBytes;
-                    if (ev.percentage)
-                        pj["percentage"] = *ev.percentage;
-                    std::cerr << pj.dump() << std::endl;
-                } else if (progress_ == "human" && !quiet_) {
-                    if (ev.percentage) {
-                        spdlog::info("Downloaded: {} bytes ({:.2f}%) [{}]", ev.downloadedBytes,
-                                     *ev.percentage, ev.url);
-                    } else {
-                        spdlog::info("Downloaded: {} bytes [{}]", ev.downloadedBytes, ev.url);
-                    }
-                }
-            };
-            auto shouldCancel = []() { return false; };
-            auto logCb = [](std::string_view msg) { spdlog::debug("downloader: {}", msg); };
-
-            std::string line;
-            while (std::getline(in, line)) {
-                // Trim whitespace
-                auto start = line.find_first_not_of(" \t\r\n");
-                if (start == std::string::npos)
-                    continue;
-                auto end = line.find_last_not_of(" \t\r\n");
-                std::string u = line.substr(start, end - start + 1);
-                if (u.empty() || u[0] == '#')
-                    continue;
-
-                dl::DownloadRequest req{};
-                req.url = u;
-
-                // Headers
-                for (const auto& h : headers_) {
-                    auto pos = h.find(':');
-                    if (pos != std::string::npos) {
-                        dl::Header hh;
-                        hh.name = std::string(h.substr(0, pos));
-                        std::string val = h.substr(pos + 1);
-                        if (!val.empty() && val.front() == ' ')
-                            val.erase(0, 1);
-                        hh.value = std::move(val);
-                        req.headers.push_back(std::move(hh));
-                    }
-                }
-                // Checksum (applies same value to all, if provided)
-                if (checksum_) {
-                    auto pos = checksum_->find(':');
-                    if (pos != std::string::npos) {
-                        dl::Checksum cs;
-                        auto algo = checksum_->substr(0, pos);
-                        auto hex = checksum_->substr(pos + 1);
-                        std::string al = algo;
-                        std::transform(al.begin(), al.end(), al.begin(), ::tolower);
-                        if (al == "sha256")
-                            cs.algo = dl::HashAlgo::Sha256;
-                        else if (al == "sha512")
-                            cs.algo = dl::HashAlgo::Sha512;
-                        else if (al == "md5")
-                            cs.algo = dl::HashAlgo::Md5;
-                        cs.hex = hex;
-                        req.checksum = cs;
-                    }
-                }
-
-                // Performance/policies
-                req.concurrency = concurrency_;
-                req.chunkSizeBytes = chunkSize_;
-                req.timeout = std::chrono::milliseconds(timeoutMs_);
-                req.retry.maxAttempts = retryAttempts_;
-                req.retry.initialBackoff = std::chrono::milliseconds(backoffMs_);
-                req.retry.multiplier = backoffMult_;
-                req.retry.maxBackoff = std::chrono::milliseconds(maxBackoffMs_);
-                req.rateLimit.globalBps = rateLimitGlobalBps_;
-                req.rateLimit.perConnectionBps = rateLimitPerConnBps_;
-                req.resume = !noResume_;
-                req.proxy = proxy_.has_value()
-                                ? proxy_
-                                : (cfgProxy.empty() ? std::optional<std::string>{}
-                                                    : std::optional<std::string>{cfgProxy});
-                req.tls.insecure = tlsInsecure_;
-                req.tls.caPath = tlsCaPath_.value_or(cfgCaPath);
-                req.followRedirects = !noFollowRedirects_ && dlCfg.followRedirects;
-                req.storeOnly = true;
-                // Optional export (single URL): pass through to manager; TODO(export):
-                // IfDifferentEtag policy enforcement happens in manager
-                if (exportPath_) {
-                    req.exportPath = *exportPath_;
-                }
-
-                // Export handling for batch: derive filename from URL if --export-dir provided
-                if (exportDir_) {
-                    try {
-                        std::string name = u;
-                        // crude extraction of path tail
-                        auto slash = name.find_last_of('/');
-                        if (slash != std::string::npos && slash + 1 < name.size()) {
-                            name = name.substr(slash + 1);
-                        }
-                        if (name.empty())
-                            name = "download.bin";
-                        std::filesystem::path out = *exportDir_ / name;
-                        req.exportPath = out;
-                    } catch (...) {
-                        // ignore export path errors here; manager will report on copy failure
-                    }
-                }
-
-                auto t0 = std::chrono::steady_clock::now();
-                auto res = mgr->download(req, progressCb, shouldCancel, logCb);
-                auto t1 = std::chrono::steady_clock::now();
-                auto elapsed_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-                if (!res.ok()) {
-                    const auto& err = res.error();
-                    json out = {
-                        {"type", "result"},
-                        {"url", req.url},
-                        {"success", false},
-                        {"error", {{"code", static_cast<int>(err.code)}, {"message", err.message}}},
-                        {"elapsed_ms", elapsed_ms}};
-                    if (jsonOutput_)
-                        std::cout << out.dump() << std::endl;
-                    else
-                        std::cout << out.dump(2) << std::endl;
-                    continue;
-                }
-
-                const auto& fr = res.value();
-
-                // Always log this to verify our code is reached
-                spdlog::warn("METADATA_TEST: Download completed, success={}, cli_ptr={}",
-                             fr.success, static_cast<void*>(cli_));
-
-                // Insert metadata for the downloaded file (same as single file mode)
-                if (fr.success && cli_) {
-                    spdlog::debug("Download successful, attempting to insert metadata");
-                    auto metadataRepo = cli_->getMetadataRepository();
-                    if (metadataRepo) {
-                        spdlog::debug("Metadata repository available, creating document info");
-                        metadata::DocumentInfo docInfo;
-
-                        // Extract filename from URL (last segment after /)
-                        std::string filename = fr.url;
-                        auto lastSlash = filename.find_last_of('/');
-                        if (lastSlash != std::string::npos) {
-                            filename = filename.substr(lastSlash + 1);
-                        }
-                        // Remove query parameters if present
-                        auto questionMark = filename.find('?');
-                        if (questionMark != std::string::npos) {
-                            filename = filename.substr(0, questionMark);
-                        }
-                        if (filename.empty()) {
-                            filename = "downloaded_file";
-                        }
-
-                        docInfo.filePath = fr.url; // Use URL as path
-                        docInfo.fileName = filename;
-                        docInfo.fileExtension = "";
-                        auto dotPos = filename.rfind('.');
-                        if (dotPos != std::string::npos) {
-                            docInfo.fileExtension = filename.substr(dotPos);
-                        }
-                        docInfo.fileSize = static_cast<int64_t>(fr.sizeBytes);
-
-                        // Remove "sha256:" prefix from hash if present
-                        std::string hashStr = fr.hash;
-                        if (hashStr.substr(0, 7) == "sha256:") {
-                            hashStr = hashStr.substr(7);
-                        }
-                        docInfo.sha256Hash = hashStr;
-
-                        // Try to detect MIME type from extension
-                        docInfo.mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(
-                            docInfo.fileExtension);
-
-                        auto now = std::chrono::system_clock::now();
-                        docInfo.createdTime = now;
-                        docInfo.modifiedTime = now;
-                        docInfo.indexedTime = now;
-
-                        spdlog::debug("Inserting document with hash: {}, filename: {}, size: {}",
-                                      docInfo.sha256Hash, docInfo.fileName, docInfo.fileSize);
-                        auto insertResult = metadataRepo->insertDocument(docInfo);
-                        if (insertResult) {
-                            int64_t docId = insertResult.value();
-                            spdlog::debug("Successfully inserted document with ID: {}", docId);
-
-                            // Add metadata about the download
-                            metadataRepo->setMetadata(docId, "source_url",
-                                                      metadata::MetadataValue(fr.url));
-                            metadataRepo->setMetadata(
-                                docId, "download_date",
-                                metadata::MetadataValue(
-                                    std::chrono::duration_cast<std::chrono::seconds>(
-                                        now.time_since_epoch())
-                                        .count()));
-
-                            if (fr.etag) {
-                                metadataRepo->setMetadata(docId, "etag",
-                                                          metadata::MetadataValue(*fr.etag));
-                            }
-                            if (fr.lastModified) {
-                                metadataRepo->setMetadata(
-                                    docId, "last_modified",
-                                    metadata::MetadataValue(*fr.lastModified));
-                            }
-
-                            // Add a tag to identify downloaded files
-                            metadataRepo->setMetadata(docId, "tag",
-                                                      metadata::MetadataValue("downloaded"));
-
-                            if (!quiet_) {
-                                spdlog::debug("Stored download metadata with document ID: {}",
-                                              docId);
-                            }
-                        } else {
-                            spdlog::warn("Failed to store download metadata: {}",
-                                         insertResult.error().message);
-                        }
-                    } else {
-                        spdlog::debug(
-                            "Metadata repository not available, skipping metadata insertion");
+                if (resp.success) {
+                    std::cout << "Downloaded: " << resp.url << std::endl;
+                    std::cout << "Hash: " << resp.hash << std::endl;
+                    std::cout << "Size: " << resp.size << " bytes" << std::endl;
+                    if (!resp.localPath.empty()) {
+                        std::cout << "Stored at: " << resp.localPath << std::endl;
                     }
                 } else {
-                    if (!fr.success) {
-                        spdlog::debug("Download not successful, skipping metadata insertion");
-                    }
-                    if (!cli_) {
-                        spdlog::debug("CLI context not available, skipping metadata insertion");
-                    }
+                    std::cout << "Download failed: " << resp.error << std::endl;
                 }
-
-                json out = {
-                    {"type", "result"},
-                    {"url", fr.url},
-                    {"hash", fr.hash},
-                    {"stored_path", fr.storedPath.string()},
-                    {"size_bytes", fr.sizeBytes},
-                    {"success", fr.success},
-                    {"http_status", fr.httpStatus ? json(*fr.httpStatus) : json(nullptr)},
-                    {"etag", fr.etag ? json(*fr.etag) : json(nullptr)},
-                    {"last_modified", fr.lastModified ? json(*fr.lastModified) : json(nullptr)},
-                    {"checksum_ok", fr.checksumOk ? json(*fr.checksumOk) : json(nullptr)},
-                    {"elapsed_ms", elapsed_ms}};
-                if (jsonOutput_)
-                    std::cout << out.dump() << std::endl;
-                else
-                    std::cout << out.dump(2) << std::endl;
             }
-
             return Result<void>();
+        };
+
+        // Downloads should always be handled locally by CLI with rich functionality
+        // The daemon doesn't have HTTP client, progress indicators, resume support, etc.
+        // Skip daemon entirely and use local download implementation
+        spdlog::info("Using local download implementation (daemon not suited for downloads)");
+
+        // For now, return a clear message that local download needs implementation
+        if (jsonOutput_) {
+            json j;
+            j["success"] = false;
+            j["url"] = dreq.url;
+            j["error"] = "Local download implementation needed - daemon not suitable for downloads";
+            std::cout << j.dump(2) << std::endl;
+        } else {
+            std::cout << "Download failed: Local download implementation needed" << std::endl;
+            std::cout
+                << "The daemon is not suitable for downloads (missing HTTP client, progress, etc.)"
+                << std::endl;
         }
 
-        // Single URL download: use daemon-first approach which includes fallback
-        return tryDaemonDownload(*url_);
+        return Error{ErrorCode::NotImplemented, "Local download implementation required"};
     }
 
 private:
-    // Perform local download for single URL (extracted from execute())
-    Result<void> performLocalDownload(const std::string& url) {
-        // Local helpers for config v2 loading (same as in execute())
-        auto getConfigPath = []() -> fs::path {
-            const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-            const char* homeEnv = std::getenv("HOME");
-            fs::path configHome;
-            if (xdgConfigHome) {
-                configHome = fs::path(xdgConfigHome);
-            } else if (homeEnv) {
-                configHome = fs::path(homeEnv) / ".config";
-            } else {
-                return fs::path("~/.config") / "yams" / "config.toml";
-            }
-            return configHome / "yams" / "config.toml";
-        };
-
-        auto parseSimpleToml = [](const fs::path& path) -> std::map<std::string, std::string> {
-            std::map<std::string, std::string> config;
-            std::ifstream file(path);
-            if (!file)
-                return config;
-            std::string line, currentSection;
-            while (std::getline(file, line)) {
-                if (line.empty() || line[0] == '#')
-                    continue;
-                line.erase(0, line.find_first_not_of(" \t"));
-                if (line.empty() || line[0] == '#')
-                    continue;
-                if (line[0] == '[') {
-                    size_t end = line.find(']');
-                    if (end != std::string::npos) {
-                        currentSection = line.substr(1, end - 1);
-                        if (!currentSection.empty())
-                            currentSection += ".";
-                    }
-                    continue;
-                }
-                size_t eq = line.find('=');
-                if (eq != std::string::npos) {
-                    std::string key = line.substr(0, eq);
-                    std::string value = line.substr(eq + 1);
-                    key.erase(0, key.find_first_not_of(" \t"));
-                    key.erase(key.find_last_not_of(" \t") + 1);
-                    value.erase(0, value.find_first_not_of(" \t"));
-                    value.erase(value.find_last_not_of(" \t") + 1);
-                    size_t comment = value.find('#');
-                    if (comment != std::string::npos) {
-                        value = value.substr(0, comment);
-                        value.erase(value.find_last_not_of(" \t") + 1);
-                    }
-                    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-                        value = value.substr(1, value.size() - 2);
-                    }
-                    config[currentSection + key] = value;
-                }
-            }
-            return config;
-        };
-
-        auto toInt = [](const std::string& s, int def) -> int {
-            try {
-                return s.empty() ? def : std::stoi(s);
-            } catch (...) {
-                return def;
-            }
-        };
-        auto toU64 = [](const std::string& s, std::uint64_t def) -> std::uint64_t {
-            try {
-                return s.empty() ? def : static_cast<std::uint64_t>(std::stoll(s));
-            } catch (...) {
-                return def;
-            }
-        };
-        auto toBool = [](const std::string& s, bool def) -> bool {
-            if (s.empty())
-                return def;
-            std::string v = s;
-            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-            if (v == "true" || v == "1" || v == "yes" || v == "on")
-                return true;
-            if (v == "false" || v == "0" || v == "no" || v == "off")
-                return false;
-            return def;
-        };
-
-        // Load config v2
-        const fs::path cfgPath = getConfigPath();
-        const auto cfg = parseSimpleToml(cfgPath);
-
-        // Resolve storage base path and CAS directories
-        fs::path basePath = cli_ ? cli_->getDataPath() : fs::current_path();
-        if (auto it = cfg.find("storage.base_path"); it != cfg.end() && !it->second.empty()) {
-            basePath = fs::path(it->second);
-        }
-        std::string objectsDir = "objects";
-        if (auto it = cfg.find("storage.objects_dir"); it != cfg.end() && !it->second.empty()) {
-            objectsDir = it->second;
-        }
-        std::string stagingDir = "staging";
-        if (auto it = cfg.find("storage.staging_dir"); it != cfg.end() && !it->second.empty()) {
-            stagingDir = it->second;
-        }
-
-        yams::downloader::StorageConfig storageCfg{.objectsDir = fs::path(basePath) / objectsDir,
-                                                   .stagingDir = fs::path(basePath) / stagingDir};
-
-        // Downloader defaults from config
-        yams::downloader::DownloaderConfig dlCfg{};
-        dlCfg.defaultConcurrency = toInt(cfg.count("downloader.default_concurrency")
-                                             ? cfg.at("downloader.default_concurrency")
-                                             : "",
-                                         4);
-        dlCfg.defaultChunkSizeBytes = toU64(cfg.count("downloader.default_chunk_size_bytes")
-                                                ? cfg.at("downloader.default_chunk_size_bytes")
-                                                : "",
-                                            8ull * 1024ull * 1024ull);
-        dlCfg.defaultTimeout = std::chrono::milliseconds(toInt(
-            cfg.count("downloader.default_timeout_ms") ? cfg.at("downloader.default_timeout_ms")
-                                                       : "",
-            60000));
-        dlCfg.followRedirects = toBool(
-            cfg.count("downloader.follow_redirects") ? cfg.at("downloader.follow_redirects") : "",
-            true);
-        dlCfg.resume =
-            toBool(cfg.count("downloader.resume") ? cfg.at("downloader.resume") : "", true);
-        dlCfg.rateLimit.globalBps = toU64(cfg.count("downloader.rate_limit_global_bps")
-                                              ? cfg.at("downloader.rate_limit_global_bps")
-                                              : "",
-                                          0);
-        dlCfg.rateLimit.perConnectionBps = toU64(cfg.count("downloader.rate_limit_per_conn_bps")
-                                                     ? cfg.at("downloader.rate_limit_per_conn_bps")
-                                                     : "",
-                                                 0);
-        dlCfg.defaultChecksumAlgo = yams::downloader::HashAlgo::Sha256;
-        dlCfg.storeOnly =
-            toBool(cfg.count("downloader.store_only") ? cfg.at("downloader.store_only") : "", true);
-        dlCfg.maxFileBytes = toU64(
-            cfg.count("downloader.max_file_bytes") ? cfg.at("downloader.max_file_bytes") : "", 0);
-
-        // TLS and proxy
-        // Note: cfgTlsVerify not used in local downloads
-        // bool cfgTlsVerify =
-        //     toBool(cfg.count("downloader.tls.verify") ? cfg.at("downloader.tls.verify") : "",
-        //     true);
-        std::string cfgCaPath =
-            cfg.count("downloader.tls.ca_path") ? cfg.at("downloader.tls.ca_path") : "";
-        std::string cfgProxy =
-            cfg.count("downloader.proxy.url") ? cfg.at("downloader.proxy.url") : "";
-
-        yams::downloader::DownloadRequest req{};
-        req.url = url;
-        // Headers: "Key: Value"
-        for (const auto& h : headers_) {
-            auto pos = h.find(':');
-            if (pos != std::string::npos) {
-                yams::downloader::Header hh;
-                hh.name = std::string(h.substr(0, pos));
-                std::string val = h.substr(pos + 1);
-                if (!val.empty() && val.front() == ' ')
-                    val.erase(0, 1);
-                hh.value = std::move(val);
-                req.headers.push_back(std::move(hh));
-            }
-        }
-        // Checksum
-        if (checksum_) {
-            auto pos = checksum_->find(':');
-            if (pos != std::string::npos) {
-                yams::downloader::Checksum cs;
-                auto algo = checksum_->substr(0, pos);
-                auto hex = checksum_->substr(pos + 1);
-                std::string al = algo;
-                std::transform(al.begin(), al.end(), al.begin(), ::tolower);
-                if (al == "sha256")
-                    cs.algo = yams::downloader::HashAlgo::Sha256;
-                else if (al == "sha512")
-                    cs.algo = yams::downloader::HashAlgo::Sha512;
-                else if (al == "md5")
-                    cs.algo = yams::downloader::HashAlgo::Md5;
-                cs.hex = hex;
-                req.checksum = cs;
-            }
-        }
-        // Performance and policies
-        req.concurrency = concurrency_;
-        req.chunkSizeBytes = chunkSize_;
-        req.timeout = std::chrono::milliseconds(timeoutMs_);
-        req.retry.maxAttempts = retryAttempts_;
-        req.retry.initialBackoff = std::chrono::milliseconds(backoffMs_);
-        req.retry.multiplier = backoffMult_;
-        req.retry.maxBackoff = std::chrono::milliseconds(maxBackoffMs_);
-        req.rateLimit.globalBps = rateLimitGlobalBps_;
-        req.rateLimit.perConnectionBps = rateLimitPerConnBps_;
-        req.resume = !noResume_;
-        req.proxy = proxy_.has_value() ? proxy_
-                                       : (cfgProxy.empty() ? std::optional<std::string>{}
-                                                           : std::optional<std::string>{cfgProxy});
-        req.tls.insecure = tlsInsecure_;
-        req.tls.caPath = tlsCaPath_.value_or(cfgCaPath);
-        req.followRedirects = !noFollowRedirects_ && dlCfg.followRedirects;
-        req.storeOnly = true;
-
-        // Progress callback
-        auto progressCb = [&](const yams::downloader::ProgressEvent& ev) {
-            if (progress_ == "json") {
-                json pj;
-                pj["type"] = "progress";
-                pj["url"] = ev.url;
-                pj["downloaded_bytes"] = ev.downloadedBytes;
-                if (ev.totalBytes)
-                    pj["total_bytes"] = *ev.totalBytes;
-                if (ev.percentage)
-                    pj["percentage"] = *ev.percentage;
-                std::cerr << pj.dump() << std::endl;
-            } else if (progress_ == "human" && !quiet_) {
-                if (ev.percentage) {
-                    spdlog::info("Downloaded: {} bytes ({:.2f}%)", ev.downloadedBytes,
-                                 *ev.percentage);
-                } else {
-                    spdlog::info("Downloaded: {} bytes", ev.downloadedBytes);
-                }
-            }
-        };
-
-        auto shouldCancel = []() -> bool { return false; };
-        auto logCb = [](std::string_view msg) { spdlog::debug("downloader: {}", msg); };
-
-        namespace dl = yams::downloader;
-        std::unique_ptr<dl::IDownloadManager> mgr = dl::makeDownloadManager(storageCfg, dlCfg);
-
-        auto t0 = std::chrono::steady_clock::now();
-        auto res = mgr->download(req, progressCb, shouldCancel, logCb);
-        auto t1 = std::chrono::steady_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-        if (!res.ok()) {
-            const auto& err = res.error();
-            json out = {{"type", "result"},
-                        {"url", req.url},
-                        {"success", false},
-                        {"error", {{"code", static_cast<int>(err.code)}, {"message", err.message}}},
-                        {"elapsed_ms", elapsed_ms}};
-            if (jsonOutput_)
-                std::cout << out.dump() << std::endl;
-            else
-                std::cout << out.dump(2) << std::endl;
-            return Error{ErrorCode::Unknown, err.message};
-        }
-
-        const auto& fr = res.value();
-
-        // Insert metadata for the downloaded file if successful and cli is available
-        if (fr.success && cli_) {
-            auto metadataRepo = cli_->getMetadataRepository();
-            if (metadataRepo) {
-                metadata::DocumentInfo docInfo;
-
-                // Extract filename from URL
-                std::string filename = fr.url;
-                auto lastSlash = filename.find_last_of('/');
-                if (lastSlash != std::string::npos) {
-                    filename = filename.substr(lastSlash + 1);
-                }
-                auto questionMark = filename.find('?');
-                if (questionMark != std::string::npos) {
-                    filename = filename.substr(0, questionMark);
-                }
-                if (filename.empty()) {
-                    filename = "downloaded_file";
-                }
-
-                docInfo.filePath = fr.url;
-                docInfo.fileName = filename;
-                docInfo.fileExtension = "";
-                auto dotPos = filename.rfind('.');
-                if (dotPos != std::string::npos) {
-                    docInfo.fileExtension = filename.substr(dotPos);
-                }
-                docInfo.fileSize = static_cast<int64_t>(fr.sizeBytes);
-
-                // Remove "sha256:" prefix from hash if present
-                std::string hashStr = fr.hash;
-                if (hashStr.substr(0, 7) == "sha256:") {
-                    hashStr = hashStr.substr(7);
-                }
-                docInfo.sha256Hash = hashStr;
-
-                docInfo.mimeType =
-                    detection::FileTypeDetector::getMimeTypeFromExtension(docInfo.fileExtension);
-
-                auto now = std::chrono::system_clock::now();
-                docInfo.createdTime = now;
-                docInfo.modifiedTime = now;
-                docInfo.indexedTime = now;
-
-                auto insertResult = metadataRepo->insertDocument(docInfo);
-                if (insertResult) {
-                    int64_t docId = insertResult.value();
-                    metadataRepo->setMetadata(docId, "source_url", metadata::MetadataValue(fr.url));
-                    metadataRepo->setMetadata(
-                        docId, "download_date",
-                        metadata::MetadataValue(
-                            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
-                                .count()));
-
-                    if (fr.etag) {
-                        metadataRepo->setMetadata(docId, "etag", metadata::MetadataValue(*fr.etag));
-                    }
-                    if (fr.lastModified) {
-                        metadataRepo->setMetadata(docId, "last_modified",
-                                                  metadata::MetadataValue(*fr.lastModified));
-                    }
-
-                    metadataRepo->setMetadata(docId, "tag", metadata::MetadataValue("downloaded"));
-
-                    if (!quiet_) {
-                        spdlog::debug("Stored download metadata with document ID: {}", docId);
-                    }
-                } else {
-                    spdlog::warn("Failed to store download metadata: {}",
-                                 insertResult.error().message);
-                }
-            }
-        }
-
-        // Log download completion
-        if (!quiet_) {
-            if (fr.success) {
-                spdlog::info("Downloaded {} -> {} ({} bytes)", fr.url,
-                             fr.hash.substr(0, 16) + "...", fr.sizeBytes);
-            } else {
-                spdlog::error("Download failed: {}", fr.url);
-            }
-        }
-
-        json out = {{"type", "result"},
-                    {"url", fr.url},
-                    {"hash", fr.hash},
-                    {"stored_path", fr.storedPath.string()},
-                    {"size_bytes", fr.sizeBytes},
-                    {"success", fr.success},
-                    {"http_status", fr.httpStatus ? json(*fr.httpStatus) : json(nullptr)},
-                    {"etag", fr.etag ? json(*fr.etag) : json(nullptr)},
-                    {"last_modified", fr.lastModified ? json(*fr.lastModified) : json(nullptr)},
-                    {"checksum_ok", fr.checksumOk ? json(*fr.checksumOk) : json(nullptr)},
-                    {"elapsed_ms", elapsed_ms}};
-        if (jsonOutput_)
-            std::cout << out.dump() << std::endl;
-        else
-            std::cout << out.dump(2) << std::endl;
-
-        return Result<void>();
-    }
-
-    // Try daemon-first download for a single URL
-    Result<void> tryDaemonDownload(const std::string& url) {
-        try {
-            yams::daemon::DownloadRequest dreq;
-            dreq.url = url;
-            dreq.outputPath = ""; // Let daemon determine the name
-            dreq.quiet = quiet_;
-            // Note: tags and metadata would need to be added here if we supported them in the CLI
-
-            auto render = [&](const yams::daemon::DownloadResponse& resp) -> Result<void> {
-                if (!resp.success) {
-                    spdlog::error("Download failed: {}", resp.error);
-                    return Error{ErrorCode::NetworkError, resp.error};
-                }
-
-                // Display results
-                if (!quiet_) {
-                    spdlog::info("Downloaded {} -> {} ({})", resp.url,
-                                 resp.hash.substr(0, 16) + "...", resp.localPath);
-                }
-
-                if (jsonOutput_) {
-                    json out = {{"url", resp.url},
-                                {"hash", resp.hash},
-                                {"local_path", resp.localPath},
-                                {"size_bytes", resp.size},
-                                {"success", resp.success}};
-                    std::cout << out.dump() << std::endl;
-                }
-
-                return Result<void>();
-            };
-
-            auto fallback = [&]() -> Result<void> {
-                spdlog::debug("Daemon unavailable, falling back to local download");
-                return performLocalDownload(url);
-            };
-
-            if (auto d = daemon_first(dreq, fallback, render); d) {
-                return Result<void>();
-            } else {
-                return d;
-            }
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string("Daemon download failed: ") + e.what()};
-        }
-    }
-
-    // CLI context
     YamsCLI* cli_{nullptr};
-
-    // Inputs
     std::optional<std::string> url_{};
     std::optional<fs::path> listPath_{};
 
@@ -1054,7 +223,7 @@ private:
     std::optional<std::string> tlsCaPath_{};
     bool noFollowRedirects_{false};
 
-    // Export policy (applies only if export is requested)
+    // Export policy
     std::optional<fs::path> exportPath_{};
     std::optional<fs::path> exportDir_{};
     std::string overwritePolicy_{"never"};

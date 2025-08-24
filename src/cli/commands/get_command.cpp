@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
@@ -99,281 +100,248 @@ public:
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
-            // Try daemon-first (streaming) for simple hash/name cases (no complex filters/graph)
-            if (!showGraph_ && !hasFilters()) {
-                yams::daemon::GetRequest dreq;
-                if (!hash_.empty()) {
-                    dreq.hash = hash_;
-                } else if (!name_.empty()) {
-                    dreq.byName = true;
-                    dreq.name = name_;
-                }
-                if (!dreq.hash.empty() || dreq.byName) {
-                    // Prefer high-level helpers via DaemonClient
-                    yams::daemon::DaemonClient client;
-                    if (auto c = client.connect(); c) {
-                        yams::daemon::GetInitRequest ireq;
-                        ireq.hash = dreq.hash;
-                        ireq.name = dreq.name;
-                        ireq.byName = dreq.byName;
-                        ireq.metadataOnly = metadataOnly_;
-                        ireq.maxBytes = maxBytes_;
-                        ireq.chunkSize = static_cast<uint32_t>(chunkSize_);
+            // Create enhanced daemon request with ALL CLI options mapped
+            yams::daemon::GetRequest dreq;
 
-                        if (metadataOnly_) {
-                            auto ir = client.getInit(ireq);
-                            if (ir) {
-                                std::cerr << "Size: " << ir.value().totalSize << " bytes\n";
-                                for (const auto& [k, v] : ir.value().metadata) {
-                                    std::cerr << k << ": " << v << "\n";
-                                }
-                                return Result<void>();
-                            }
-                            // Fall through on failure
-                        } else {
-                            if (outputPath_.empty() || outputPath_ == "-") {
-                                auto r = client.getToStdout(ireq);
-                                if (r)
-                                    return Result<void>();
-                            } else {
-                                auto r = client.getToFile(ireq, outputPath_);
-                                if (r) {
-                                    if (verbose_) {
-                                        std::cerr << "Document retrieved successfully!\n";
-                                        std::cerr << "Output: " << outputPath_ << "\n";
-                                    }
-                                    return Result<void>();
-                                }
-                            }
-                        }
-                        // If we reach here, daemon call failed; fall through to local
-                    }
-                }
-            }
-            auto ensured = cli_->ensureStorageInitialized();
-            if (!ensured) {
-                return ensured;
-            }
-            auto store = cli_->getContentStore();
-            if (!store) {
-                return Error{ErrorCode::NotInitialized, "Content store not initialized"};
-            }
+            // Target selection
+            dreq.hash = hash_;
+            dreq.name = name_;
+            dreq.byName = !name_.empty();
 
-            // Resolve the hash to retrieve
-            std::string hashToRetrieve;
+            // File type filters
+            dreq.fileType = fileType_;
+            dreq.mimeType = mimeType_;
+            dreq.extension = extension_;
+            dreq.binaryOnly = binaryOnly_;
+            dreq.textOnly = textOnly_;
 
-            if (!hash_.empty()) {
-                YAMS_ZONE_SCOPED_N("GetCommand::hashResolution");
-                // Direct hash retrieval - support partial hashes
-                if (isValidHashPrefix(hash_) && hash_.length() < 64) {
-                    auto resolveResult = resolvePartialHash(hash_);
-                    if (!resolveResult) {
-                        return resolveResult.error();
-                    }
-                    hashToRetrieve = resolveResult.value();
+            // Time filters
+            dreq.createdAfter = createdAfter_;
+            dreq.createdBefore = createdBefore_;
+            dreq.modifiedAfter = modifiedAfter_;
+            dreq.modifiedBefore = modifiedBefore_;
+            dreq.indexedAfter = indexedAfter_;
+            dreq.indexedBefore = indexedBefore_;
 
+            // Selection options
+            dreq.latest = getLatest_;
+            dreq.oldest = getOldest_;
+
+            // Output options
+            dreq.outputPath = outputPath_;
+            dreq.metadataOnly = metadataOnly_;
+            dreq.maxBytes = maxBytes_;
+            dreq.chunkSize = static_cast<uint32_t>(chunkSize_);
+
+            // Content options
+            dreq.raw = raw_;
+            dreq.extract = extract_;
+
+            // Knowledge graph options
+            dreq.showGraph = showGraph_;
+            dreq.graphDepth = graphDepth_;
+
+            // Display options
+            dreq.verbose = verbose_;
+
+            spdlog::debug("GetCommand: Created enhanced daemon request (hash='{}', name='{}', "
+                          "filters={}, graph={})",
+                          dreq.hash, dreq.name, hasFilters(), dreq.showGraph);
+
+            // Define render function for daemon response
+            auto render = [&](const yams::daemon::GetResponse& resp) -> Result<void> {
+                spdlog::debug("GetCommand: Processing daemon response (hash='{}', hasContent={}, "
+                              "graphRelated={})",
+                              resp.hash, resp.hasContent, resp.related.size());
+
+                if (metadataOnly_) {
+                    // Metadata-only display
                     if (verbose_) {
-                        std::cerr << "Resolved hash prefix '" << hash_
-                                  << "' to: " << hashToRetrieve.substr(0, 12) << "..." << std::endl;
+                        std::cerr << "Document: " << resp.fileName << std::endl;
+                        std::cerr << "Hash: " << resp.hash << std::endl;
+                        std::cerr << "Path: " << resp.path << std::endl;
+                    }
+                    std::cerr << "Size: " << resp.size << " bytes" << std::endl;
+                    std::cerr << "Type: " << resp.mimeType << std::endl;
+
+                    // Display metadata
+                    for (const auto& [key, value] : resp.metadata) {
+                        std::cerr << key << ": " << value << std::endl;
+                    }
+
+                    // Display knowledge graph if enabled
+                    if (resp.graphEnabled && !resp.related.empty()) {
+                        std::cerr << "\nRelated documents (depth " << graphDepth_
+                                  << "):" << std::endl;
+                        for (const auto& rel : resp.related) {
+                            std::cerr << "  - " << rel.name << " (" << rel.relationship
+                                      << ", distance=" << rel.distance << ")" << std::endl;
+                        }
+                    }
+
+                } else if (resp.hasContent) {
+                    // Content retrieval
+                    if (outputPath_.empty() || outputPath_ == "-") {
+                        // Output to stdout
+                        std::cout << resp.content;
+                    } else {
+                        // Write to file
+                        std::ofstream outFile(outputPath_, std::ios::binary);
+                        if (!outFile) {
+                            return Error{ErrorCode::WriteError,
+                                         "Cannot open output file: " + outputPath_.string()};
+                        }
+                        outFile.write(resp.content.data(), resp.content.size());
+                        outFile.close();
+
+                        if (verbose_) {
+                            std::cerr << "Document retrieved successfully!" << std::endl;
+                            std::cerr << "Output: " << outputPath_ << std::endl;
+                            std::cerr << "Size: " << resp.totalBytes << " bytes" << std::endl;
+                        }
+                    }
+
+                    // Display knowledge graph if enabled
+                    if (resp.graphEnabled && !resp.related.empty()) {
+                        std::cerr << "\nRelated documents (depth " << graphDepth_
+                                  << "):" << std::endl;
+                        for (const auto& rel : resp.related) {
+                            std::cerr << "  - " << rel.name << " (" << rel.relationship
+                                      << ", distance=" << rel.distance << ")" << std::endl;
+                        }
                     }
                 } else {
-                    hashToRetrieve = hash_;
+                    return Error{ErrorCode::NotFound, "Document content not available"};
                 }
-            } else if (hasFilters()) {
-                YAMS_ZONE_SCOPED_N("GetCommand::filterResolution");
-                // Filter-based retrieval
-                auto resolveResult = resolveByFilters();
-                if (!resolveResult) {
-                    return resolveResult.error();
+
+                return Result<void>();
+            };
+
+            // Define service fallback using DocumentService
+            auto fallback = [&]() -> Result<void> {
+                spdlog::debug("GetCommand: Using service fallback");
+
+                // Get application context and DocumentService
+                auto appContext = cli_->getAppContext();
+                auto documentService = app::services::makeDocumentService(*appContext);
+
+                // Map CLI options to service RetrieveDocumentRequest
+                app::services::RetrieveDocumentRequest serviceReq;
+
+                // Target selection
+                serviceReq.hash = hash_;
+                serviceReq.name = name_;
+
+                // File type filters
+                serviceReq.fileType = fileType_;
+                serviceReq.mimeType = mimeType_;
+                serviceReq.extension = extension_;
+
+                // Selection options
+                serviceReq.latest = getLatest_;
+                serviceReq.oldest = getOldest_;
+
+                // Output options
+                serviceReq.outputPath = outputPath_;
+                serviceReq.metadataOnly = metadataOnly_;
+                serviceReq.maxBytes = maxBytes_;
+                serviceReq.chunkSize = chunkSize_;
+
+                // Content options
+                serviceReq.includeContent = !metadataOnly_;
+                serviceReq.raw = raw_;
+                serviceReq.extract = extract_;
+
+                // Knowledge graph options
+                serviceReq.graph = showGraph_;
+                serviceReq.depth = graphDepth_;
+
+                // Call DocumentService
+                auto result = documentService->retrieve(serviceReq);
+                if (!result) {
+                    return result.error();
                 }
-                hashToRetrieve = resolveResult.value();
 
-                if (verbose_) {
-                    std::cerr << "Found document matching filters: " << hashToRetrieve.substr(0, 12)
-                              << "..." << std::endl;
-                }
-            } else if (!name_.empty()) {
-                // Name-based retrieval
-                auto resolveResult = resolveNameToHash(name_);
-                if (!resolveResult) {
-                    // If document not found in YAMS, check if it's a local file
-                    if (resolveResult.error().code == ErrorCode::NotFound &&
-                        std::filesystem::exists(name_)) {
-                        // Fall back to local file operations
-                        if (outputPath_.empty() || outputPath_ == "-") {
-                            // Output to stdout
-                            std::ifstream file(name_, std::ios::binary);
-                            if (!file) {
-                                return Error{ErrorCode::FileNotFound,
-                                             "Cannot read local file: " + name_};
-                            }
-                            std::cout << file.rdbuf();
-                        } else {
-                            // Copy local file to output path
-                            try {
-                                std::filesystem::copy_file(
-                                    name_, outputPath_,
-                                    std::filesystem::copy_options::overwrite_existing);
+                const auto& serviceResp = result.value();
 
-                                auto fileSize = std::filesystem::file_size(name_);
+                // Convert service response to daemon response and render
+                yams::daemon::GetResponse daemonResp;
 
-                                // Output success message to stderr
-                                std::cerr << "Document retrieved successfully!" << std::endl;
-                                std::cerr << "Output: " << outputPath_ << std::endl;
-                                std::cerr << "Size: " << fileSize << " bytes" << std::endl;
-                            } catch (const std::filesystem::filesystem_error& e) {
-                                return Error{ErrorCode::WriteError,
-                                             "Failed to copy local file: " + std::string(e.what())};
-                            }
-                        }
-                        return Result<void>();
+                if (serviceResp.document.has_value()) {
+                    const auto& doc = serviceResp.document.value();
+                    daemonResp.hash = doc.hash;
+                    daemonResp.path = doc.path;
+                    daemonResp.name = doc.name;
+                    daemonResp.fileName = doc.fileName;
+                    daemonResp.size = doc.size;
+                    daemonResp.mimeType = doc.mimeType;
+                    daemonResp.fileType = doc.fileType;
+                    daemonResp.created = doc.created;
+                    daemonResp.modified = doc.modified;
+                    daemonResp.indexed = doc.indexed;
+
+                    if (doc.content.has_value()) {
+                        daemonResp.content = doc.content.value();
+                        daemonResp.hasContent = true;
                     }
-                    // Not a local file either, return original error
-                    return resolveResult.error();
+
+                    // Convert metadata
+                    for (const auto& [key, value] : doc.metadata) {
+                        daemonResp.metadata[key] = value;
+                    }
+
+                } else if (!serviceResp.documents.empty()) {
+                    const auto& doc = serviceResp.documents[0];
+                    daemonResp.hash = doc.hash;
+                    daemonResp.path = doc.path;
+                    daemonResp.name = doc.name;
+                    daemonResp.fileName = doc.fileName;
+                    daemonResp.size = doc.size;
+                    daemonResp.mimeType = doc.mimeType;
+                    daemonResp.fileType = doc.fileType;
+                    daemonResp.created = doc.created;
+                    daemonResp.modified = doc.modified;
+                    daemonResp.indexed = doc.indexed;
+
+                    if (doc.content.has_value()) {
+                        daemonResp.content = doc.content.value();
+                        daemonResp.hasContent = true;
+                    }
+
+                    for (const auto& [key, value] : doc.metadata) {
+                        daemonResp.metadata[key] = value;
+                    }
+                } else {
+                    return Error{ErrorCode::NotFound, "No documents found matching criteria"};
                 }
-                hashToRetrieve = resolveResult.value();
 
-                if (verbose_) {
-                    std::cerr << "Resolved '" << name_
-                              << "' to hash: " << hashToRetrieve.substr(0, 12) << "..."
-                              << std::endl;
-                }
-            } else {
-                return Error{ErrorCode::InvalidArgument, "No retrieval criteria specified"};
-            }
-
-            // Check if document exists
-            auto existsResult = store->exists(hashToRetrieve);
-            if (!existsResult) {
-                return Error{existsResult.error().code, existsResult.error().message};
-            }
-
-            if (!existsResult.value()) {
-                return Error{ErrorCode::NotFound, "Document not found: " + hashToRetrieve};
-            }
-
-            // Show knowledge graph if requested
-            if (showGraph_) {
-                auto graphResult = displayKnowledgeGraph(hashToRetrieve);
-                if (!graphResult) {
-                    spdlog::warn("Failed to display knowledge graph: {}",
-                                 graphResult.error().message);
-                }
-            }
-
-            // Determine if we should extract text
-            bool outputToStdout = (outputPath_.empty() || outputPath_ == "-");
-            bool shouldExtract = false;
-
-            if (!raw_) {
-                if (extract_) {
-                    // User explicitly requested extraction
-                    shouldExtract = true;
-                } else if (outputToStdout) {
-                    // Auto-detect: extract if outputting to terminal
-                    shouldExtract = isatty(fileno(stdout)) != 0;
-                }
-            }
-
-            // Retrieve content
-            YAMS_ZONE_SCOPED_N("GetCommand::retrieveBytes");
-            auto result = store->retrieveBytes(hashToRetrieve);
-            if (!result) {
-                return Error{result.error().code, result.error().message};
-            }
-            std::vector<std::byte> contentBytes = result.value();
-
-            // Apply text extraction if needed
-            if (shouldExtract) {
-                // Try to determine file extension from metadata
-                std::string extension;
-                std::string fileName;
-
-                // Always get the actual fileName from metadata using the resolved hash
-                auto metadataRepo = cli_->getMetadataRepository();
-                if (metadataRepo) {
-                    auto docResult = metadataRepo->getDocumentByHash(hashToRetrieve);
-                    if (docResult && docResult.value().has_value()) {
-                        fileName = docResult.value()->fileName;
+                // Knowledge graph results
+                daemonResp.graphEnabled = serviceResp.graphEnabled;
+                if (serviceResp.graphEnabled) {
+                    for (const auto& rel : serviceResp.related) {
+                        yams::daemon::RelatedDocumentEntry entry;
+                        entry.hash = rel.hash;
+                        entry.path = rel.path;
+                        entry.name = rel.name;
+                        entry.relationship = rel.relationship.value_or("unknown");
+                        entry.distance = rel.distance;
+                        entry.relevanceScore = rel.relevanceScore;
+                        daemonResp.related.push_back(entry);
                     }
                 }
 
-                // Fallback to using the search term if no metadata found and we used name-based
-                // lookup
-                if (fileName.empty() && !name_.empty()) {
-                    fileName = name_;
-                }
+                daemonResp.totalBytes = serviceResp.totalBytes;
+                daemonResp.outputWritten = serviceResp.outputPath.has_value();
 
-                // Extract extension from file name
-                if (!fileName.empty()) {
-                    auto lastDot = fileName.find_last_of('.');
-                    if (lastDot != std::string::npos) {
-                        extension = fileName.substr(lastDot);
-                    }
-                }
+                // Render using the same logic as daemon path
+                return render(daemonResp);
+            };
 
-                // Try text extraction if we have an extension
-                if (!extension.empty()) {
-                    auto& factory = extraction::TextExtractorFactory::instance();
-                    auto extractor = factory.create(extension);
-
-                    if (extractor) {
-                        // Create extraction config
-                        extraction::ExtractionConfig config;
-                        config.maxFileSize = 100 * 1024 * 1024; // 100MB max
-
-                        // Convert to byte span
-                        auto dataSpan =
-                            std::span<const std::byte>(contentBytes.data(), contentBytes.size());
-
-                        // Extract text
-                        auto extractResult = extractor->extractFromBuffer(dataSpan, config);
-                        if (extractResult) {
-                            // Replace content with extracted text
-                            const std::string& text = extractResult.value().text;
-                            contentBytes.clear();
-                            contentBytes.reserve(text.size());
-                            std::transform(text.begin(), text.end(),
-                                           std::back_inserter(contentBytes),
-                                           [](char c) { return std::byte(c); });
-                        }
-                        // If extraction fails, keep original content
-                    }
-                }
-            }
-
-            // Output content
-            if (outputToStdout) {
-                // Output to stdout
-                std::cout.write(reinterpret_cast<const char*>(contentBytes.data()),
-                                contentBytes.size());
-                // Silent output to stdout - just the content
-            } else {
-                YAMS_ZONE_SCOPED_N("GetCommand::writeToFile");
-                // Write to file
-                std::ofstream file(outputPath_, std::ios::binary);
-                if (!file) {
-                    return Error{ErrorCode::FileNotFound,
-                                 "Cannot create output file: " + outputPath_.string()};
-                }
-                file.write(reinterpret_cast<const char*>(contentBytes.data()), contentBytes.size());
-                file.close();
-
-                YAMS_PLOT("RetrievedBytes", static_cast<int64_t>(contentBytes.size()));
-
-                // Output success message to stderr so it doesn't interfere with piped output
-                std::cerr << "Document retrieved successfully!" << std::endl;
-                std::cerr << "Output: " << outputPath_ << std::endl;
-                std::cerr << "Size: " << contentBytes.size() << " bytes" << std::endl;
-                if (shouldExtract) {
-                    std::cerr << "Text extraction: Applied" << std::endl;
-                }
-            }
-
-            return Result<void>();
+            // Use daemon_first helper with enhanced request
+            return daemon_first(dreq, fallback, render);
 
         } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+            return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};
         }
     }
 

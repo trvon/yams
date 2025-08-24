@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
 #include <cctype>
@@ -10,6 +11,20 @@
 namespace yams::app::services {
 
 namespace {
+
+// Helper function to escape regex special characters
+static std::string escapeRegex(const std::string& text) {
+    static const std::string specialChars = "\\^$.|?*+()[]{}";
+    std::string escaped;
+    escaped.reserve(text.size() * 2);
+    for (char c : text) {
+        if (specialChars.find(c) != std::string::npos) {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    return escaped;
+}
 
 // Simple glob matcher supporting '*' and '?'
 static bool wildcardMatch(const std::string& text, const std::string& pattern) {
@@ -54,6 +69,44 @@ static std::vector<std::string> splitToLines(const std::string& content) {
     }
     // Handle trailing newline producing an extra empty line? std::getline handles ok.
     return lines;
+}
+
+// Helper to check if document has required tags
+static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
+                            const std::vector<std::string>& tags, bool matchAll) {
+    if (!repo || tags.empty())
+        return true;
+    auto md = repo->getAllMetadata(docId);
+    if (!md)
+        return false;
+    auto& all = md.value();
+
+    auto hasTag = [&](const std::string& t) {
+        // Match if key equals tag OR string value equals tag
+        auto it = all.find(t);
+        if (it != all.end())
+            return true;
+        for (const auto& [k, v] : all) {
+            (void)k;
+            if (v.asString() == t)
+                return true;
+        }
+        return false;
+    };
+
+    if (matchAll) {
+        for (const auto& t : tags) {
+            if (!hasTag(t))
+                return false;
+        }
+        return true;
+    } else {
+        for (const auto& t : tags) {
+            if (hasTag(t))
+                return true;
+        }
+        return false;
+    }
 }
 
 static bool pathFilterMatch(const std::string& filePath, const std::vector<std::string>& filters) {
@@ -105,6 +158,10 @@ public:
 
         // Build regex
         std::string pat = req.pattern;
+        if (req.literalText) {
+            // Escape regex special characters for literal matching
+            pat = escapeRegex(pat);
+        }
         if (req.word) {
             // Wrap with word boundaries; use a non-capturing group to avoid precedence issues
             pat = "\\b(?:" + pat + ")\\b";
@@ -145,6 +202,33 @@ public:
                 continue;
             }
 
+            // Apply include patterns filter
+            if (!req.includePatterns.empty()) {
+                bool matches = false;
+                for (const auto& pattern : req.includePatterns) {
+                    if (hasWildcard(pattern)) {
+                        if (wildcardMatch(doc.filePath, pattern)) {
+                            matches = true;
+                            break;
+                        }
+                    } else {
+                        // Simple substring match for non-wildcard patterns
+                        if (doc.filePath.find(pattern) != std::string::npos) {
+                            matches = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matches) {
+                    continue;
+                }
+            }
+
+            // Apply tag filtering
+            if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) {
+                continue;
+            }
+
             // Retrieve content
             std::ostringstream oss;
             auto rs = ctx_.store->retrieveStream(doc.sha256Hash, oss, nullptr);
@@ -174,6 +258,7 @@ public:
 
                 if (!req.count) {
                     GrepMatch gm;
+                    gm.matchType = "regex"; // Set match type for all regex matches
                     if (req.lineNumbers)
                         gm.lineNumber = i + 1;
                     gm.line = line;

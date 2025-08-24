@@ -76,6 +76,7 @@ public:
 
             // Set up callbacks
             auto progressCb = [](const downloader::ProgressEvent& ev) {
+                (void)ev; // TODO: Implement progress reporting
                 // Could log progress or update status, for now just ignore
             };
             auto shouldCancel = []() { return false; };

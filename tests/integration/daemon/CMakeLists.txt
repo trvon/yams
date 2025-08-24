@@ -62,3 +62,28 @@ target_link_libraries(daemon_download_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_download_integration_test COMMAND daemon_download_integration_test)
+
+# Split tests: daemon add normalization and daemon delete parity
+add_executable(daemon_add_normalization_integration_test
+    daemon_delete_add_integration_test.cpp
+)
+target_link_libraries(daemon_add_normalization_integration_test PRIVATE
+    yams::daemon
+    yams::api
+    yams::metadata
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME daemon_add_normalization_integration_test COMMAND daemon_add_normalization_integration_test)
+
+add_executable(daemon_delete_parity_integration_test
+    daemon_delete_add_integration_test.cpp
+)
+target_link_libraries(daemon_delete_parity_integration_test PRIVATE
+    yams::daemon
+    yams::api
+    yams::metadata
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME daemon_delete_parity_integration_test COMMAND daemon_delete_parity_integration_test)

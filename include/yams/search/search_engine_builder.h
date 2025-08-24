@@ -131,6 +131,10 @@ public:
             o.hybrid.kg_budget_ms = std::chrono::milliseconds{20};
             o.hybrid.generate_explanations = true;
 
+            // Enable parallel search for better performance
+            o.hybrid.parallel_search = true;
+            o.hybrid.num_threads = 0; // Auto-detect optimal thread count
+
             // Normalize to ensure weights sum to 1.0
             o.hybrid.normalizeWeights();
             return o;

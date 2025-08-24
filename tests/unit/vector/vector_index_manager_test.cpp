@@ -87,27 +87,70 @@ TEST_F(VectorIndexManagerTest, AddMultipleVectors) {
     }
 }
 
-// Test vector retrieval - feature may not be implemented yet
-TEST_F(VectorIndexManagerTest, DISABLED_GetVector) {
+// Test vector retrieval via getAllVectorIds
+TEST_F(VectorIndexManagerTest, GetVector) {
     auto vec = generateRandomVector(128);
     std::string id = "test_vector";
 
-    manager_->addVector(id, vec);
+    auto add_result = manager_->addVector(id, vec);
+    ASSERT_TRUE(add_result.has_value());
 
-    // Get vector feature may not be available in current API
-    // This test is disabled until the feature is implemented
+    // Test getAllVectorIds functionality
+    auto ids_result = manager_->getAllVectorIds();
+    ASSERT_TRUE(ids_result.has_value());
+
+    const auto& ids = ids_result.value();
+    EXPECT_EQ(ids.size(), 1);
+    EXPECT_EQ(ids[0], id);
+
+    // Add more vectors and verify
+    manager_->addVector("vec2", generateRandomVector(128));
+    manager_->addVector("vec3", generateRandomVector(128));
+
+    auto ids_result2 = manager_->getAllVectorIds();
+    ASSERT_TRUE(ids_result2.has_value());
+    EXPECT_EQ(ids_result2.value().size(), 3);
 }
 
-// Test vector update - feature may not be implemented yet
-TEST_F(VectorIndexManagerTest, DISABLED_UpdateVector) {
-    // Update vector feature may not be available in current API
-    // This test is disabled until the feature is implemented
+// Test vector update
+TEST_F(VectorIndexManagerTest, UpdateVector) {
+    std::string id = "update_test";
+    auto vec1 = generateRandomVector(128);
+    auto vec2 = generateRandomVector(128);
+
+    // Add initial vector
+    auto add_result = manager_->addVector(id, vec1);
+    ASSERT_TRUE(add_result.has_value());
+
+    // Search for the vector
+    auto search_result1 = manager_->search(vec1, 1);
+    ASSERT_TRUE(search_result1.has_value());
+    ASSERT_EQ(search_result1.value().size(), 1);
+    EXPECT_EQ(search_result1.value()[0].id, id);
+    EXPECT_NEAR(search_result1.value()[0].distance, 0.0f, 0.001f); // Should be exact match
+
+    // Update the vector
+    auto update_result = manager_->updateVector(id, vec2);
+    ASSERT_TRUE(update_result.has_value());
+
+    // Search with the new vector - should find it
+    auto search_result2 = manager_->search(vec2, 1);
+    ASSERT_TRUE(search_result2.has_value());
+    ASSERT_EQ(search_result2.value().size(), 1);
+    EXPECT_EQ(search_result2.value()[0].id, id);
+    EXPECT_NEAR(search_result2.value()[0].distance, 0.0f, 0.001f); // Should be exact match
+
+    // Search with old vector - should not be as close
+    auto search_result3 = manager_->search(vec1, 1);
+    ASSERT_TRUE(search_result3.has_value());
+    if (search_result3.value().size() > 0) {
+        // If found, distance should be greater than 0 (not exact match anymore)
+        EXPECT_GT(search_result3.value()[0].distance, 0.01f);
+    }
 }
 
 // Test vector deletion
-// DISABLED: removeVector() returns NotSupported error - needs implementation
-// TODO(v0.5.0): Implement removeVector in VectorIndexManager
-TEST_F(VectorIndexManagerTest, DISABLED_RemoveVector) {
+TEST_F(VectorIndexManagerTest, RemoveVector) {
     std::string id = "delete_test";
     auto vec = generateRandomVector(128);
 
@@ -262,9 +305,7 @@ TEST_F(VectorIndexManagerTest, ConcurrentSearches) {
 }
 
 // Test index persistence (save/load)
-// DISABLED: saveIndex/loadIndex return NotSupported - needs implementation
-// TODO(v0.5.0): Implement index persistence in VectorIndexManager
-TEST_F(VectorIndexManagerTest, DISABLED_IndexPersistence) {
+TEST_F(VectorIndexManagerTest, IndexPersistence) {
     // Add test vectors
     const size_t num_vectors = 20;
     std::vector<std::string> ids;
@@ -298,9 +339,7 @@ TEST_F(VectorIndexManagerTest, DISABLED_IndexPersistence) {
 }
 
 // Test HNSW index type
-// DISABLED: HNSW index operations not yet implemented
-// TODO(v0.5.0): Implement HNSW index support
-TEST_F(VectorIndexManagerTest, DISABLED_HNSWIndex) {
+TEST_F(VectorIndexManagerTest, HNSWIndex) {
     IndexConfig hnsw_config;
     hnsw_config.dimension = 128;
     hnsw_config.type = IndexType::HNSW;
@@ -309,6 +348,9 @@ TEST_F(VectorIndexManagerTest, DISABLED_HNSWIndex) {
     hnsw_config.hnsw_ef_construction = 200;
 
     auto hnsw_manager = std::make_unique<VectorIndexManager>(hnsw_config);
+    auto init_result = hnsw_manager->initialize();
+    ASSERT_TRUE(init_result.has_value())
+        << "Failed to initialize HNSW VectorIndexManager: " << init_result.error().message;
 
     // Add vectors
     const size_t num_vectors = 100;
@@ -329,9 +371,7 @@ TEST_F(VectorIndexManagerTest, DISABLED_HNSWIndex) {
 }
 
 // Test batch operations
-// DISABLED: Batch operations depend on removeVector which is not implemented
-// TODO(v0.5.0): Enable after implementing removeVector
-TEST_F(VectorIndexManagerTest, DISABLED_BatchOperations) {
+TEST_F(VectorIndexManagerTest, BatchOperations) {
     // Batch add
     std::vector<std::string> ids;
     std::vector<std::vector<float>> vectors;
@@ -355,9 +395,7 @@ TEST_F(VectorIndexManagerTest, DISABLED_BatchOperations) {
 }
 
 // Test memory usage tracking
-// DISABLED: Memory tracking not implemented in current VectorIndexManager
-// TODO(v0.5.0): Implement memory usage tracking
-TEST_F(VectorIndexManagerTest, DISABLED_MemoryUsage) {
+TEST_F(VectorIndexManagerTest, MemoryUsage) {
     auto stats = manager_->getStats();
     size_t initial_memory = stats.index_size_bytes;
     EXPECT_GE(initial_memory, 0);
@@ -390,9 +428,7 @@ TEST_F(VectorIndexManagerTest, ErrorRecovery) {
 }
 
 // Test index statistics
-// DISABLED: Index statistics not tracked in current implementation
-// TODO(v0.5.0): Implement statistics tracking
-TEST_F(VectorIndexManagerTest, DISABLED_IndexStatistics) {
+TEST_F(VectorIndexManagerTest, IndexStatistics) {
     // Add vectors
     const size_t num_vectors = 50;
     for (size_t i = 0; i < num_vectors; ++i) {
@@ -403,6 +439,35 @@ TEST_F(VectorIndexManagerTest, DISABLED_IndexStatistics) {
     EXPECT_EQ(stats.num_vectors, num_vectors);
     EXPECT_EQ(stats.dimension, 128);
     EXPECT_GT(stats.index_size_bytes, 0);
+}
+
+// Test index statistics with HNSW index type
+TEST_F(VectorIndexManagerTest, HNSWIndexStatistics) {
+    // Create HNSW index
+    IndexConfig hnsw_config;
+    hnsw_config.dimension = 128;
+    hnsw_config.type = IndexType::HNSW;
+    hnsw_config.distance_metric = DistanceMetric::L2;
+    hnsw_config.hnsw_m = 16;
+    hnsw_config.hnsw_ef_construction = 200;
+
+    auto hnsw_manager = std::make_unique<VectorIndexManager>(hnsw_config);
+    auto init_result = hnsw_manager->initialize();
+    ASSERT_TRUE(init_result.has_value())
+        << "Failed to initialize HNSW VectorIndexManager: " << init_result.error().message;
+
+    // Add vectors
+    const size_t num_vectors = 25;
+    for (size_t i = 0; i < num_vectors; ++i) {
+        hnsw_manager->addVector("hnsw_vec_" + std::to_string(i), generateRandomVector(128));
+    }
+
+    auto stats = hnsw_manager->getStats();
+    EXPECT_EQ(stats.num_vectors, num_vectors);
+    EXPECT_EQ(stats.dimension, 128);
+    EXPECT_EQ(stats.type, IndexType::HNSW);
+    EXPECT_GT(stats.index_size_bytes, 0);
+    EXPECT_GT(stats.memory_usage_bytes, 0);
 }
 
 // Performance benchmark test

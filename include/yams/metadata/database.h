@@ -60,6 +60,7 @@ public:
     Result<void> bind(int index, std::nullptr_t);
     Result<void> bind(int index, int value);
     Result<void> bind(int index, int64_t value);
+    Result<void> bind(int index, float value);
     Result<void> bind(int index, double value);
     Result<void> bind(int index, const std::string& value);
     Result<void> bind(int index, std::string_view value);

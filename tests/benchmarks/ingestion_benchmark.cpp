@@ -1,12 +1,16 @@
+#include <algorithm>
 #include <filesystem>
+#include <iterator>
 #include <random>
 #include <vector>
 #include "../common/fixture_manager.h"
 #include "../common/test_data_generator.h"
 #include "benchmark_base.h"
+#include <yams/api/content_metadata.h>
 #include <yams/api/content_store.h>
-#include <yams/chunking/rabin_chunker.h>
-#include <yams/crypto/sha256_hasher.h>
+#include <yams/api/content_store_builder.h>
+#include <yams/chunking/chunker.h>
+#include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
 
 using namespace yams;
@@ -25,8 +29,11 @@ protected:
         std::filesystem::create_directories(tempDir_);
 
         // Initialize components
-        storageEngine_ = std::make_unique<storage::StorageEngine>(tempDir_ / "storage");
-        contentStore_ = std::make_unique<api::ContentStore>(tempDir_.string());
+        auto result = api::createContentStore(tempDir_ / "storage");
+        if (!result) {
+            throw std::runtime_error("Failed to create content store: " + result.error().message);
+        }
+        contentStore_ = std::move(result).value();
 
         // Generate test data
         generator_ = std::make_unique<test::TestDataGenerator>();
@@ -44,8 +51,7 @@ protected:
     }
 
     std::filesystem::path tempDir_;
-    std::unique_ptr<storage::StorageEngine> storageEngine_;
-    std::unique_ptr<api::ContentStore> contentStore_;
+    std::unique_ptr<api::IContentStore> contentStore_;
     std::unique_ptr<test::TestDataGenerator> generator_;
 
     double lastDedupRatio_ = 0.0;
@@ -59,11 +65,16 @@ BENCHMARK_F(IngestionBenchmark, SmallDocument) {
     auto content = generator_->generateTextDocument(1024);
 
     // Ingest document
-    auto result = contentStore_->addContent(std::vector<std::byte>(content.begin(), content.end()),
-                                            "small_doc.txt");
+    std::vector<std::byte> contentBytes;
+    contentBytes.reserve(content.size());
+    std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
+                   [](char c) { return std::byte(c); });
+    api::ContentMetadata metadata;
+    metadata.name = "small_doc.txt";
+    auto result = contentStore_->storeBytes(contentBytes, metadata);
 
     if (result.has_value()) {
-        lastDedupRatio_ = result->dedupRatio();
+        lastDedupRatio_ = result.value().dedupRatio();
         totalBytesProcessed_ = 1024;
         return 1; // 1 document processed
     }
@@ -77,11 +88,16 @@ BENCHMARK_F(IngestionBenchmark, MediumDocument) {
     auto content = generator_->generateTextDocument(100 * 1024);
 
     // Ingest document
-    auto result = contentStore_->addContent(std::vector<std::byte>(content.begin(), content.end()),
-                                            "medium_doc.txt");
+    std::vector<std::byte> contentBytes;
+    contentBytes.reserve(content.size());
+    std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
+                   [](char c) { return std::byte(c); });
+    api::ContentMetadata metadata;
+    metadata.name = "medium_doc.txt";
+    auto result = contentStore_->storeBytes(contentBytes, metadata);
 
     if (result.has_value()) {
-        lastDedupRatio_ = result->dedupRatio();
+        lastDedupRatio_ = result.value().dedupRatio();
         totalBytesProcessed_ = 100 * 1024;
         return 1;
     }
@@ -95,11 +111,16 @@ BENCHMARK_F(IngestionBenchmark, LargeDocument) {
     auto content = generator_->generateTextDocument(10 * 1024 * 1024);
 
     // Ingest document
-    auto result = contentStore_->addContent(std::vector<std::byte>(content.begin(), content.end()),
-                                            "large_doc.txt");
+    std::vector<std::byte> contentBytes;
+    contentBytes.reserve(content.size());
+    std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
+                   [](char c) { return std::byte(c); });
+    api::ContentMetadata metadata;
+    metadata.name = "large_doc.txt";
+    auto result = contentStore_->storeBytes(contentBytes, metadata);
 
     if (result.has_value()) {
-        lastDedupRatio_ = result->dedupRatio();
+        lastDedupRatio_ = result.value().dedupRatio();
         totalBytesProcessed_ = 10 * 1024 * 1024;
         return 1;
     }
@@ -115,13 +136,17 @@ BENCHMARK_F(IngestionBenchmark, BatchIngestion) {
 
     for (size_t i = 0; i < numDocs; ++i) {
         auto content = generator_->generateTextDocument(docSize);
-        auto result =
-            contentStore_->addContent(std::vector<std::byte>(content.begin(), content.end()),
-                                      "batch_doc_" + std::to_string(i) + ".txt");
+        std::vector<std::byte> contentBytes;
+        contentBytes.reserve(content.size());
+        std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
+                       [](char c) { return std::byte(c); });
+        api::ContentMetadata metadata;
+        metadata.name = "batch_doc_" + std::to_string(i) + ".txt";
+        auto result = contentStore_->storeBytes(contentBytes, metadata);
 
         if (result.has_value()) {
             successCount++;
-            lastDedupRatio_ += result->dedupRatio();
+            lastDedupRatio_ += result.value().dedupRatio();
         }
     }
 
@@ -145,12 +170,16 @@ BENCHMARK_F(IngestionBenchmark, WithMetadata) {
     file.close();
 
     // Add with metadata
-    std::vector<std::string> tags = {"benchmark", "test", "metadata"};
-    auto result = contentStore_->addFile(filePath, tags);
+    api::ContentMetadata fileMetadata;
+    fileMetadata.name = "metadata_doc.txt";
+    fileMetadata.tags["category"] = "benchmark";
+    fileMetadata.tags["type"] = "test";
+    fileMetadata.tags["purpose"] = "metadata";
+    auto result = contentStore_->store(filePath, fileMetadata);
 
     if (result.has_value()) {
         // Update metadata
-        for (const auto& [key, value] : metadata) {
+        for ([[maybe_unused]] const auto& [key, value] : metadata) {
             // Note: Would need metadata repository access here
             // For benchmark, we're measuring the ingestion part
         }
@@ -174,7 +203,9 @@ BENCHMARK_F(IngestionBenchmark, PDFDocument) {
     file.close();
 
     // Ingest PDF
-    auto result = contentStore_->addFile(pdfPath);
+    api::ContentMetadata pdfMetadata;
+    pdfMetadata.name = "test.pdf";
+    auto result = contentStore_->store(pdfPath, pdfMetadata);
 
     if (result.has_value()) {
         totalBytesProcessed_ = pdfData.size();
@@ -204,13 +235,17 @@ BENCHMARK_F(IngestionBenchmark, Deduplication) {
         size_t idx = dist(rng);
         auto& content = uniqueContents[idx];
 
-        auto result =
-            contentStore_->addContent(std::vector<std::byte>(content.begin(), content.end()),
-                                      "dedup_doc_" + std::to_string(i) + ".txt");
+        std::vector<std::byte> contentBytes;
+        contentBytes.reserve(content.size());
+        std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
+                       [](char c) { return std::byte(c); });
+        api::ContentMetadata metadata;
+        metadata.name = "dedup_doc_" + std::to_string(i) + ".txt";
+        auto result = contentStore_->storeBytes(contentBytes, metadata);
 
         if (result.has_value()) {
             successCount++;
-            lastDedupRatio_ += result->dedupRatio();
+            lastDedupRatio_ += result.value().dedupRatio();
         }
     }
 
@@ -233,9 +268,14 @@ BENCHMARK_F(IngestionBenchmark, ConcurrentIngestion) {
 
             for (size_t i = 0; i < docsPerThread; ++i) {
                 auto content = localGen.generateTextDocument(8 * 1024);
-                auto result = contentStore_->addContent(
-                    std::vector<std::byte>(content.begin(), content.end()),
-                    "thread_" + std::to_string(t) + "_doc_" + std::to_string(i) + ".txt");
+                std::vector<std::byte> contentBytes;
+                contentBytes.reserve(content.size());
+                std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
+                               [](char c) { return std::byte(c); });
+                api::ContentMetadata metadata;
+                metadata.name =
+                    "thread_" + std::to_string(t) + "_doc_" + std::to_string(i) + ".txt";
+                auto result = contentStore_->storeBytes(contentBytes, metadata);
 
                 if (result.has_value()) {
                     successCount++;

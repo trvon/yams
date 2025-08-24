@@ -73,6 +73,7 @@ if(benchmark_FOUND OR TARGET benchmark::benchmark)
             yams::crypto
             test_utils
             benchmark::benchmark
+            nlohmann_json::nlohmann_json
     )
     
     target_link_libraries(search_benchmark
@@ -81,6 +82,7 @@ if(benchmark_FOUND OR TARGET benchmark::benchmark)
             yams::search
             test_utils
             benchmark::benchmark
+            nlohmann_json::nlohmann_json
     )
     
     target_link_libraries(metadata_benchmark
@@ -89,6 +91,7 @@ if(benchmark_FOUND OR TARGET benchmark::benchmark)
             yams::api
             test_utils
             benchmark::benchmark
+            nlohmann_json::nlohmann_json
     )
     
     # Link search benchmarks

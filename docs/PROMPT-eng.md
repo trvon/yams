@@ -77,6 +77,8 @@ This document establishes a unified, machine-readable, and authoritative policy 
   # Get only file paths for context efficiency
   yams search "SearchCommand" --paths-only
   yams search "#include" --paths-only | head -10
+  yams list --recent 10 --paths-only
+  yams list --type text --paths-only
 
   # Use fuzzy search for broader discovery
   yams search "vector database" --fuzzy --similarity 0.7 --paths-only
@@ -223,13 +225,23 @@ yams get --name "docs/pbi/pbi-001-*.md" | grep -A 30 "Phase 1"
 yams get --name "docs/pbi/pbi-001-*.md" | grep -c "\[x\]"  # Completed
 yams get --name "docs/pbi/pbi-001-*.md" | grep -c "\[ \]"  # Pending
 
+# Calculate progress percentage (example for 7 total commands)
+COMPLETED=$(yams get --name "docs/pbi/pbi-001-*.md" | grep -c "✅")
+TOTAL=7
+PERCENT=$((COMPLETED * 100 / TOTAL))
+echo "Progress: ${COMPLETED}/${TOTAL} (${PERCENT}%)"
+
 # Update PBI after phase completion
 yams update --name "docs/pbi/pbi-001-*.md" \
   --metadata "phase1_complete=true" \
-  --metadata "phase1_date=$(date -Iseconds)"
+  --metadata "phase1_date=$(date -Iseconds)" \
+  --metadata "progress=${PERCENT}"
 
 # Track acceptance criteria progress
 yams get --name "docs/pbi/pbi-001-*.md" | sed -n '/## Acceptance Criteria/,/## /p'
+
+# Find specific phase status
+yams get --name "docs/pbi/pbi-001-*.md" | grep -E "Phase [0-9]:|✅|⏳|❌"
 ```
 
 #### Single-PBI Progress Snapshot

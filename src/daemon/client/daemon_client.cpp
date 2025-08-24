@@ -607,20 +607,21 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    // Build log path for error message based on resolved socket
+    // Build log path for error message - daemon logs to XDG_STATE_HOME or ~/.local/state
     std::filesystem::path logPath;
-    if (socketPath.parent_path() == "/var/run") {
+
+    // First check XDG_STATE_HOME
+    auto xdgState = std::getenv("XDG_STATE_HOME");
+    if (xdgState) {
+        logPath = std::filesystem::path(xdgState) / "yams" / "daemon.log";
+    } else if (auto home = std::getenv("HOME")) {
+        // Default to ~/.local/state/yams/daemon.log
+        logPath = std::filesystem::path(home) / ".local" / "state" / "yams" / "daemon.log";
+    } else if (socketPath.parent_path() == "/var/run") {
+        // System daemon
         logPath = "/var/log/yams-daemon.log";
-    } else if (socketPath.parent_path().string().find("runtime") != std::string::npos) {
-        auto xdgState = std::getenv("XDG_STATE_HOME");
-        if (xdgState) {
-            logPath = std::filesystem::path(xdgState) / "yams" / "daemon.log";
-        } else if (auto home = std::getenv("HOME")) {
-            logPath = std::filesystem::path(home) / ".local" / "state" / "yams" / "daemon.log";
-        }
-    }
-    if (logPath.empty()) {
-        // Fall back to /tmp based log
+    } else {
+        // Last resort fallback
         logPath = socketPath.parent_path() / (socketPath.stem().string() + ".log");
     }
 

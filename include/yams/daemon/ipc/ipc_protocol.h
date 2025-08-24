@@ -200,14 +200,75 @@ struct AddRequest {
 };
 
 struct GetRequest {
+    // Target selection (basic)
     std::string hash;
     std::string name;
     bool byName = false;
 
+    // File type filters
+    std::string fileType;    // "image", "document", "archive", etc.
+    std::string mimeType;    // MIME type filter
+    std::string extension;   // file extension filter
+    bool binaryOnly = false; // get only binary files
+    bool textOnly = false;   // get only text files
+
+    // Time filters
+    std::string createdAfter; // ISO 8601, relative, or natural language
+    std::string createdBefore;
+    std::string modifiedAfter;
+    std::string modifiedBefore;
+    std::string indexedAfter;
+    std::string indexedBefore;
+
+    // Selection options
+    bool latest = false; // get most recent matching document
+    bool oldest = false; // get oldest matching document
+
+    // Output options
+    std::string outputPath;      // output file path (empty = stdout)
+    bool metadataOnly = false;   // return only metadata, no content
+    uint64_t maxBytes = 0;       // max bytes to transfer (0 = unlimited)
+    uint32_t chunkSize = 262144; // streaming chunk size in bytes
+
+    // Content options
+    bool raw = false;     // output raw content without text extraction
+    bool extract = false; // force text extraction even when piping
+
+    // Knowledge graph options
+    bool showGraph = false; // show related documents from knowledge graph
+    int graphDepth = 1;     // depth of graph traversal (1-5)
+
+    // Display options
+    bool verbose = false; // enable verbose output
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
+        // Basic target selection
         ser << hash << name << byName;
+
+        // File type filters
+        ser << fileType << mimeType << extension << binaryOnly << textOnly;
+
+        // Time filters
+        ser << createdAfter << createdBefore << modifiedAfter << modifiedBefore << indexedAfter
+            << indexedBefore;
+
+        // Selection options
+        ser << latest << oldest;
+
+        // Output options
+        ser << outputPath << metadataOnly << static_cast<uint64_t>(maxBytes)
+            << static_cast<uint32_t>(chunkSize);
+
+        // Content options
+        ser << raw << extract;
+
+        // Knowledge graph options
+        ser << showGraph << static_cast<int32_t>(graphDepth);
+
+        // Display options
+        ser << verbose;
     }
 
     template <typename Deserializer>
@@ -215,6 +276,7 @@ struct GetRequest {
     static Result<GetRequest> deserialize(Deserializer& deser) {
         GetRequest req;
 
+        // Basic target selection
         auto hashResult = deser.readString();
         if (!hashResult)
             return hashResult.error();
@@ -229,6 +291,123 @@ struct GetRequest {
         if (!byNameResult)
             return byNameResult.error();
         req.byName = byNameResult.value();
+
+        // File type filters
+        auto fileTypeResult = deser.readString();
+        if (!fileTypeResult)
+            return fileTypeResult.error();
+        req.fileType = std::move(fileTypeResult.value());
+
+        auto mimeTypeResult = deser.readString();
+        if (!mimeTypeResult)
+            return mimeTypeResult.error();
+        req.mimeType = std::move(mimeTypeResult.value());
+
+        auto extensionResult = deser.readString();
+        if (!extensionResult)
+            return extensionResult.error();
+        req.extension = std::move(extensionResult.value());
+
+        auto binaryOnlyResult = deser.template read<bool>();
+        if (!binaryOnlyResult)
+            return binaryOnlyResult.error();
+        req.binaryOnly = binaryOnlyResult.value();
+
+        auto textOnlyResult = deser.template read<bool>();
+        if (!textOnlyResult)
+            return textOnlyResult.error();
+        req.textOnly = textOnlyResult.value();
+
+        // Time filters
+        auto createdAfterResult = deser.readString();
+        if (!createdAfterResult)
+            return createdAfterResult.error();
+        req.createdAfter = std::move(createdAfterResult.value());
+
+        auto createdBeforeResult = deser.readString();
+        if (!createdBeforeResult)
+            return createdBeforeResult.error();
+        req.createdBefore = std::move(createdBeforeResult.value());
+
+        auto modifiedAfterResult = deser.readString();
+        if (!modifiedAfterResult)
+            return modifiedAfterResult.error();
+        req.modifiedAfter = std::move(modifiedAfterResult.value());
+
+        auto modifiedBeforeResult = deser.readString();
+        if (!modifiedBeforeResult)
+            return modifiedBeforeResult.error();
+        req.modifiedBefore = std::move(modifiedBeforeResult.value());
+
+        auto indexedAfterResult = deser.readString();
+        if (!indexedAfterResult)
+            return indexedAfterResult.error();
+        req.indexedAfter = std::move(indexedAfterResult.value());
+
+        auto indexedBeforeResult = deser.readString();
+        if (!indexedBeforeResult)
+            return indexedBeforeResult.error();
+        req.indexedBefore = std::move(indexedBeforeResult.value());
+
+        // Selection options
+        auto latestResult = deser.template read<bool>();
+        if (!latestResult)
+            return latestResult.error();
+        req.latest = latestResult.value();
+
+        auto oldestResult = deser.template read<bool>();
+        if (!oldestResult)
+            return oldestResult.error();
+        req.oldest = oldestResult.value();
+
+        // Output options
+        auto outputPathResult = deser.readString();
+        if (!outputPathResult)
+            return outputPathResult.error();
+        req.outputPath = std::move(outputPathResult.value());
+
+        auto metadataOnlyResult = deser.template read<bool>();
+        if (!metadataOnlyResult)
+            return metadataOnlyResult.error();
+        req.metadataOnly = metadataOnlyResult.value();
+
+        auto maxBytesResult = deser.template read<uint64_t>();
+        if (!maxBytesResult)
+            return maxBytesResult.error();
+        req.maxBytes = maxBytesResult.value();
+
+        auto chunkSizeResult = deser.template read<uint32_t>();
+        if (!chunkSizeResult)
+            return chunkSizeResult.error();
+        req.chunkSize = chunkSizeResult.value();
+
+        // Content options
+        auto rawResult = deser.template read<bool>();
+        if (!rawResult)
+            return rawResult.error();
+        req.raw = rawResult.value();
+
+        auto extractResult = deser.template read<bool>();
+        if (!extractResult)
+            return extractResult.error();
+        req.extract = extractResult.value();
+
+        // Knowledge graph options
+        auto showGraphResult = deser.template read<bool>();
+        if (!showGraphResult)
+            return showGraphResult.error();
+        req.showGraph = showGraphResult.value();
+
+        auto graphDepthResult = deser.template read<int32_t>();
+        if (!graphDepthResult)
+            return graphDepthResult.error();
+        req.graphDepth = graphDepthResult.value();
+
+        // Display options
+        auto verboseResult = deser.template read<bool>();
+        if (!verboseResult)
+            return verboseResult.error();
+        req.verbose = verboseResult.value();
 
         return req;
     }
@@ -377,39 +556,174 @@ struct GetChunkResponse {
     }
 };
 
-// Simple list response for daemon-first list command
+// Enhanced list response for full feature parity
 struct ListEntry {
+    // Basic file information
     std::string hash;
     std::string path;
     std::string name;
+    std::string fileName;
     uint64_t size = 0;
+
+    // File type and format information
+    std::string mimeType;
+    std::string fileType; // "text" | "binary" | "image" | "document" | etc.
+    std::string extension;
+
+    // Timestamps (Unix epoch seconds)
+    int64_t created = 0;
+    int64_t modified = 0;
+    int64_t indexed = 0;
+
+    // Content and metadata
+    std::string snippet;  // content preview
+    std::string language; // detected language
+    std::string extractionMethod;
+    std::vector<std::string> tags;
+    std::map<std::string, std::string> metadata;
+
+    // Change tracking info
+    std::string changeType; // "added" | "modified" | "deleted" | ""
+    int64_t changeTime = 0; // when the change was detected
+
+    // Display helpers
+    double relevanceScore = 0.0;
+    std::string matchReason; // why this document matched
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << path << name << static_cast<uint64_t>(size);
+        // Basic file information
+        ser << hash << path << name << fileName << static_cast<uint64_t>(size);
+
+        // File type and format
+        ser << mimeType << fileType << extension;
+
+        // Timestamps
+        ser << static_cast<int64_t>(created) << static_cast<int64_t>(modified)
+            << static_cast<int64_t>(indexed);
+
+        // Content and metadata
+        ser << snippet << language << extractionMethod << tags << metadata;
+
+        // Change tracking
+        ser << changeType << static_cast<int64_t>(changeTime);
+
+        // Display helpers
+        ser << relevanceScore << matchReason;
     }
 
     template <typename Deserializer>
     requires IsDeserializer<Deserializer>
     static Result<ListEntry> deserialize(Deserializer& deser) {
         ListEntry e;
+
+        // Basic file information
         auto h = deser.readString();
         if (!h)
             return h.error();
         e.hash = std::move(h.value());
+
         auto p = deser.readString();
         if (!p)
             return p.error();
         e.path = std::move(p.value());
+
         auto n = deser.readString();
         if (!n)
             return n.error();
         e.name = std::move(n.value());
+
+        auto fn = deser.readString();
+        if (!fn)
+            return fn.error();
+        e.fileName = std::move(fn.value());
+
         auto s = deser.template read<uint64_t>();
         if (!s)
             return s.error();
         e.size = s.value();
+
+        // File type and format
+        auto mt = deser.readString();
+        if (!mt)
+            return mt.error();
+        e.mimeType = std::move(mt.value());
+
+        auto ft = deser.readString();
+        if (!ft)
+            return ft.error();
+        e.fileType = std::move(ft.value());
+
+        auto ext = deser.readString();
+        if (!ext)
+            return ext.error();
+        e.extension = std::move(ext.value());
+
+        // Timestamps
+        auto cr = deser.template read<int64_t>();
+        if (!cr)
+            return cr.error();
+        e.created = cr.value();
+
+        auto mo = deser.template read<int64_t>();
+        if (!mo)
+            return mo.error();
+        e.modified = mo.value();
+
+        auto idx = deser.template read<int64_t>();
+        if (!idx)
+            return idx.error();
+        e.indexed = idx.value();
+
+        // Content and metadata
+        auto snip = deser.readString();
+        if (!snip)
+            return snip.error();
+        e.snippet = std::move(snip.value());
+
+        auto lang = deser.readString();
+        if (!lang)
+            return lang.error();
+        e.language = std::move(lang.value());
+
+        auto em = deser.readString();
+        if (!em)
+            return em.error();
+        e.extractionMethod = std::move(em.value());
+
+        auto tags = deser.readStringVector();
+        if (!tags)
+            return tags.error();
+        e.tags = std::move(tags.value());
+
+        auto meta = deser.readStringMap();
+        if (!meta)
+            return meta.error();
+        e.metadata = std::move(meta.value());
+
+        // Change tracking
+        auto ct = deser.readString();
+        if (!ct)
+            return ct.error();
+        e.changeType = std::move(ct.value());
+
+        auto chTime = deser.template read<int64_t>();
+        if (!chTime)
+            return chTime.error();
+        e.changeTime = chTime.value();
+
+        // Display helpers
+        auto rel = deser.template read<double>();
+        if (!rel)
+            return rel.error();
+        e.relevanceScore = rel.value();
+
+        auto mr = deser.readString();
+        if (!mr)
+            return mr.error();
+        e.matchReason = std::move(mr.value());
+
         return e;
     }
 };
@@ -471,13 +785,30 @@ struct GetEndRequest {
 };
 
 struct DeleteRequest {
+    // Single deletion options
     std::string hash;
-    bool purge = false;
+    std::string name;
+
+    // Batch deletion options
+    std::vector<std::string> names;
+    std::string pattern;   // glob pattern
+    std::string directory; // directory path
+
+    // Flags
+    bool purge = false;     // backward compat (maps to force)
+    bool force = false;     // skip confirmation
+    bool dryRun = false;    // preview without deleting
+    bool keepRefs = false;  // don't decrement references
+    bool recursive = false; // for directory deletion
+    bool verbose = false;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << hash << purge;
+        // Extended fields for enhanced protocol
+        ser << name << names << pattern << directory;
+        ser << force << dryRun << keepRefs << recursive << verbose;
     }
 
     template <typename Deserializer>
@@ -495,19 +826,124 @@ struct DeleteRequest {
             return purgeResult.error();
         req.purge = purgeResult.value();
 
+        // Try to read extended fields (backward compatibility)
+        auto nameResult = deser.readString();
+        if (nameResult)
+            req.name = std::move(nameResult.value());
+
+        auto namesResult = deser.readStringVector();
+        if (namesResult)
+            req.names = std::move(namesResult.value());
+
+        auto patternResult = deser.readString();
+        if (patternResult)
+            req.pattern = std::move(patternResult.value());
+
+        auto directoryResult = deser.readString();
+        if (directoryResult)
+            req.directory = std::move(directoryResult.value());
+
+        auto forceResult = deser.template read<bool>();
+        if (forceResult)
+            req.force = forceResult.value();
+
+        auto dryRunResult = deser.template read<bool>();
+        if (dryRunResult)
+            req.dryRun = dryRunResult.value();
+
+        auto keepRefsResult = deser.template read<bool>();
+        if (keepRefsResult)
+            req.keepRefs = keepRefsResult.value();
+
+        auto recursiveResult = deser.template read<bool>();
+        if (recursiveResult)
+            req.recursive = recursiveResult.value();
+
+        auto verboseResult = deser.template read<bool>();
+        if (verboseResult)
+            req.verbose = verboseResult.value();
+
         return req;
     }
 };
 
 struct ListRequest {
+    // Basic pagination and sorting
     size_t limit = 20;
-    bool recent = true;
+    int offset = 0;
+    int recentCount = 0; // 0 means not set, show all
+    bool recent = true;  // backward compatibility
+
+    // Format and display options
+    std::string format = "table"; // "table" | "json" | "csv" | "minimal"
+    std::string sortBy = "date";  // "name" | "size" | "date" | "hash"
+    bool reverse = false;
+    bool verbose = false;
+    bool showSnippets = true;
+    bool showMetadata = false;
+    bool showTags = true;
+    bool groupBySession = false;
+    int snippetLength = 50;
+    bool noSnippets = false;
+    bool pathsOnly = false; // Output only file paths
+
+    // File type filters
+    std::string fileType;   // "image" | "document" | "archive" | "audio" | "video" | "text" |
+                            // "executable" | "binary"
+    std::string mimeType;   // MIME type filter
+    std::string extensions; // comma-separated extensions
+    bool binaryOnly = false;
+    bool textOnly = false;
+
+    // Time filters (ISO 8601, relative, or natural language)
+    std::string createdAfter;
+    std::string createdBefore;
+    std::string modifiedAfter;
+    std::string modifiedBefore;
+    std::string indexedAfter;
+    std::string indexedBefore;
+
+    // Change tracking
+    bool showChanges = false;
+    std::string sinceTime;
+    bool showDiffTags = false;
+    bool showDeleted = false;
+    std::string changeWindow = "24h";
+
+    // Tag filtering
     std::vector<std::string> tags;
+    std::string filterTags;    // comma-separated tag filter
+    bool matchAllTags = false; // require all tags vs any tag
+
+    // Name pattern filtering
+    std::string namePattern; // glob pattern for file name/path matching
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << static_cast<uint32_t>(limit) << recent << tags;
+        // Basic options
+        ser << static_cast<uint32_t>(limit) << static_cast<int32_t>(offset)
+            << static_cast<int32_t>(recentCount) << recent;
+
+        // Format and display
+        ser << format << sortBy << reverse << verbose << showSnippets << showMetadata << showTags
+            << groupBySession << static_cast<int32_t>(snippetLength) << noSnippets;
+
+        // File type filters
+        ser << fileType << mimeType << extensions << binaryOnly << textOnly;
+
+        // Time filters
+        ser << createdAfter << createdBefore << modifiedAfter << modifiedBefore << indexedAfter
+            << indexedBefore;
+
+        // Change tracking
+        ser << showChanges << sinceTime << showDiffTags << showDeleted << changeWindow;
+
+        // Tag filtering
+        ser << tags << filterTags << matchAllTags;
+
+        // Name pattern filtering
+        ser << namePattern;
     }
 
     template <typename Deserializer>
@@ -515,20 +951,182 @@ struct ListRequest {
     static Result<ListRequest> deserialize(Deserializer& deser) {
         ListRequest req;
 
+        // Basic options
         auto limitResult = deser.template read<uint32_t>();
         if (!limitResult)
             return limitResult.error();
         req.limit = limitResult.value();
+
+        auto offsetResult = deser.template read<int32_t>();
+        if (!offsetResult)
+            return offsetResult.error();
+        req.offset = offsetResult.value();
+
+        auto recentCountResult = deser.template read<int32_t>();
+        if (!recentCountResult)
+            return recentCountResult.error();
+        req.recentCount = recentCountResult.value();
 
         auto recentResult = deser.template read<bool>();
         if (!recentResult)
             return recentResult.error();
         req.recent = recentResult.value();
 
+        // Format and display
+        auto formatResult = deser.readString();
+        if (!formatResult)
+            return formatResult.error();
+        req.format = std::move(formatResult.value());
+
+        auto sortByResult = deser.readString();
+        if (!sortByResult)
+            return sortByResult.error();
+        req.sortBy = std::move(sortByResult.value());
+
+        auto reverseResult = deser.template read<bool>();
+        if (!reverseResult)
+            return reverseResult.error();
+        req.reverse = reverseResult.value();
+
+        auto verboseResult = deser.template read<bool>();
+        if (!verboseResult)
+            return verboseResult.error();
+        req.verbose = verboseResult.value();
+
+        auto showSnippetsResult = deser.template read<bool>();
+        if (!showSnippetsResult)
+            return showSnippetsResult.error();
+        req.showSnippets = showSnippetsResult.value();
+
+        auto showMetadataResult = deser.template read<bool>();
+        if (!showMetadataResult)
+            return showMetadataResult.error();
+        req.showMetadata = showMetadataResult.value();
+
+        auto showTagsResult = deser.template read<bool>();
+        if (!showTagsResult)
+            return showTagsResult.error();
+        req.showTags = showTagsResult.value();
+
+        auto groupBySessionResult = deser.template read<bool>();
+        if (!groupBySessionResult)
+            return groupBySessionResult.error();
+        req.groupBySession = groupBySessionResult.value();
+
+        auto snippetLengthResult = deser.template read<int32_t>();
+        if (!snippetLengthResult)
+            return snippetLengthResult.error();
+        req.snippetLength = snippetLengthResult.value();
+
+        auto noSnippetsResult = deser.template read<bool>();
+        if (!noSnippetsResult)
+            return noSnippetsResult.error();
+        req.noSnippets = noSnippetsResult.value();
+
+        // File type filters
+        auto fileTypeResult = deser.readString();
+        if (!fileTypeResult)
+            return fileTypeResult.error();
+        req.fileType = std::move(fileTypeResult.value());
+
+        auto mimeTypeResult = deser.readString();
+        if (!mimeTypeResult)
+            return mimeTypeResult.error();
+        req.mimeType = std::move(mimeTypeResult.value());
+
+        auto extensionsResult = deser.readString();
+        if (!extensionsResult)
+            return extensionsResult.error();
+        req.extensions = std::move(extensionsResult.value());
+
+        auto binaryOnlyResult = deser.template read<bool>();
+        if (!binaryOnlyResult)
+            return binaryOnlyResult.error();
+        req.binaryOnly = binaryOnlyResult.value();
+
+        auto textOnlyResult = deser.template read<bool>();
+        if (!textOnlyResult)
+            return textOnlyResult.error();
+        req.textOnly = textOnlyResult.value();
+
+        // Time filters
+        auto createdAfterResult = deser.readString();
+        if (!createdAfterResult)
+            return createdAfterResult.error();
+        req.createdAfter = std::move(createdAfterResult.value());
+
+        auto createdBeforeResult = deser.readString();
+        if (!createdBeforeResult)
+            return createdBeforeResult.error();
+        req.createdBefore = std::move(createdBeforeResult.value());
+
+        auto modifiedAfterResult = deser.readString();
+        if (!modifiedAfterResult)
+            return modifiedAfterResult.error();
+        req.modifiedAfter = std::move(modifiedAfterResult.value());
+
+        auto modifiedBeforeResult = deser.readString();
+        if (!modifiedBeforeResult)
+            return modifiedBeforeResult.error();
+        req.modifiedBefore = std::move(modifiedBeforeResult.value());
+
+        auto indexedAfterResult = deser.readString();
+        if (!indexedAfterResult)
+            return indexedAfterResult.error();
+        req.indexedAfter = std::move(indexedAfterResult.value());
+
+        auto indexedBeforeResult = deser.readString();
+        if (!indexedBeforeResult)
+            return indexedBeforeResult.error();
+        req.indexedBefore = std::move(indexedBeforeResult.value());
+
+        // Change tracking
+        auto showChangesResult = deser.template read<bool>();
+        if (!showChangesResult)
+            return showChangesResult.error();
+        req.showChanges = showChangesResult.value();
+
+        auto sinceTimeResult = deser.readString();
+        if (!sinceTimeResult)
+            return sinceTimeResult.error();
+        req.sinceTime = std::move(sinceTimeResult.value());
+
+        auto showDiffTagsResult = deser.template read<bool>();
+        if (!showDiffTagsResult)
+            return showDiffTagsResult.error();
+        req.showDiffTags = showDiffTagsResult.value();
+
+        auto showDeletedResult = deser.template read<bool>();
+        if (!showDeletedResult)
+            return showDeletedResult.error();
+        req.showDeleted = showDeletedResult.value();
+
+        auto changeWindowResult = deser.readString();
+        if (!changeWindowResult)
+            return changeWindowResult.error();
+        req.changeWindow = std::move(changeWindowResult.value());
+
+        // Tag filtering
         auto tagsResult = deser.readStringVector();
         if (!tagsResult)
             return tagsResult.error();
         req.tags = std::move(tagsResult.value());
+
+        auto filterTagsResult = deser.readString();
+        if (!filterTagsResult)
+            return filterTagsResult.error();
+        req.filterTags = std::move(filterTagsResult.value());
+
+        auto matchAllTagsResult = deser.template read<bool>();
+        if (!matchAllTagsResult)
+            return matchAllTagsResult.error();
+        req.matchAllTags = matchAllTagsResult.value();
+
+        // Name pattern filtering
+        auto namePatternResult = deser.readString();
+        if (!namePatternResult)
+            return namePatternResult.error();
+        req.namePattern = std::move(namePatternResult.value());
 
         return req;
     }
@@ -891,15 +1489,17 @@ struct AddDocumentRequest {
 };
 
 struct GrepRequest {
-    std::string pattern; // Regex pattern
-    std::string path;    // Optional path filter
+    std::string pattern;            // Regex pattern
+    std::string path;               // Optional path filter (deprecated - use paths)
+    std::vector<std::string> paths; // Multiple paths to search (NEW)
     bool caseInsensitive = false;
     bool invertMatch = false;
-    int contextLines = 0;
-    size_t maxMatches = 0; // 0 = unlimited
+    int contextLines = 0;  // Combined context (overrides before/after if > 0)
+    size_t maxMatches = 0; // 0 = unlimited per file
 
     // Additional fields for feature parity
     std::vector<std::string> includePatterns; // File patterns to include
+    bool recursive = true;                    // Recursive directory search (NEW)
     bool wholeWord = false;                   // Match whole words only
     bool showLineNumbers = false;             // Show line numbers
     bool showFilename = false;                // Show filename with matches
@@ -920,12 +1520,13 @@ struct GrepRequest {
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << pattern << path << caseInsensitive << invertMatch
+        ser << pattern << path << paths << caseInsensitive << invertMatch
             << static_cast<int32_t>(contextLines) << static_cast<uint64_t>(maxMatches)
-            << includePatterns << wholeWord << showLineNumbers << showFilename << noFilename
-            << countOnly << filesOnly << filesWithoutMatch << pathsOnly << literalText << regexOnly
-            << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags << colorMode
-            << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(afterContext);
+            << includePatterns << recursive << wholeWord << showLineNumbers << showFilename
+            << noFilename << countOnly << filesOnly << filesWithoutMatch << pathsOnly << literalText
+            << regexOnly << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags
+            << colorMode << static_cast<int32_t>(beforeContext)
+            << static_cast<int32_t>(afterContext);
     }
 
     template <typename Deserializer>
@@ -940,6 +1541,13 @@ struct GrepRequest {
         if (!pt)
             return pt.error();
         req.path = std::move(pt.value());
+
+        // Deserialize new paths field
+        auto pths = deser.readStringVector();
+        if (!pths)
+            return pths.error();
+        req.paths = std::move(pths.value());
+
         auto ci = deser.template read<bool>();
         if (!ci)
             return ci.error();
@@ -962,6 +1570,12 @@ struct GrepRequest {
         if (!ip)
             return ip.error();
         req.includePatterns = std::move(ip.value());
+
+        // Deserialize new recursive field
+        auto rec = deser.template read<bool>();
+        if (!rec)
+            return rec.error();
+        req.recursive = rec.value();
         auto ww = deser.template read<bool>();
         if (!ww)
             return ww.error();
@@ -1119,13 +1733,20 @@ struct DownloadRequest {
 };
 
 struct GetStatsRequest {
-    bool detailed = false;     // Include detailed breakdown
-    bool includeCache = false; // Include cache statistics
+    bool detailed = false;        // Include detailed breakdown
+    bool includeCache = false;    // Include cache statistics
+    bool showFileTypes = false;   // Include file type breakdown
+    bool showCompression = false; // Include compression statistics
+    bool showDuplicates = false;  // Include duplicate analysis
+    bool showDedup = false;       // Include block-level deduplication
+    bool showPerformance = false; // Include performance metrics
+    bool includeHealth = false;   // Include health status
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << detailed << includeCache;
+        ser << detailed << includeCache << showFileTypes << showCompression << showDuplicates
+            << showDedup << showPerformance << includeHealth;
     }
 
     template <typename Deserializer>
@@ -1136,10 +1757,42 @@ struct GetStatsRequest {
         if (!d)
             return d.error();
         req.detailed = d.value();
+
         auto c = deser.template read<bool>();
         if (!c)
             return c.error();
         req.includeCache = c.value();
+
+        auto ft = deser.template read<bool>();
+        if (!ft)
+            return ft.error();
+        req.showFileTypes = ft.value();
+
+        auto sc = deser.template read<bool>();
+        if (!sc)
+            return sc.error();
+        req.showCompression = sc.value();
+
+        auto sd = deser.template read<bool>();
+        if (!sd)
+            return sd.error();
+        req.showDuplicates = sd.value();
+
+        auto sdd = deser.template read<bool>();
+        if (!sdd)
+            return sdd.error();
+        req.showDedup = sdd.value();
+
+        auto sp = deser.template read<bool>();
+        if (!sp)
+            return sp.error();
+        req.showPerformance = sp.value();
+
+        auto ih = deser.template read<bool>();
+        if (!ih)
+            return ih.error();
+        req.includeHealth = ih.value();
+
         return req;
     }
 };
@@ -1297,15 +1950,116 @@ struct AddResponse {
     }
 };
 
-struct GetResponse {
-    std::string content;
+// Related document entry for knowledge graph results
+struct RelatedDocumentEntry {
     std::string hash;
-    std::map<std::string, std::string> metadata;
+    std::string path;
+    std::string name;
+    std::string relationship;   // type of relationship
+    int distance{1};            // distance in graph
+    double relevanceScore{0.0}; // relevance score
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << content << hash << metadata;
+        ser << hash << path << name << relationship << static_cast<int32_t>(distance)
+            << relevanceScore;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RelatedDocumentEntry> deserialize(Deserializer& deser) {
+        RelatedDocumentEntry entry;
+
+        auto hashResult = deser.readString();
+        if (!hashResult)
+            return hashResult.error();
+        entry.hash = std::move(hashResult.value());
+
+        auto pathResult = deser.readString();
+        if (!pathResult)
+            return pathResult.error();
+        entry.path = std::move(pathResult.value());
+
+        auto nameResult = deser.readString();
+        if (!nameResult)
+            return nameResult.error();
+        entry.name = std::move(nameResult.value());
+
+        auto relationshipResult = deser.readString();
+        if (!relationshipResult)
+            return relationshipResult.error();
+        entry.relationship = std::move(relationshipResult.value());
+
+        auto distanceResult = deser.template read<int32_t>();
+        if (!distanceResult)
+            return distanceResult.error();
+        entry.distance = distanceResult.value();
+
+        auto relevanceScoreResult = deser.template read<double>();
+        if (!relevanceScoreResult)
+            return relevanceScoreResult.error();
+        entry.relevanceScore = relevanceScoreResult.value();
+
+        return entry;
+    }
+};
+
+// Enhanced GetResponse supporting rich document information and knowledge graph
+struct GetResponse {
+    // Single document result (for hash/name queries)
+    std::string hash;
+    std::string path;
+    std::string name;
+    std::string fileName;
+    uint64_t size{0};
+    std::string mimeType;
+    std::string fileType;
+
+    // Time information
+    int64_t created{0}; // Unix epoch seconds
+    int64_t modified{0};
+    int64_t indexed{0};
+
+    // Content (conditionally included)
+    std::string content;    // document content (if not metadataOnly)
+    bool hasContent{false}; // indicates if content is included
+
+    // Metadata
+    std::map<std::string, std::string> metadata;
+
+    // Knowledge graph results (when showGraph=true)
+    bool graphEnabled{false};
+    std::vector<RelatedDocumentEntry> related;
+
+    // Result information
+    uint64_t totalBytes{0};    // total bytes processed
+    bool outputWritten{false}; // true if written to output file
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        // Basic document information
+        ser << hash << path << name << fileName << static_cast<uint64_t>(size) << mimeType
+            << fileType;
+
+        // Time information
+        ser << static_cast<int64_t>(created) << static_cast<int64_t>(modified)
+            << static_cast<int64_t>(indexed);
+
+        // Content
+        ser << content << hasContent;
+
+        // Metadata
+        ser << metadata;
+
+        // Knowledge graph
+        ser << graphEnabled << static_cast<uint32_t>(related.size());
+        for (const auto& rel : related)
+            rel.serialize(ser);
+
+        // Result information
+        ser << static_cast<uint64_t>(totalBytes) << outputWritten;
     }
 
     template <typename Deserializer>
@@ -1313,20 +2067,102 @@ struct GetResponse {
     static Result<GetResponse> deserialize(Deserializer& deser) {
         GetResponse res;
 
-        auto contentResult = deser.readString();
-        if (!contentResult)
-            return contentResult.error();
-        res.content = std::move(contentResult.value());
-
+        // Basic document information
         auto hashResult = deser.readString();
         if (!hashResult)
             return hashResult.error();
         res.hash = std::move(hashResult.value());
 
+        auto pathResult = deser.readString();
+        if (!pathResult)
+            return pathResult.error();
+        res.path = std::move(pathResult.value());
+
+        auto nameResult = deser.readString();
+        if (!nameResult)
+            return nameResult.error();
+        res.name = std::move(nameResult.value());
+
+        auto fileNameResult = deser.readString();
+        if (!fileNameResult)
+            return fileNameResult.error();
+        res.fileName = std::move(fileNameResult.value());
+
+        auto sizeResult = deser.template read<uint64_t>();
+        if (!sizeResult)
+            return sizeResult.error();
+        res.size = sizeResult.value();
+
+        auto mimeTypeResult = deser.readString();
+        if (!mimeTypeResult)
+            return mimeTypeResult.error();
+        res.mimeType = std::move(mimeTypeResult.value());
+
+        auto fileTypeResult = deser.readString();
+        if (!fileTypeResult)
+            return fileTypeResult.error();
+        res.fileType = std::move(fileTypeResult.value());
+
+        // Time information
+        auto createdResult = deser.template read<int64_t>();
+        if (!createdResult)
+            return createdResult.error();
+        res.created = createdResult.value();
+
+        auto modifiedResult = deser.template read<int64_t>();
+        if (!modifiedResult)
+            return modifiedResult.error();
+        res.modified = modifiedResult.value();
+
+        auto indexedResult = deser.template read<int64_t>();
+        if (!indexedResult)
+            return indexedResult.error();
+        res.indexed = indexedResult.value();
+
+        // Content
+        auto contentResult = deser.readString();
+        if (!contentResult)
+            return contentResult.error();
+        res.content = std::move(contentResult.value());
+
+        auto hasContentResult = deser.template read<bool>();
+        if (!hasContentResult)
+            return hasContentResult.error();
+        res.hasContent = hasContentResult.value();
+
+        // Metadata
         auto metadataResult = deser.readStringMap();
         if (!metadataResult)
             return metadataResult.error();
         res.metadata = std::move(metadataResult.value());
+
+        // Knowledge graph
+        auto graphEnabledResult = deser.template read<bool>();
+        if (!graphEnabledResult)
+            return graphEnabledResult.error();
+        res.graphEnabled = graphEnabledResult.value();
+
+        auto relatedCountResult = deser.template read<uint32_t>();
+        if (!relatedCountResult)
+            return relatedCountResult.error();
+        res.related.reserve(relatedCountResult.value());
+        for (uint32_t i = 0; i < relatedCountResult.value(); ++i) {
+            auto relResult = RelatedDocumentEntry::deserialize(deser);
+            if (!relResult)
+                return relResult.error();
+            res.related.push_back(std::move(relResult.value()));
+        }
+
+        // Result information
+        auto totalBytesResult = deser.template read<uint64_t>();
+        if (!totalBytesResult)
+            return totalBytesResult.error();
+        res.totalBytes = totalBytesResult.value();
+
+        auto outputWrittenResult = deser.template read<bool>();
+        if (!outputWrittenResult)
+            return outputWrittenResult.error();
+        res.outputWritten = outputWrittenResult.value();
 
         return res;
     }
@@ -1334,7 +2170,7 @@ struct GetResponse {
 
 struct StatusResponse {
     bool running = true;
-    bool ready;
+    bool ready; // Overall readiness (backward compatibility)
     size_t uptimeSeconds;
     size_t requestsProcessed;
     size_t activeConnections;
@@ -1342,6 +2178,11 @@ struct StatusResponse {
     double cpuUsagePercent;
     std::string version;
     std::map<std::string, size_t> requestCounts;
+
+    // Readiness state tracking (new fields)
+    std::map<std::string, bool> readinessStates; // Subsystem -> ready
+    std::map<std::string, uint8_t> initProgress; // Subsystem -> progress (0-100)
+    std::string overallStatus;                   // "ready", "degraded", "initializing", "starting"
 
     // Model information
     struct ModelInfo {
@@ -1398,6 +2239,21 @@ struct StatusResponse {
         for (const auto& [key, value] : requestCounts) {
             ser << key << static_cast<uint64_t>(value);
         }
+
+        // Serialize readiness states map
+        ser << static_cast<uint32_t>(readinessStates.size());
+        for (const auto& [key, value] : readinessStates) {
+            ser << key << value;
+        }
+
+        // Serialize init progress map
+        ser << static_cast<uint32_t>(initProgress.size());
+        for (const auto& [key, value] : initProgress) {
+            ser << key << static_cast<uint8_t>(value);
+        }
+
+        // Serialize overall status
+        ser << overallStatus;
 
         // Serialize models
         ser << static_cast<uint32_t>(models.size());
@@ -1466,6 +2322,42 @@ struct StatusResponse {
             res.requestCounts[std::move(keyResult.value())] = valueResult.value();
         }
 
+        // Deserialize readiness states
+        auto readinessCountResult = deser.template read<uint32_t>();
+        if (!readinessCountResult)
+            return readinessCountResult.error();
+
+        for (uint32_t i = 0; i < readinessCountResult.value(); ++i) {
+            auto keyResult = deser.readString();
+            if (!keyResult)
+                return keyResult.error();
+            auto valueResult = deser.template read<bool>();
+            if (!valueResult)
+                return valueResult.error();
+            res.readinessStates[std::move(keyResult.value())] = valueResult.value();
+        }
+
+        // Deserialize init progress
+        auto progressCountResult = deser.template read<uint32_t>();
+        if (!progressCountResult)
+            return progressCountResult.error();
+
+        for (uint32_t i = 0; i < progressCountResult.value(); ++i) {
+            auto keyResult = deser.readString();
+            if (!keyResult)
+                return keyResult.error();
+            auto valueResult = deser.template read<uint8_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.initProgress[std::move(keyResult.value())] = valueResult.value();
+        }
+
+        // Deserialize overall status
+        auto statusResult = deser.readString();
+        if (!statusResult)
+            return statusResult.error();
+        res.overallStatus = std::move(statusResult.value());
+
         // Deserialize models
         auto modelsCountResult = deser.template read<uint32_t>();
         if (!modelsCountResult)
@@ -1480,6 +2372,101 @@ struct StatusResponse {
         }
 
         return res;
+    }
+};
+
+struct DeleteResponse {
+    bool dryRun = false;
+    size_t successCount = 0;
+    size_t failureCount = 0;
+
+    struct DeleteResult {
+        std::string name;
+        std::string hash;
+        bool success = false;
+        std::string error; // if failed
+
+        template <typename Serializer>
+        requires IsSerializer<Serializer>
+        void serialize(Serializer& ser) const {
+            ser << name << hash << success << error;
+        }
+
+        template <typename Deserializer>
+        requires IsDeserializer<Deserializer>
+        static Result<DeleteResult> deserialize(Deserializer& deser) {
+            DeleteResult result;
+
+            auto nameRes = deser.readString();
+            if (!nameRes)
+                return nameRes.error();
+            result.name = std::move(nameRes.value());
+
+            auto hashRes = deser.readString();
+            if (!hashRes)
+                return hashRes.error();
+            result.hash = std::move(hashRes.value());
+
+            auto successRes = deser.template read<bool>();
+            if (!successRes)
+                return successRes.error();
+            result.success = successRes.value();
+
+            auto errorRes = deser.readString();
+            if (!errorRes)
+                return errorRes.error();
+            result.error = std::move(errorRes.value());
+
+            return result;
+        }
+    };
+
+    std::vector<DeleteResult> results;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << dryRun << successCount << failureCount;
+        ser << static_cast<uint32_t>(results.size());
+        for (const auto& result : results) {
+            result.serialize(ser);
+        }
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<DeleteResponse> deserialize(Deserializer& deser) {
+        DeleteResponse resp;
+
+        auto dryRunRes = deser.template read<bool>();
+        if (!dryRunRes)
+            return dryRunRes.error();
+        resp.dryRun = dryRunRes.value();
+
+        auto successRes = deser.template read<uint32_t>();
+        if (!successRes)
+            return successRes.error();
+        resp.successCount = successRes.value();
+
+        auto failureRes = deser.template read<uint32_t>();
+        if (!failureRes)
+            return failureRes.error();
+        resp.failureCount = failureRes.value();
+
+        auto sizeRes = deser.template read<uint32_t>();
+        if (!sizeRes)
+            return sizeRes.error();
+        size_t size = sizeRes.value();
+
+        resp.results.reserve(size);
+        for (size_t i = 0; i < size; ++i) {
+            auto resultRes = DeleteResult::deserialize(deser);
+            if (!resultRes)
+                return resultRes.error();
+            resp.results.push_back(std::move(resultRes.value()));
+        }
+
+        return resp;
     }
 };
 
@@ -1920,11 +2907,14 @@ struct GrepMatch {
     std::string line;
     std::vector<std::string> contextBefore;
     std::vector<std::string> contextAfter;
+    std::string matchType = "regex"; // "regex" | "semantic" | "hybrid"
+    double confidence = 1.0;         // Match confidence (1.0 for regex, variable for semantic)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << file << static_cast<uint64_t>(lineNumber) << line << contextBefore << contextAfter;
+        ser << file << static_cast<uint64_t>(lineNumber) << line << contextBefore << contextAfter
+            << matchType << confidence;
     }
 
     template <typename Deserializer>
@@ -1951,6 +2941,17 @@ struct GrepMatch {
         if (!ca)
             return ca.error();
         m.contextAfter = std::move(ca.value());
+
+        // Deserialize new fields
+        auto mt = deser.readString();
+        if (!mt)
+            return mt.error();
+        m.matchType = std::move(mt.value());
+        auto conf = deser.template read<double>();
+        if (!conf)
+            return conf.error();
+        m.confidence = conf.value();
+
         return m;
     }
 };
@@ -2155,7 +3156,7 @@ using Response =
                  StatusResponse, SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse,
                  BatchEmbeddingResponse, ModelLoadResponse, ModelStatusResponse, ListResponse,
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, DownloadResponse,
-                 GetStatsResponse>;
+                 GetStatsResponse, DeleteResponse>;
 
 // ============================================================================
 // Message Envelope
@@ -2226,7 +3227,8 @@ enum class MessageType : uint8_t {
     AddDocumentResponse = 143,
     GrepResponse = 144,
     UpdateDocumentResponse = 145,
-    GetStatsResponse = 146
+    GetStatsResponse = 146,
+    DeleteResponse = 147
 };
 
 // ============================================================================

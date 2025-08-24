@@ -58,6 +58,15 @@ Result<void> Statement::bind(int index, int64_t value) {
     return {};
 }
 
+Result<void> Statement::bind(int index, float value) {
+    // SQLite doesn't have a specific float bind, so convert to double
+    int rc = sqlite3_bind_double(stmt_, index, static_cast<double>(value));
+    if (rc != SQLITE_OK) {
+        return Error{ErrorCode::DatabaseError, "Failed to bind float"};
+    }
+    return {};
+}
+
 Result<void> Statement::bind(int index, double value) {
     int rc = sqlite3_bind_double(stmt_, index, value);
     if (rc != SQLITE_OK) {

@@ -126,47 +126,28 @@ public:
 
     Result<void> execute() override {
         try {
-            // Attempt daemon-first grep; fall back to local on failure
+            // Attempt daemon-first grep with complete protocol mapping
             {
                 yams::daemon::GrepRequest dreq;
                 dreq.pattern = pattern_;
+                dreq.paths = paths_; // Use new paths field for multiple paths
                 dreq.caseInsensitive = ignoreCase_;
                 dreq.invertMatch = invertMatch_;
-                if (!paths_.empty()) {
-                    dreq.path = paths_[0]; // Use first path as filter
-                }
 
-                // Handle context - use separate before/after if specified
+                // Handle context options with proper precedence
                 if (context_ > 0) {
                     dreq.contextLines = static_cast<int>(context_);
                     dreq.beforeContext = static_cast<int>(context_);
                     dreq.afterContext = static_cast<int>(context_);
                 } else {
+                    dreq.contextLines = 0;
                     dreq.beforeContext = static_cast<int>(beforeContext_);
                     dreq.afterContext = static_cast<int>(afterContext_);
-                    // Keep contextLines for backward compatibility
-                    dreq.contextLines = static_cast<int>(std::max(beforeContext_, afterContext_));
                 }
 
-                if (maxCount_ > 0) {
-                    dreq.maxMatches = maxCount_;
-                }
-
-                // Pass all additional fields for feature parity
-                // Parse comma-separated includePatterns
-                if (!includePatterns_.empty()) {
-                    std::stringstream ss(includePatterns_);
-                    std::string pattern;
-                    while (std::getline(ss, pattern, ',')) {
-                        // Trim whitespace
-                        pattern.erase(0, pattern.find_first_not_of(" \t"));
-                        pattern.erase(pattern.find_last_not_of(" \t") + 1);
-                        if (!pattern.empty()) {
-                            dreq.includePatterns.push_back(pattern);
-                        }
-                    }
-                }
-
+                // Map all CLI options to daemon protocol
+                dreq.includePatterns = parseCommaSeparated(includePatterns_);
+                dreq.recursive = true; // Default to recursive
                 dreq.wholeWord = wholeWord_;
                 dreq.showLineNumbers = showLineNumbers_;
                 dreq.showFilename = showFilename_;
@@ -178,23 +159,10 @@ public:
                 dreq.literalText = literalText_;
                 dreq.regexOnly = regexOnly_;
                 dreq.semanticLimit = semanticLimit_;
-
-                // Parse comma-separated filterTags
-                if (!filterTags_.empty()) {
-                    std::stringstream ss(filterTags_);
-                    std::string tag;
-                    while (std::getline(ss, tag, ',')) {
-                        // Trim whitespace
-                        tag.erase(0, tag.find_first_not_of(" \t"));
-                        tag.erase(tag.find_last_not_of(" \t") + 1);
-                        if (!tag.empty()) {
-                            dreq.filterTags.push_back(tag);
-                        }
-                    }
-                }
-
+                dreq.filterTags = parseCommaSeparated(filterTags_);
                 dreq.matchAllTags = matchAllTags_;
                 dreq.colorMode = colorMode_;
+                dreq.maxMatches = maxCount_;
 
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
                     // Handle different output modes
@@ -220,14 +188,39 @@ public:
                             std::cout << count << std::endl;
                         }
                     } else {
-                        // Full match output
+                        // Full match output with match type indicators
+                        size_t regexCount = 0, semanticCount = 0;
+
                         for (const auto& match : resp.matches) {
+                            // Track match types for summary
+                            if (match.matchType == "semantic") {
+                                semanticCount++;
+                            } else {
+                                regexCount++;
+                            }
+
+                            // Build output line with match type indicator
                             if (showFilename_ || resp.matches.size() > 1) {
                                 std::cout << match.file << ":";
                             }
                             if (showLineNumbers_) {
                                 std::cout << match.lineNumber << ":";
                             }
+
+                            // Add match type indicator
+                            if (match.matchType == "semantic") {
+                                // Show semantic match with confidence
+                                std::cout << "[S:" << std::fixed << std::setprecision(2)
+                                          << match.confidence << "] ";
+                            } else if (match.matchType == "hybrid") {
+                                std::cout << "[H] ";
+                            } else {
+                                // Regex match - only show indicator if we have mixed results
+                                if (!regexOnly_ && semanticLimit_ > 0) {
+                                    std::cout << "[R] ";
+                                }
+                            }
+
                             std::cout << match.line << std::endl;
 
                             // Show context lines if any
@@ -237,6 +230,12 @@ public:
                             for (const auto& ctx : match.contextAfter) {
                                 std::cout << "  " << ctx << std::endl;
                             }
+                        }
+
+                        // Show summary if we have mixed match types
+                        if (regexCount > 0 && semanticCount > 0) {
+                            std::cout << "\n[Summary: " << regexCount << " regex matches, "
+                                      << semanticCount << " semantic matches]" << std::endl;
                         }
                     }
 
@@ -266,6 +265,25 @@ public:
     }
 
 private:
+    // Helper function to parse comma-separated strings into vector
+    std::vector<std::string> parseCommaSeparated(const std::string& input) {
+        std::vector<std::string> result;
+        if (input.empty())
+            return result;
+
+        std::stringstream ss(input);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            // Trim whitespace
+            item.erase(0, item.find_first_not_of(" \t"));
+            item.erase(item.find_last_not_of(" \t") + 1);
+            if (!item.empty()) {
+                result.push_back(item);
+            }
+        }
+        return result;
+    }
+
     Result<void> executeLocal() {
         auto ensured = cli_->ensureStorageInitialized();
         if (!ensured) {

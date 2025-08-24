@@ -98,6 +98,8 @@ MessageType getMessageType(const Response& res) {
                 return MessageType::DownloadResponse;
             } else if constexpr (std::is_same_v<T, GetStatsResponse>) {
                 return MessageType::GetStatsResponse;
+            } else if constexpr (std::is_same_v<T, DeleteResponse>) {
+                return MessageType::DeleteResponse;
             }
             return MessageType::ErrorResponse; // Default
         },

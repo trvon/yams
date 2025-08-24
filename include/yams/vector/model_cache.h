@@ -38,8 +38,8 @@ struct CachedModel {
     CachedModel() = default;
     CachedModel(const CachedModel&) = delete;
     CachedModel& operator=(const CachedModel&) = delete;
-    CachedModel(CachedModel&&) = default;
-    CachedModel& operator=(CachedModel&&) = default;
+    CachedModel(CachedModel&&) = delete;
+    CachedModel& operator=(CachedModel&&) = delete;
 };
 
 /**

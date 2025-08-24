@@ -13,6 +13,10 @@
 #include <sstream>
 #include <thread>
 
+// Include HNSWlib before namespace to avoid namespace conflicts
+#include <hnswlib.h>
+#include <unordered_map>
+
 namespace yams::vector {
 
 // =============================================================================
@@ -23,6 +27,19 @@ class FlatIndex : public VectorIndex {
 public:
     explicit FlatIndex(const IndexConfig& config) : VectorIndex(config) {
         vectors_.reserve(config.max_elements);
+
+        // Initialize stats
+        stats_.type = IndexType::FLAT;
+        stats_.dimension = config.dimension;
+        stats_.metric = config.distance_metric;
+        stats_.num_vectors = 0;
+        stats_.memory_usage_bytes = 0;
+        stats_.index_size_bytes = 0;
+        stats_.needs_optimization = false;
+        stats_.total_searches = 0;
+        stats_.avg_search_time_ms = 0.0;
+        stats_.fragmentation_ratio = 0.0;
+        stats_.delta_index_size = 0;
     }
 
     Result<void> add(const std::string& id, const std::vector<float>& vector) override {
@@ -390,6 +407,184 @@ public:
         return stats_;
     }
 
+    Result<void> serialize(std::ostream& out) const override {
+        std::shared_lock lock(mutex_);
+
+        try {
+            // Write number of active vectors (excluding deleted)
+            uint32_t num_active = vectors_.size() - deleted_indices_.size();
+            out.write(reinterpret_cast<const char*>(&num_active), sizeof(num_active));
+
+            // Write each vector (skip deleted ones)
+            for (size_t i = 0; i < vectors_.size(); ++i) {
+                if (deleted_indices_.find(i) != deleted_indices_.end()) {
+                    continue; // Skip deleted vectors
+                }
+
+                // Write ID
+                uint32_t id_len = ids_[i].size();
+                out.write(reinterpret_cast<const char*>(&id_len), sizeof(id_len));
+                out.write(ids_[i].data(), id_len);
+
+                // Write vector
+                out.write(reinterpret_cast<const char*>(vectors_[i].data()),
+                          config_.dimension * sizeof(float));
+            }
+
+            // Write deleted indices for potential recovery
+            uint32_t num_deleted = deleted_indices_.size();
+            out.write(reinterpret_cast<const char*>(&num_deleted), sizeof(num_deleted));
+            for (size_t idx : deleted_indices_) {
+                uint32_t index = static_cast<uint32_t>(idx);
+                out.write(reinterpret_cast<const char*>(&index), sizeof(index));
+            }
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::WriteError,
+                         std::string("Failed to serialize index: ") + e.what()};
+        }
+    }
+
+    Result<void> deserialize(std::istream& in) override {
+        std::unique_lock lock(mutex_);
+
+        try {
+            // Clear existing data
+            vectors_.clear();
+            ids_.clear();
+            id_to_index_.clear();
+            deleted_indices_.clear();
+
+            // Check stream state before reading
+            if (!in.good()) {
+                return Error{ErrorCode::InvalidData, "Input stream is not in good state"};
+            }
+
+            // Read number of vectors
+            uint32_t num_vectors;
+            in.read(reinterpret_cast<char*>(&num_vectors), sizeof(num_vectors));
+
+            if (!in.good()) {
+                return Error{ErrorCode::InvalidData, "Failed to read number of vectors"};
+            }
+
+            // Sanity check on num_vectors
+            if (num_vectors > 1000000) { // Arbitrary large limit
+                return Error{ErrorCode::InvalidData,
+                             "Number of vectors seems invalid: " + std::to_string(num_vectors)};
+            }
+
+            // Reserve space
+            vectors_.reserve(num_vectors);
+            ids_.reserve(num_vectors);
+
+            // Read each vector
+            for (uint32_t i = 0; i < num_vectors; ++i) {
+                // Read ID
+                uint32_t id_len;
+                in.read(reinterpret_cast<char*>(&id_len), sizeof(id_len));
+
+                if (!in.good()) {
+                    return Error{ErrorCode::InvalidData,
+                                 "Failed to read ID length for vector " + std::to_string(i)};
+                }
+
+                // Sanity check on ID length
+                if (id_len > 10000) { // Arbitrary large limit
+                    return Error{ErrorCode::InvalidData,
+                                 "ID length seems invalid: " + std::to_string(id_len)};
+                }
+
+                std::string id(id_len, '\0');
+                in.read(id.data(), id_len);
+
+                if (!in.good()) {
+                    return Error{ErrorCode::InvalidData,
+                                 "Failed to read ID data for vector " + std::to_string(i)};
+                }
+
+                // Read vector
+                std::vector<float> vector(config_.dimension);
+                in.read(reinterpret_cast<char*>(vector.data()), config_.dimension * sizeof(float));
+
+                if (!in.good()) {
+                    return Error{ErrorCode::InvalidData,
+                                 "Failed to read vector data for vector " + std::to_string(i)};
+                }
+
+                // Add to structures
+                size_t index = vectors_.size();
+                vectors_.push_back(std::move(vector));
+                ids_.push_back(id);
+                id_to_index_[id] = index;
+            }
+
+            // Read deleted indices (for information only, we don't restore deleted vectors)
+            uint32_t num_deleted;
+            in.read(reinterpret_cast<char*>(&num_deleted), sizeof(num_deleted));
+
+            if (!in.good()) {
+                return Error{ErrorCode::InvalidData, "Failed to read number of deleted indices"};
+            }
+
+            // Sanity check on num_deleted
+            if (num_deleted > 1000000) { // Arbitrary large limit
+                return Error{ErrorCode::InvalidData, "Number of deleted indices seems invalid: " +
+                                                         std::to_string(num_deleted)};
+            }
+
+            for (uint32_t i = 0; i < num_deleted; ++i) {
+                uint32_t index;
+                in.read(reinterpret_cast<char*>(&index), sizeof(index));
+
+                if (!in.good()) {
+                    return Error{ErrorCode::InvalidData,
+                                 "Failed to read deleted index " + std::to_string(i)};
+                }
+                // We don't restore deleted indices since we only saved active vectors
+            }
+
+            // Update stats
+            stats_.num_vectors = vectors_.size();
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("Failed to deserialize index: ") + e.what()};
+        }
+    }
+
+    std::vector<std::string> getAllIds() const override {
+        std::shared_lock lock(mutex_);
+        std::vector<std::string> result;
+        result.reserve(vectors_.size() - deleted_indices_.size());
+
+        for (size_t i = 0; i < ids_.size(); ++i) {
+            if (deleted_indices_.find(i) == deleted_indices_.end()) {
+                result.push_back(ids_[i]);
+            }
+        }
+
+        return result;
+    }
+
+    Result<std::vector<float>> getVector(const std::string& id) const override {
+        std::shared_lock lock(mutex_);
+
+        auto it = id_to_index_.find(id);
+        if (it == id_to_index_.end()) {
+            return Error{ErrorCode::NotFound, "Vector not found: " + id};
+        }
+
+        size_t index = it->second;
+        if (deleted_indices_.find(index) != deleted_indices_.end()) {
+            return Error{ErrorCode::NotFound, "Vector was deleted: " + id};
+        }
+
+        return vectors_[index];
+    }
+
 private:
     mutable std::shared_mutex mutex_;
     std::vector<std::vector<float>> vectors_;
@@ -399,107 +594,614 @@ private:
 };
 
 // =============================================================================
-// HNSW Index Implementation (Placeholder)
+// HNSW Index Implementation using HNSWlib
 // =============================================================================
 
 class HNSWIndex : public VectorIndex {
 public:
-    explicit HNSWIndex(const IndexConfig& config) : VectorIndex(config) {
-        // TODO: Implement HNSW graph structure
+    explicit HNSWIndex(const IndexConfig& config) : VectorIndex(config), next_label_(0) {
+        // Initialize stats
+        stats_.type = IndexType::HNSW;
+        stats_.dimension = config.dimension;
+        stats_.metric = config.distance_metric;
+        stats_.num_vectors = 0;
+        stats_.memory_usage_bytes = 0;
+        stats_.index_size_bytes = 0;
+        stats_.needs_optimization = false;
+        stats_.total_searches = 0;
+        stats_.avg_search_time_ms = 0.0;
+        stats_.fragmentation_ratio = 0.0;
+        stats_.delta_index_size = 0;
+
+        initializeIndex();
     }
 
     Result<void> add(const std::string& id, const std::vector<float>& vector) override {
-        // Placeholder - use flat index internally for now
-        if (!flat_index_) {
-            flat_index_ = std::make_unique<FlatIndex>(config_);
+        if (vector.size() != config_.dimension) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Vector dimension mismatch"});
         }
-        return flat_index_->add(id, vector);
+
+        std::unique_lock lock(mutex_);
+
+        // Check if ID already exists
+        if (id_to_label_.find(id) != id_to_label_.end()) {
+            return Result<void>(
+                Error{ErrorCode::InvalidArgument, "Vector with this ID already exists"});
+        }
+
+        // Check capacity
+        if (next_label_ >= config_.max_elements) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Index at maximum capacity"});
+        }
+
+        try {
+            // Normalize vector if needed
+            std::vector<float> normalized_vector =
+                config_.normalize_vectors ? vector_utils::normalize(vector) : vector;
+
+            // Map string ID to numeric label
+            hnswlib::labeltype label = next_label_++;
+            id_to_label_[id] = label;
+            label_to_id_[label] = id;
+
+            // Store the vector for later retrieval
+            stored_vectors_[label] = normalized_vector;
+
+            // Add to HNSW index
+            hnsw_index_->addPoint(normalized_vector.data(), label);
+
+            stats_.num_vectors++;
+            updateMemoryStats();
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(
+                Error{ErrorCode::InternalError, std::string("Failed to add vector: ") + e.what()});
+        }
     }
 
     Result<void> update(const std::string& id, const std::vector<float>& vector) override {
-        if (!flat_index_) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        if (vector.size() != config_.dimension) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Vector dimension mismatch"});
         }
-        return flat_index_->update(id, vector);
+
+        std::unique_lock lock(mutex_);
+
+        auto it = id_to_label_.find(id);
+        if (it == id_to_label_.end()) {
+            return Result<void>(Error{ErrorCode::NotFound, "Vector not found"});
+        }
+
+        try {
+            hnswlib::labeltype label = it->second;
+
+            // Normalize vector if needed
+            std::vector<float> normalized_vector =
+                config_.normalize_vectors ? vector_utils::normalize(vector) : vector;
+
+            // Update stored vector
+            stored_vectors_[label] = normalized_vector;
+
+            // Mark as deleted and re-add (HNSWlib's update mechanism)
+            hnsw_index_->markDelete(label);
+            hnsw_index_->addPoint(normalized_vector.data(), label, true); // replace_deleted = true
+
+            // Update memory stats (vector count doesn't change but memory might)
+            updateMemoryStats();
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(Error{ErrorCode::InternalError,
+                                      std::string("Failed to update vector: ") + e.what()});
+        }
     }
 
     Result<void> remove(const std::string& id) override {
-        if (!flat_index_) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        std::unique_lock lock(mutex_);
+
+        auto it = id_to_label_.find(id);
+        if (it == id_to_label_.end()) {
+            return Result<void>(Error{ErrorCode::NotFound, "Vector not found"});
         }
-        return flat_index_->remove(id);
+
+        try {
+            hnswlib::labeltype label = it->second;
+
+            // Mark as deleted in HNSW
+            hnsw_index_->markDelete(label);
+
+            // Remove from mappings
+            stored_vectors_.erase(label);
+            label_to_id_.erase(label);
+            id_to_label_.erase(it);
+
+            stats_.num_vectors--;
+            updateMemoryStats();
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(Error{ErrorCode::InternalError,
+                                      std::string("Failed to remove vector: ") + e.what()});
+        }
     }
 
     Result<std::vector<SearchResult>> search(const std::vector<float>& query, size_t k,
                                              const SearchFilter* filter) override {
-        if (!flat_index_) {
+        if (query.size() != config_.dimension) {
             return Result<std::vector<SearchResult>>(
-                Error{ErrorCode::InvalidArgument, "Index not initialized"});
+                Error{ErrorCode::InvalidArgument, "Query dimension mismatch"});
         }
-        return flat_index_->search(query, k, filter);
+
+        std::shared_lock lock(mutex_);
+
+        if (stats_.num_vectors == 0) {
+            return Result<std::vector<SearchResult>>(std::vector<SearchResult>{});
+        }
+
+        auto start = std::chrono::high_resolution_clock::now();
+
+        try {
+            // Normalize query if needed
+            std::vector<float> normalized_query =
+                config_.normalize_vectors ? vector_utils::normalize(query) : query;
+
+            // Set search parameters
+            hnsw_index_->setEf(config_.hnsw_ef_search);
+
+            // Perform k-NN search (search more if we have filters)
+            size_t search_k =
+                filter && filter->hasFilters() ? std::min(k * 10, stats_.num_vectors) : k;
+            auto result_pairs = hnsw_index_->searchKnn(normalized_query.data(), search_k);
+
+            // Convert results to our format and apply filters
+            std::vector<SearchResult> results;
+            results.reserve(k);
+
+            while (!result_pairs.empty() && results.size() < k) {
+                auto [dist, label] = result_pairs.top();
+                result_pairs.pop();
+
+                // Find the ID for this label
+                auto id_it = label_to_id_.find(label);
+                if (id_it == label_to_id_.end()) {
+                    continue; // Deleted or invalid
+                }
+
+                const std::string& id = id_it->second;
+
+                // Apply filters
+                if (filter && filter->hasFilters()) {
+                    // Check exclude list
+                    if (!filter->exclude_ids.empty()) {
+                        if (std::find(filter->exclude_ids.begin(), filter->exclude_ids.end(), id) !=
+                            filter->exclude_ids.end()) {
+                            continue;
+                        }
+                    }
+
+                    // Check max distance
+                    if (filter->max_distance.has_value() && dist > filter->max_distance.value()) {
+                        continue;
+                    }
+
+                    // Check custom filter
+                    if (filter->custom_filter && !filter->custom_filter(id, {})) {
+                        continue;
+                    }
+                }
+
+                SearchResult result;
+                result.id = id;
+                result.distance = dist;
+                result.similarity =
+                    vector_utils::distanceToSimilarity(dist, config_.distance_metric);
+
+                // Apply similarity filter
+                if (filter && filter->min_similarity.has_value()) {
+                    if (result.similarity < filter->min_similarity.value()) {
+                        continue;
+                    }
+                }
+
+                results.push_back(std::move(result));
+            }
+
+            // Reverse to get best results first (priority queue gives worst first)
+            std::reverse(results.begin(), results.end());
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+            // Update statistics
+            stats_.total_searches++;
+            stats_.avg_search_time_ms = (stats_.avg_search_time_ms * (stats_.total_searches - 1) +
+                                         duration.count() / 1000.0) /
+                                        stats_.total_searches;
+
+            return Result<std::vector<SearchResult>>(results);
+        } catch (const std::exception& e) {
+            return Result<std::vector<SearchResult>>(
+                Error{ErrorCode::InternalError, std::string("Search failed: ") + e.what()});
+        }
     }
 
     Result<void> addBatch(const std::vector<std::string>& ids,
                           const std::vector<std::vector<float>>& vectors) override {
-        if (!flat_index_) {
-            flat_index_ = std::make_unique<FlatIndex>(config_);
+        if (ids.size() != vectors.size()) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "IDs and vectors size mismatch"});
         }
-        return flat_index_->addBatch(ids, vectors);
+
+        std::unique_lock lock(mutex_);
+
+        // Validate all vectors first
+        for (size_t i = 0; i < vectors.size(); ++i) {
+            if (vectors[i].size() != config_.dimension) {
+                return Result<void>(
+                    Error{ErrorCode::InvalidArgument,
+                          "Vector dimension mismatch at index " + std::to_string(i)});
+            }
+            if (id_to_label_.find(ids[i]) != id_to_label_.end()) {
+                return Result<void>(
+                    Error{ErrorCode::InvalidArgument,
+                          "Duplicate ID at index " + std::to_string(i) + ": " + ids[i]});
+            }
+        }
+
+        try {
+            // Add all vectors
+            for (size_t i = 0; i < ids.size(); ++i) {
+                // Normalize vector if needed
+                std::vector<float> normalized_vector =
+                    config_.normalize_vectors ? vector_utils::normalize(vectors[i]) : vectors[i];
+
+                // Map string ID to numeric label
+                hnswlib::labeltype label = next_label_++;
+                id_to_label_[ids[i]] = label;
+                label_to_id_[label] = ids[i];
+                stored_vectors_[label] = normalized_vector;
+
+                // Add to HNSW index
+                hnsw_index_->addPoint(normalized_vector.data(), label);
+
+                stats_.num_vectors++;
+            }
+
+            updateMemoryStats();
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(
+                Error{ErrorCode::InternalError, std::string("Batch add failed: ") + e.what()});
+        }
     }
 
     Result<std::vector<std::vector<SearchResult>>>
     searchBatch(const std::vector<std::vector<float>>& queries, size_t k,
                 const SearchFilter* filter) override {
-        if (!flat_index_) {
-            return Result<std::vector<std::vector<SearchResult>>>(
-                Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        std::vector<std::vector<SearchResult>> results;
+        results.reserve(queries.size());
+
+        for (const auto& query : queries) {
+            auto result = search(query, k, filter);
+            if (!result.has_value()) {
+                return Result<std::vector<std::vector<SearchResult>>>(result.error());
+            }
+            results.push_back(std::move(result.value()));
         }
-        return flat_index_->searchBatch(queries, k, filter);
+
+        return Result<std::vector<std::vector<SearchResult>>>(results);
     }
 
     Result<void> save(const std::string& path) override {
-        if (!flat_index_) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        std::unique_lock lock(mutex_);
+
+        try {
+            // Save HNSW index
+            hnsw_index_->saveIndex(path);
+
+            // Save ID mappings to a separate file
+            std::string mappings_path = path + ".mappings";
+            std::ofstream mappings_file(mappings_path, std::ios::binary);
+            if (!mappings_file) {
+                return Result<void>(Error{ErrorCode::IOError, "Failed to create mappings file"});
+            }
+
+            // Write number of mappings
+            size_t num_mappings = id_to_label_.size();
+            mappings_file.write(reinterpret_cast<const char*>(&num_mappings), sizeof(num_mappings));
+
+            // Write each mapping
+            for (const auto& [id, label] : id_to_label_) {
+                size_t id_len = id.length();
+                mappings_file.write(reinterpret_cast<const char*>(&id_len), sizeof(id_len));
+                mappings_file.write(id.data(), id_len);
+                mappings_file.write(reinterpret_cast<const char*>(&label), sizeof(label));
+
+                // Write the stored vector
+                const auto& vec = stored_vectors_[label];
+                mappings_file.write(reinterpret_cast<const char*>(vec.data()),
+                                    vec.size() * sizeof(float));
+            }
+
+            // Write next_label
+            mappings_file.write(reinterpret_cast<const char*>(&next_label_), sizeof(next_label_));
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(
+                Error{ErrorCode::IOError, std::string("Failed to save index: ") + e.what()});
         }
-        return flat_index_->save(path);
     }
 
     Result<void> load(const std::string& path) override {
-        if (!flat_index_) {
-            flat_index_ = std::make_unique<FlatIndex>(config_);
+        std::unique_lock lock(mutex_);
+
+        try {
+            // Reinitialize index before loading
+            initializeIndex();
+
+            // Load HNSW index
+            hnsw_index_->loadIndex(path, space_.get());
+
+            // Load ID mappings
+            std::string mappings_path = path + ".mappings";
+            std::ifstream mappings_file(mappings_path, std::ios::binary);
+            if (!mappings_file) {
+                return Result<void>(Error{ErrorCode::IOError, "Failed to open mappings file"});
+            }
+
+            // Read number of mappings
+            size_t num_mappings;
+            mappings_file.read(reinterpret_cast<char*>(&num_mappings), sizeof(num_mappings));
+
+            // Clear existing mappings
+            id_to_label_.clear();
+            label_to_id_.clear();
+            stored_vectors_.clear();
+
+            // Read each mapping
+            for (size_t i = 0; i < num_mappings; ++i) {
+                size_t id_len;
+                mappings_file.read(reinterpret_cast<char*>(&id_len), sizeof(id_len));
+
+                std::string id(id_len, '\0');
+                mappings_file.read(&id[0], id_len);
+
+                hnswlib::labeltype label;
+                mappings_file.read(reinterpret_cast<char*>(&label), sizeof(label));
+
+                id_to_label_[id] = label;
+                label_to_id_[label] = id;
+
+                // Read the stored vector
+                std::vector<float> vec(config_.dimension);
+                mappings_file.read(reinterpret_cast<char*>(vec.data()),
+                                   config_.dimension * sizeof(float));
+                stored_vectors_[label] = vec;
+            }
+
+            // Read next_label
+            mappings_file.read(reinterpret_cast<char*>(&next_label_), sizeof(next_label_));
+
+            stats_.num_vectors = id_to_label_.size();
+            updateMemoryStats();
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(
+                Error{ErrorCode::IOError, std::string("Failed to load index: ") + e.what()});
         }
-        return flat_index_->load(path);
     }
 
     Result<void> optimize() override {
-        if (!flat_index_) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
-        }
-        return flat_index_->optimize();
+        // HNSW doesn't need regular optimization like other indices
+        // But we could rebuild if there are many deleted items
+        return Result<void>();
     }
 
     bool needsOptimization() const override {
-        return flat_index_ ? flat_index_->needsOptimization() : false;
+        // Could check for high deletion ratio
+        return false;
     }
 
-    size_t size() const override { return flat_index_ ? flat_index_->size() : 0; }
+    size_t size() const override {
+        std::shared_lock lock(mutex_);
+        return stats_.num_vectors;
+    }
 
     size_t dimension() const override { return config_.dimension; }
 
     IndexType type() const override { return IndexType::HNSW; }
 
     IndexStats getStats() const override {
-        if (flat_index_) {
-            auto stats = flat_index_->getStats();
-            stats.type = IndexType::HNSW;
-            return stats;
+        std::shared_lock lock(mutex_);
+        stats_.type = IndexType::HNSW;
+        stats_.dimension = config_.dimension;
+        stats_.metric = config_.distance_metric;
+        stats_.needs_optimization = needsOptimization();
+        // memory_usage_bytes and index_size_bytes are already set by updateMemoryStats()
+        // num_vectors is also already tracked
+        return stats_;
+    }
+
+    Result<void> serialize(std::ostream& out) const override {
+        std::shared_lock lock(mutex_);
+
+        try {
+            // Write version
+            uint32_t version = 1;
+            out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+            // Write number of vectors
+            size_t num_vectors = id_to_label_.size();
+            out.write(reinterpret_cast<const char*>(&num_vectors), sizeof(num_vectors));
+
+            // Write each vector with its ID
+            for (const auto& [id, label] : id_to_label_) {
+                // Write ID length and ID
+                size_t id_len = id.length();
+                out.write(reinterpret_cast<const char*>(&id_len), sizeof(id_len));
+                out.write(id.data(), id_len);
+
+                // Write vector
+                const auto& vec = stored_vectors_.at(label);
+                out.write(reinterpret_cast<const char*>(vec.data()),
+                          config_.dimension * sizeof(float));
+            }
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::IOError, std::string("Serialization failed: ") + e.what()};
         }
-        return IndexStats{};
+    }
+
+    Result<void> deserialize(std::istream& in) override {
+        std::unique_lock lock(mutex_);
+
+        try {
+            // Read version
+            uint32_t version;
+            in.read(reinterpret_cast<char*>(&version), sizeof(version));
+            if (version != 1) {
+                return Error{ErrorCode::InvalidArgument, "Unsupported serialization version"};
+            }
+
+            // Read number of vectors
+            size_t num_vectors;
+            in.read(reinterpret_cast<char*>(&num_vectors), sizeof(num_vectors));
+
+            // Clear existing data
+            id_to_label_.clear();
+            label_to_id_.clear();
+            stored_vectors_.clear();
+            next_label_ = 0;
+            stats_.num_vectors = 0;
+
+            // Only initialize if index doesn't exist
+            if (!hnsw_index_) {
+                initializeIndex();
+            }
+
+            // Prepare batch of vectors for efficient loading
+            std::vector<std::vector<float>> all_vectors;
+            std::vector<hnswlib::labeltype> all_labels;
+            all_vectors.reserve(num_vectors);
+            all_labels.reserve(num_vectors);
+
+            // Read all vectors first
+            for (size_t i = 0; i < num_vectors; ++i) {
+                // Read ID
+                size_t id_len;
+                in.read(reinterpret_cast<char*>(&id_len), sizeof(id_len));
+                std::string id(id_len, '\0');
+                in.read(&id[0], id_len);
+
+                // Read vector
+                std::vector<float> vec(config_.dimension);
+                in.read(reinterpret_cast<char*>(vec.data()), config_.dimension * sizeof(float));
+
+                // Store mappings
+                hnswlib::labeltype label = next_label_++;
+                id_to_label_[id] = label;
+                label_to_id_[label] = id;
+                stored_vectors_[label] = vec;
+
+                all_vectors.push_back(vec);
+                all_labels.push_back(label);
+            }
+
+            // Add all points to index at once
+            for (size_t i = 0; i < all_vectors.size(); ++i) {
+                hnsw_index_->addPoint(all_vectors[i].data(), all_labels[i]);
+            }
+
+            stats_.num_vectors = num_vectors;
+            updateMemoryStats();
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::IOError, std::string("Deserialization failed: ") + e.what()};
+        }
+    }
+
+    std::vector<std::string> getAllIds() const override {
+        std::shared_lock lock(mutex_);
+        std::vector<std::string> ids;
+        ids.reserve(id_to_label_.size());
+        for (const auto& [id, label] : id_to_label_) {
+            ids.push_back(id);
+        }
+        return ids;
+    }
+
+    Result<std::vector<float>> getVector(const std::string& id) const override {
+        std::shared_lock lock(mutex_);
+
+        auto it = id_to_label_.find(id);
+        if (it == id_to_label_.end()) {
+            return Error{ErrorCode::NotFound, "Vector not found"};
+        }
+
+        auto vec_it = stored_vectors_.find(it->second);
+        if (vec_it == stored_vectors_.end()) {
+            return Error{ErrorCode::InternalError, "Vector data not found"};
+        }
+
+        return Result<std::vector<float>>(vec_it->second);
     }
 
 private:
-    std::unique_ptr<FlatIndex> flat_index_; // Temporary fallback
-    // TODO: Add HNSW graph structure
+    void initializeIndex() {
+        // Create appropriate space based on distance metric
+        switch (config_.distance_metric) {
+            case DistanceMetric::L2:
+                space_ = std::make_unique<hnswlib::L2Space>(config_.dimension);
+                break;
+            case DistanceMetric::INNER_PRODUCT:
+                space_ = std::make_unique<hnswlib::InnerProductSpace>(config_.dimension);
+                break;
+            case DistanceMetric::COSINE:
+                // For cosine similarity, we normalize vectors and use inner product
+                space_ = std::make_unique<hnswlib::InnerProductSpace>(config_.dimension);
+                config_.normalize_vectors = true; // Force normalization for cosine
+                break;
+            default:
+                // Default to L2
+                space_ = std::make_unique<hnswlib::L2Space>(config_.dimension);
+        }
+
+        // Create HNSW index
+        hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+            space_.get(), config_.max_elements, config_.hnsw_m, config_.hnsw_ef_construction,
+            config_.hnsw_seed);
+
+        // Set the ef parameter for search
+        hnsw_index_->setEf(config_.hnsw_ef_search);
+    }
+
+    void updateMemoryStats() {
+        // Estimate memory usage
+        // HNSW memory: ~(4 * dimension * N + 8 * M * N) bytes
+        size_t hnsw_memory =
+            4 * config_.dimension * stats_.num_vectors + 8 * config_.hnsw_m * stats_.num_vectors;
+
+        // Add memory for ID mappings and stored vectors
+        size_t mapping_memory =
+            (sizeof(std::string) + sizeof(hnswlib::labeltype)) * stats_.num_vectors * 2;
+        size_t vector_memory = config_.dimension * sizeof(float) * stats_.num_vectors;
+
+        stats_.memory_usage_bytes = hnsw_memory + mapping_memory + vector_memory;
+        stats_.index_size_bytes = stats_.memory_usage_bytes;
+    }
+
+    mutable std::shared_mutex mutex_;
+    std::unique_ptr<hnswlib::SpaceInterface<float>> space_;
+    std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_index_;
+
+    // ID mappings (since HNSWlib uses numeric labels)
+    std::unordered_map<std::string, hnswlib::labeltype> id_to_label_;
+    std::unordered_map<hnswlib::labeltype, std::string> label_to_id_;
+    std::unordered_map<hnswlib::labeltype, std::vector<float>> stored_vectors_;
+    hnswlib::labeltype next_label_;
 };
 
 // =============================================================================
@@ -696,8 +1398,14 @@ public:
 
         auto stats = main_index_->getStats();
 
-        if (delta_index_) {
+        if (delta_index_ && delta_index_->size() > 0) {
             stats.delta_index_size = delta_index_->size();
+
+            // Aggregate stats from delta index
+            auto delta_stats = delta_index_->getStats();
+            stats.num_vectors += delta_stats.num_vectors;
+            stats.memory_usage_bytes += delta_stats.memory_usage_bytes;
+            stats.index_size_bytes += delta_stats.index_size_bytes;
         }
 
         return stats;
@@ -721,21 +1429,277 @@ public:
                 Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
 
-        std::vector<std::string> ids;
+        std::vector<std::string> all_ids;
+        std::set<std::string> unique_ids;
 
-        // Get IDs from metadata store (most reliable approach)
-        {
-            std::shared_lock lock(metadata_mutex_);
-            ids.reserve(metadata_store_.size());
-            for (const auto& [id, metadata] : metadata_store_) {
-                ids.push_back(id);
+        // Get IDs from main index
+        if (main_index_) {
+            auto main_ids = main_index_->getAllIds();
+            for (const auto& id : main_ids) {
+                unique_ids.insert(id);
             }
         }
 
-        return Result<std::vector<std::string>>(std::move(ids));
+        // Get IDs from delta index
+        if (delta_index_) {
+            auto delta_ids = delta_index_->getAllIds();
+            for (const auto& id : delta_ids) {
+                unique_ids.insert(id);
+            }
+        }
+
+        // Convert set to vector
+        all_ids.reserve(unique_ids.size());
+        for (const auto& id : unique_ids) {
+            all_ids.push_back(id);
+        }
+
+        return Result<std::vector<std::string>>(std::move(all_ids));
     }
 
     IndexType getIndexType() const { return config_.type; }
+
+    Result<void> updateVector(const std::string& id, const std::vector<float>& vector,
+                              const std::map<std::string, std::string>& metadata) {
+        if (!initialized_) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        }
+
+        // Update metadata if provided
+        if (!metadata.empty()) {
+            std::unique_lock lock(metadata_mutex_);
+            metadata_store_[id] = metadata;
+        }
+
+        // Try to update in delta index first if it exists
+        if (delta_index_) {
+            // Check if the vector exists in delta
+            auto delta_ids = delta_index_->getAllIds();
+            bool in_delta = std::find(delta_ids.begin(), delta_ids.end(), id) != delta_ids.end();
+
+            if (in_delta) {
+                return delta_index_->update(id, vector);
+            }
+        }
+
+        // Update in main index
+        return main_index_->update(id, vector);
+    }
+
+    Result<void> removeVector(const std::string& id) {
+        if (!initialized_) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        }
+
+        // Remove from metadata store
+        {
+            std::unique_lock lock(metadata_mutex_);
+            metadata_store_.erase(id);
+        }
+
+        // Try to remove from delta index first if it exists
+        if (delta_index_) {
+            auto result = delta_index_->remove(id);
+            if (result) {
+                return result; // Successfully removed from delta
+            }
+        }
+
+        // Remove from main index
+        return main_index_->remove(id);
+    }
+
+    Result<void> saveIndex(const std::string& path) {
+        if (!initialized_) {
+            return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
+        }
+
+        std::unique_lock lock(mutex_);
+
+        try {
+            std::ofstream file(path, std::ios::binary);
+            if (!file) {
+                return Result<void>(Error{ErrorCode::FileNotFound, "Cannot open file for writing"});
+            }
+
+            // Write magic number and version
+            const uint32_t magic = 0x56494458; // "VIDX"
+            const uint32_t version = 2;        // Version 2 with proper serialization
+            file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+            // Write configuration
+            const uint32_t dim = config_.dimension;
+            const int type = static_cast<int>(config_.type);
+            file.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
+            file.write(reinterpret_cast<const char*>(&type), sizeof(type));
+
+            // Write main index
+            const uint8_t has_main = main_index_ ? 1 : 0;
+            file.write(reinterpret_cast<const char*>(&has_main), sizeof(has_main));
+            if (main_index_) {
+                auto result = main_index_->serialize(file);
+                if (!result) {
+                    return result;
+                }
+            }
+
+            // Write delta index
+            const uint8_t has_delta = delta_index_ ? 1 : 0;
+            file.write(reinterpret_cast<const char*>(&has_delta), sizeof(has_delta));
+            if (delta_index_) {
+                auto result = delta_index_->serialize(file);
+                if (!result) {
+                    return result;
+                }
+            }
+
+            // Write metadata
+            const uint32_t metadata_count = metadata_store_.size();
+            file.write(reinterpret_cast<const char*>(&metadata_count), sizeof(metadata_count));
+
+            for (const auto& [id, meta] : metadata_store_) {
+                // Write ID
+                const uint32_t id_len = id.size();
+                file.write(reinterpret_cast<const char*>(&id_len), sizeof(id_len));
+                file.write(id.data(), id_len);
+
+                // Write metadata entries
+                const uint32_t meta_count = meta.size();
+                file.write(reinterpret_cast<const char*>(&meta_count), sizeof(meta_count));
+
+                for (const auto& [key, value] : meta) {
+                    const uint32_t key_len = key.size();
+                    file.write(reinterpret_cast<const char*>(&key_len), sizeof(key_len));
+                    file.write(key.data(), key_len);
+
+                    const uint32_t val_len = value.size();
+                    file.write(reinterpret_cast<const char*>(&val_len), sizeof(val_len));
+                    file.write(value.data(), val_len);
+                }
+            }
+
+            file.close();
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(
+                Error{ErrorCode::InternalError, std::string("Failed to save index: ") + e.what()});
+        }
+    }
+
+    Result<void> loadIndex(const std::string& path) {
+        std::unique_lock lock(mutex_);
+
+        try {
+            std::ifstream file(path, std::ios::binary);
+            if (!file) {
+                return Result<void>(Error{ErrorCode::FileNotFound, "Cannot open index file"});
+            }
+
+            // Read and verify magic number
+            uint32_t magic;
+            file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            if (magic != 0x56494458) { // "VIDX"
+                return Result<void>(Error{ErrorCode::InvalidData, "Invalid index file format"});
+            }
+
+            // Read version
+            uint32_t version;
+            file.read(reinterpret_cast<char*>(&version), sizeof(version));
+            if (version != 2) {
+                return Result<void>(Error{ErrorCode::InvalidData,
+                                          "Unsupported index version: " + std::to_string(version) +
+                                              " (expected 2)"});
+            }
+
+            // Read configuration
+            uint32_t dim;
+            int type;
+            file.read(reinterpret_cast<char*>(&dim), sizeof(dim));
+            file.read(reinterpret_cast<char*>(&type), sizeof(type));
+
+            // Update configuration
+            config_.dimension = dim;
+            config_.type = static_cast<IndexType>(type);
+
+            // Re-initialize index with loaded config
+            initialized_ = false;
+
+            lock.unlock(); // Release lock to avoid deadlock in initialize()
+
+            auto init_result = initialize();
+            if (!init_result) {
+                return init_result;
+            }
+
+            lock.lock(); // Re-acquire lock for the rest of the operation
+
+            // Read main index
+            uint8_t has_main;
+            file.read(reinterpret_cast<char*>(&has_main), sizeof(has_main));
+
+            if (has_main && main_index_) {
+                auto deserializeResult = main_index_->deserialize(file);
+                if (!deserializeResult) {
+                    return Result<void>(
+                        Error{ErrorCode::IOError, "Failed to deserialize main index: " +
+                                                      deserializeResult.error().message});
+                }
+            }
+
+            // Read delta index
+            uint8_t has_delta;
+            file.read(reinterpret_cast<char*>(&has_delta), sizeof(has_delta));
+            if (has_delta && delta_index_) {
+                auto deserializeResult = delta_index_->deserialize(file);
+                if (!deserializeResult) {
+                    return Result<void>(
+                        Error{ErrorCode::IOError, "Failed to deserialize delta index: " +
+                                                      deserializeResult.error().message});
+                }
+            }
+
+            // Read metadata
+            uint32_t metadata_count;
+            file.read(reinterpret_cast<char*>(&metadata_count), sizeof(metadata_count));
+
+            metadata_store_.clear();
+            for (uint32_t i = 0; i < metadata_count; ++i) {
+                // Read ID
+                uint32_t id_len;
+                file.read(reinterpret_cast<char*>(&id_len), sizeof(id_len));
+                std::string id(id_len, '\0');
+                file.read(id.data(), id_len);
+
+                // Read metadata entries
+                uint32_t meta_count;
+                file.read(reinterpret_cast<char*>(&meta_count), sizeof(meta_count));
+
+                std::map<std::string, std::string> meta;
+                for (uint32_t j = 0; j < meta_count; ++j) {
+                    uint32_t key_len;
+                    file.read(reinterpret_cast<char*>(&key_len), sizeof(key_len));
+                    std::string key(key_len, '\0');
+                    file.read(key.data(), key_len);
+
+                    uint32_t val_len;
+                    file.read(reinterpret_cast<char*>(&val_len), sizeof(val_len));
+                    std::string value(val_len, '\0');
+                    file.read(value.data(), val_len);
+
+                    meta[key] = value;
+                }
+
+                metadata_store_[id] = meta;
+            }
+
+            file.close();
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Result<void>(
+                Error{ErrorCode::InternalError, std::string("Failed to load index: ") + e.what()});
+        }
+    }
 
     // Accessor methods for VectorIndexManager
     void setConfig(const IndexConfig& config) { config_ = config; }
@@ -792,6 +1756,12 @@ VectorIndexManager::addVectors(const std::vector<std::string>& ids,
     return pImpl->addVectors(ids, vectors, metadata);
 }
 
+Result<void> VectorIndexManager::updateVector(const std::string& id,
+                                              const std::vector<float>& vector,
+                                              const std::map<std::string, std::string>& metadata) {
+    return pImpl->updateVector(id, vector, metadata);
+}
+
 Result<std::vector<SearchResult>> VectorIndexManager::search(const std::vector<float>& query,
                                                              size_t k, const SearchFilter& filter) {
     return pImpl->search(query, k, filter);
@@ -828,21 +1798,15 @@ Result<void> VectorIndexManager::buildIndex() {
 }
 
 Result<void> VectorIndexManager::removeVector(const std::string& id) {
-    (void)id; // Suppress unused parameter warning
-    // TODO: Implement single vector removal
-    return Error{ErrorCode::NotSupported, "removeVector not yet implemented"};
+    return pImpl->removeVector(id);
 }
 
 Result<void> VectorIndexManager::saveIndex(const std::string& path) {
-    (void)path; // Suppress unused parameter warning
-    // TODO: Implement index persistence
-    return Error{ErrorCode::NotSupported, "saveIndex not yet implemented"};
+    return pImpl->saveIndex(path);
 }
 
 Result<void> VectorIndexManager::loadIndex(const std::string& path) {
-    (void)path; // Suppress unused parameter warning
-    // TODO: Implement index loading
-    return Error{ErrorCode::NotSupported, "loadIndex not yet implemented"};
+    return pImpl->loadIndex(path);
 }
 
 // =============================================================================

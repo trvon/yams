@@ -203,6 +203,14 @@ public:
     virtual IndexType type() const = 0;
     virtual IndexStats getStats() const = 0;
 
+    // Serialization interface
+    virtual Result<void> serialize(std::ostream& out) const = 0;
+    virtual Result<void> deserialize(std::istream& in) = 0;
+
+    // Helper methods for serialization
+    virtual std::vector<std::string> getAllIds() const = 0;
+    virtual Result<std::vector<float>> getVector(const std::string& id) const = 0;
+
     // Configuration
     const IndexConfig& getConfig() const { return config_; }
 

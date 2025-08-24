@@ -1,18 +1,5 @@
-# Text extraction unit tests
-add_executable(extraction_tests
-    text_extraction_test.cpp
-    pdf_extractor_test.cpp
-)
+# Text extraction tests have been moved to content handler tests
+# Legacy extraction tests have been deprecated in favor of the Universal Content Handler System
+# See tests/unit/content/ for modern content processing tests
 
-target_link_libraries(extraction_tests
-    PRIVATE
-        GTest::gtest_main
-        GTest::gmock
-        yams::extraction
-        yams::core
-)
-
-gtest_discover_tests(extraction_tests)
-
-# Add to CTest
-add_test(NAME extraction_unit_tests COMMAND extraction_tests)
+# This directory is kept for backward compatibility but contains no active tests

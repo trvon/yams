@@ -7,10 +7,29 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#define ISATTY _isatty
+#define FILENO _fileno
+#else
+#include <unistd.h>
+#include <sys/ioctl.h>
+#define ISATTY isatty
+#define FILENO fileno
+#endif
 
 namespace yams::tools {
 
@@ -105,6 +124,117 @@ private:
         std::vector<std::pair<std::string, uint64_t>> largestFiles;
     };
 
+    // === UI helpers ===
+    struct Ansi {
+        static constexpr const char* RESET = "\x1b[0m";
+        static constexpr const char* BOLD = "\x1b[1m";
+        static constexpr const char* DIM = "\x1b[2m";
+        static constexpr const char* RED = "\x1b[31m";
+        static constexpr const char* GREEN = "\x1b[32m";
+        static constexpr const char* YELLOW = "\x1b[33m";
+        static constexpr const char* BLUE = "\x1b[34m";
+        static constexpr const char* MAGENTA = "\x1b[35m";
+        static constexpr const char* CYAN = "\x1b[36m";
+        static constexpr const char* WHITE = "\x1b[37m";
+    };
+
+    bool colorsEnabled() const {
+        const char* noColor = std::getenv("NO_COLOR");
+        if (noColor != nullptr)
+            return false;
+        return ISATTY(FILENO(stdout));
+    }
+
+    std::string colorize(const std::string& s, const char* code) const {
+        if (!colorsEnabled())
+            return s;
+        return std::string(code) + s + Ansi::RESET;
+    }
+
+    int detectTerminalWidth() const {
+#if defined(_WIN32)
+        // Fallback to environment or default on Windows
+        const char* cols = std::getenv("COLUMNS");
+        if (cols) {
+            try {
+                return std::max(40, std::stoi(cols));
+            } catch (...) {
+            }
+        }
+        return 100;
+#else
+        struct winsize w{};
+        if (ioctl(FILENO(stdout), TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
+            return std::max<int>(60, w.ws_col);
+        }
+        const char* cols = std::getenv("COLUMNS");
+        if (cols) {
+            try {
+                return std::max(60, std::stoi(cols));
+            } catch (...) {
+            }
+        }
+        return 100;
+#endif
+    }
+
+    static std::string repeat(char ch, size_t n) { return std::string(n, ch); }
+
+    static std::string padRight(const std::string& s, size_t width, char fill = ' ') {
+        if (s.size() >= width)
+            return s;
+        return s + std::string(width - s.size(), fill);
+    }
+
+    static std::string padLeft(const std::string& s, size_t width, char fill = ' ') {
+        if (s.size() >= width)
+            return s;
+        return std::string(width - s.size(), fill) + s;
+    }
+
+    std::string progressBar(double fraction, size_t width, const char* good = Ansi::GREEN,
+                            const char* warn = Ansi::YELLOW, const char* bad = Ansi::RED) const {
+        if (width == 0)
+            return "";
+        double f = fraction;
+        if (f < 0.0)
+            f = 0.0;
+        if (f > 1.0)
+            f = 1.0;
+        size_t filled = static_cast<size_t>(std::llround(f * static_cast<double>(width)));
+        std::string filledPart = repeat('#', filled);
+        std::string emptyPart = repeat('-', width - filled);
+
+        const char* colorCode = good;
+        if (f >= 0.66)
+            colorCode = bad;
+        else if (f >= 0.33)
+            colorCode = warn;
+
+        if (colorsEnabled()) {
+            return std::string(colorCode) + filledPart + Ansi::RESET + emptyPart;
+        }
+        return filledPart + emptyPart;
+    }
+
+    std::string sectionHeader(const std::string& title, int width) const {
+        std::string shown = " " + title + " ";
+        int lineLen = std::max(0, width - static_cast<int>(shown.size()) - 4);
+        std::string line = repeat('-', static_cast<size_t>(lineLen));
+        std::string decorated = "[ " + title + " ] " + line;
+        return colorsEnabled() ? colorize(decorated, Ansi::CYAN) : decorated;
+    }
+
+    std::string titleBanner(const std::string& title, int width) const {
+        std::string t = " " + title + " ";
+        int side = std::max(0, (width - static_cast<int>(t.size()) - 4) / 2);
+        std::string left = repeat('=', static_cast<size_t>(side));
+        std::string right =
+            repeat('=', static_cast<size_t>(width - side - static_cast<int>(t.size()) - 4));
+        std::string line = "==" + left + t + right + "==";
+        return colorsEnabled() ? colorize(line, Ansi::MAGENTA) : line;
+    }
+
     Stats gatherStatistics(storage::StorageEngine& storage, storage::ReferenceCounter& refCounter,
                            manifest::ManifestManager& manifestMgr) {
         Stats stats;
@@ -192,62 +322,148 @@ private:
     }
 
     void printHumanReadable(const Stats& stats) {
-        std::cout << "\n=== YAMS Storage Statistics ===\n\n";
+        const int termWidth = detectTerminalWidth();
+        std::cout << "\n"
+                  << titleBanner("YAMS Command Center - Storage Statistics", termWidth) << "\n\n";
 
-        // Storage overview
-        std::cout << "Storage Overview:\n";
-        std::cout << "  Total blocks:        " << std::setw(12) << stats.totalBlocks << "\n";
-        std::cout << "  Unique blocks:       " << std::setw(12) << stats.uniqueBlocks << "\n";
-        std::cout << "  Total size:          " << std::setw(12) << formatSize(stats.totalSize)
-                  << "\n";
-        std::cout << "  Unreferenced blocks: " << std::setw(12) << stats.unreferencedBlocks;
-        std::cout << " (" << formatSize(stats.unreferencedSize) << ")\n\n";
+        // Storage Overview
+        std::cout << sectionHeader("Storage Overview", termWidth) << "\n";
+        struct Row {
+            std::string label;
+            std::string value;
+        };
+        std::vector<Row> overview = {
+            {"Total blocks", std::to_string(stats.totalBlocks)},
+            {"Unique blocks", std::to_string(stats.uniqueBlocks)},
+            {"Total size", formatSize(stats.totalSize)},
+            {"Unreferenced blocks", std::to_string(stats.unreferencedBlocks) + " (" +
+                                        formatSize(stats.unreferencedSize) + ")"},
+        };
 
-        // Deduplication metrics
-        std::cout << "Deduplication Metrics:\n";
-        std::cout << "  Deduplication ratio: " << std::fixed << std::setprecision(2)
-                  << stats.deduplicationRatio << ":1\n";
-        std::cout << "  Space savings:       " << std::fixed << std::setprecision(1)
-                  << (stats.spacesSavings * 100) << "%\n";
-        std::cout << "  Logical size:        " << formatSize(stats.deduplicatedSize) << "\n";
-        std::cout << "  Average references:  " << std::fixed << std::setprecision(2)
-                  << stats.averageReferences << "\n";
-        std::cout << "  Max references:      " << stats.maxReferences << "\n\n";
+        size_t labelWidth = 0;
+        for (const auto& r : overview)
+            labelWidth = std::max(labelWidth, r.label.size());
+        size_t valueWidth =
+            static_cast<size_t>(std::max(20, termWidth - static_cast<int>(labelWidth) - 6));
+
+        for (const auto& r : overview) {
+            std::string label = padRight("  " + r.label, labelWidth + 2);
+            std::string value = padLeft(r.value, std::min(valueWidth, r.value.size() + 0));
+            std::cout << colorize(label, Ansi::BOLD) << colorize(value, Ansi::WHITE) << "\n";
+        }
+        std::cout << "\n";
+
+        // Deduplication Metrics
+        std::cout << sectionHeader("Deduplication Metrics", termWidth) << "\n";
+        {
+            std::ostringstream ratio;
+            ratio << std::fixed << std::setprecision(2) << stats.deduplicationRatio << ":1";
+            std::ostringstream avg;
+            avg << std::fixed << std::setprecision(2) << stats.averageReferences;
+            std::string logical = formatSize(stats.deduplicatedSize);
+
+            // Space savings bar
+            double savings = stats.spacesSavings;
+            if (savings < 0.0)
+                savings = 0.0;
+            if (savings > 0.999999)
+                savings = 0.999999;
+            size_t barWidth = static_cast<size_t>(std::max(10, termWidth - 30));
+            std::ostringstream savingsText;
+            savingsText << std::fixed << std::setprecision(1) << (savings * 100.0) << "%";
+            std::string bar = progressBar(savings, barWidth);
+
+            std::vector<Row> rows = {
+                {"Deduplication ratio", ratio.str()},
+                {"Space savings", savingsText.str()},
+                {"Logical size", logical},
+                {"Average references", avg.str()},
+                {"Max references", std::to_string(stats.maxReferences)},
+            };
+
+            labelWidth = 0;
+            for (const auto& r : rows)
+                labelWidth = std::max(labelWidth, r.label.size());
+            for (const auto& r : rows) {
+                std::string label = padRight("  " + r.label, labelWidth + 2);
+                std::cout << colorize(label, Ansi::BOLD) << colorize(r.value, Ansi::GREEN) << "\n";
+                if (r.label == "Space savings") {
+                    std::cout << "    " << bar << "\n";
+                }
+            }
+        }
+        std::cout << "\n";
 
         if (detailed_) {
-            // Block size distribution
+            // Block Size Distribution with bars
             if (!stats.blockSizeDistribution.empty()) {
-                std::cout << "Block Size Distribution:\n";
+                std::cout << sectionHeader("Block Size Distribution", termWidth) << "\n";
+                uint64_t maxCount = 0;
+                for (const auto& [_, c] : stats.blockSizeDistribution)
+                    maxCount = std::max(maxCount, c);
+                size_t barWidth = static_cast<size_t>(std::max(10, termWidth - 36));
+
                 for (const auto& [range, count] : stats.blockSizeDistribution) {
-                    std::cout << "  " << std::setw(20) << range << ": " << std::setw(8) << count
-                              << " blocks\n";
+                    double frac = maxCount > 0
+                                      ? static_cast<double>(count) / static_cast<double>(maxCount)
+                                      : 0.0;
+                    std::ostringstream right;
+                    right << count << " blocks";
+                    std::string label = padRight("  " + range, 24);
+                    std::string bar =
+                        progressBar(frac, barWidth, Ansi::CYAN, Ansi::YELLOW, Ansi::RED);
+                    std::cout << colorize(label, Ansi::DIM) << bar << " "
+                              << colorize(right.str(), Ansi::WHITE) << "\n";
                 }
                 std::cout << "\n";
             }
 
-            // Top referenced blocks
+            // Top Referenced Blocks table
             if (!stats.topReferencedBlocks.empty()) {
-                std::cout << "Top Referenced Blocks:\n";
+                std::cout << sectionHeader("Top Referenced Blocks", termWidth) << "\n";
+                size_t hashCol = 16; // show 16 chars of hash
+                size_t refsCol = 8;
+                size_t barWidth = static_cast<size_t>(
+                    std::max(10, termWidth - static_cast<int>(hashCol + refsCol + 12)));
+
+                uint64_t maxRefs = 0;
+                for (const auto& p : stats.topReferencedBlocks)
+                    maxRefs = std::max(maxRefs, p.second);
+
                 for (const auto& [hash, refs] : stats.topReferencedBlocks) {
-                    std::cout << "  " << hash.substr(0, 16) << "...: " << refs << " references\n";
+                    std::string h = hash.size() > hashCol ? hash.substr(0, hashCol) + "..."
+                                                          : padRight(hash, hashCol);
+                    double frac = maxRefs > 0
+                                      ? static_cast<double>(refs) / static_cast<double>(maxRefs)
+                                      : 0.0;
+                    std::string bar =
+                        progressBar(frac, barWidth, Ansi::BLUE, Ansi::YELLOW, Ansi::RED);
+                    std::ostringstream r;
+                    r << refs;
+                    std::cout << "  " << colorize(padRight(h, hashCol + 2), Ansi::BOLD) << bar
+                              << "  " << colorize(padLeft(r.str(), refsCol), Ansi::WHITE) << "\n";
                 }
                 std::cout << "\n";
             }
         }
 
-        // Storage health
-        std::cout << "Storage Health:\n";
-        double unreferencedPercent =
-            stats.uniqueBlocks > 0
-                ? (static_cast<double>(stats.unreferencedBlocks) / stats.uniqueBlocks * 100)
-                : 0;
-        std::cout << "  Unreferenced %:      " << std::fixed << std::setprecision(1)
-                  << unreferencedPercent << "%\n";
+        // Storage Health
+        std::cout << sectionHeader("Storage Health", termWidth) << "\n";
+        double unrefPct = stats.uniqueBlocks > 0
+                              ? (static_cast<double>(stats.unreferencedBlocks) / stats.uniqueBlocks)
+                              : 0.0;
+        std::ostringstream pctStr;
+        pctStr << std::fixed << std::setprecision(1) << (unrefPct * 100.0) << "%";
+        size_t barWidth = static_cast<size_t>(std::max(10, termWidth - 28));
+        std::cout << colorize("  Unreferenced %   ", Ansi::BOLD) << pctStr.str() << "\n";
+        std::cout << "    " << progressBar(unrefPct, barWidth) << "\n";
 
-        if (unreferencedPercent > 10) {
-            std::cout << "  Status:              Consider running garbage collection\n";
+        if (unrefPct > 0.10) {
+            std::cout << colorize("  Status           ", Ansi::BOLD)
+                      << colorize("Consider running garbage collection", Ansi::YELLOW) << "\n";
         } else {
-            std::cout << "  Status:              Healthy\n";
+            std::cout << colorize("  Status           ", Ansi::BOLD)
+                      << colorize("Healthy", Ansi::GREEN) << "\n";
         }
     }
 

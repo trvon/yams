@@ -28,6 +28,20 @@ static bool hasWildcard(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
 
+// Helper function to escape regex special characters
+static std::string escapeRegex(const std::string& text) {
+    static const std::string specialChars = "\\^$.|?*+()[]{}";
+    std::string escaped;
+    escaped.reserve(text.size() * 2);
+    for (char c : text) {
+        if (specialChars.find(c) != std::string::npos) {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    return escaped;
+}
+
 // Simple glob matcher supporting '*' and '?'
 static bool wildcardMatch(const std::string& text, const std::string& pattern) {
     const size_t n = text.size();
@@ -104,6 +118,14 @@ public:
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
+        // Validate request parameters
+        if (req.query.empty() && req.hash.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Query or hash is required"};
+        }
+        if (req.limit < 0) {
+            return Error{ErrorCode::InvalidArgument, "Limit must be non-negative"};
+        }
+
         // Hash-first handling (explicit), otherwise auto-detect from query string
         if (!req.hash.empty()) {
             if (!looksLikeHash(req.hash)) {
@@ -153,10 +175,9 @@ private:
 
     template <typename T> void setExecTime(Result<T>& r, std::chrono::steady_clock::time_point t0) {
         using namespace std::chrono;
-        if (r) {
-            // Best effort: try to set execution time if T has that field
-            // We can't SFINAE easily here; rely on overload below
-        }
+        (void)t0; // Suppress unused parameter warning - only specialized version uses it
+        (void)r;  // Suppress unused parameter warning
+        // Generic template doesn't use parameters, only specialized version does
     }
 
     // Overload specifically to set SearchResponse.executionTimeMs
@@ -210,7 +231,7 @@ private:
             } else {
                 SearchItem it;
                 it.id = doc.id;
-                it.hash = doc.sha256Hash;
+                it.hash = req.showHash ? doc.sha256Hash : "";
                 it.title = doc.fileName;
                 it.path = doc.filePath;
                 it.score = 1.0;  // Exact/prefix match
@@ -259,7 +280,8 @@ private:
             const auto& r = vec[i];
             SearchItem it;
             it.id = static_cast<int64_t>(i + 1); // Use 1-based index as ID
-            it.hash.clear();                     // Not directly provided by hybrid result
+            // Hash not directly available from hybrid result, only show if requested and available
+            it.hash.clear();
             auto itTitle = r.metadata.find("title");
             if (itTitle != r.metadata.end())
                 it.title = itTitle->second;
@@ -285,9 +307,16 @@ private:
     }
 
     Result<SearchResponse> metadataSearch(const SearchRequest& req) {
+        // Prepare query - escape regex if literalText is requested
+        std::string processedQuery = req.query;
+        if (req.literalText) {
+            // Escape regex special characters
+            processedQuery = escapeRegex(req.query);
+        }
+
         // Fuzzy or full-text via metadata repository
         if (req.fuzzy) {
-            auto r = ctx_.metadataRepo->fuzzySearch(req.query, req.similarity,
+            auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
                                                     static_cast<int>(req.limit));
             if (!r) {
                 return Error{ErrorCode::InternalError, "Fuzzy search failed: " + r.error().message};
@@ -334,7 +363,7 @@ private:
                 }
                 SearchItem it;
                 it.id = item.document.id;
-                it.hash = item.document.sha256Hash;
+                it.hash = req.showHash ? item.document.sha256Hash : "";
                 it.title = item.document.fileName;
                 it.path = item.document.filePath;
                 it.score = item.score;
@@ -344,7 +373,7 @@ private:
 
             return resp;
         } else {
-            auto r = ctx_.metadataRepo->search(req.query, static_cast<int>(req.limit), 0);
+            auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0);
             if (!r) {
                 return Error{ErrorCode::InternalError,
                              "Full-text search failed: " + r.error().message};
@@ -391,7 +420,7 @@ private:
                 }
                 SearchItem it;
                 it.id = item.document.id;
-                it.hash = item.document.sha256Hash;
+                it.hash = req.showHash ? item.document.sha256Hash : "";
                 it.title = item.document.fileName;
                 it.path = item.document.filePath;
                 it.score = item.score;

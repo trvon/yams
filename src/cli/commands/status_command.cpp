@@ -351,77 +351,170 @@ private:
         std::cout << "}\n";
     }
 
+    struct Row {
+        std::string label;
+        std::string value;
+        std::string extra;
+    };
+
+    static size_t visibleWidth(const std::string& s) {
+        size_t w = 0;
+        bool inEsc = false;
+        for (char c : s) {
+            if (c == '\x1b') {
+                inEsc = true;
+                continue;
+            }
+            if (inEsc) {
+                if (c == 'm')
+                    inEsc = false;
+                continue;
+            }
+            ++w;
+        }
+        return w;
+    }
+    static std::string truncateToWidth(const std::string& s, size_t maxw) {
+        if (maxw == 0)
+            return "";
+        if (visibleWidth(s) <= maxw)
+            return s;
+        std::string out;
+        out.reserve(s.size());
+        size_t w = 0;
+        bool inEsc = false;
+        for (char c : s) {
+            if (c == '\x1b') {
+                inEsc = true;
+                out.push_back(c);
+                continue;
+            }
+            if (inEsc) {
+                out.push_back(c);
+                if (c == 'm')
+                    inEsc = false;
+                continue;
+            }
+            if (w + 1 > maxw - 1)
+                break;
+            out.push_back(c);
+            ++w;
+        }
+        out += "…";
+        return out;
+    }
+    static int detectTerminalWidth() {
+        const char* cols = getenv("COLUMNS");
+        if (cols) {
+            try {
+                return std::max(60, std::min(200, std::stoi(cols)));
+            } catch (...) {
+            }
+        }
+        return 100;
+    }
+
+    static void renderRows(const std::vector<Row>& rows) {
+        if (rows.empty())
+            return;
+        int term = detectTerminalWidth();
+        const int pad = 2;
+        size_t maxL = 8, maxV = 8;
+        for (const auto& r : rows) {
+            maxL = std::max(maxL, visibleWidth(r.label));
+            maxV = std::max(maxV, visibleWidth(r.value));
+        }
+        for (const auto& r : rows) {
+            std::string l = r.label, v = r.value, e = r.extra;
+            size_t lW = maxL, vW = maxV;
+            int base = 2 + (int)lW + pad + (int)vW;
+            int need = base + (e.empty() ? 0 : pad + (int)visibleWidth(e));
+            int over = need - term;
+            if (over > 0) {
+                if (!e.empty()) {
+                    size_t ew = visibleWidth(e);
+                    size_t tgt = (over >= (int)ew) ? 0 : ew - over;
+                    e = truncateToWidth(e, tgt);
+                    need = base + (e.empty() ? 0 : pad + (int)visibleWidth(e));
+                    over = need - term;
+                }
+                if (over > 0 && vW > 8) {
+                    size_t tgt = std::max((size_t)8, vW - (size_t)over);
+                    v = truncateToWidth(v, tgt);
+                    vW = visibleWidth(v);
+                    need =
+                        2 + (int)lW + pad + (int)vW + (e.empty() ? 0 : pad + (int)visibleWidth(e));
+                    over = need - term;
+                }
+                if (over > 0 && lW > 8) {
+                    size_t tgt = std::max((size_t)8, lW - (size_t)over);
+                    l = truncateToWidth(l, tgt);
+                    lW = visibleWidth(l);
+                }
+            }
+            std::cout << "  " << std::left << std::setw((int)lW) << l << std::string(pad, ' ')
+                      << std::right << std::setw((int)vW) << v;
+            if (!e.empty())
+                std::cout << std::string(pad, ' ') << e;
+            std::cout << "\n";
+        }
+    }
+
     void outputText(const StatusInfo& info) {
         std::cout << "YAMS System Status\n";
         std::cout << "==================\n\n";
 
-        // Storage status
-        std::cout << (info.storageHealthy ? "✓" : "✗") << " Storage: ";
-        if (info.storageHealthy) {
-            std::cout << "Healthy (" << formatSize(info.totalSize) << ", " << info.totalDocuments
-                      << " documents)\n";
-        } else {
-            std::cout << "Issues detected\n";
-        }
+        std::vector<Row> rows;
+        rows.push_back({std::string(info.storageHealthy ? "✓ Storage" : "✗ Storage"),
+                        info.storageHealthy ? ("Healthy (" + formatSize(info.totalSize) + ", " +
+                                               std::to_string(info.totalDocuments) + " documents)")
+                                            : std::string("Issues detected"),
+                        ""});
+        rows.push_back(
+            {std::string(info.configMigrationNeeded ? "⚠ Configuration" : "✓ Configuration"),
+             std::string("v") + info.configVersion +
+                 (info.configMigrationNeeded ? " (migration recommended)" : " (current)"),
+             ""});
+        rows.push_back({std::string(info.hasModels ? "✓ Models" : "⚠ Models"),
+                        info.hasModels
+                            ? (std::to_string(info.availableModels.size()) + " available (" +
+                               [&]() {
+                                   std::ostringstream oss;
+                                   for (size_t i = 0; i < info.availableModels.size(); ++i) {
+                                       if (i)
+                                           oss << ", ";
+                                       oss << info.availableModels[i];
+                                   }
+                                   return oss.str();
+                               }() +
+                               ")")
+                            : std::string("No embedding models found"),
+                        ""});
+        rows.push_back({std::string(info.autoGenerationEnabled ? "✓ Embeddings" : "⚠ Embeddings"),
+                        std::string(info.autoGenerationEnabled ? "Auto-generation enabled"
+                                                               : "Auto-generation disabled") +
+                            (info.embeddingCount > 0 ? (" (" + std::to_string(info.embeddingCount) +
+                                                        " embeddings ready)")
+                                                     : std::string()),
+                        ""});
+        rows.push_back(
+            {std::string(info.vectorDbHealthy ? "✓ Vector DB" : "⚠ Vector DB"),
+             std::string(info.vectorDbHealthy ? "Ready for semantic search" : "Not available"),
+             ""});
+        renderRows(rows);
 
-        // Configuration status
-        std::cout << (info.configMigrationNeeded ? "⚠" : "✓") << " Configuration: ";
-        if (info.configMigrationNeeded) {
-            std::cout << "v" << info.configVersion << " (migration recommended)\n";
-        } else {
-            std::cout << "v" << info.configVersion << " (current)\n";
-        }
-
-        // Models status
-        std::cout << (info.hasModels ? "✓" : "⚠") << " Models: ";
-        if (info.hasModels) {
-            std::cout << info.availableModels.size() << " available (";
-            for (size_t i = 0; i < info.availableModels.size(); ++i) {
-                if (i > 0)
-                    std::cout << ", ";
-                std::cout << info.availableModels[i];
-            }
-            std::cout << ")\n";
-        } else {
-            std::cout << "No embedding models found\n";
-        }
-
-        // Embeddings status
-        std::cout << (info.autoGenerationEnabled ? "✓" : "⚠") << " Embeddings: ";
-        if (info.autoGenerationEnabled) {
-            std::cout << "Auto-generation enabled";
-        } else {
-            std::cout << "Auto-generation disabled";
-        }
-        if (info.embeddingCount > 0) {
-            std::cout << " (" << info.embeddingCount << " embeddings ready)";
-        }
-        std::cout << "\n";
-
-        // Vector DB status
-        std::cout << (info.vectorDbHealthy ? "✓" : "⚠") << " Vector DB: ";
-        if (info.vectorDbHealthy) {
-            std::cout << "Ready for semantic search\n";
-        } else {
-            std::cout << "Not available\n";
-        }
-
-        // Show recommendations
         if (!info.recommendations.empty()) {
             std::cout << "\nRecommendations:\n";
             for (const auto& rec : info.recommendations) {
                 std::cout << "  → " << rec << "\n";
             }
         }
-
-        // Show warnings if verbose or if there are critical issues
         if (!info.warnings.empty() && (verbose_ || !info.storageHealthy)) {
             std::cout << "\nWarnings:\n";
             for (const auto& warning : info.warnings) {
                 std::cout << "  ⚠ " << warning << "\n";
             }
         }
-
         std::cout << "\nFor detailed statistics: yams stats\n";
         std::cout << "For configuration help: yams config --help\n";
     }

@@ -5,6 +5,70 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Fixed
+## [v0.5.0] - 2025-08-22
+
+### Added
+- **Service-Based Architecture**
+  - Complete app services layer implementation (`app/services/*.cpp`)
+  - Service factory pattern with centralized AppContext management
+- **RequestDispatcher Service Integration**
+  - All daemon handlers migrated to use app services exclusively
+  - Complete feature parity between CLI and daemon operations
+  - Enhanced protocol mapping with proper field alignment
+- **SearchCommand Service Migration**
+  - Tag filtering support with `--tags` and `--match-all-tags` options
+  - Comma-separated tag parsing with whitespace trimming
+  - Complete daemon_first pattern implementation with local fallback
+- **IndexingService Integration**
+  - All document ingestion centralized through IndexingService
+  - Eliminated direct IndexingPipeline calls from CLI commands
+  - Directory recursion uses IndexingService::addDirectory() for consistency
+  - Embedding lifecycle managed exclusively by IndexinService
+- **Auto-Repair for Vector Embeddings**
+  - Daemon automatically generates missing embeddings when documents are added (hot-load behavior)
+  - New `enableAutoRepair` configuration flag in DaemonConfig (default: true)
+  - Background repair thread processes queued documents in batches
+  - Automatic detection and repair during semantic search operations
+  - Shared repair utility (`yams/repair/embedding_repair_util.h`) for CLI and daemon use
+- **Vector Index Persistence**
+  - Implemented `saveIndex()` and `loadIndex()` methods for VectorIndexManager
+  - Binary serialization format for index state and metadata
+  - Automatic index saving on daemon shutdown
+- **Vector Management**
+  - Implemented `removeVector()` method for single vector deletion
+  - Support for removing vectors from both flat and HNSW indices
+- **HNSW Index Support**
+  - Complete implementation of Hierarchical Navigable Small World index
+  - Configurable M and ef_construction parameters
+  - Efficient approximate nearest neighbor search
+- **Improved Daemon Lifecycle Management**
+  - New daemon instances now automatically kill existing daemons on startup
+  - Prevents resource conflicts and stale daemon processes
+  - Ensures clean daemon state for each new session
+  - **Note**: Older YAMS versions require manual daemon termination before upgrading
+- **Service-Based Test Architecture** 
+  - New comprehensive service layer tests: `IndexingService`, `DocumentService`, and `SearchService`
+  - Modern content handler tests using Universal Content Handler System (`pdf_content_handler_test.cpp`)
+  - CMakeLists.txt structure for organized test building and discovery
+
+### Fixed
+- **Service Interface Field Mapping**
+  - Fixed field name mismatches between daemon protocols and service interfaces
+  - Corrected `lineNumbers` vs `showLineNumbers` mapping in RequestDispatcher, MCP server, and SearchCommand
+  - Resolved compilation errors from protocol field alignment issues
+  - Fixed RequestDispatcher handlers to properly map request fields to service parameters
+- **Vector Index Persistence Deadlock**
+  - Fixed critical mutex deadlock in VectorIndexManager loadIndex() method
+  - IndexPersistence test no longer hangs indefinitely during deserialization
+  - Fixed deadlock by properly releasing mutex before calling initialize()
+  - Added robust error checking for stream operations during serialization/deserialization
+  - Enhanced data validation with sanity checks for corrupted data
+  - Vector index save/load functionality now works correctly
+- **Model Loading Performance**
+  - Removed unnecessary async wrappers causing 15+ minute timeouts
+  - Model loading now completes in seconds instead of timing out
+  - Fixed deadlock issues in OnnxModelPool initialization
 
 ## [v0.4.8] - 2025-08-21
 
@@ -13,6 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `add` command now accepts multiple file paths from shell expansion
   - Commands like `yams add *.md` now work correctly without "arguments were not expected" errors
   - Properly handles shell wildcard expansion (e.g., `*.cpp`, `*.md`, `*.txt`)
+- **Dynamic Plugin Loading**
+  - Implemented PluginLoader class for runtime plugin loading
+  - Added automatic plugin discovery from standard directories
+  - Support for YAMS_PLUGIN_DIR environment variable
+  - ONNX model provider now loads dynamically as a plugin
+  - Daemon automatically loads plugins on startup
+  - Created comprehensive test suite for plugin loader
 
 ### Fixed
 - **Tag Storage and Filtering**
@@ -40,6 +111,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed missing `#include <cstring>` in compression_benchmark.cpp for `std::strlen`
   - Fixed C++ compiler flag `-Wnon-virtual-dtor` being incorrectly applied to C files
   - Used CMake generator expression `$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>` for language-specific flags
+  - Fixed missing Rabin chunker header include in ingestion_benchmark.cpp
+  - Fixed GCOptions struct initializer warnings by adding progressCallback field
+  - Fixed query parser benchmark Result access patterns (use `.value()` instead of `*result`)
+  - Fixed metadata benchmark Database constructor usage pattern
+  - Fixed benchmark API calls to use storeBytes() instead of non-existent addContent()
+- **Vector Index Loading**
+  - Fixed empty error message when vector index file doesn't exist
+  - Added proper file existence check before attempting to load
+  - Shows debug message instead of warning for missing index file on startup
 
 ## [v0.4.7] - 2025-08-21
 

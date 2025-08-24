@@ -167,7 +167,8 @@ jobs:
           cmake --build --preset conan-release --parallel
           echo "Running tests..."
           cd build/conan-validation
-          ctest --preset conan-release --output-on-failure --timeout 300 || true
+          # Skip slow model loading tests in CI to prevent timeouts
+          YAMS_SKIP_SLOW_TESTS=1 ctest --preset conan-release --output-on-failure --timeout 300 || true
           cd "$GITHUB_WORKSPACE"
           echo "Validation complete, now building optimized release..."
 

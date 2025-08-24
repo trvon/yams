@@ -1,5 +1,6 @@
 #include <yams/app/services/services.hpp>
 
+#include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
 #include <yams/metadata/metadata_repository.h>
 
@@ -76,6 +77,18 @@ inline void addMetadataToMap(const std::unordered_map<std::string, std::string>&
     }
 }
 
+// Returns true if s consists only of hex digits
+inline bool isHex(const std::string& s) {
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+// Heuristic: treat as hash when it looks like a hex string of reasonable length (6-64)
+inline bool looksLikePartialHash(const std::string& s) {
+    if (s.size() < 6 || s.size() >= 64)
+        return false;
+    return isHex(s);
+}
+
 inline std::string makeTempFilePathFor(const std::string& name) {
     namespace fs = std::filesystem;
     auto tmpDir = fs::temp_directory_path();
@@ -90,11 +103,7 @@ inline std::string makeTempFilePathFor(const std::string& name) {
     return tmp.string();
 }
 
-inline std::string trimLeadingDot(const std::string& ext) {
-    if (!ext.empty() && ext[0] == '.')
-        return ext.substr(1);
-    return ext;
-}
+// Removed unused function trimLeadingDot
 
 // Basic "tags" extraction heuristic from metadata rows
 inline std::vector<std::string>
@@ -132,6 +141,20 @@ public:
         }
         addTagPairsToMap(req.tags, md.tags);
         addMetadataToMap(req.metadata, md.tags);
+
+        // Add collection and snapshot metadata if provided
+        if (!req.collection.empty()) {
+            md.tags["collection"] = req.collection;
+        }
+        if (!req.snapshotId.empty()) {
+            md.tags["snapshot_id"] = req.snapshotId;
+        }
+        if (!req.snapshotLabel.empty()) {
+            md.tags["snapshot_label"] = req.snapshotLabel;
+        }
+        if (req.noEmbeddings) {
+            md.tags["no_embeddings"] = "true";
+        }
 
         std::string usePath;
         std::optional<std::filesystem::path> tmpToRemove;
@@ -207,17 +230,62 @@ public:
         return out;
     }
 
-    // Retrieve by hash (+ optional outputPath) with optional content and simple graph
+    // Retrieve by hash or name (+ optional outputPath) with optional content and simple graph
     Result<RetrieveDocumentResponse> retrieve(const RetrieveDocumentRequest& req) override {
         if (!ctx_.store) {
             return Error{ErrorCode::NotInitialized, "Content store not available"};
         }
-        if (req.hash.empty()) {
-            return Error{ErrorCode::InvalidArgument, "Hash is required"};
+        if (req.hash.empty() && req.name.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Either hash or name is required"};
         }
 
         RetrieveDocumentResponse resp;
         resp.graphEnabled = req.graph;
+
+        // If name is provided but no hash, resolve name to hash first
+        std::string resolvedHash = req.hash;
+        if (!req.name.empty() && req.hash.empty()) {
+            auto resolveResult = resolveNameToHash(req.name);
+            if (!resolveResult) {
+                return Error{ErrorCode::NotFound, "Document not found with name: " + req.name};
+            }
+            resolvedHash = resolveResult.value();
+        }
+
+        // Resolve hash (handle partial hashes)
+        if (!resolvedHash.empty() && resolvedHash.size() != 64 &&
+            looksLikePartialHash(resolvedHash)) {
+            // Partial hash resolution
+            if (!ctx_.metadataRepo) {
+                return Error{ErrorCode::NotInitialized,
+                             "Metadata repository not available for partial hash resolution"};
+            }
+            auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            if (!docsRes) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to enumerate documents for partial hash resolution: " +
+                                 docsRes.error().message};
+            }
+
+            std::vector<std::string> matches;
+            for (const auto& d : docsRes.value()) {
+                if (d.sha256Hash.size() >= resolvedHash.size() &&
+                    d.sha256Hash.compare(0, resolvedHash.size(), resolvedHash) == 0) {
+                    matches.push_back(d.sha256Hash);
+                }
+            }
+
+            if (matches.empty()) {
+                return Error{ErrorCode::NotFound,
+                             "No documents found matching hash prefix: " + resolvedHash};
+            }
+            if (matches.size() > 1) {
+                return Error{ErrorCode::InvalidOperation,
+                             "Ambiguous hash prefix: " + std::to_string(matches.size()) +
+                                 " matches for '" + resolvedHash + "'"};
+            }
+            resolvedHash = matches[0];
+        }
 
         // Find document in metadata repository to populate metadata/path/name/size
         std::optional<metadata::DocumentInfo> foundDoc;
@@ -225,7 +293,7 @@ public:
             auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
             if (docsRes) {
                 for (const auto& d : docsRes.value()) {
-                    if (d.sha256Hash == req.hash) {
+                    if (d.sha256Hash == resolvedHash) {
                         foundDoc = d;
                         break;
                     }
@@ -234,7 +302,7 @@ public:
         }
 
         RetrievedDocument doc;
-        doc.hash = req.hash;
+        doc.hash = resolvedHash;
 
         if (foundDoc) {
             doc.path = foundDoc->filePath;
@@ -243,7 +311,7 @@ public:
             doc.mimeType = foundDoc->mimeType;
         } else {
             // Fallback: path unknown; mime default
-            doc.path = req.outputPath.empty() ? req.hash : req.outputPath;
+            doc.path = req.outputPath.empty() ? resolvedHash : req.outputPath;
             doc.name.clear();
             doc.size = 0;
             doc.mimeType = "application/octet-stream";
@@ -251,7 +319,7 @@ public:
 
         // If outputPath provided, retrieve to file
         if (!req.outputPath.empty()) {
-            auto r = ctx_.store->retrieve(req.hash, req.outputPath);
+            auto r = ctx_.store->retrieve(resolvedHash, req.outputPath);
             if (!r) {
                 return Error{ErrorCode::InternalError, "Retrieve failed: " + r.error().message};
             }
@@ -266,7 +334,7 @@ public:
         // Include content if requested
         if (req.includeContent) {
             std::ostringstream oss;
-            auto rs = ctx_.store->retrieveStream(req.hash, oss, nullptr);
+            auto rs = ctx_.store->retrieveStream(resolvedHash, oss, nullptr);
             if (rs) {
                 doc.content = oss.str();
                 doc.size = static_cast<uint64_t>(doc.content->size());
@@ -434,22 +502,150 @@ public:
 
         for (const auto& d : page) {
             DocumentEntry e;
+
+            // Basic file information
             e.name = d.fileName;
+            e.fileName = d.fileName; // Fix: populate fileName field
             e.hash = d.sha256Hash;
             e.path = d.filePath;
             e.extension = d.fileExtension;
             e.size = static_cast<uint64_t>(d.fileSize);
             e.mimeType = d.mimeType;
             e.fileType = toFileType(d.mimeType);
+
+            // Timestamps
             e.created = toEpochSeconds(d.createdTime);
             e.modified = toEpochSeconds(d.modifiedTime);
             e.indexed = toEpochSeconds(d.indexedTime);
-            // add tags when filtering requested
-            if (!req.tags.empty()) {
-                auto md = ctx_.metadataRepo->getAllMetadata(d.id);
-                if (md)
-                    e.tags = extractTags(md.value());
+
+            // Content and metadata (only fetch when needed to avoid performance impact)
+            std::optional<std::unordered_map<std::string, metadata::MetadataValue>> cachedMetadata;
+
+            // Add content snippets when requested
+            if (req.showSnippets && req.snippetLength > 0) {
+                spdlog::debug("DocumentService: Extracting snippet for document {} (length={})",
+                              d.sha256Hash.substr(0, 8), req.snippetLength);
+
+                auto contentResult = ctx_.metadataRepo->getContent(d.id);
+                if (contentResult) {
+                    spdlog::debug("DocumentService: getContent succeeded for document {}",
+                                  d.sha256Hash.substr(0, 8));
+
+                    // Fix: Properly check the nested optional
+                    const auto& optionalContent = contentResult.value();
+                    if (optionalContent.has_value()) {
+                        const auto& content = optionalContent.value();
+                        spdlog::debug("DocumentService: Content found, text length = {}",
+                                      content.contentText.length());
+
+                        // Validate that we have actual text content
+                        if (!content.contentText.empty() && content.contentText.length() > 3) {
+                            // Create snippet with word boundary preservation
+                            std::string snippet = content.contentText;
+                            if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
+                                snippet =
+                                    snippet.substr(0, static_cast<size_t>(req.snippetLength - 3));
+                                // Find last space to avoid cutting words
+                                size_t lastSpace = snippet.find_last_of(' ');
+                                if (lastSpace != std::string::npos &&
+                                    lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
+                                    snippet = snippet.substr(0, lastSpace);
+                                }
+                                snippet += "...";
+                            }
+                            // Clean up snippet (remove excessive whitespace)
+                            std::string cleanedSnippet;
+                            bool lastWasSpace = false;
+                            for (char c : snippet) {
+                                if (std::isspace(c)) {
+                                    if (!lastWasSpace) {
+                                        cleanedSnippet += ' ';
+                                        lastWasSpace = true;
+                                    }
+                                } else {
+                                    cleanedSnippet += c;
+                                    lastWasSpace = false;
+                                }
+                            }
+                            e.snippet = cleanedSnippet;
+                            spdlog::debug("DocumentService: Generated snippet: '{}'",
+                                          cleanedSnippet.substr(0, 30) + "...");
+                        } else {
+                            e.snippet = "[No text content]";
+                            spdlog::debug(
+                                "DocumentService: No text content available for document {}",
+                                d.sha256Hash.substr(0, 8));
+                        }
+                    } else {
+                        e.snippet = "[Content not available]";
+                        spdlog::debug("DocumentService: Content optional is empty for document {}",
+                                      d.sha256Hash.substr(0, 8));
+                    }
+                } else {
+                    e.snippet = "[Content extraction failed]";
+                    spdlog::warn("DocumentService: getContent failed for document {}: {}",
+                                 d.sha256Hash.substr(0, 8), contentResult.error().message);
+                }
+            } else {
+                spdlog::debug("DocumentService: Skipping snippet extraction (showSnippets={}, "
+                              "snippetLength={})",
+                              req.showSnippets, req.snippetLength);
             }
+
+            // Add tags when requested (not just when filtering)
+            if (req.showTags) {
+                spdlog::debug("DocumentService: Extracting tags for document {}",
+                              d.sha256Hash.substr(0, 8));
+
+                if (!cachedMetadata) {
+                    auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
+                    if (metadataResult) {
+                        cachedMetadata = metadataResult.value();
+                        spdlog::debug(
+                            "DocumentService: Retrieved {} metadata entries for document {}",
+                            cachedMetadata.value().size(), d.sha256Hash.substr(0, 8));
+                    } else {
+                        spdlog::warn("DocumentService: Failed to get metadata for document {}: {}",
+                                     d.sha256Hash.substr(0, 8), metadataResult.error().message);
+                    }
+                }
+                if (cachedMetadata) {
+                    e.tags = extractTags(cachedMetadata.value());
+                    spdlog::debug("DocumentService: Extracted {} tags for document {}: [{}]",
+                                  e.tags.size(), d.sha256Hash.substr(0, 8), [&e]() {
+                                      std::string tagStr;
+                                      for (size_t i = 0; i < e.tags.size(); ++i) {
+                                          if (i > 0)
+                                              tagStr += ", ";
+                                          tagStr += e.tags[i];
+                                      }
+                                      return tagStr;
+                                  }());
+                } else {
+                    spdlog::debug("DocumentService: No metadata available for tags extraction for "
+                                  "document {}",
+                                  d.sha256Hash.substr(0, 8));
+                }
+            } else {
+                spdlog::debug("DocumentService: Skipping tags extraction (showTags={})",
+                              req.showTags);
+            }
+
+            // Add metadata when requested
+            if (req.showMetadata) {
+                if (!cachedMetadata) {
+                    auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
+                    if (metadataResult) {
+                        cachedMetadata = metadataResult.value();
+                    }
+                }
+                if (cachedMetadata) {
+                    for (const auto& [key, value] : cachedMetadata.value()) {
+                        e.metadata[key] = value.value;
+                    }
+                }
+            }
+
             out.documents.push_back(std::move(e));
         }
 
@@ -492,14 +688,74 @@ public:
             return Error{ErrorCode::NotFound, "Document not found"};
         }
 
+        UpdateMetadataResponse resp;
+        resp.hash = hash;
+        resp.documentId = target->id;
+
+        // Create backup if requested
+        if (req.createBackup && ctx_.store) {
+            std::ostringstream contentStream;
+            auto retrieveResult = ctx_.store->retrieveStream(hash, contentStream);
+            if (retrieveResult) {
+                // Store backup with timestamp suffix
+                auto backupContent = contentStream.str();
+                std::istringstream backupStream(backupContent);
+
+                api::ContentMetadata backupMeta;
+                backupMeta.name =
+                    target->fileName + ".backup_" +
+                    std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+                backupMeta.mimeType = target->mimeType;
+
+                auto stored = ctx_.store->storeStream(backupStream, backupMeta);
+                if (stored) {
+                    resp.backupHash = stored.value().contentHash;
+                }
+            }
+        }
+
+        // Handle content update if requested
+        if (!req.newContent.empty() && ctx_.store) {
+            std::istringstream contentStream(req.newContent);
+
+            api::ContentMetadata contentMeta;
+            contentMeta.name = target->fileName;
+            contentMeta.mimeType = target->mimeType;
+
+            auto stored = ctx_.store->storeStream(contentStream, contentMeta);
+            if (!stored) {
+                if (req.atomic) {
+                    return Error{ErrorCode::InternalError,
+                                 "Failed to update content: " + stored.error().message};
+                }
+            } else {
+                // Update the document's hash in metadata
+                auto updateHash = ctx_.metadataRepo->setMetadata(
+                    target->id, "content_hash",
+                    metadata::MetadataValue(stored.value().contentHash));
+                if (updateHash) {
+                    resp.contentUpdated = true;
+                    resp.hash = stored.value().contentHash; // Update to new hash
+                }
+            }
+        }
+
         std::size_t count = 0;
-        // Apply map keyValues
+        std::vector<std::string> errors;
+
+        // Apply metadata updates
         for (const auto& [k, v] : req.keyValues) {
             auto u = ctx_.metadataRepo->setMetadata(target->id, k, metadata::MetadataValue(v));
-            if (!u)
-                return Error{ErrorCode::InternalError, "Failed to update metadata: " + k};
-            count++;
+            if (!u) {
+                errors.push_back("Failed to update metadata: " + k);
+                if (req.atomic) {
+                    return Error{ErrorCode::InternalError, errors.back()};
+                }
+            } else {
+                count++;
+            }
         }
+
         // Apply pairs "k=v"
         for (const auto& p : req.pairs) {
             auto pos = p.find('=');
@@ -508,16 +764,64 @@ public:
             std::string k = p.substr(0, pos);
             std::string v = p.substr(pos + 1);
             auto u = ctx_.metadataRepo->setMetadata(target->id, k, metadata::MetadataValue(v));
-            if (!u)
-                return Error{ErrorCode::InternalError, "Failed to update metadata: " + k};
-            count++;
+            if (!u) {
+                errors.push_back("Failed to update metadata: " + k);
+                if (req.atomic) {
+                    return Error{ErrorCode::InternalError, errors.back()};
+                }
+            } else {
+                count++;
+            }
         }
 
-        UpdateMetadataResponse resp;
-        resp.success = true;
-        resp.hash = hash;
+        // Handle tag additions (tags are stored as metadata with "tag:" prefix)
+        for (const auto& tag : req.addTags) {
+            auto u = ctx_.metadataRepo->setMetadata(target->id, "tag:" + tag,
+                                                    metadata::MetadataValue("true"));
+            if (!u) {
+                errors.push_back("Failed to add tag: " + tag);
+                if (req.atomic) {
+                    return Error{ErrorCode::InternalError, errors.back()};
+                }
+            } else {
+                resp.tagsAdded++;
+            }
+        }
+
+        // Handle tag removals (remove metadata entries with "tag:" prefix)
+        for (const auto& tag : req.removeTags) {
+            // Get current tags to verify it exists
+            auto currentTags = ctx_.metadataRepo->getDocumentTags(target->id);
+            bool tagExists = false;
+            if (currentTags) {
+                for (const auto& existingTag : currentTags.value()) {
+                    if (existingTag == tag) {
+                        tagExists = true;
+                        break;
+                    }
+                }
+            }
+
+            if (tagExists) {
+                // Remove by setting to empty/null value (this typically removes the metadata entry)
+                auto u = ctx_.metadataRepo->setMetadata(target->id, "tag:" + tag,
+                                                        metadata::MetadataValue(""));
+                if (!u) {
+                    errors.push_back("Failed to remove tag: " + tag);
+                    if (req.atomic) {
+                        return Error{ErrorCode::InternalError, errors.back()};
+                    }
+                } else {
+                    resp.tagsRemoved++;
+                }
+            }
+        }
+
+        // Update fuzzy index
+        ctx_.metadataRepo->updateFuzzyIndex(target->id);
+
+        resp.success = (errors.empty() || !req.atomic);
         resp.updatesApplied = count;
-        resp.documentId = target->id;
         return resp;
     }
 

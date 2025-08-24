@@ -35,3 +35,10 @@ target_compile_features(yams_app_services PUBLIC cxx_std_20)
 if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
     target_link_libraries(yams_app_services PRIVATE Tracy::TracyClient)
 endif()
+
+# Export and install app services library
+install(TARGETS yams_app_services
+    EXPORT YamsTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)

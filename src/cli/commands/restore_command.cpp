@@ -7,6 +7,7 @@
 #include <regex>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/pattern_utils.h>
 
 namespace yams::cli {
 
@@ -153,7 +154,7 @@ private:
 
         // Check exclude patterns first
         for (const auto& pattern : excludePatterns_) {
-            if (matchesPattern(fileName, pattern)) {
+            if (yams::common::wildcard_match(fileName, pattern)) {
                 return false;
             }
         }
@@ -165,42 +166,12 @@ private:
 
         // Check include patterns
         for (const auto& pattern : includePatterns_) {
-            if (matchesPattern(fileName, pattern)) {
+            if (yams::common::wildcard_match(fileName, pattern)) {
                 return true;
             }
         }
 
         return false;
-    }
-
-    bool matchesPattern(const std::string& str, const std::string& pattern) {
-        // Efficient iterative wildcard matching (* and ?)
-        size_t strIdx = 0, patIdx = 0;
-        size_t strLen = str.length(), patLen = pattern.length();
-        size_t lastWildcard = std::string::npos, lastMatch = 0;
-
-        while (strIdx < strLen) {
-            if (patIdx < patLen && (pattern[patIdx] == '?' || pattern[patIdx] == str[strIdx])) {
-                strIdx++;
-                patIdx++;
-            } else if (patIdx < patLen && pattern[patIdx] == '*') {
-                lastWildcard = patIdx;
-                lastMatch = strIdx;
-                patIdx++;
-            } else if (lastWildcard != std::string::npos) {
-                patIdx = lastWildcard + 1;
-                lastMatch++;
-                strIdx = lastMatch;
-            } else {
-                return false;
-            }
-        }
-
-        while (patIdx < patLen && pattern[patIdx] == '*') {
-            patIdx++;
-        }
-
-        return patIdx == patLen;
     }
 
     Result<std::string>

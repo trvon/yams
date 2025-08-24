@@ -282,6 +282,34 @@ std::shared_ptr<vector::EmbeddingGenerator> YamsCLI::getEmbeddingGenerator() {
     return embeddingGenerator_;
 }
 
+std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
+    std::lock_guard<std::mutex> lock(appContextMutex_);
+
+    if (!appContext_) {
+        // Ensure storage is initialized before creating context
+        auto initResult = ensureStorageInitialized();
+        if (!initResult) {
+            spdlog::error("Failed to initialize storage for AppContext: {}",
+                          initResult.error().message);
+            return nullptr;
+        }
+
+        // Create the app context with all available components
+        appContext_ = std::make_shared<app::services::AppContext>();
+        appContext_->store = getContentStore();
+        appContext_->searchExecutor = getSearchExecutor();
+        appContext_->metadataRepo = getMetadataRepository();
+
+        // HybridEngine may not be available, that's ok
+        // TODO: Add hybrid engine initialization if needed
+        appContext_->hybridEngine = nullptr;
+
+        spdlog::debug("Created AppContext for services");
+    }
+
+    return appContext_;
+}
+
 Result<void> YamsCLI::initializeStorage() {
     try {
         // Create data directory if it doesn't exist

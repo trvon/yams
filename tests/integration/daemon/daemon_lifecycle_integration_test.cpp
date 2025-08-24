@@ -27,7 +27,7 @@ protected:
         config_.pidFile = pidFile_;
         config_.logFile = logFile_;
         config_.workerThreads = 2;
-        config_.maxMemoryGb = 0.5;
+        config_.maxMemoryGb = 1;
 
         clientConfig_.socketPath = socketPath_;
         clientConfig_.autoStart = false;
@@ -389,7 +389,7 @@ TEST_F(DaemonLifecycleIntegrationTest, ConcurrentOperations) {
     std::atomic<int> errorCount{0};
 
     for (int i = 0; i < numThreads; ++i) {
-        threads.emplace_back([this, &successCount, &errorCount, i]() {
+        threads.emplace_back([this, &successCount, &errorCount]() {
             DaemonClient client(clientConfig_);
 
             for (int j = 0; j < 10; ++j) {
@@ -406,7 +406,8 @@ TEST_F(DaemonLifecycleIntegrationTest, ConcurrentOperations) {
                         else
                             errorCount++;
                     } else {
-                        SearchRequest req{"test", 5};
+                        SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
+                                          false,  false, false, false, 0,   0,  0,         ""};
                         if (client.search(req) || true)
                             successCount++; // May fail if no data
                         else

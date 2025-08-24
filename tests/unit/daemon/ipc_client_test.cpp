@@ -126,9 +126,8 @@ TEST_F(IpcClientTest, GenericCallSearch) {
     auto connectResult = client.connect();
     ASSERT_TRUE(connectResult);
 
-    SearchRequest req{"test query", 10};
-    req.fuzzy = false;
-    req.similarity = 0.8;
+    SearchRequest req{"test query", 10,    false, false, 0.8, {}, "keyword", false,
+                      false,        false, false, false, 0,   0,  0,         ""};
 
     auto result = client.call(req);
 
@@ -150,7 +149,8 @@ TEST_F(IpcClientTest, GenericCallGet) {
     ASSERT_TRUE(connectResult);
 
     GetRequest req;
-    req.hash = "nonexistent123";
+    // Use a valid hex hash that doesn't exist (64 hex chars)
+    req.hash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
     auto result = client.call(req);
 
@@ -227,7 +227,8 @@ TEST_F(IpcClientTest, ConcurrentGenericCalls) {
                     else
                         failCount++;
                 } else {
-                    SearchRequest req{"test", 5};
+                    SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
+                                      false,  false, false, false, 0,   0,  0,         ""};
                     auto result = client.call(req);
                     // Search might fail if no data, count as success if proper response
                     if (result || result.error().code != ErrorCode::InvalidData) {
@@ -261,7 +262,8 @@ TEST_F(IpcClientTest, ProviderBackedGeneratorAvailable) {
     ASSERT_TRUE(connectResult);
 
     // Trigger a simple search (hybrid may be available depending on vector index)
-    SearchRequest req{"provider", 5};
+    SearchRequest req{"provider", 5,     false, false, 0.7, {}, "keyword", false,
+                      false,      false, false, false, 0,   0,  0,         ""};
     req.fuzzy = false;
     auto result = client.call(req);
 
@@ -295,7 +297,8 @@ TEST_F(IpcClientTest, ProviderBackedInitializationStatus) {
 
     // Even if models list is not directly exposed, a simple non-fuzzy search should be well-typed
     // with provider enabled
-    SearchRequest req{"provider-init", 3};
+    SearchRequest req{"provider-init", 3,     false, false, 0.7, {}, "keyword", false,
+                      false,           false, false, false, 0,   0,  0,         ""};
     req.fuzzy = false;
     auto r = client.call(req);
     ASSERT_TRUE(r) << "Search failed under provider-backed initialization";
@@ -314,7 +317,8 @@ TEST_F(IpcClientTest, ProviderDisabledFallbackToFuzzyOrFTS) {
     ASSERT_TRUE(connectResult);
 
     // Force fuzzy path to avoid vector dependency
-    SearchRequest req{"fallback case", 5};
+    SearchRequest req{"fallback case", 5,     false, false, 0.7, {}, "keyword", false,
+                      false,           false, false, false, 0,   0,  0,         ""};
     req.fuzzy = true;
     req.similarity = 0.7;
 
@@ -345,7 +349,8 @@ TEST_F(IpcClientTest, HybridSearchReturnsSeededResult) {
     ASSERT_TRUE(connectResult);
 
     // Query for the seeded term; limit small
-    SearchRequest req{"client_seed", 3};
+    SearchRequest req{"client_seed", 3,     false, false, 0.7, {}, "keyword", false,
+                      false,         false, false, false, 0,   0,  0,         ""};
     req.fuzzy = false;
 
     auto result = client.call(req);
@@ -381,7 +386,8 @@ TEST_F(IpcClientTest, LegacyMethodsCompatibility) {
     EXPECT_TRUE(statusResult.value().running);
 
     // Test legacy search() method
-    yams::daemon::SearchRequest searchReq{"test", 10};
+    yams::daemon::SearchRequest searchReq{"test", 10,    false, false, 0.7, {}, "keyword", false,
+                                          false,  false, false, false, 0,   0,  0,         ""};
     auto searchResult = client.search(searchReq);
     // May fail if no data, but should return proper type
     if (searchResult) {
@@ -437,7 +443,8 @@ TEST_F(IpcClientTest, RequestTimeout) {
     ASSERT_TRUE(connectResult);
 
     // This might timeout depending on daemon response time
-    yams::daemon::SearchRequest req{"complex query", 1000};
+    yams::daemon::SearchRequest req{"complex query", 1000,  false, false, 0.7, {}, "keyword", false,
+                                    false,           false, false, false, 0,   0,  0,         ""};
     auto result = client.call(req);
 
     // Either succeeds or times out, but shouldn't crash

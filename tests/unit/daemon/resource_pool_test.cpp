@@ -240,7 +240,7 @@ TEST_F(ResourcePoolTest, ConcurrentAcquisition) {
 
     std::vector<std::thread> threads;
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &successCount, &failCount, acquisitionsPerThread]() {
+        threads.emplace_back([this, &successCount, &failCount]() {
             for (int i = 0; i < acquisitionsPerThread; ++i) {
                 auto result = pool_->acquire(100ms);
                 if (result) {
@@ -356,8 +356,9 @@ TEST_F(ResourcePoolTest, Statistics) {
         return Result<std::shared_ptr<TestResource>>(createResource(id));
     });
 
-    auto stats1 = pool_->getStats();
     // Check initial stats
+    auto stats1 = pool_->getStats();
+    EXPECT_GT(stats1.totalResources, 0);
 
     // Acquire and release
     {

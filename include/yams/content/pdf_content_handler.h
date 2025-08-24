@@ -21,6 +21,8 @@ public:
     // IContentHandler interface
     std::string name() const override { return "PdfContentHandler"; }
 
+    int priority() const override { return 50; } // High priority for PDF files
+
     bool canHandle(const detection::FileSignature& signature) const override;
 
     std::vector<std::string> supportedMimeTypes() const override;

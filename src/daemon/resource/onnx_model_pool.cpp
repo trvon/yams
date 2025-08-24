@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 
 namespace yams::daemon {
 
@@ -58,6 +59,9 @@ public:
         try {
             spdlog::info("[ONNX] Creating Ort::Session for model '{}' at {}", modelName_.c_str(),
                          modelPath_.c_str());
+
+            // Create session directly - no async wrapper needed for local file operations
+            // This matches the working ModelManager approach used by HybridBackend
             session_ = std::make_unique<Ort::Session>(*env_, modelPath_.c_str(), *sessionOptions_);
 
             // Get input/output information
@@ -175,11 +179,9 @@ OnnxModelSession::OnnxModelSession(const std::string& modelPath, const std::stri
         info_.memoryUsageBytes = fs::file_size(modelPath);
     }
 
-    // Load the model
-    if (auto result = pImpl->loadModel(); result) {
-        info_.embeddingDim = pImpl->getEmbeddingDim();
-        info_.maxSequenceLength = pImpl->getMaxSequenceLength();
-    }
+    // Don't load the model in constructor - use lazy loading instead
+    // Model will be loaded on first use in generateEmbedding()
+    spdlog::debug("[ONNX] Created session for '{}' (lazy loading enabled)", modelName);
 }
 
 OnnxModelSession::~OnnxModelSession() = default;
@@ -246,11 +248,17 @@ Result<void> OnnxModelPool::initialize() {
 
     spdlog::info("Initializing ONNX model pool with max {} models", config_.maxLoadedModels);
 
-    // Preload configured models
+    // Start background preloading if configured (non-blocking)
     if (!config_.lazyLoading && !config_.preloadModels.empty()) {
-        if (auto result = preloadModels(); !result) {
-            spdlog::warn("Failed to preload some models: {}", result.error().message);
-        }
+        // Launch preloading in background thread to avoid blocking
+        std::thread([this]() {
+            spdlog::info("Starting background model preloading");
+            if (auto result = preloadModels(); !result) {
+                spdlog::warn("Failed to preload some models: {}", result.error().message);
+            } else {
+                spdlog::info("Background model preloading completed");
+            }
+        }).detach();
     }
 
     initialized_ = true;
@@ -335,9 +343,50 @@ std::vector<std::string> OnnxModelPool::getLoadedModels() const {
 }
 
 Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
+    // Quick check if already loaded (with minimal lock time)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = models_.find(modelName);
+        if (it != models_.end() && it->second.pool) {
+            return Result<void>(); // Already loaded
+        }
+    }
+
+    // Resolve model path WITHOUT holding the lock
+    spdlog::debug("Resolving model path for: {}", modelName);
+    std::string modelPath = resolveModelPath(modelName);
+
+    // Direct filesystem check - no async wrapper needed for local files
+    bool fileExists = false;
+    try {
+        fileExists = fs::exists(modelPath) && fs::is_regular_file(modelPath);
+    } catch (const std::exception& e) {
+        spdlog::warn("Error checking model file existence: {}", e.what());
+    }
+
+    if (!fileExists) {
+        // Log at info level so users know why models aren't loading
+        spdlog::info("Model file not found: {} (searched for: {})", modelName, modelPath);
+        spdlog::info("Download the model with: yams model --download {}", modelName);
+        return Error{ErrorCode::NotFound,
+                     "Model file not found: " + modelPath +
+                         ". Download with: yams model --download " + modelName +
+                         " or set YAMS_ALLOW_MODEL_DOWNLOAD=1 for automatic downloads"};
+    }
+
+    // Check file size directly - no async wrapper needed for local files
+    size_t modelSize = 0;
+    try {
+        modelSize = fs::file_size(modelPath);
+    } catch (const std::exception& e) {
+        spdlog::warn("Error getting model file size: {}", e.what());
+        modelSize = 100 * 1024 * 1024; // Assume 100MB if can't determine
+    }
+
+    // Now acquire lock to modify shared state
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Check if already loaded
+    // Double-check it wasn't loaded while we were checking filesystem
     auto it = models_.find(modelName);
     if (it != models_.end() && it->second.pool) {
         return Result<void>(); // Already loaded
@@ -355,20 +404,7 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
         evictLRU(1);
     }
 
-    // Resolve model path
-    std::string modelPath = resolveModelPath(modelName);
-    if (!fs::exists(modelPath) || !fs::is_regular_file(modelPath)) {
-        // Use debug level for expected failures (e.g., in tests)
-        // to avoid log spam when models are intentionally missing
-        spdlog::debug("Model file not found: {} (searched for: {})", modelName, modelPath);
-        return Error{
-            ErrorCode::NotFound,
-            "Model file not found: " + modelPath +
-                ". Please download the model to ~/.yams/models/ or /usr/local/share/yams/models/"};
-    }
-
     // Check memory constraints
-    size_t modelSize = fs::file_size(modelPath);
     if (!canLoadModel(modelSize)) {
         return Error{ErrorCode::ResourceExhausted, "Insufficient memory to load model"};
     }
@@ -385,8 +421,8 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     poolConfig.maxSize = 3; // Allow up to 3 concurrent users per model
     poolConfig.maxIdle = 2;
     poolConfig.idleTimeout = config_.modelIdleTimeout;
-    // Respect lazy-loading: if enabled, don't pre-create sessions here to avoid blocking.
-    poolConfig.preCreateResources = !config_.lazyLoading;
+    // Always use lazy loading to prevent blocking on model load
+    poolConfig.preCreateResources = false;
 
     // Create embedding config
     vector::EmbeddingConfig embConfig;
@@ -442,10 +478,13 @@ Result<void> OnnxModelPool::preloadModels() {
     for (const auto& modelName : config_.preloadModels) {
         spdlog::info("Preloading model: {}", modelName);
 
-        if (auto result = loadModel(modelName); !result) {
+        // Load model directly - no async wrapper needed
+        auto result = loadModel(modelName);
+        if (!result) {
             spdlog::warn("Failed to preload model {}: {}", modelName, result.error().message);
         } else {
             // Mark as hot model
+            std::lock_guard<std::mutex> lock(mutex_);
             auto it = models_.find(modelName);
             if (it != models_.end()) {
                 it->second.isHot = true;
@@ -556,10 +595,18 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
         "/usr/local/share/yams/models/" + modelName + "/" + modelName + ".onnx",
         "/usr/local/share/yams/models/" + modelName + ".onnx"};
 
+    // Direct filesystem checks - no async, no timeouts needed for local files
     for (const auto& path : searchPaths) {
-        if (!path.empty() && fs::exists(path)) {
-            spdlog::debug("Found model at: {}", path);
-            return path;
+        if (path.empty())
+            continue;
+
+        try {
+            if (fs::exists(path)) {
+                spdlog::debug("Found model at: {}", path);
+                return path;
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Error checking path {}: {}", path, e.what());
         }
     }
 

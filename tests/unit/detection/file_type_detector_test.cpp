@@ -17,8 +17,9 @@ protected:
         nonExistentPath = testDataDir / "non_existent.json";
 
         // Create test files with known signatures
-        createTestFile("test.jpg", {0xFF, 0xD8, 0xFF, 0xE0});  // JPEG
-        createTestFile("test.png", {0x89, 0x50, 0x4E, 0x47});  // PNG
+        createTestFile("test.jpg", {0xFF, 0xD8, 0xFF, 0xE0}); // JPEG
+        createTestFile("test.png", {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A,
+                                    0x0A});                    // PNG (full 8-byte signature)
         createTestFile("test.pdf", {0x25, 0x50, 0x44, 0x46});  // PDF
         createTestFile("test.zip", {0x50, 0x4B, 0x03, 0x04});  // ZIP
         createTestFile("test.json", {0x7B, 0x22, 0x74, 0x65}); // JSON (starts with {"te)
@@ -71,8 +72,16 @@ TEST_F(FileTypeDetectorTest, InitializeWithNonExistentFile) {
 
 TEST_F(FileTypeDetectorTest, DetectFromBuffer_JPEG) {
     FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
+    // Use the actual magic_numbers.json if it exists, otherwise use built-in patterns
+    fs::path actualMagicFile =
+        fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "data" /
+        "magic_numbers.json";
+    if (fs::exists(actualMagicFile)) {
+        config.patternsFile = actualMagicFile;
+        config.useCustomPatterns = true;
+    } else {
+        config.useCustomPatterns = false; // Use built-in patterns
+    }
     FileTypeDetector::instance().initialize(config);
 
     std::vector<std::byte> jpegData = {std::byte(0xFF), std::byte(0xD8), std::byte(0xFF),
@@ -89,12 +98,21 @@ TEST_F(FileTypeDetectorTest, DetectFromBuffer_JPEG) {
 
 TEST_F(FileTypeDetectorTest, DetectFromBuffer_PNG) {
     FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
+    // Use the actual magic_numbers.json if it exists, otherwise use built-in patterns
+    fs::path actualMagicFile =
+        fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "data" /
+        "magic_numbers.json";
+    if (fs::exists(actualMagicFile)) {
+        config.patternsFile = actualMagicFile;
+        config.useCustomPatterns = true;
+    } else {
+        config.useCustomPatterns = false; // Use built-in patterns
+    }
     FileTypeDetector::instance().initialize(config);
 
     std::vector<std::byte> pngData = {std::byte(0x89), std::byte(0x50), std::byte(0x4E),
-                                      std::byte(0x47)};
+                                      std::byte(0x47), std::byte(0x0D), std::byte(0x0A),
+                                      std::byte(0x1A), std::byte(0x0A)};
 
     auto result = FileTypeDetector::instance().detectFromBuffer(pngData);
     ASSERT_TRUE(result.has_value()) << "Should detect PNG from buffer";
@@ -212,7 +230,8 @@ TEST_F(FileTypeDetectorTest, ClearCache) {
     FileTypeDetector::instance().detectFromBuffer(jpegData);
 
     std::vector<std::byte> pngData = {std::byte(0x89), std::byte(0x50), std::byte(0x4E),
-                                      std::byte(0x47)};
+                                      std::byte(0x47), std::byte(0x0D), std::byte(0x0A),
+                                      std::byte(0x1A), std::byte(0x0A)};
     FileTypeDetector::instance().detectFromBuffer(pngData);
 
     auto statsBefore = FileTypeDetector::instance().getCacheStats();

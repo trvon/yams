@@ -1,4 +1,6 @@
 #include <spdlog/spdlog.h>
+#include <yams/app/services/factory.hpp>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
@@ -41,6 +43,9 @@ public:
         auto* cmd = app.add_subcommand("list", getDescription());
         cmd->alias("ls"); // Add ls as alias for list
 
+        cmd->add_option("--name", namePattern_,
+                        "Filter by name pattern (supports wildcards: * and ?)");
+
         cmd->add_option("--format", format_, "Output format: table, json, csv, minimal")
             ->default_val("table")
             ->check(CLI::IsMember({"table", "json", "csv", "minimal"}));
@@ -54,6 +59,8 @@ public:
         cmd->add_option("--offset", offset_, "Offset for pagination")->default_val(0);
         cmd->add_option("--recent", recentCount_, "Show N most recent documents");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
+        cmd->add_flag("--paths-only", pathsOnly_,
+                      "Output only file paths, one per line (useful for scripting)");
 
         // New options for enhanced metadata display
         cmd->add_flag("--show-snippets", showSnippets_, "Show content previews (default: true)")
@@ -88,10 +95,6 @@ public:
         cmd->add_option("--indexed-after", indexedAfter_, "Show files indexed after this time");
         cmd->add_option("--indexed-before", indexedBefore_, "Show files indexed before this time");
 
-        // Filter options
-        cmd->add_option("--tags", filterTags_,
-                        "Filter documents by tags (comma-separated, e.g., 'work,important')");
-
         // Change tracking options
         cmd->add_flag("--changes", showChanges_,
                       "Show documents with recent modifications (last 24h)");
@@ -122,261 +125,258 @@ public:
 
     Result<void> execute() override {
         try {
-            // Try daemon-first for simple list (no heavy filters)
-            if (!binaryOnly_ && !textOnly_ && fileType_.empty() && mimeType_.empty() &&
-                extensions_.empty() && createdAfter_.empty() && createdBefore_.empty() &&
-                modifiedAfter_.empty() && modifiedBefore_.empty() && indexedAfter_.empty() &&
-                indexedBefore_.empty() && !showChanges_ && sinceTime_.empty() && !showDiffTags_ &&
-                !showDeleted_) {
-                yams::daemon::ListRequest dreq;
-                dreq.limit = static_cast<size_t>(recentCount_ > 0 ? recentCount_ : limit_);
-                dreq.recent = true; // respect recent ordering
-                auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
-                    if (format_ == "json") {
-                        nlohmann::json j;
-                        j["total"] = resp.totalCount;
-                        nlohmann::json items = nlohmann::json::array();
-                        for (const auto& e : resp.items) {
-                            items.push_back({{"hash", e.hash},
-                                             {"path", e.path},
-                                             {"name", e.name},
-                                             {"size", e.size}});
-                        }
-                        j["items"] = items;
-                        std::cout << j.dump(2) << std::endl;
-                    } else {
-                        for (const auto& e : resp.items) {
-                            if (format_ == "minimal") {
-                                std::cout << e.path << "\n";
-                            } else {
-                                std::cout << e.name << "\t" << e.size << "\t"
-                                          << e.hash.substr(0, 12) << "\t" << e.path << "\n";
-                            }
-                        }
+            // Always try daemon-first approach with full protocol mapping for PBI-001 compliance
+            yams::daemon::ListRequest dreq;
+
+            // Map all CLI options to daemon protocol fields
+            // Basic pagination and sorting
+            dreq.limit = limit_;
+            dreq.offset = offset_;
+            dreq.recentCount = recentCount_;
+            dreq.recent = (recentCount_ > 0) || (limit_ <= 100); // backward compatibility
+
+            // Format and display options
+            dreq.format = format_;
+            dreq.sortBy = sortBy_;
+            dreq.reverse = reverse_;
+            dreq.verbose = verbose_ || cli_->getVerbose();
+            dreq.pathsOnly = pathsOnly_;
+            dreq.showSnippets = showSnippets_ && !noSnippets_;
+            dreq.snippetLength = snippetLength_;
+            dreq.showMetadata = showMetadata_;
+            dreq.showTags = showTags_;
+            dreq.groupBySession = groupBySession_;
+            dreq.noSnippets = noSnippets_;
+
+            // File type filters
+            dreq.fileType = fileType_;
+            dreq.mimeType = mimeType_;
+            dreq.extensions = extensions_;
+            dreq.binaryOnly = binaryOnly_;
+            dreq.textOnly = textOnly_;
+
+            // Time filters
+            dreq.createdAfter = createdAfter_;
+            dreq.createdBefore = createdBefore_;
+            dreq.modifiedAfter = modifiedAfter_;
+            dreq.modifiedBefore = modifiedBefore_;
+            dreq.indexedAfter = indexedAfter_;
+            dreq.indexedBefore = indexedBefore_;
+
+            // Change tracking
+            dreq.showChanges = showChanges_;
+            dreq.sinceTime = sinceTime_;
+            dreq.showDiffTags = showDiffTags_;
+            dreq.showDeleted = showDeleted_;
+            dreq.changeWindow = changeWindow_;
+
+            // Tag filtering (legacy tags field still used by daemon)
+            dreq.tags = {}; // Keep empty for backward compatibility
+            dreq.filterTags = filterTags_;
+            dreq.matchAllTags = false; // Use filterTags for actual filtering
+
+            // Name pattern filtering
+            dreq.namePattern = namePattern_;
+
+            auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
+                // Handle paths-only output
+                if (pathsOnly_) {
+                    for (const auto& e : resp.items) {
+                        std::cout << e.path << std::endl;
                     }
                     return Result<void>();
-                };
-                auto fallback = [&]() -> Result<void> {
-                    return Error{ErrorCode::NotImplemented, "local"};
-                };
-                if (auto d = daemon_first(dreq, fallback, render); d)
+                }
+
+                // Convert daemon response to EnhancedDocumentInfo for display compatibility
+                std::vector<EnhancedDocumentInfo> documents;
+
+                for (const auto& e : resp.items) {
+                    EnhancedDocumentInfo doc;
+
+                    // Map daemon ListEntry to EnhancedDocumentInfo
+                    doc.info.fileName = e.fileName.empty() ? e.name : e.fileName;
+                    doc.info.filePath = e.path;
+                    doc.info.sha256Hash = e.hash;
+                    doc.info.fileExtension = e.extension;
+                    doc.info.fileSize = e.size;
+                    doc.info.mimeType = e.mimeType;
+
+                    // Convert timestamps
+                    doc.info.createdTime = std::chrono::system_clock::from_time_t(e.created);
+                    doc.info.modifiedTime = std::chrono::system_clock::from_time_t(e.modified);
+                    doc.info.indexedTime = std::chrono::system_clock::from_time_t(e.indexed);
+
+                    // Content and metadata
+                    doc.contentSnippet = e.snippet;
+                    doc.language = e.language;
+                    doc.extractionMethod = e.extractionMethod;
+                    doc.hasContent = !e.snippet.empty();
+
+                    // Handle metadata and tags
+                    for (const auto& [key, value] : e.metadata) {
+                        metadata::MetadataValue metaVal;
+                        metaVal.value = value;
+                        doc.metadata[key] = metaVal;
+                    }
+
+                    documents.push_back(doc);
+                }
+
+                // Handle diff-tags grouping if requested
+                if (showDiffTags_) {
+                    outputDiffTags(documents);
                     return Result<void>();
-            }
+                }
+
+                // Output results - respect global --json flag
+                std::string effectiveFormat = format_;
+                if (effectiveFormat == "table" && cli_->getJsonOutput()) {
+                    effectiveFormat = "json";
+                }
+
+                if (effectiveFormat == "json") {
+                    outputJson(documents);
+                } else if (effectiveFormat == "csv") {
+                    outputCsv(documents);
+                } else if (effectiveFormat == "minimal") {
+                    outputMinimal(documents);
+                } else {
+                    outputTable(documents);
+                }
+
+                return Result<void>();
+            };
+
+            auto fallback = [&]() -> Result<void> { return executeWithServices(); };
+
+            if (auto d = daemon_first(dreq, fallback, render); d)
+                return Result<void>();
+
+            // Fallback to service-based approach
+            return executeWithServices();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+private:
+    Result<void> executeWithServices() {
+        try {
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;
             }
 
-            auto store = cli_->getContentStore();
-            if (!store) {
-                return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+            auto appContext = cli_->getAppContext();
+            if (!appContext) {
+                return Error{ErrorCode::NotInitialized, "App context not available"};
+            }
+            auto documentService = app::services::makeDocumentService(*appContext);
+            if (!documentService) {
+                return Error{ErrorCode::NotInitialized, "Document service not available"};
             }
 
-            // Get metadata repository
-            auto metadataRepo = cli_->getMetadataRepository();
-            if (!metadataRepo) {
-                spdlog::warn(
-                    "Metadata repository not available, falling back to filesystem scanning");
+            // Map CLI options to service request
+            app::services::ListDocumentsRequest serviceReq;
+
+            // Basic options
+            serviceReq.limit = limit_;
+            serviceReq.offset = offset_;
+            if (recentCount_ > 0) {
+                serviceReq.recent = recentCount_;
+            }
+
+            // Name pattern filter
+            serviceReq.pattern = namePattern_;
+
+            // File type filters
+            serviceReq.type = fileType_;
+            serviceReq.mime = mimeType_;
+            serviceReq.extension = extensions_;
+            serviceReq.binary = binaryOnly_;
+            serviceReq.text = textOnly_;
+
+            // Time filters
+            serviceReq.createdAfter = createdAfter_;
+            serviceReq.createdBefore = createdBefore_;
+            serviceReq.modifiedAfter = modifiedAfter_;
+            serviceReq.modifiedBefore = modifiedBefore_;
+            serviceReq.indexedAfter = indexedAfter_;
+            serviceReq.indexedBefore = indexedBefore_;
+
+            // Change tracking
+            serviceReq.changes = showChanges_;
+            serviceReq.since = sinceTime_;
+            serviceReq.diffTags = showDiffTags_;
+            serviceReq.showDeleted = showDeleted_;
+            serviceReq.changeWindow = changeWindow_;
+
+            // Display options
+            serviceReq.format = format_;
+            serviceReq.showSnippets = showSnippets_ && !noSnippets_;
+            serviceReq.snippetLength = snippetLength_;
+            serviceReq.showMetadata = showMetadata_;
+            serviceReq.showTags = showTags_;
+            serviceReq.groupBySession = groupBySession_;
+            serviceReq.verbose = verbose_ || cli_->getVerbose();
+
+            // Sorting
+            serviceReq.sortBy = sortBy_;
+            serviceReq.reverse = reverse_;
+
+            // Call service
+            auto result = documentService->list(serviceReq);
+            if (!result) {
+                spdlog::warn("Service failed, falling back to filesystem scanning: {}",
+                             result.error().message);
                 return fallbackToFilesystemScanning();
             }
 
-            // Get all documents from metadata repository
-            auto documentsResult = metadataRepo->findDocumentsByPath("%");
-            if (!documentsResult) {
-                spdlog::warn("Failed to query documents from metadata repository: {}",
-                             documentsResult.error().message);
-                return fallbackToFilesystemScanning();
-            }
+            const auto& serviceResponse = result.value();
 
-            spdlog::debug("Found {} documents in metadata repository",
-                          documentsResult.value().size());
-
+            // Convert service response to legacy EnhancedDocumentInfo for display
             std::vector<EnhancedDocumentInfo> documents;
-
-            // Initialize file type detector if needed for filtering
-            bool needFileTypeDetection =
-                !fileType_.empty() || !mimeType_.empty() || binaryOnly_ || textOnly_;
-            if (needFileTypeDetection) {
-                detection::FileTypeDetectorConfig config;
-                config.patternsFile = YamsCLI::findMagicNumbersFile();
-                config.useCustomPatterns = !config.patternsFile.empty();
-                detection::FileTypeDetector::instance().initialize(config);
-            }
-
-            // Process each document and enrich with metadata and content
-            for (const auto& docInfo : documentsResult.value()) {
-                // Apply time filters
-                if (!applyTimeFilters(docInfo)) {
-                    continue;
-                }
-
-                // Apply change tracking filters (skip if showing diff-tags, since it needs all
-                // docs)
-                if (!showDiffTags_ && !applyChangeFilters(docInfo)) {
-                    continue;
-                }
-
-                // Apply file type filters
-                if (!applyFileTypeFilters(docInfo)) {
-                    continue;
-                }
-
+            for (const auto& docEntry : serviceResponse.documents) {
                 EnhancedDocumentInfo doc;
-                doc.info = docInfo;
 
-                // Get additional metadata
-                if (showMetadata_ || showTags_ || !filterTags_.empty()) {
-                    auto metadataResult = metadataRepo->getAllMetadata(docInfo.id);
-                    if (metadataResult) {
-                        doc.metadata = metadataResult.value();
+                // Convert DocumentEntry to DocumentInfo
+                doc.info.fileName = docEntry.fileName;
+                doc.info.filePath = docEntry.path;
+                doc.info.sha256Hash = docEntry.hash;
+                doc.info.fileExtension = docEntry.extension;
+                doc.info.fileSize = docEntry.size;
+                doc.info.mimeType = docEntry.mimeType;
+
+                // Convert timestamps
+                doc.info.createdTime = std::chrono::system_clock::from_time_t(docEntry.created);
+                doc.info.modifiedTime = std::chrono::system_clock::from_time_t(docEntry.modified);
+                doc.info.indexedTime = std::chrono::system_clock::from_time_t(docEntry.indexed);
+
+                // Handle metadata and tags
+                if (!docEntry.metadata.empty()) {
+                    for (const auto& [key, value] : docEntry.metadata) {
+                        metadata::MetadataValue metaVal;
+                        metaVal.value = value;
+                        doc.metadata[key] = metaVal;
                     }
                 }
 
-                // Apply tag filter if specified
-                if (!filterTags_.empty()) {
-                    // Parse comma-separated tags
-                    std::vector<std::string> requiredTags;
-                    std::stringstream ss(filterTags_);
-                    std::string tag;
-                    while (std::getline(ss, tag, ',')) {
-                        // Trim whitespace
-                        tag.erase(0, tag.find_first_not_of(" \t"));
-                        tag.erase(tag.find_last_not_of(" \t") + 1);
-                        if (!tag.empty()) {
-                            requiredTags.push_back(tag);
-                        }
-                    }
-
-                    // Check if document has any of the required tags
-                    bool hasTag = false;
-                    for (const auto& [key, value] : doc.metadata) {
-                        // Tags are stored with key="tag" as comma-separated values
-                        if (key == "tag") {
-                            // Parse the stored tags
-                            std::stringstream storedTagStream(value.value);
-                            std::string storedTag;
-                            while (std::getline(storedTagStream, storedTag, ',')) {
-                                // Trim whitespace from stored tag
-                                storedTag.erase(0, storedTag.find_first_not_of(" \t"));
-                                storedTag.erase(storedTag.find_last_not_of(" \t") + 1);
-
-                                // Check if this stored tag matches any required tag
-                                for (const auto& reqTag : requiredTags) {
-                                    if (storedTag == reqTag) {
-                                        hasTag = true;
-                                        break;
-                                    }
-                                }
-                                if (hasTag)
-                                    break;
-                            }
-                            if (hasTag)
-                                break;
-                        }
-                    }
-
-                    if (!hasTag) {
-                        continue; // Skip this document
-                    }
-                }
-
-                // Get content snippet if requested
-                bool isVerbose = verbose_ || cli_->getVerbose();
-                if ((showSnippets_ && !noSnippets_) || isVerbose) {
-                    auto contentResult = metadataRepo->getContent(docInfo.id);
-                    if (contentResult && contentResult.value()) {
-                        const auto& content = contentResult.value().value();
-                        doc.contentSnippet = extractSnippet(content.contentText, snippetLength_);
-                        doc.language = content.language;
-                        doc.extractionMethod = content.extractionMethod;
-                        doc.hasContent = true;
-                    }
+                // Handle content snippet
+                if (docEntry.snippet) {
+                    doc.contentSnippet = docEntry.snippet.value();
+                    doc.hasContent = true;
                 }
 
                 documents.push_back(doc);
             }
 
-            // Sort documents
-            if (sortBy_ == "name") {
-                std::sort(documents.begin(), documents.end(),
-                          [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                              return a.info.fileName < b.info.fileName;
-                          });
-            } else if (sortBy_ == "size") {
-                std::sort(documents.begin(), documents.end(),
-                          [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                              return a.info.fileSize < b.info.fileSize;
-                          });
-            } else if (sortBy_ == "hash") {
-                std::sort(documents.begin(), documents.end(),
-                          [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                              return a.info.sha256Hash < b.info.sha256Hash;
-                          });
-            } else { // date
-                std::sort(documents.begin(), documents.end(),
-                          [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                              return a.info.indexedTime < b.info.indexedTime;
-                          });
-            }
-
-            if (reverse_) {
-                std::reverse(documents.begin(), documents.end());
-            }
-
-            // If --recent is specified, sort by date (most recent first) and take N most recent
-            if (recentCount_ > 0) {
-                // Sort by date descending (most recent first) regardless of original sort
-                std::sort(documents.begin(), documents.end(),
-                          [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                              return a.info.indexedTime >
-                                     b.info.indexedTime; // Note: > for descending
-                          });
-
-                // Take only the N most recent
-                if (documents.size() > static_cast<size_t>(recentCount_)) {
-                    documents.resize(static_cast<size_t>(recentCount_));
+            // Handle paths-only output
+            if (pathsOnly_) {
+                for (const auto& doc : documents) {
+                    std::cout << doc.info.filePath << std::endl;
                 }
-
-                // Re-apply the original sort if it wasn't date
-                if (sortBy_ != "date") {
-                    if (sortBy_ == "name") {
-                        std::sort(documents.begin(), documents.end(),
-                                  [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                                      return a.info.fileName < b.info.fileName;
-                                  });
-                    } else if (sortBy_ == "size") {
-                        std::sort(documents.begin(), documents.end(),
-                                  [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                                      return a.info.fileSize < b.info.fileSize;
-                                  });
-                    } else if (sortBy_ == "hash") {
-                        std::sort(documents.begin(), documents.end(),
-                                  [](const EnhancedDocumentInfo& a, const EnhancedDocumentInfo& b) {
-                                      return a.info.sha256Hash < b.info.sha256Hash;
-                                  });
-                    }
-                    if (reverse_) {
-                        std::reverse(documents.begin(), documents.end());
-                    }
-                }
-            }
-
-            // Apply offset then limit (but only if --recent wasn't used, or for additional
-            // limiting)
-            if (offset_ > 0) {
-                if (documents.size() > static_cast<size_t>(offset_)) {
-                    documents.erase(documents.begin(),
-                                    documents.begin() + static_cast<size_t>(offset_));
-                } else {
-                    documents.clear();
-                }
-            }
-            // Only apply limit if --recent wasn't specified, or if limit is smaller than recent
-            if (limit_ > 0 && recentCount_ == 0 && documents.size() > static_cast<size_t>(limit_)) {
-                documents.resize(static_cast<size_t>(limit_));
-            } else if (limit_ > 0 && recentCount_ > 0 && limit_ < recentCount_ &&
-                       documents.size() > static_cast<size_t>(limit_)) {
-                documents.resize(static_cast<size_t>(limit_));
+                return Result<void>();
             }
 
             // Handle diff-tags grouping if requested
@@ -408,7 +408,6 @@ public:
         }
     }
 
-private:
     struct EnhancedDocumentInfo {
         metadata::DocumentInfo info;
         std::unordered_map<std::string, metadata::MetadataValue> metadata;
@@ -1051,14 +1050,15 @@ private:
     }
 
     YamsCLI* cli_ = nullptr;
+    std::string namePattern_; // Filter by name pattern
     std::string format_;
     std::string sortBy_;
     bool reverse_ = false;
     int limit_ = 100;
     bool verbose_ = false;
+    bool pathsOnly_ = false;
     int offset_ = 0;
-    int recentCount_ = 0;    // 0 means not set, show all
-    std::string filterTags_; // Comma-separated tags to filter by
+    int recentCount_ = 0; // 0 means not set, show all
 
     // New enhanced display options
     bool showSnippets_ = true;
@@ -1090,6 +1090,8 @@ private:
     bool showDeleted_ = false;
     std::string changeWindow_;
 
+    // Tag filtering
+    std::string filterTags_;
     // bool matchAllTags_ = false;  // Currently unused - reserved for future tag matching logic
 
     std::string getFileTypeIndicator(const EnhancedDocumentInfo& doc) {

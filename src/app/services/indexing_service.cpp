@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <yams/app/services/services.hpp>
+#include <yams/common/pattern_utils.h>
 
 namespace yams::app::services {
 
@@ -97,14 +98,12 @@ private:
 
     bool shouldIncludeFile(const std::string& path, const std::vector<std::string>& includePatterns,
                            const std::vector<std::string>& excludePatterns) {
-        // Simple pattern matching - could be enhanced with proper glob support
         std::filesystem::path filePath(path);
         std::string filename = filePath.filename().string();
-        std::string extension = filePath.extension().string();
 
         // Check exclude patterns first
         for (const auto& pattern : excludePatterns) {
-            if (filename.find(pattern) != std::string::npos || extension == pattern) {
+            if (yams::common::wildcard_match(filename, pattern)) {
                 return false;
             }
         }
@@ -116,7 +115,7 @@ private:
 
         // Check include patterns
         for (const auto& pattern : includePatterns) {
-            if (filename.find(pattern) != std::string::npos || extension == pattern) {
+            if (yams::common::wildcard_match(filename, pattern)) {
                 return true;
             }
         }

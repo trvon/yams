@@ -16,6 +16,9 @@ add_subdirectory(search)
 add_subdirectory(vector)
 add_subdirectory(detection)
 add_subdirectory(daemon)
+add_subdirectory(resolve)
+add_subdirectory(content)
+add_subdirectory(app)
 
 # Add MCP tests if tools are being built
 if(YAMS_BUILD_TOOLS)
