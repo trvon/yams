@@ -4,6 +4,7 @@
 #include <concepts>
 #include <cstdint>
 #include <format>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>

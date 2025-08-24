@@ -3,6 +3,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <unordered_map>
 #include <vector>

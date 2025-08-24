@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <stop_token>
 #include "IComponent.h"
 #include <yams/app/services/services.hpp>
