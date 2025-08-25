@@ -141,9 +141,7 @@ public:
             std::unique_ptr<mcp::ITransport> transport = std::make_unique<mcp::StdioTransport>();
             spdlog::info("MCP server initialized with stdio transport");
 
-            auto server =
-                std::make_unique<mcp::MCPServer>(store, searchExecutor, metadataRepo, hybridEngine,
-                                                 std::move(transport), &g_shutdown);
+            auto server = std::make_unique<mcp::MCPServer>(std::move(transport), &g_shutdown);
 
             // Run server until shutdown signal
             server->start();

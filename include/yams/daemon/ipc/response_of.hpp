@@ -31,7 +31,7 @@ template <> struct ResponseOf<ListRequest> {
     using type = ListResponse;
 };
 template <> struct ResponseOf<DeleteRequest> {
-    using type = SuccessResponse;
+    using type = DeleteResponse;
 };
 template <> struct ResponseOf<StatusRequest> {
     using type = StatusResponse;

@@ -190,6 +190,10 @@ Result<StatusResponse> DaemonClient::status() {
     return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
+Result<Response> DaemonClient::executeRequest(const Request& req) {
+    return sendRequest(req);
+}
+
 Result<void> DaemonClient::shutdown(bool graceful) {
     ShutdownRequest req;
     req.graceful = graceful;

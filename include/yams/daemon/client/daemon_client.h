@@ -152,6 +152,9 @@ public:
     Result<SuccessResponse> unloadModel(const UnloadModelRequest& req);
     Result<ModelStatusResponse> getModelStatus(const ModelStatusRequest& req);
 
+    // Public method to allow generic request sending by helpers
+    Result<Response> executeRequest(const Request& req);
+
     // Generic typed call (templated) – returns ResponseOfT<Req>
     template <class Req> Result<ResponseOfT<Req>> call(const Req& req);
 

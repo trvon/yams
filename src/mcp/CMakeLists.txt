@@ -16,6 +16,7 @@ target_link_libraries(yams_mcp
         yams_search
         yams_app_services
         yams_downloader
+        yams::daemon_ipc
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::SSL
@@ -61,3 +62,6 @@ target_include_directories(yams_mcp
 
 # Set C++ standard
 target_compile_features(yams_mcp PUBLIC cxx_std_20)
+
+# Ensure zlib is available for CRC32 in message_framing.cpp
+find_package(ZLIB REQUIRED)

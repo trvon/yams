@@ -131,6 +131,32 @@ jobs:
           echo "Conan profile configured:" >&2
           conan profile show >&2
 
+      - name: Setup Python (hosted Windows)
+        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Conan (hosted Windows)
+        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --user pipx
+          python -m pipx ensurepath
+          try {
+            pipx install conan --force
+          } catch {
+            Write-Host "pipx install failed; falling back to pip"
+            python -m pip install --upgrade conan
+          }
+          $scriptDir = "$env:PythonLocation\Scripts"
+          $localBin = "$env:USERPROFILE\.local\bin"
+          $env:PATH = "$localBin;$scriptDir;$env:PATH"
+          "$localBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          conan --version
+
       - name: Setup Conan Profile (hosted Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
         shell: pwsh
@@ -220,8 +246,21 @@ jobs:
           Remove-Item -Recurse -Force build\conan-release -ErrorAction SilentlyContinue
           Remove-Item -Force CMakeUserPresets.json -ErrorAction SilentlyContinue
 
+          # Ensure Conan is available (pipx first, fallback to pip), and update PATH
           python -m pip install --upgrade pip
-          python -m pip install conan
+          python -m pip install --user pipx
+          python -m pipx ensurepath
+          try {
+            pipx install conan --force
+          } catch {
+            Write-Host "pipx install failed; falling back to pip"
+            python -m pip install --upgrade conan
+          }
+          $scriptDir = "$env:PythonLocation\Scripts"
+          $localBin = "$env:USERPROFILE\.local\bin"
+          $env:PATH = "$localBin;$scriptDir;$env:PATH"
+          "$localBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           conan --version
 
           conan install . `
@@ -425,6 +464,18 @@ jobs:
           echo "Combined release notes:"
           cat "$COMBINED_NOTES"
 
+      - name: Publish matrix.json (expected platform count)
+        shell: bash
+        run: |
+          echo '{"total": 4}' > matrix.json
+
+      - name: Upload matrix metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix
+          path: matrix.json
+          retention-days: 1
+
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -448,6 +499,11 @@ jobs:
       contents: write
       actions: read
     steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: "*"
       - name: Check job completion status
         id: check-status
         shell: bash
@@ -460,13 +516,20 @@ jobs:
           EXPECTED_PLATFORMS=$(echo "$JOBS_JSON" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(Build and Release ([^"]*)\)".*/\1/p' | sed -n 's/Build and Release (\(.*\))/\1/p' | sort -u)
           TOTAL_EXPECTED=$(echo "$EXPECTED_PLATFORMS" | grep -c . || true)
 
-          # Count successful artifacts (platforms that produced release-* artifacts)
-          ARTIFACTS_JSON=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                                -H "Accept: application/vnd.github.v3+json" \
-                                -s "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100")
-          SUCCESS_COUNT=$(echo "$ARTIFACTS_JSON" | grep -o '"name":"release-[^"]*' | sed -E 's/.*"name":"release-([^"]*).*/\1/' | sort -u | grep -c . || true)
+          # Count successful artifacts from downloaded files (release-*)
+          if [ -d "release-artifacts" ]; then
+            # Count per-platform artifact directories (robust against file/dir listing quirks)
+            SUCCESS_COUNT=$(find "release-artifacts" -mindepth 1 -maxdepth 1 -type d -name 'release-*' 2>/dev/null | grep -c . || true)
+          else
+            SUCCESS_COUNT=0
+          fi
 
-          # Fallback: if we failed to detect expected platforms, assume expected equals number of artifacts found
+          # Determine expected builds:
+          # 1) Prefer matrix.json (if provided)
+          # 2) Otherwise, fall back to number of artifact groups downloaded
+          if [ -f "release-artifacts/matrix.json" ]; then
+            TOTAL_EXPECTED=$(cat "release-artifacts/matrix.json" | tr -d '\r' | grep -Eo '"total"[[:space:]]*:[[:space:]]*[0-9]+' | grep -Eo '[0-9]+' | head -1)
+          fi
           if [ -z "$TOTAL_EXPECTED" ] || [ "$TOTAL_EXPECTED" -eq 0 ]; then
             TOTAL_EXPECTED="$SUCCESS_COUNT"
           fi
@@ -550,12 +613,6 @@ jobs:
           # Store path for later use
           echo "grouped_changelog_file=$GROUPED_FILE" >> $GITHUB_OUTPUT
           echo "minor_version=$MINOR_VERSION" >> $GITHUB_OUTPUT
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
-          pattern: release-*
 
       - name: Prepare release assets
         shell: bash

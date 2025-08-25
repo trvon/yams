@@ -5,9 +5,35 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.7] - 2025-08-25
+
+### Added
+- Groundwork for PBI-007 (Folder tracking/sync architecture readiness): introduced daemon pooled request pattern across MCP/CLI boundaries.
+- Lightweight `daemon_first` wrapper in CLI that uses `DaemonClient::call<T>` to preserve daemon-first behavior while commands migrate to pooled execution.
+
+### Changed
+- MCPServer constructor simplified to `(std::unique_ptr<ITransport>, std::atomic<bool>*)`; serve command and yams-mcp tool updated to STDIO-only transport.
+- `daemon_helpers` generalized to accept generic callables (lambdas) instead of `std::function`, improving template deduction and avoiding copies.
+
+### Fixed
+- MCP tools/call responses were not rendered by some clients due to missing MCP content wrapper. Non-MCP-shaped tool results are now wrapped in a top-level content array.
+- search: paths_only results could be empty; fixed to return service-provided paths.
+- list: limit and offset were not wired from MCP -> services; pagination is now honored.
+- Protocol alignment: removed non-existent fields from daemon `SearchRequest` mapping and explicitly cast similarity to `double`.
+- Error handling: replaced non-existent `ErrorCode::Unavailable` with `ErrorCode::NetworkError`.
+- Type mapping: `DeleteRequest` now maps to `DeleteResponse` in response traits.
+- Duplicates: removed duplicate `clientInfo_`/`negotiatedProtocolVersion_` members and the extra `handleUpdateMetadata` definition in MCP.
+- Linking: integrated daemon IPC implementation into `yams_mcp` and linked `ZLIB::ZLIB` (CRC32) to resolve `AsyncSocket`/`ConnectionPool` and checksum undefined symbols.
+- Windows CI job fix (this will be a process)
+- Release build fix for artfact upload on partial success
+
+### Notes
+- CLI migration to pooled requests will proceed per-command; the temporary `daemon_first` wrapper keeps commands working until each is switched to the pooled manager.
+
 ## [v0.5.6] - 2025-08-24
 
 **CI version bump**
+- Release formatting fix
 
 ## [v0.5.5] - 2025-08-24
 

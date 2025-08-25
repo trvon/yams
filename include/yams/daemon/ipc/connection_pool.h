@@ -15,6 +15,9 @@
 
 namespace yams::daemon {
 
+// Forward declaration so we can use ConnectionFactory in ConnectionPool
+class ConnectionFactory;
+
 // Connection pool for efficient socket management
 class ConnectionPool {
 public:
@@ -33,6 +36,12 @@ public:
 
     explicit ConnectionPool(Config config = {});
     ~ConnectionPool();
+
+    // Configure a factory to create pooled connections (Unix or TCP)
+    void set_factory(std::shared_ptr<ConnectionFactory> factory) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        factory_ = std::move(factory);
+    }
 
     // RAII handle for pooled connections
     class ConnectionHandle {
@@ -114,11 +123,27 @@ private:
     [[nodiscard]] Result<std::unique_ptr<AsyncSocket>> create_connection();
     void prune_idle_connections();
 
+    // Apply pool-level socket options
+    Result<void> apply_socket_options(AsyncSocket& sock) {
+        if (config_.keepalive) {
+            if (auto r = sock.set_keepalive(true); !r)
+                return r;
+        }
+        if (config_.nodelay) {
+            if (auto r = sock.set_nodelay(true); !r)
+                return r;
+        }
+        return Result<void>();
+    }
+
     Config config_;
     mutable std::mutex mutex_;
     std::vector<PooledConnection> connections_;
     std::counting_semaphore<> available_semaphore_;
     std::atomic<size_t> active_count_{0};
+
+    // Factory for creating new connections
+    std::shared_ptr<ConnectionFactory> factory_;
 
     // Statistics
     std::atomic<size_t> total_acquisitions_{0};

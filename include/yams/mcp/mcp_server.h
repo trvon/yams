@@ -3,6 +3,7 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/core/types.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/tool_registry.h>
@@ -77,30 +78,67 @@ private:
  */
 class MCPServer {
 public:
-    MCPServer(std::shared_ptr<api::IContentStore> store,
-              std::shared_ptr<search::SearchExecutor> searchExecutor,
-              std::shared_ptr<metadata::MetadataRepository> metadataRepo,
-              std::shared_ptr<search::HybridSearchEngine> hybridEngine = nullptr,
-              std::unique_ptr<ITransport> transport = std::make_unique<StdioTransport>(),
-              std::atomic<bool>* externalShutdown = nullptr);
+    MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr);
     ~MCPServer();
 
-    /**
-     * Start the server and begin processing requests
-     */
     void start();
-
-    /**
-     * Stop the server
-     */
     void stop();
+    bool isRunning() const { return running_.load(); }
 
-    /**
-     * Check if server is running
-     */
-    bool isRunning() const { return running_; }
+private:
+    // Refactored members: No direct backend components
+    std::atomic<bool> running_{false};
+    std::unique_ptr<ITransport> transport_;
+    std::unique_ptr<ToolRegistry> toolRegistry_;
+    std::atomic<bool>* externalShutdown_;
+
+    // New PooledRequestManager for daemon communication
+    std::unique_ptr<
+        cli::PooledRequestManager<yams::daemon::SearchRequest, yams::daemon::SearchResponse>>
+        search_req_manager_;
+    std::unique_ptr<
+        cli::PooledRequestManager<yams::daemon::GrepRequest, yams::daemon::GrepResponse>>
+        grep_req_manager_;
+    std::unique_ptr<
+        cli::PooledRequestManager<yams::daemon::DownloadRequest, yams::daemon::DownloadResponse>>
+        download_req_manager_;
+    std::unique_ptr<cli::PooledRequestManager<yams::daemon::AddDocumentRequest,
+                                              yams::daemon::AddDocumentResponse>>
+        store_req_manager_;
+    std::unique_ptr<cli::PooledRequestManager<yams::daemon::GetRequest, yams::daemon::GetResponse>>
+        retrieve_req_manager_;
+    std::unique_ptr<
+        cli::PooledRequestManager<yams::daemon::ListRequest, yams::daemon::ListResponse>>
+        list_req_manager_;
+    std::unique_ptr<
+        cli::PooledRequestManager<yams::daemon::GetStatsRequest, yams::daemon::GetStatsResponse>>
+        stats_req_manager_;
+    std::unique_ptr<
+        cli::PooledRequestManager<yams::daemon::DeleteRequest, yams::daemon::DeleteResponse>>
+        delete_req_manager_;
+    std::unique_ptr<cli::PooledRequestManager<yams::daemon::UpdateDocumentRequest,
+                                              yams::daemon::UpdateDocumentResponse>>
+        update_req_manager_;
+
+    struct ClientInfo {
+        std::string name;
+        std::string version;
+    };
+
+    // Methods
+    MessageResult handleRequest(const nlohmann::json& request);
+    nlohmann::json initialize(const nlohmann::json& params);
+    nlohmann::json listTools();
+    nlohmann::json callTool(const std::string& name, const nlohmann::json& arguments);
+    nlohmann::json listResources();
+    nlohmann::json readResource(const std::string& uri);
+    nlohmann::json listPrompts();
+    void initializeToolRegistry();
+    nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
+    nlohmann::json createError(const nlohmann::json& id, int code, const std::string& message);
 
 #ifdef YAMS_TESTING
+public:
     // Public testing interface - only available when building tests
     json testListTools() { return listTools(); }
 
@@ -126,15 +164,6 @@ public:
 #endif
 
 private:
-    // MCP protocol methods with error handling
-    MessageResult handleRequest(const json& request);
-    json initialize(const json& params);
-    json listResources();
-    json listTools();
-    json listPrompts();
-    json callTool(const std::string& name, const json& arguments);
-    json readResource(const std::string& uri);
-
     // Modern C++20 tool handlers (type-safe, clean)
     Result<MCPSearchResponse> handleSearchDocuments(const MCPSearchRequest& req);
     Result<MCPGrepResponse> handleGrepDocuments(const MCPGrepRequest& req);
@@ -175,8 +204,6 @@ private:
     json listSnapshots(const json& args);
 
     // Helper methods
-    json createResponse(const json& id, const json& result);
-    json createError(const json& id, int code, const std::string& message);
 
     // Name resolution helpers (similar to CLI commands)
     Result<std::string> resolveNameToHash(const std::string& name);
@@ -237,13 +264,11 @@ private:
     std::string getFileTypeFromMime(const std::string& mimeType);
     bool isBinaryMimeType(const std::string& mimeType);
 
-private:
     // Core services
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<search::HybridSearchEngine> hybridEngine_;
-    std::unique_ptr<ITransport> transport_;
 
     // App context and services for business logic
     app::services::AppContext appContext_;
@@ -254,16 +279,8 @@ private:
     std::shared_ptr<app::services::IIndexingService> indexingService_;
     std::shared_ptr<app::services::IStatsService> statsService_;
 
-    // Modern tool registry
-    std::unique_ptr<ToolRegistry> toolRegistry_;
-
-    // Tool registry initialization
-    void initializeToolRegistry();
-
-    std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
     std::atomic<bool> readyPending_{false};
-    std::atomic<bool>* externalShutdown_{nullptr};
 
     // Server info
     struct {
@@ -272,10 +289,7 @@ private:
     } serverInfo_;
 
     // Client info (set during initialize)
-    struct {
-        std::string name;
-        std::string version;
-    } clientInfo_;
+    ClientInfo clientInfo_;
 
     // Negotiated protocol version (set during initialize)
     std::string negotiatedProtocolVersion_{"2024-11-05"};

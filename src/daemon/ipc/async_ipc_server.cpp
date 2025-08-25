@@ -134,25 +134,54 @@ Result<void> AsyncIpcServer::start() {
         return Error{ErrorCode::NetworkError, msg};
     }
 
+    // Set socket to non-blocking mode for the accept loop
+    int flags = fcntl(listen_fd_, F_GETFL, 0);
+    if (flags == -1) {
+        cleanup_socket();
+        running_ = false;
+        auto msg = std::string("Failed to get socket flags: ") + std::string(strerror(errno));
+        spdlog::error("AsyncIpcServer: {}", msg);
+        return Error{ErrorCode::NetworkError, msg};
+    }
+    if (fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) == -1) {
+        cleanup_socket();
+        running_ = false;
+        auto msg =
+            std::string("Failed to set socket non-blocking: ") + std::string(strerror(errno));
+        spdlog::error("AsyncIpcServer: {}", msg);
+        return Error{ErrorCode::NetworkError, msg};
+    }
+
     spdlog::info("AsyncIpcServer listening on {}", config_.socket_path.string());
 
     // Start a single IO thread for the event loop (kqueue doesn't support multiple threads)
     // The worker_threads will be used for processing requests, not for the IO loop
     io_thread_ = std::thread([this]() {
-        spdlog::debug("AsyncIpcServer IO thread started");
-        // Run until io_context_->stop() is called
-        io_context_->run();
-        spdlog::debug("AsyncIpcServer IO thread exiting");
+        try {
+            spdlog::debug("AsyncIpcServer IO thread started");
+            // Run until io_context_->stop() is called
+            io_context_->run();
+            spdlog::debug("AsyncIpcServer IO thread exiting");
+        } catch (const std::exception& e) {
+            spdlog::error("AsyncIpcServer IO thread crashed: {}", e.what());
+        } catch (...) {
+            spdlog::error("AsyncIpcServer IO thread crashed: unknown exception");
+        }
     });
 
     // Start accept thread
     accept_thread_ = std::thread([this]() {
-        spdlog::debug("AsyncIpcServer accept thread started");
-        auto token = stop_source_.get_token();
-        // Drive the accept loop synchronously within this thread
-        auto task = accept_loop(token);
-        task.get();
-        spdlog::debug("AsyncIpcServer accept thread exiting");
+        try {
+            spdlog::debug("AsyncIpcServer accept thread started");
+            auto token = stop_source_.get_token();
+            // Run accept loop synchronously
+            accept_loop_sync(token);
+            spdlog::debug("AsyncIpcServer accept thread exiting");
+        } catch (const std::exception& e) {
+            spdlog::error("AsyncIpcServer accept thread crashed: {}", e.what());
+        } catch (...) {
+            spdlog::error("AsyncIpcServer accept thread crashed: unknown exception");
+        }
     });
 
     stats_.total_connections = 0;
@@ -190,6 +219,18 @@ void AsyncIpcServer::stop() {
         io_thread_.join();
     }
 
+    // Ensure all retained client tasks have finished
+    {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        for (auto& t : client_tasks_) {
+            try {
+                t.get();
+            } catch (...) {
+                // ignore errors during shutdown
+            }
+        }
+    }
+
     for (auto& thread : worker_threads_) {
         if (thread.joinable()) {
             thread.join();
@@ -206,8 +247,8 @@ void AsyncIpcServer::stop() {
 Result<void> AsyncIpcServer::create_socket() {
     listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
-        return Error{ErrorCode::NetworkError,
-                     "Failed to create socket: " + std::string(strerror(errno))};
+        auto msg = std::string("Failed to create socket: ") + std::string(strerror(errno));
+        return Error{ErrorCode::NetworkError, msg};
     }
 
     // Set socket options
@@ -298,8 +339,8 @@ Result<void> AsyncIpcServer::bind_socket() {
     return Result<void>();
 }
 
-Task<void> AsyncIpcServer::accept_loop(std::stop_token token) {
-    spdlog::debug("Accept loop started");
+void AsyncIpcServer::accept_loop_sync(std::stop_token token) {
+    spdlog::debug("Accept loop started (synchronous)");
 
     while (!token.stop_requested() && running_) {
         // Accept new connection
@@ -358,11 +399,15 @@ Task<void> AsyncIpcServer::accept_loop(std::stop_token token) {
     }
 
     spdlog::debug("Accept loop exiting");
+}
+
+Task<void> AsyncIpcServer::accept_loop(std::stop_token token) {
+    // Coroutine version kept for compatibility but not used
     co_return;
 }
 
 Task<void> AsyncIpcServer::handle_client(AsyncSocket socket, std::stop_token token) {
-    spdlog::debug("Handling new client connection (active={}, total={})",
+    spdlog::debug("handle_client coroutine started (active={}, total={})",
                   stats_.active_connections.load(), stats_.total_connections.load());
 
     // Use the request handler to process the connection

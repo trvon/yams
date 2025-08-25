@@ -225,6 +225,8 @@ struct MCPListDocumentsRequest {
     bool binary = false;
     bool text = false;
     int recent = 0;
+    int limit = 100;
+    int offset = 0;
     std::string sortBy = "modified";
     std::string sortOrder = "desc";
 

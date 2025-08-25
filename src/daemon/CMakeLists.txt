@@ -30,6 +30,47 @@ target_compile_features(yams_daemon_client PUBLIC cxx_std_20)
 add_library(yams::daemon_client ALIAS yams_daemon_client)
 
 # ============================================================================
+# Daemon IPC Library (shared by daemon and MCP)
+# ============================================================================
+add_library(yams_daemon_ipc STATIC
+    ipc/async_socket.cpp
+    ipc/async_ipc_server.cpp
+    ipc/connection_pool.cpp
+    ipc/request_handler.cpp
+    ipc/retrieval_session.cpp
+    ipc/thread_pool.cpp
+)
+
+# Install daemon IPC library and export with YamsTargets so dependents are satisfied
+install(TARGETS yams_daemon_ipc
+    EXPORT YamsTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+target_include_directories(yams_daemon_ipc
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(yams_daemon_ipc
+    PUBLIC
+        yams::core
+        ZLIB::ZLIB          # For CRC32 in framing
+    PRIVATE
+        spdlog::spdlog
+)
+
+target_compile_features(yams_daemon_ipc PUBLIC cxx_std_20)
+
+# Create alias for daemon ipc
+add_library(yams::daemon_ipc ALIAS yams_daemon_ipc)
+
+# ============================================================================
 # Main Daemon Library
 # ============================================================================
 add_library(yams_daemon STATIC
@@ -37,12 +78,6 @@ add_library(yams_daemon STATIC
     components/RequestDispatcher.cpp
     components/LifecycleComponent.cpp
     components/ServiceManager.cpp
-    ipc/async_socket.cpp
-    ipc/async_ipc_server.cpp
-    ipc/connection_pool.cpp
-    ipc/request_handler.cpp
-    ipc/retrieval_session.cpp
-    ipc/thread_pool.cpp
     resource/mock_model_provider.cpp
     resource/plugin_loader.cpp
 )
@@ -64,12 +99,12 @@ target_link_libraries(yams_daemon
         yams_downloader
         yams_repair
         yams_app_services
+        yams::daemon_ipc
     PRIVATE
         spdlog::spdlog
         pthread
         ${CMAKE_DL_LIBS}  # For dlopen/dlsym
         # Removed: onnxruntime::onnxruntime (moved to plugin)
-        ZLIB::ZLIB  # For CRC32
 )
 
 # Note: ONNX plugin is now loaded dynamically at runtime, not linked statically
@@ -149,19 +184,19 @@ find_package(onnxruntime QUIET)
 
 if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
     message(STATUS "Building ONNX model provider plugin")
-    
+
     # Create ONNX plugin as a separate library
     add_library(yams_onnx_plugin SHARED
         resource/onnx_model_pool.cpp
         resource/onnx_model_provider.cpp
     )
-    
+
     target_include_directories(yams_onnx_plugin
         PRIVATE
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
             ${CMAKE_CURRENT_SOURCE_DIR}
     )
-    
+
     target_link_libraries(yams_onnx_plugin
         PRIVATE
             yams::core
@@ -169,17 +204,17 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
             onnxruntime::onnxruntime
             spdlog::spdlog
     )
-    
+
     target_compile_features(yams_onnx_plugin PUBLIC cxx_std_20)
-    
+
     # Install ONNX plugin to plugins directory
     install(TARGETS yams_onnx_plugin
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins
     )
-    
+
     # Create plugins directory during installation
     install(DIRECTORY DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins)
-    
+
     # Make plugin available for tests
     add_library(yams::onnx_plugin ALIAS yams_onnx_plugin)
 else()

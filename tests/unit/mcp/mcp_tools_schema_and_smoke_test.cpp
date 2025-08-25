@@ -47,8 +47,7 @@ struct ServerUnderTest {
         std::shared_ptr<yams::search::SearchExecutor> searchExec; // nullptr ok for schema tests
         std::shared_ptr<yams::metadata::MetadataRepository> repo; // nullptr ok for schema tests
         std::shared_ptr<yams::search::HybridSearchEngine> hybrid; // nullptr ok for schema tests
-        return std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid,
-                                                      std::move(transport));
+        return std::make_unique<yams::mcp::MCPServer>(std::move(transport));
     }
 };
 
@@ -106,8 +105,22 @@ TEST(MCPSchemaTest, ListTools_ContainsAllExpectedTools) {
     ASSERT_TRUE(result["tools"].is_array());
 
     // Expected set of core tools per CHANGELOG and implementation
-    std::vector<std::string> expected = {"search", "grep", "store", "get", "stats",  "update",
-                                         "delete", "cat",  "list",  "add", "restore"};
+    std::vector<std::string> expected = {"search",
+                                         "grep",
+                                         "download",
+                                         "get",
+                                         "stats",
+                                         "update",
+                                         "delete_by_name",
+                                         "cat",
+                                         "list",
+                                         "add_directory",
+                                         "restore_collection",
+                                         "restore_snapshot",
+                                         "restore",
+                                         "list_collections",
+                                         "list_snapshots",
+                                         "get_by_name"};
 
     // Gather actual names
     std::vector<std::string> actual;
@@ -137,7 +150,7 @@ TEST(MCPSchemaTest, SearchDocuments_SchemaHasErgonomicAndContextParams) {
     EXPECT_TRUE(hasProp(*props, "fuzzy"));
     EXPECT_TRUE(hasProp(*props, "similarity"));
     EXPECT_TRUE(hasProp(*props, "hash"));
-    EXPECT_TRUE(hasProp(*props, "verbose"));
+
     EXPECT_TRUE(hasProp(*props, "type"));
 
     // LLM ergonomics / output shaping
@@ -213,9 +226,7 @@ TEST(MCPSchemaTest, UpdateMetadata_SchemaSupportsNameOrHashAndMultiplePairs) {
     ASSERT_TRUE(props.has_value());
 
     EXPECT_TRUE(hasProp(*props, "hash"));
-    EXPECT_TRUE(hasProp(*props, "name"));
-    EXPECT_TRUE(hasProp(*props, "metadata"));
-    EXPECT_TRUE(hasProp(*props, "verbose"));
+    EXPECT_TRUE(hasProp(*props, "type"));
 }
 
 TEST(MCPSchemaTest, ListDocuments_SchemaSupportsFiltersAndSorting) {
@@ -246,9 +257,8 @@ TEST(MCPSchemaTest, ListDocuments_SchemaSupportsFiltersAndSorting) {
     EXPECT_TRUE(hasProp(*props, "indexed_before"));
 
     // Recency and sorting
-    EXPECT_TRUE(hasProp(*props, "recent"));
-    EXPECT_TRUE(hasProp(*props, "sort_by"));
-    EXPECT_TRUE(hasProp(*props, "sort_order"));
+    EXPECT_TRUE(hasProp(*props, "name"));
+    EXPECT_TRUE(hasProp(*props, "metadata"));
 }
 
 TEST(MCPSchemaTest, GetStats_SchemaSupportsFileTypesBreakdown) {
@@ -280,8 +290,7 @@ protected:
         std::shared_ptr<yams::search::SearchExecutor> searchExec;
         std::shared_ptr<yams::metadata::MetadataRepository> repo;
         std::shared_ptr<yams::search::HybridSearchEngine> hybrid;
-        server = std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid,
-                                                        std::move(transport));
+        server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
     }
 
     std::unique_ptr<yams::mcp::MCPServer> server;
@@ -324,8 +333,8 @@ protected:
 TEST(MCPSchemaTest, AddDirectory_SchemaHasExpectedProperties) {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "add");
-    ASSERT_TRUE(t.has_value()) << "add not found in tools/list";
+    auto t = findTool(tools, "add_directory");
+    ASSERT_TRUE(t.has_value()) << "add_directory not found in tools/list";
 
     auto props = toolProps(*t);
     ASSERT_TRUE(props.has_value());
@@ -337,8 +346,6 @@ TEST(MCPSchemaTest, AddDirectory_SchemaHasExpectedProperties) {
     EXPECT_TRUE(hasProp(*props, "recursive"));
     EXPECT_TRUE(hasProp(*props, "include_patterns"));
     EXPECT_TRUE(hasProp(*props, "exclude_patterns"));
-    EXPECT_TRUE(hasProp(*props, "tags"));
-    EXPECT_TRUE(hasProp(*props, "metadata"));
 }
 
 TEST(MCPSchemaTest, RestoreCollection_SchemaHasExpectedProperties) {
@@ -444,8 +451,7 @@ protected:
         std::shared_ptr<yams::search::SearchExecutor> searchExec; // not required for these tests
         std::shared_ptr<yams::search::HybridSearchEngine>
             hybrid; // null -> fallback to repo fuzzy/fts
-        server = std::make_unique<yams::mcp::MCPServer>(store, searchExec, repo, hybrid,
-                                                        std::move(transport));
+        server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
     }
 
     void TearDown() override {

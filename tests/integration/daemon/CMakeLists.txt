@@ -87,3 +87,22 @@ target_link_libraries(daemon_delete_parity_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_delete_parity_integration_test COMMAND daemon_delete_parity_integration_test)
+
+# Pooled request integration test (uses real daemon)
+add_executable(pooled_request_integration_test
+    pooled_request_integration_test.cpp
+)
+target_link_libraries(pooled_request_integration_test PRIVATE
+    yams_mcp
+    yams_cli
+    yams_api
+    yams_search
+    yams_metadata
+    yams_downloader
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    GTest::gtest
+    GTest::gtest_main
+    Threads::Threads
+)
+add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)

@@ -178,7 +178,9 @@ TEST_F(DaemonResilienceTest, MemoryGrowth) {
     for (int i = 0; i < numOperations; ++i) {
         client.ping();
 
-        SearchRequest req{"test", 10};
+        SearchRequest req{};
+        req.query = "test";
+        req.limit = 10;
         client.search(req);
 
         if (i % 10 == 0) {
@@ -331,7 +333,7 @@ TEST_F(DaemonResilienceTest, ConcurrentStress) {
     ASSERT_TRUE(daemon_->start());
 
     const int numThreads = 10;
-    const int opsPerThread = 100;
+    // opsPerThread unused at outer scope; per-thread value set inside lambda
     std::atomic<int> successCount{0};
     std::atomic<int> errorCount{0};
     std::atomic<bool> stopFlag{false};
@@ -363,7 +365,9 @@ TEST_F(DaemonResilienceTest, ConcurrentStress) {
                         success = client.status().has_value();
                         break;
                     case 2: {
-                        SearchRequest req{"test", 5};
+                        SearchRequest req{};
+                        req.query = "test";
+                        req.limit = 5;
                         auto res = client.search(req);
                         success = res.has_value() || res.error().code == ErrorCode::NotFound;
                         break;
@@ -414,7 +418,9 @@ TEST_F(DaemonResilienceTest, ErrorInjection) {
     // Send various invalid requests
     std::vector<std::function<void()>> errorTests = {[&client]() {
                                                          // Empty search
-                                                         SearchRequest req{"", 0};
+                                                         SearchRequest req{};
+                                                         req.query = "";
+                                                         req.limit = 0;
                                                          client.search(req);
                                                      },
                                                      [&client]() {
@@ -425,7 +431,8 @@ TEST_F(DaemonResilienceTest, ErrorInjection) {
                                                      },
                                                      [&client]() {
                                                          // Invalid hash
-                                                         GetRequest req{"invalid-hash-123", ""};
+                                                         GetRequest req{};
+                                                         req.hash = "invalid-hash-123";
                                                          client.get(req);
                                                      }};
 

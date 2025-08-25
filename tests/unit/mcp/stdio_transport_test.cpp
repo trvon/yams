@@ -8,10 +8,10 @@
 #include <yams/mcp/mcp_server.h>
 
 using namespace yams::mcp;
-using json = nlohmann::json;
+using test_json = nlohmann::json;
 
 // MCP stdio protocol uses newline-delimited JSON, not HTTP framing
-static std::string formatMessage(const json& j) {
+static std::string formatMessage(const test_json& j) {
     return j.dump() + "\n";
 }
 
@@ -65,7 +65,7 @@ TEST_F(StdioTransportTest, InitialState) {
 }
 
 TEST_F(StdioTransportTest, SendMessage) {
-    json testMessage = {{"jsonrpc", "2.0"}, {"method", "test"}, {"id", 1}};
+    test_json testMessage = {{"jsonrpc", "2.0"}, {"method", "test"}, {"id", 1}};
 
     transport->send(testMessage);
 

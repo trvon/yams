@@ -1,3 +1,9 @@
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/connection_pool.h>
+#include <yams/mcp/error_handling.h>
+#include <yams/mcp/mcp_server.h>
+
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -10,11 +16,6 @@
 #include <memory>
 #include <mutex>
 #include <regex>
-#include <yams/app/services/factory.hpp>
-#include <yams/app/services/services.hpp>
-#include <yams/extraction/html_text_extractor.h>
-#include <yams/extraction/text_extractor.h>
-#include <yams/mcp/mcp_server.h>
 
 // Platform-specific includes for non-blocking I/O
 #ifdef _WIN32
@@ -191,30 +192,68 @@ void StdioTransport::resetErrorCount() noexcept {
 }
 
 // MCPServer implementation
-MCPServer::MCPServer(std::shared_ptr<api::IContentStore> store,
-                     std::shared_ptr<search::SearchExecutor> searchExecutor,
-                     std::shared_ptr<metadata::MetadataRepository> metadataRepo,
-                     std::shared_ptr<search::HybridSearchEngine> hybridEngine,
-                     std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown)
-    : store_(std::move(store)), searchExecutor_(std::move(searchExecutor)),
-      metadataRepo_(std::move(metadataRepo)), hybridEngine_(std::move(hybridEngine)),
-      transport_(std::move(transport)),
-      appContext_{store_, searchExecutor_, metadataRepo_, hybridEngine_},
-      externalShutdown_(externalShutdown) {
+MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown)
+    : transport_(std::move(transport)), externalShutdown_(externalShutdown) {
     // Set external shutdown flag on StdioTransport if applicable
     if (auto* stdioTransport = dynamic_cast<StdioTransport*>(transport_.get())) {
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize app services using cached context
-    auto services = app::services::makeServices(appContext_);
+    // Initialize the daemon connection pool
+    yams::daemon::ConnectionPool::Config pool_config;
+    pool_config.max_connections = 10; // Cap connections to the daemon
+    pool_config.connection_timeout = std::chrono::seconds(5);
+    pool_config.idle_timeout = std::chrono::minutes(1);
 
-    searchService_ = services.search;
-    grepService_ = services.grep;
-    documentService_ = services.document;
-    downloadService_ = services.download;
-    indexingService_ = services.indexing;
-    statsService_ = services.stats;
+    // Resolve daemon socket path and configure a UnixSocketFactory for real socket pooling
+    static yams::daemon::AsyncIOContext io_ctx;
+    auto socket_path = yams::daemon::DaemonClient::resolveSocketPath();
+    auto unix_factory =
+        std::make_shared<yams::daemon::UnixSocketFactory>(socket_path.string(), io_ctx);
+
+    // Initialize the request manager for the search tool and set its factory
+    search_req_manager_ =
+        std::make_unique<cli::PooledRequestManager<daemon::SearchRequest, daemon::SearchResponse>>(
+            pool_config);
+    search_req_manager_->set_socket_factory(unix_factory);
+
+    grep_req_manager_ =
+        std::make_unique<cli::PooledRequestManager<daemon::GrepRequest, daemon::GrepResponse>>(
+            pool_config);
+    grep_req_manager_->set_socket_factory(unix_factory);
+
+    download_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<daemon::DownloadRequest, daemon::DownloadResponse>>(pool_config);
+    download_req_manager_->set_socket_factory(unix_factory);
+
+    store_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<daemon::AddDocumentRequest, daemon::AddDocumentResponse>>(
+        pool_config);
+    store_req_manager_->set_socket_factory(unix_factory);
+
+    retrieve_req_manager_ =
+        std::make_unique<cli::PooledRequestManager<daemon::GetRequest, daemon::GetResponse>>(
+            pool_config);
+    retrieve_req_manager_->set_socket_factory(unix_factory);
+
+    list_req_manager_ =
+        std::make_unique<cli::PooledRequestManager<daemon::ListRequest, daemon::ListResponse>>(
+            pool_config);
+    list_req_manager_->set_socket_factory(unix_factory);
+
+    stats_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<daemon::GetStatsRequest, daemon::GetStatsResponse>>(pool_config);
+    stats_req_manager_->set_socket_factory(unix_factory);
+
+    delete_req_manager_ =
+        std::make_unique<cli::PooledRequestManager<daemon::DeleteRequest, daemon::DeleteResponse>>(
+            pool_config);
+    delete_req_manager_->set_socket_factory(unix_factory);
+
+    update_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<daemon::UpdateDocumentRequest, daemon::UpdateDocumentResponse>>(
+        pool_config);
+    update_req_manager_->set_socket_factory(unix_factory);
 
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
@@ -948,476 +987,481 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", "Tool registry not initialized"}};
     }
 
-    return toolRegistry_->callTool(name, arguments);
+    auto toolResult = toolRegistry_->callTool(name, arguments);
+    // Wrap non-MCP-shaped results into MCP content format for compatibility with MCP clients
+    if (toolResult.contains("content") && toolResult["content"].is_array()) {
+        return toolResult;
+    }
+    json wrapped = {
+        {"content", json::array({json{{"type", "text"}, {"text", toolResult.dump(2)}}})}};
+    return wrapped;
 }
 
 // Modern C++20 tool handler implementations
 Result<MCPSearchResponse> MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
-    try {
-        if (!searchService_) {
-            return Error{ErrorCode::NotInitialized, "Search service not initialized"};
+    // This function will now be a client to the daemon.
+    // It converts the MCP request to a daemon request, sends it, and converts the response.
+
+    // 1. Convert MCP request to daemon IPC request
+    daemon::SearchRequest daemon_req;
+    daemon_req.query = req.query;
+    daemon_req.limit = req.limit;
+    daemon_req.fuzzy = req.fuzzy;
+    daemon_req.similarity = static_cast<double>(req.similarity);
+    daemon_req.hashQuery = req.hash;
+    daemon_req.searchType = req.type;
+    daemon_req.verbose = req.verbose;
+    daemon_req.pathsOnly = req.pathsOnly;
+    daemon_req.showLineNumbers = req.lineNumbers;
+    daemon_req.beforeContext = req.beforeContext;
+    daemon_req.afterContext = req.afterContext;
+    daemon_req.context = req.context;
+
+    // daemon_req.tags = req.tags; // Tags need to be handled if protocol supports it
+    // daemon_req.matchAllTags = req.matchAllTags;
+
+    // 2. Execute request via the pooled manager
+    MCPSearchResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::SearchResponse& resp) -> Result<void> {
+        // 3. Convert daemon response to MCP response
+        mcp_response.total = resp.totalCount;
+        mcp_response.type = "daemon"; // Indicate response came from daemon
+        mcp_response.executionTimeMs = resp.elapsed.count();
+
+        for (const auto& item : resp.results) {
+            MCPSearchResponse::Result mcp_result;
+            mcp_result.id = item.id;
+            mcp_result.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
+            mcp_result.title = item.title;
+            mcp_result.path = item.path;
+            mcp_result.score = item.score;
+            mcp_result.snippet = item.snippet;
+            mcp_response.results.push_back(mcp_result);
         }
+        return Result<void>();
+    };
 
-        // Convert MCP request to app services request
-        app::services::SearchRequest searchReq;
-        searchReq.query = req.query;
-        searchReq.limit = req.limit;
-        searchReq.fuzzy = req.fuzzy;
-        searchReq.similarity = req.similarity;
-        searchReq.hash = req.hash;
-        searchReq.type = req.type;
-        searchReq.verbose = req.verbose;
-        searchReq.pathsOnly = req.pathsOnly;
-        searchReq.showLineNumbers = req.lineNumbers;
-        searchReq.beforeContext = req.beforeContext;
-        searchReq.afterContext = req.afterContext;
-        searchReq.context = req.context;
-        searchReq.colorMode = req.colorMode;
-        searchReq.pathPattern = req.pathPattern;
-        searchReq.tags = req.tags;
-        searchReq.matchAllTags = req.matchAllTags;
+    auto fallback = [&]() -> Result<void> {
+        execution_error = Error{ErrorCode::NetworkError,
+                                "Daemon not available or failed to respond. Try restarting the "
+                                "daemon (yams daemon start) and re-run the command."};
+        return Result<void>();
+    };
 
-        auto result = searchService_->search(searchReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
-        }
+    auto result = search_req_manager_->execute(daemon_req, fallback, render);
 
-        const auto& searchRes = result.value();
-
-        // Convert app services response to MCP response
-        MCPSearchResponse response;
-        response.total = searchRes.total;
-        response.type = searchRes.type;
-        response.executionTimeMs = searchRes.executionTimeMs;
-
-        if (req.pathsOnly) {
-            // Convert search results to paths
-            for (const auto& item : searchRes.results) {
-                response.paths.push_back(item.path);
-            }
-        } else {
-            response.results.reserve(searchRes.results.size());
-            for (const auto& item : searchRes.results) {
-                MCPSearchResponse::Result mcpResult;
-                mcpResult.id = std::to_string(item.id);
-                mcpResult.hash = item.hash;
-                mcpResult.title = item.title;
-                mcpResult.path = item.path;
-                mcpResult.score = static_cast<float>(item.score);
-                mcpResult.snippet = item.snippet;
-                mcpResult.vectorScore =
-                    item.vectorScore ? std::optional<float>(static_cast<float>(*item.vectorScore))
-                                     : std::nullopt;
-                mcpResult.keywordScore =
-                    item.keywordScore ? std::optional<float>(static_cast<float>(*item.keywordScore))
-                                      : std::nullopt;
-                mcpResult.kgEntityScore =
-                    item.kgEntityScore
-                        ? std::optional<float>(static_cast<float>(*item.kgEntityScore))
-                        : std::nullopt;
-                mcpResult.structuralScore =
-                    item.structuralScore
-                        ? std::optional<float>(static_cast<float>(*item.structuralScore))
-                        : std::nullopt;
-                response.results.push_back(std::move(mcpResult));
-            }
-        }
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Search failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPGrepResponse> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
-    try {
-        if (!grepService_) {
-            return Error{ErrorCode::NotInitialized, "Grep service not initialized"};
-        }
-
-        // Convert MCP request to app services request
-        app::services::GrepRequest grepReq;
-        grepReq.pattern = req.pattern;
-        grepReq.paths = req.paths;
-        grepReq.ignoreCase = req.ignoreCase;
-        grepReq.word = req.word;
-        grepReq.invert = req.invert;
-        grepReq.lineNumbers = req.lineNumbers;
-        grepReq.withFilename = req.withFilename;
-        grepReq.count = req.count;
-        grepReq.filesWithMatches = req.filesWithMatches;
-        grepReq.filesWithoutMatch = req.filesWithoutMatch;
-        grepReq.afterContext = req.afterContext;
-        grepReq.beforeContext = req.beforeContext;
-        grepReq.context = req.context;
-        if (req.maxCount) {
-            grepReq.maxCount = *req.maxCount;
-        }
-        grepReq.colorMode = req.color;
-
-        auto result = grepService_->grep(grepReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
-        }
-
-        const auto& grepRes = result.value();
-
-        // Convert app services response to MCP response
-        MCPGrepResponse response;
-        // TODO: Format the structured grep results into output string
-        // For now, just provide basic aggregated info
-        response.output = "Grep completed";
-        response.matchCount = grepRes.totalMatches;
-        response.fileCount = grepRes.filesWith.size();
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Grep failed: ") + e.what()};
+    // Convert MCP request to daemon request
+    daemon::GrepRequest daemon_req;
+    daemon_req.pattern = req.pattern;
+    daemon_req.paths = req.paths;
+    daemon_req.caseInsensitive = req.ignoreCase;
+    daemon_req.wholeWord = req.word;
+    daemon_req.invertMatch = req.invert;
+    daemon_req.showLineNumbers = req.lineNumbers;
+    daemon_req.showFilename = req.withFilename;
+    daemon_req.countOnly = req.count;
+    daemon_req.filesOnly = req.filesWithMatches;
+    daemon_req.filesWithoutMatch = req.filesWithoutMatch;
+    daemon_req.afterContext = req.afterContext;
+    daemon_req.beforeContext = req.beforeContext;
+    daemon_req.contextLines = req.context;
+    daemon_req.colorMode = req.color;
+    if (req.maxCount) {
+        daemon_req.maxMatches = *req.maxCount;
     }
+
+    MCPGrepResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::GrepResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.matchCount = resp.totalMatches;
+        mcp_response.fileCount = resp.filesSearched;
+
+        std::ostringstream oss;
+        for (const auto& match : resp.matches) {
+            if (mcp_response.fileCount > 1 || req.withFilename) {
+                oss << match.file << ":";
+            }
+            if (req.lineNumbers) {
+                oss << match.lineNumber << ":";
+            }
+            oss << match.line << "\n";
+        }
+        mcp_response.output = oss.str();
+
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
+
+    auto result = grep_req_manager_->execute(daemon_req, fallback, render);
+
+    if (execution_error) {
+        return execution_error.value();
+    }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& req) {
-    try {
-        if (!downloadService_) {
-            return Error{ErrorCode::NotInitialized, "Download service not initialized"};
+    // Convert MCP request to daemon request
+    daemon::DownloadRequest daemon_req;
+    daemon_req.url = req.url;
+    daemon_req.outputPath = req.exportPath;
+    // Note: More complex fields like headers, checksum, etc. would be mapped here
+    // if the daemon protocol supported them. For now, we map the basics.
+
+    MCPDownloadResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::DownloadResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.url = resp.url;
+        mcp_response.hash = resp.hash;
+        mcp_response.storedPath = resp.localPath;
+        mcp_response.sizeBytes = resp.size;
+        mcp_response.success = resp.success;
+        if (!resp.error.empty()) {
+            mcp_response.success = false;
         }
+        return Result<void>();
+    };
 
-        // Convert MCP request to app services request
-        app::services::DownloadServiceRequest downloadReq;
-        downloadReq.url = req.url;
+    auto fallback = [&]() -> Result<void> {
+        execution_error = Error{ErrorCode::NetworkError,
+                                "Daemon not available or download failed. Try restarting the "
+                                "daemon (yams daemon start) and re-run the command."};
+        return Result<void>();
+    };
 
-        // Convert string headers to proper Header objects
-        for (const auto& headerStr : req.headers) {
-            auto pos = headerStr.find(':');
-            if (pos != std::string::npos) {
-                downloader::Header h;
-                h.name = headerStr.substr(0, pos);
-                std::string val = headerStr.substr(pos + 1);
-                if (!val.empty() && val.front() == ' ')
-                    val.erase(0, 1);
-                h.value = val;
-                downloadReq.headers.push_back(std::move(h));
-            }
-        }
+    auto result = download_req_manager_->execute(daemon_req, fallback, render);
 
-        // Parse checksum if provided
-        if (!req.checksum.empty()) {
-            auto pos = req.checksum.find(':');
-            if (pos != std::string::npos) {
-                downloader::Checksum cs;
-                auto algo = req.checksum.substr(0, pos);
-                auto hex = req.checksum.substr(pos + 1);
-                std::transform(algo.begin(), algo.end(), algo.begin(), ::tolower);
-                if (algo == "sha256")
-                    cs.algo = downloader::HashAlgo::Sha256;
-                else if (algo == "sha512")
-                    cs.algo = downloader::HashAlgo::Sha512;
-                else if (algo == "md5")
-                    cs.algo = downloader::HashAlgo::Md5;
-                cs.hex = hex;
-                downloadReq.checksum = cs;
-            }
-        }
-
-        downloadReq.concurrency = req.concurrency;
-        downloadReq.chunkSizeBytes = req.chunkSizeBytes;
-        downloadReq.timeout = std::chrono::milliseconds(req.timeoutMs);
-        downloadReq.resume = req.resume;
-        downloadReq.followRedirects = req.followRedirects;
-        downloadReq.storeOnly = req.storeOnly;
-
-        if (!req.exportPath.empty()) {
-            downloadReq.exportPath = req.exportPath;
-        }
-
-        if (req.overwrite == "always") {
-            downloadReq.overwrite = downloader::OverwritePolicy::Always;
-        } else if (req.overwrite == "if-different-etag") {
-            downloadReq.overwrite = downloader::OverwritePolicy::IfDifferentEtag;
-        } else {
-            downloadReq.overwrite = downloader::OverwritePolicy::Never;
-        }
-
-        auto result = downloadService_->download(downloadReq);
-        if (!result) {
-            spdlog::error("MCP handleDownload failed: {}", result.error().message);
-            return Error{ErrorCode::NetworkError, result.error().message};
-        }
-
-        const auto& downloadRes = result.value();
-
-        // Convert app services response to MCP response
-        MCPDownloadResponse response;
-        response.url = downloadRes.url;
-        response.hash = downloadRes.hash;
-        response.storedPath = downloadRes.storedPath.string();
-        response.sizeBytes = downloadRes.sizeBytes;
-        response.success = downloadRes.success;
-        response.httpStatus = downloadRes.httpStatus;
-        response.etag = downloadRes.etag;
-        response.lastModified = downloadRes.lastModified;
-        response.checksumOk = downloadRes.checksumOk;
-
-        spdlog::debug("MCP handleDownload returning response: url={}, hash={}, size={}",
-                      response.url, response.hash, response.sizeBytes);
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Download failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPStoreDocumentResponse>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
-    try {
-        if (!documentService_) {
-            return Error{ErrorCode::NotInitialized, "Document service not initialized"};
+    // Convert MCP request to daemon request
+    daemon::AddDocumentRequest daemon_req;
+    daemon_req.path = req.path;
+    daemon_req.content = req.content;
+    daemon_req.name = req.name;
+    daemon_req.mimeType = req.mimeType;
+    daemon_req.tags = req.tags;
+    for (const auto& [key, value] : req.metadata.items()) {
+        if (value.is_string()) {
+            daemon_req.metadata[key] = value.get<std::string>();
+        } else {
+            daemon_req.metadata[key] = value.dump();
         }
-
-        // Convert MCP request to app services request
-        app::services::StoreDocumentRequest storeReq;
-        storeReq.path = req.path;
-        storeReq.content = req.content;
-        storeReq.name = req.name;
-        storeReq.mimeType = req.mimeType;
-        storeReq.tags = req.tags;
-
-        // Convert JSON metadata to string map
-        if (!req.metadata.empty()) {
-            for (const auto& [key, value] : req.metadata.items()) {
-                if (value.is_string()) {
-                    storeReq.metadata[key] = value.get<std::string>();
-                } else {
-                    storeReq.metadata[key] = value.dump();
-                }
-            }
-        }
-
-        auto result = documentService_->store(storeReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
-        }
-
-        const auto& storeRes = result.value();
-
-        // Convert app services response to MCP response
-        MCPStoreDocumentResponse response;
-        response.hash = storeRes.hash;
-        response.bytesStored = storeRes.bytesStored;
-        response.bytesDeduped = storeRes.bytesDeduped;
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Store document failed: ") + e.what()};
     }
+
+    MCPStoreDocumentResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.hash = resp.hash;
+        // Note: The daemon AddDocumentResponse doesn't have bytesStored/bytesDeduped.
+        // We can leave them as 0 or enhance the daemon protocol later.
+        mcp_response.bytesStored = 0;
+        mcp_response.bytesDeduped = 0;
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
+
+    auto result = store_req_manager_->execute(daemon_req, fallback, render);
+
+    if (execution_error) {
+        return execution_error.value();
+    }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPRetrieveDocumentResponse>
 MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
-    try {
-        if (!documentService_) {
-            return Error{ErrorCode::NotInitialized, "Document service not initialized"};
+    // Convert MCP request to daemon request
+    daemon::GetRequest daemon_req;
+    daemon_req.hash = req.hash;
+    daemon_req.outputPath = req.outputPath;
+    daemon_req.showGraph = req.graph;
+    daemon_req.graphDepth = req.depth;
+    daemon_req.metadataOnly = !req.includeContent;
+
+    MCPRetrieveDocumentResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::GetResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.hash = resp.hash;
+        mcp_response.path = resp.path;
+        mcp_response.name = resp.name;
+        mcp_response.size = resp.size;
+        mcp_response.mimeType = resp.mimeType;
+        if (resp.hasContent) {
+            mcp_response.content = resp.content;
         }
-
-        // Convert MCP request to app services request
-        app::services::RetrieveDocumentRequest retrieveReq;
-        retrieveReq.hash = req.hash;
-        retrieveReq.outputPath = req.outputPath;
-        retrieveReq.graph = req.graph;
-        retrieveReq.depth = req.depth;
-        retrieveReq.includeContent = req.includeContent;
-
-        auto result = documentService_->retrieve(retrieveReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
+        mcp_response.graphEnabled = resp.graphEnabled;
+        for (const auto& rel : resp.related) {
+            json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
+            mcp_response.related.push_back(std::move(relatedJson));
         }
+        return Result<void>();
+    };
 
-        const auto& retrieveRes = result.value();
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
 
-        // Convert app services response to MCP response
-        MCPRetrieveDocumentResponse response;
-        response.graphEnabled = retrieveRes.graphEnabled;
+    auto result = retrieve_req_manager_->execute(daemon_req, fallback, render);
 
-        if (retrieveRes.document) {
-            const auto& doc = *retrieveRes.document;
-            response.hash = doc.hash;
-            response.path = doc.path;
-            response.name = doc.name;
-            response.size = doc.size;
-            response.mimeType = doc.mimeType;
-            response.content = doc.content;
-        }
-
-        // Convert related documents to JSON
-        for (const auto& related : retrieveRes.related) {
-            json relatedJson = {
-                {"hash", related.hash}, {"path", related.path}, {"distance", related.distance}};
-            if (related.relationship) {
-                relatedJson["relationship"] = *related.relationship;
-            }
-            response.related.push_back(std::move(relatedJson));
-        }
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError,
-                     std::string("Retrieve document failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPListDocumentsResponse>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
-    try {
-        if (!documentService_) {
-            return Error{ErrorCode::NotInitialized, "Document service not initialized"};
+    // Convert MCP request to daemon request
+    daemon::ListRequest daemon_req;
+    daemon_req.namePattern = req.pattern;
+    daemon_req.tags = req.tags;
+    daemon_req.fileType = req.type;
+    daemon_req.mimeType = req.mime;
+    daemon_req.extensions = req.extension;
+    daemon_req.binaryOnly = req.binary;
+    daemon_req.textOnly = req.text;
+    daemon_req.recentCount = req.recent;
+    daemon_req.sortBy = req.sortBy;
+    daemon_req.reverse = (req.sortOrder == "desc");
+    daemon_req.limit = req.limit;
+    daemon_req.offset = req.offset;
+
+    MCPListDocumentsResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::ListResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.total = resp.totalCount;
+        for (const auto& item : resp.items) {
+            json docJson = {{"hash", item.hash},          {"path", item.path},
+                            {"name", item.name},          {"size", item.size},
+                            {"mime_type", item.mimeType}, {"created", item.created},
+                            {"modified", item.modified},  {"indexed", item.indexed}};
+            mcp_response.documents.push_back(std::move(docJson));
         }
+        return Result<void>();
+    };
 
-        // Convert MCP request to app services request
-        app::services::ListDocumentsRequest listReq;
-        listReq.pattern = req.pattern;
-        listReq.tags = req.tags;
-        listReq.type = req.type;
-        listReq.mime = req.mime;
-        listReq.extension = req.extension;
-        listReq.binary = req.binary;
-        listReq.text = req.text;
-        listReq.recent = req.recent;
-        listReq.sortBy = req.sortBy;
-        listReq.sortOrder = req.sortOrder;
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
 
-        auto result = documentService_->list(listReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
-        }
+    auto result = list_req_manager_->execute(daemon_req, fallback, render);
 
-        const auto& listRes = result.value();
-
-        // Convert app services response to MCP response
-        MCPListDocumentsResponse response;
-        response.total = listRes.totalFound;
-
-        // Convert documents to JSON
-        for (const auto& doc : listRes.documents) {
-            json docJson = {{"hash", doc.hash},          {"path", doc.path},
-                            {"name", doc.name},          {"size", doc.size},
-                            {"mime_type", doc.mimeType}, {"created", doc.created},
-                            {"modified", doc.modified},  {"indexed", doc.indexed}};
-            if (!doc.tags.empty()) {
-                docJson["tags"] = doc.tags;
-            }
-            // Note: DocumentEntry doesn't have metadata field, skipping
-            response.documents.push_back(std::move(docJson));
-        }
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("List documents failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPStatsResponse> MCPServer::handleGetStats(const MCPStatsRequest& req) {
-    try {
-        if (!statsService_) {
-            return Error{ErrorCode::NotInitialized, "Stats service not initialized"};
+    // Convert MCP request to daemon request
+    daemon::GetStatsRequest daemon_req;
+    daemon_req.showFileTypes = req.fileTypes;
+    daemon_req.detailed = req.verbose;
+
+    MCPStatsResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::GetStatsResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.totalObjects = resp.totalDocuments;
+        mcp_response.totalBytes = resp.totalSize;
+        mcp_response.uniqueHashes = resp.additionalStats.count("unique_hashes")
+                                        ? std::stoull(resp.additionalStats.at("unique_hashes"))
+                                        : 0;
+        mcp_response.deduplicationSavings =
+            resp.additionalStats.count("deduplicated_bytes")
+                ? std::stoull(resp.additionalStats.at("deduplicated_bytes"))
+                : 0;
+
+        for (const auto& [key, value] : resp.documentsByType) {
+            json ftJson;
+            ftJson["extension"] = key;
+            ftJson["count"] = value;
+            mcp_response.fileTypes.push_back(ftJson);
         }
 
-        // Convert MCP request to app services request
-        app::services::StatsRequest statsReq;
-        statsReq.fileTypes = req.fileTypes;
-        statsReq.verbose = req.verbose;
+        mcp_response.additionalStats = resp.additionalStats;
+        return Result<void>();
+    };
 
-        auto result = statsService_->getStats(statsReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
-        }
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
 
-        const auto& statsRes = result.value();
+    auto result = stats_req_manager_->execute(daemon_req, fallback, render);
 
-        // Convert app services response to MCP response
-        MCPStatsResponse response;
-        response.totalObjects = statsRes.totalObjects;
-        response.totalBytes = statsRes.totalBytes;
-        response.uniqueHashes = statsRes.uniqueHashes;
-        response.deduplicationSavings = statsRes.deduplicationSavings;
-
-        // Convert file type stats to JSON
-        for (const auto& ft : statsRes.fileTypes) {
-            json ftJson = {
-                {"extension", ft.extension}, {"count", ft.count}, {"total_bytes", ft.totalBytes}};
-            response.fileTypes.push_back(std::move(ftJson));
-        }
-
-        // Convert additional stats
-        if (!statsRes.additionalStats.empty()) {
-            for (const auto& [key, value] : statsRes.additionalStats) {
-                response.additionalStats[key] = value;
-            }
-        }
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Get stats failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPAddDirectoryResponse> MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
-    try {
-        if (!indexingService_) {
-            return Error{ErrorCode::NotInitialized, "Indexing service not initialized"};
+    // Convert MCP request to daemon request
+    daemon::AddDocumentRequest daemon_req;
+    daemon_req.path = req.directoryPath;
+    daemon_req.collection = req.collection;
+    daemon_req.includePatterns = req.includePatterns;
+    daemon_req.excludePatterns = req.excludePatterns;
+    daemon_req.recursive = req.recursive;
+    for (const auto& [key, value] : req.metadata.items()) {
+        if (value.is_string()) {
+            daemon_req.metadata[key] = value.get<std::string>();
+        } else {
+            daemon_req.metadata[key] = value.dump();
         }
-
-        // Convert MCP request to app services request
-        app::services::AddDirectoryRequest addReq;
-        addReq.directoryPath = req.directoryPath;
-        addReq.collection = req.collection;
-        addReq.includePatterns = req.includePatterns;
-        addReq.excludePatterns = req.excludePatterns;
-        addReq.recursive = req.recursive;
-        addReq.followSymlinks = req.followSymlinks;
-
-        // Convert JSON metadata to string map
-        if (!req.metadata.empty()) {
-            for (const auto& [key, value] : req.metadata.items()) {
-                if (value.is_string()) {
-                    addReq.metadata[key] = value.get<std::string>();
-                } else {
-                    addReq.metadata[key] = value.dump();
-                }
-            }
-        }
-
-        auto result = indexingService_->addDirectory(addReq);
-        if (!result) {
-            return Error{ErrorCode::InternalError, result.error().message};
-        }
-
-        const auto& addRes = result.value();
-
-        // Convert app services response to MCP response
-        MCPAddDirectoryResponse response;
-        response.directoryPath = addRes.directoryPath;
-        response.collection = addRes.collection;
-        response.filesProcessed = addRes.filesProcessed;
-        response.filesIndexed = addRes.filesIndexed;
-        response.filesSkipped = addRes.filesSkipped;
-        response.filesFailed = addRes.filesFailed;
-
-        // Convert file results to JSON
-        for (const auto& fileResult : addRes.results) {
-            json resultJson = {{"path", fileResult.path},
-                               {"hash", fileResult.hash},
-                               {"size_bytes", fileResult.sizeBytes},
-                               {"success", fileResult.success}};
-            if (fileResult.error) {
-                resultJson["error"] = *fileResult.error;
-            }
-            response.results.push_back(std::move(resultJson));
-        }
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Add directory failed: ") + e.what()};
     }
+
+    MCPAddDirectoryResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.directoryPath = resp.path;
+        mcp_response.collection =
+            daemon_req.collection; // Not in daemon response, use request value
+        mcp_response.filesIndexed = resp.documentsAdded;
+        // Other fields are not in the daemon response, so we leave them default.
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
+
+    auto result = store_req_manager_->execute(daemon_req, fallback, render);
+
+    if (execution_error) {
+        return execution_error.value();
+    }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
+}
+
+Result<MCPUpdateMetadataResponse>
+MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
+    // Convert MCP request to daemon request
+    daemon::UpdateDocumentRequest daemon_req;
+    daemon_req.hash = req.hash;
+    daemon_req.name = req.name;
+    daemon_req.addTags = req.tags;
+    for (const auto& [key, value] : req.metadata.items()) {
+        if (value.is_string()) {
+            daemon_req.metadata[key] = value.get<std::string>();
+        } else {
+            daemon_req.metadata[key] = value.dump();
+        }
+    }
+
+    MCPUpdateMetadataResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::UpdateDocumentResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.success = resp.metadataUpdated || resp.tagsUpdated || resp.contentUpdated;
+        mcp_response.message = "Update successful";
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
+
+    auto result = update_req_manager_->execute(daemon_req, fallback, render);
+
+    if (execution_error) {
+        return execution_error.value();
+    }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 void MCPServer::initializeToolRegistry() {
@@ -1510,15 +1554,20 @@ void MCPServer::initializeToolRegistry() {
 
     toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
         "list", [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
-        json{
-            {"type", "object"},
-            {"properties",
-             {{"pattern", {{"type", "string"}, {"description", "Name pattern filter"}}},
-              {"tags",
-               {{"type", "array"},
-                {"items", {{"type", "string"}}},
-                {"description", "Filter by tags"}}},
-              {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}}}}},
+        json{{"type", "object"},
+             {"properties",
+              {{"pattern", {{"type", "string"}, {"description", "Name pattern filter"}}},
+               {"tags",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Filter by tags"}}},
+               {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}},
+               {"limit",
+                {{"type", "integer"},
+                 {"description", "Maximum number of results"},
+                 {"default", 100}}},
+               {"offset",
+                {{"type", "integer"}, {"description", "Offset for pagination"}, {"default", 0}}}}}},
         "List documents with filtering by pattern, tags, type, or recency");
 
     toolRegistry_->registerTool<MCPStatsRequest, MCPStatsResponse>(
@@ -1677,436 +1726,130 @@ json MCPServer::createError(const json& id, int code, const std::string& message
 }
 
 Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
-    try {
-        if (!metadataRepo_) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+    // Convert MCP request to daemon request
+    daemon::GetRequest daemon_req;
+    daemon_req.name = req.name;
+    daemon_req.byName = true;
+    daemon_req.raw = req.rawContent;
+    daemon_req.extract = req.extractText;
+
+    MCPGetByNameResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::GetResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.hash = resp.hash;
+        mcp_response.name = resp.name;
+        mcp_response.path = resp.path;
+        mcp_response.size = resp.size;
+        mcp_response.mimeType = resp.mimeType;
+        if (resp.hasContent) {
+            mcp_response.content = resp.content;
         }
+        return Result<void>();
+    };
 
-        if (req.name.empty()) {
-            return Error{ErrorCode::InvalidArgument, "Document name is required"};
-        }
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
 
-        spdlog::debug("MCP handleGetByName: searching for document with name '{}'", req.name);
+    auto result = retrieve_req_manager_->execute(daemon_req, fallback, render);
 
-        // Find documents by name using metadata repository
-        auto docsResult = metadataRepo_->findDocumentsByPath("%" + req.name);
-        if (!docsResult) {
-            spdlog::error("MCP handleGetByName: failed to query metadata repository: {}",
-                          docsResult.error().message);
-            return Error{ErrorCode::InternalError,
-                         "Failed to search for document: " + docsResult.error().message};
-        }
-
-        auto& docs = docsResult.value();
-
-        // Try exact name match first
-        const metadata::DocumentInfo* foundDoc = nullptr;
-        for (const auto& doc : docs) {
-            if (doc.fileName == req.name) {
-                foundDoc = &doc;
-                break;
-            }
-        }
-
-        // If no exact match, try suffix match
-        if (!foundDoc && !docs.empty()) {
-            for (const auto& doc : docs) {
-                if (doc.filePath.ends_with("/" + req.name) ||
-                    doc.fileName.find(req.name) != std::string::npos) {
-                    foundDoc = &doc;
-                    break;
-                }
-            }
-        }
-
-        if (!foundDoc) {
-            spdlog::warn("MCP handleGetByName: document '{}' not found", req.name);
-            return Error{ErrorCode::NotFound, "Document not found: " + req.name};
-        }
-
-        // Get content from content store
-        auto contentResult = store_->retrieveBytes(foundDoc->sha256Hash);
-        if (!contentResult) {
-            spdlog::error("MCP handleGetByName: failed to retrieve content for hash {}: {}",
-                          foundDoc->sha256Hash, contentResult.error().message);
-            return Error{ErrorCode::InternalError,
-                         "Failed to retrieve document content: " + contentResult.error().message};
-        }
-
-        // Build response
-        MCPGetByNameResponse response;
-        response.hash = foundDoc->sha256Hash;
-        response.name = foundDoc->fileName;
-        response.path = foundDoc->filePath;
-        response.size = static_cast<uint64_t>(foundDoc->fileSize);
-        response.mimeType = foundDoc->mimeType;
-
-        // Convert vector<std::byte> to string
-        const auto& data = contentResult.value();
-        std::string content = std::string(reinterpret_cast<const char*>(data.data()), data.size());
-
-        // Apply text extraction if requested (default behavior unless raw is requested)
-        if (req.extractText && !req.rawContent) {
-            // Try to determine file extension from fileName
-            std::string extension;
-            if (!foundDoc->fileName.empty()) {
-                auto lastDot = foundDoc->fileName.find_last_of('.');
-                if (lastDot != std::string::npos) {
-                    extension = foundDoc->fileName.substr(lastDot);
-                }
-            }
-
-            // Try to get appropriate text extractor
-            if (!extension.empty()) {
-                auto& factory = extraction::TextExtractorFactory::instance();
-                auto extractor = factory.create(extension);
-
-                if (extractor) {
-                    spdlog::debug("MCP handleGetByName: extracting text from {} for '{}'",
-                                  extension, req.name);
-
-                    // Create extraction config
-                    extraction::ExtractionConfig config;
-                    config.maxFileSize = 100 * 1024 * 1024; // 100MB max
-
-                    // Convert string to byte span for extraction
-                    auto dataSpan = std::span<const std::byte>(
-                        reinterpret_cast<const std::byte*>(content.data()), content.size());
-
-                    // Extract text
-                    auto extractResult = extractor->extractFromBuffer(dataSpan, config);
-                    if (extractResult) {
-                        content = extractResult.value().text;
-                        spdlog::debug(
-                            "MCP handleGetByName: successfully extracted {} bytes of text",
-                            content.size());
-                    } else {
-                        spdlog::warn("MCP handleGetByName: text extraction failed: {}",
-                                     extractResult.error().message);
-                        // Keep original content on extraction failure
-                    }
-                } else if (extension == ".html" || extension == ".htm") {
-                    // Fallback to HTML extractor for HTML files
-                    spdlog::debug(
-                        "MCP handleGetByName: using HTML text extractor fallback for '{}'",
-                        req.name);
-                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
-                }
-            } else if (foundDoc->mimeType == "text/html") {
-                // No extension but MIME type indicates HTML
-                spdlog::debug(
-                    "MCP handleGetByName: detected HTML via MIME type, extracting text for '{}'",
-                    req.name);
-                content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
-            } else {
-                // Content-based detection as last resort
-                // Check if content looks like HTML
-                auto trimmedContent = content.substr(0, std::min(size_t(1000), content.size()));
-                std::transform(trimmedContent.begin(), trimmedContent.end(), trimmedContent.begin(),
-                               ::tolower);
-
-                if (trimmedContent.find("<!doctype html") != std::string::npos ||
-                    trimmedContent.find("<html") != std::string::npos ||
-                    trimmedContent.find("<head") != std::string::npos ||
-                    trimmedContent.find("<body") != std::string::npos) {
-                    spdlog::debug("MCP handleGetByName: detected HTML via content inspection, "
-                                  "extracting text for '{}'",
-                                  req.name);
-                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
-                }
-            }
-        }
-
-        response.content = content;
-
-        spdlog::debug("MCP handleGetByName: successfully retrieved document '{}' (hash: {}, size: "
-                      "{}, extracted: {})",
-                      response.name, response.hash, response.size,
-                      (req.extractText && !req.rawContent) ? "yes" : "no");
-
-        return response;
-    } catch (const std::exception& e) {
-        spdlog::error("MCP handleGetByName exception: {}", e.what());
-        return Error{ErrorCode::InternalError, std::string("Get by name failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPDeleteByNameResponse> MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
-    try {
-        if (!metadataRepo_) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-        }
+    // Convert MCP request to daemon request
+    daemon::DeleteRequest daemon_req;
+    daemon_req.name = req.name;
+    daemon_req.names = req.names;
+    daemon_req.pattern = req.pattern;
+    daemon_req.dryRun = req.dryRun;
 
-        std::vector<std::string> hashesToDelete;
-        std::vector<std::string> deletedNames;
+    MCPDeleteByNameResponse mcp_response;
+    std::optional<Error> execution_error;
 
-        // Handle single name
-        if (!req.name.empty()) {
-            auto docsResult = metadataRepo_->findDocumentsByPath("%" + req.name);
-            if (docsResult) {
-                for (const auto& doc : docsResult.value()) {
-                    if (doc.fileName == req.name) {
-                        hashesToDelete.push_back(doc.sha256Hash);
-                        deletedNames.push_back(doc.fileName);
-                    }
-                }
+    auto render = [&](const daemon::DeleteResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.count = resp.results.size();
+        mcp_response.dryRun = resp.dryRun;
+        for (const auto& result : resp.results) {
+            if (result.success) {
+                mcp_response.deleted.push_back(result.name);
             }
         }
+        return Result<void>();
+    };
 
-        // Handle multiple names
-        for (const auto& name : req.names) {
-            auto docsResult = metadataRepo_->findDocumentsByPath("%" + name);
-            if (docsResult) {
-                for (const auto& doc : docsResult.value()) {
-                    if (doc.fileName == name) {
-                        hashesToDelete.push_back(doc.sha256Hash);
-                        deletedNames.push_back(doc.fileName);
-                    }
-                }
-            }
-        }
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
 
-        // Handle pattern
-        if (!req.pattern.empty()) {
-            // Simple glob pattern matching
-            auto docsResult = metadataRepo_->findDocumentsByPath("%");
-            if (docsResult) {
-                for (const auto& doc : docsResult.value()) {
-                    // Basic glob matching (supports * wildcard)
-                    std::string pattern = req.pattern;
-                    std::replace(pattern.begin(), pattern.end(), '*', '%');
+    auto result = delete_req_manager_->execute(daemon_req, fallback, render);
 
-                    if (doc.fileName.find(pattern.substr(0, pattern.find('%'))) == 0) {
-                        hashesToDelete.push_back(doc.sha256Hash);
-                        deletedNames.push_back(doc.fileName);
-                    }
-                }
-            }
-        }
-
-        MCPDeleteByNameResponse response;
-        response.dryRun = req.dryRun;
-        response.deleted = deletedNames;
-        response.count = deletedNames.size();
-
-        // Actually delete if not dry run
-        if (!req.dryRun) {
-            for (const auto& hash : hashesToDelete) {
-                store_->remove(hash);
-                // Note: We should also remove from metadata repo, but that API might not exist
-            }
-        }
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Delete by name failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
+
+    if (!result) {
+        return result.error();
+    }
+
+    return mcp_response;
 }
 
 Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocumentRequest& req) {
-    try {
-        std::string hash;
-        std::string name;
+    // Convert MCP request to daemon request
+    daemon::GetRequest daemon_req;
+    daemon_req.hash = req.hash;
+    daemon_req.name = req.name;
+    daemon_req.byName = !req.name.empty();
+    daemon_req.raw = req.rawContent;
+    daemon_req.extract = req.extractText;
 
-        // Resolve hash from name if needed
-        if (!req.name.empty()) {
-            auto getByNameReq = MCPGetByNameRequest{};
-            getByNameReq.name = req.name;
-            auto result = handleGetByName(getByNameReq);
-            if (!result) {
-                return Error{ErrorCode::NotFound, result.error().message};
-            }
-            hash = result.value().hash;
-            name = result.value().name;
-        } else if (!req.hash.empty()) {
-            hash = req.hash;
-            // Try to get name from metadata
-            if (metadataRepo_) {
-                auto docsResult = metadataRepo_->findDocumentsByPath("%");
-                if (docsResult) {
-                    for (const auto& doc : docsResult.value()) {
-                        if (doc.sha256Hash == hash) {
-                            name = doc.fileName;
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            return Error{ErrorCode::InvalidArgument, "Either hash or name must be provided"};
+    MCPCatDocumentResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::GetResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.hash = resp.hash;
+        mcp_response.name = resp.name;
+        mcp_response.size = resp.size;
+        if (resp.hasContent) {
+            mcp_response.content = resp.content;
         }
+        return Result<void>();
+    };
 
-        // Get content
-        auto contentResult = store_->retrieveBytes(hash);
-        if (!contentResult) {
-            return Error{ErrorCode::NotFound, "Document not found"};
-        }
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
 
-        MCPCatDocumentResponse response;
-        response.hash = hash;
-        response.name = name;
-        const auto& data = contentResult.value();
-        std::string content = std::string(reinterpret_cast<const char*>(data.data()), data.size());
+    auto result = retrieve_req_manager_->execute(daemon_req, fallback, render);
 
-        // Apply text extraction if requested (default behavior unless raw is requested)
-        if (req.extractText && !req.rawContent) {
-            // Get the actual fileName from metadata to determine the correct extension
-            std::string actualFileName;
-            if (metadataRepo_) {
-                auto docResult = metadataRepo_->getDocumentByHash(hash);
-                if (docResult && docResult.value().has_value()) {
-                    actualFileName = docResult.value()->fileName;
-                }
-            }
-
-            // Fallback to name if no metadata found
-            if (actualFileName.empty()) {
-                actualFileName = name;
-            }
-
-            // Try to determine file extension from actual fileName
-            std::string extension;
-            if (!actualFileName.empty()) {
-                auto lastDot = actualFileName.find_last_of('.');
-                if (lastDot != std::string::npos) {
-                    extension = actualFileName.substr(lastDot);
-                }
-            }
-
-            // Try to get appropriate text extractor
-            if (!extension.empty()) {
-                auto& factory = extraction::TextExtractorFactory::instance();
-                auto extractor = factory.create(extension);
-
-                if (extractor) {
-                    spdlog::debug("MCP handleCatDocument: extracting text from {} using extractor",
-                                  extension);
-
-                    // Create extraction config
-                    extraction::ExtractionConfig config;
-                    config.maxFileSize = 100 * 1024 * 1024; // 100MB max
-
-                    // Convert string to byte span for extraction
-                    auto dataSpan = std::span<const std::byte>(
-                        reinterpret_cast<const std::byte*>(content.data()), content.size());
-
-                    // Extract text
-                    auto extractResult = extractor->extractFromBuffer(dataSpan, config);
-                    if (extractResult) {
-                        content = extractResult.value().text;
-                        spdlog::debug(
-                            "MCP handleCatDocument: successfully extracted {} bytes of text",
-                            content.size());
-                    } else {
-                        spdlog::warn("MCP handleCatDocument: text extraction failed: {}",
-                                     extractResult.error().message);
-                        // Keep original content on extraction failure
-                    }
-                } else if (extension == ".html" || extension == ".htm") {
-                    // Fallback to HTML extractor for HTML files
-                    spdlog::debug("MCP handleCatDocument: using HTML text extractor fallback");
-                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
-                }
-            } else if (!content.empty()) {
-                // No extension, check if it's HTML content
-                // Use case-insensitive search on first 1000 chars
-                auto trimmedContent = content.substr(0, std::min(size_t(1000), content.size()));
-                std::transform(trimmedContent.begin(), trimmedContent.end(), trimmedContent.begin(),
-                               ::tolower);
-
-                if (trimmedContent.find("<!doctype html") != std::string::npos ||
-                    trimmedContent.find("<html") != std::string::npos ||
-                    trimmedContent.find("<head") != std::string::npos ||
-                    trimmedContent.find("<body") != std::string::npos) {
-                    spdlog::debug("MCP handleCatDocument: detected HTML via content inspection, "
-                                  "extracting text");
-                    content = extraction::HtmlTextExtractor::extractTextFromHtml(content);
-                }
-            }
-        }
-
-        response.content = content;
-        response.size = content.size();
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Cat document failed: ") + e.what()};
+    if (execution_error) {
+        return execution_error.value();
     }
-}
 
-Result<MCPUpdateMetadataResponse>
-MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
-    try {
-        if (!metadataRepo_) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-        }
-
-        // Find document ID
-        int64_t docId = -1;
-        if (!req.name.empty()) {
-            auto docsResult = metadataRepo_->findDocumentsByPath("%" + req.name);
-            if (docsResult && !docsResult.value().empty()) {
-                for (const auto& doc : docsResult.value()) {
-                    if (doc.fileName == req.name) {
-                        docId = doc.id;
-                        break;
-                    }
-                }
-            }
-        } else if (!req.hash.empty()) {
-            auto docsResult = metadataRepo_->findDocumentsByPath("%");
-            if (docsResult) {
-                for (const auto& doc : docsResult.value()) {
-                    if (doc.sha256Hash == req.hash) {
-                        docId = doc.id;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (docId < 0) {
-            return Error{ErrorCode::NotFound, "Document not found"};
-        }
-
-        // Update metadata
-        for (const auto& [key, value] : req.metadata.items()) {
-            metadata::MetadataValue mv;
-            if (value.is_string()) {
-                mv.value = value.get<std::string>();
-            } else {
-                mv.value = value.dump();
-            }
-            mv.type = metadata::MetadataValueType::String;
-
-            auto result = metadataRepo_->setMetadata(docId, key, mv);
-            if (!result) {
-                return Error{ErrorCode::InternalError,
-                             "Failed to update metadata: " + result.error().message};
-            }
-        }
-
-        // Update tags
-        for (const auto& tag : req.tags) {
-            metadata::MetadataValue mv;
-            mv.value = "";
-            mv.type = metadata::MetadataValueType::String;
-
-            auto result = metadataRepo_->setMetadata(docId, "tag:" + tag, mv);
-            if (!result) {
-                return Error{ErrorCode::InternalError,
-                             "Failed to update tag: " + result.error().message};
-            }
-        }
-
-        MCPUpdateMetadataResponse response;
-        response.success = true;
-        response.message = "Metadata updated successfully";
-
-        return response;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Update metadata failed: ") + e.what()};
+    if (!result) {
+        return result.error();
     }
+
+    return mcp_response;
 }
 
 // Implementation of collection restore

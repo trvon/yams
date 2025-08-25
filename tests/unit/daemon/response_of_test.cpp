@@ -16,7 +16,7 @@ TEST_F(ResponseOfTest, CompileTimeMappings) {
     // Document operations
     static_assert(std::is_same_v<ResponseOfT<AddRequest>, AddResponse>);
     static_assert(std::is_same_v<ResponseOfT<GetRequest>, GetResponse>);
-    static_assert(std::is_same_v<ResponseOfT<DeleteRequest>, SuccessResponse>);
+    static_assert(std::is_same_v<ResponseOfT<DeleteRequest>, DeleteResponse>);
 
     // System operations
     static_assert(std::is_same_v<ResponseOfT<StatusRequest>, StatusResponse>);
@@ -91,7 +91,9 @@ TEST_F(ResponseOfTest, VariantCompatibility) {
     // All request types should be constructible into Request variant
     Request req1 = SearchRequest{"query", 10,    false, false, 0.7, {}, "keyword", false,
                                  false,   false, false, false, 0,   0,  0,         ""};
-    Request req2 = GetRequest{"hash123", ""};
+    GetRequest getByHash{};
+    getByHash.hash = "hash123";
+    Request req2 = getByHash;
     Request req3 = StatusRequest{true};
 
     // All response types should be constructible into Response variant
@@ -121,11 +123,11 @@ TEST_F(ResponseOfTest, VariantCompatibility) {
 // Test that ShutdownRequest maps to SuccessResponse (multiple requests can map to same response)
 TEST_F(ResponseOfTest, MultipleRequestsToSameResponse) {
     // Both DeleteRequest and UnloadModelRequest map to SuccessResponse
-    static_assert(std::is_same_v<ResponseOfT<DeleteRequest>, SuccessResponse>);
+    static_assert(std::is_same_v<ResponseOfT<DeleteRequest>, DeleteResponse>);
     static_assert(std::is_same_v<ResponseOfT<UnloadModelRequest>, SuccessResponse>);
 
-    // They map to the same type
-    static_assert(std::is_same_v<ResponseOfT<DeleteRequest>, ResponseOfT<UnloadModelRequest>>);
+    // They map to different types
+    static_assert(!std::is_same_v<ResponseOfT<DeleteRequest>, ResponseOfT<UnloadModelRequest>>);
 
     SUCCEED() << "Multiple requests can map to the same response type";
 }
@@ -144,8 +146,13 @@ TEST_F(ResponseOfTest, RequestResponsePairVerification) {
     Response searchRes = SearchResponse{{}, 10, std::chrono::milliseconds(0)};
     EXPECT_TRUE(verifyRequestResponsePair(searchReq, searchRes));
 
-    GetRequest getReq{"abc123", ""};
-    Response getRes = GetResponse{"abc123", "content", {}};
+    GetRequest getReq{};
+    getReq.hash = "abc123";
+    GetResponse gr{};
+    gr.hash = "abc123";
+    gr.content = "content";
+    gr.hasContent = true;
+    Response getRes = gr;
     EXPECT_TRUE(verifyRequestResponsePair(getReq, getRes));
 
     // Wrong response type should fail

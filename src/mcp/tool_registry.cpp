@@ -404,16 +404,18 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     req.binary = j.value("binary", false);
     req.text = j.value("text", false);
     req.recent = j.value("recent", 0);
+    req.limit = j.value("limit", 100);
+    req.offset = j.value("offset", 0);
     req.sortBy = j.value("sort_by", std::string{"modified"});
     req.sortOrder = j.value("sort_order", std::string{"desc"});
     return req;
 }
 
 json MCPListDocumentsRequest::toJson() const {
-    return json{{"pattern", pattern},     {"tags", tags},           {"type", type},
-                {"mime", mime},           {"extension", extension}, {"binary", binary},
-                {"text", text},           {"recent", recent},       {"sort_by", sortBy},
-                {"sort_order", sortOrder}};
+    return json{{"pattern", pattern}, {"tags", tags},           {"type", type},
+                {"mime", mime},       {"extension", extension}, {"binary", binary},
+                {"text", text},       {"recent", recent},       {"limit", limit},
+                {"offset", offset},   {"sort_by", sortBy},      {"sort_order", sortOrder}};
 }
 
 // MCPListDocumentsResponse implementation

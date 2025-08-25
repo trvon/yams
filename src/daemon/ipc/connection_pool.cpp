@@ -110,7 +110,10 @@ Task<Result<ConnectionPool::ConnectionHandle>> ConnectionPool::acquire() {
 
 Result<ConnectionPool::ConnectionHandle> ConnectionPool::try_acquire() {
     if (!available_semaphore_.try_acquire()) {
-        return Error{ErrorCode::ResourceBusy, "No connections available"};
+        size_t active = active_count_.load();
+        auto msg = std::string("No connections available (active=") + std::to_string(active) +
+                   ", max=" + std::to_string(config_.max_connections) + ")";
+        return Error{ErrorCode::ResourceBusy, std::move(msg)};
     }
 
     std::lock_guard lock(mutex_);
@@ -160,13 +163,6 @@ Result<ConnectionPool::ConnectionHandle> ConnectionPool::try_acquire() {
 }
 
 void ConnectionPool::release(std::unique_ptr<AsyncSocket> socket) {
-    if (!socket || !socket->is_valid()) {
-        available_semaphore_.release();
-        active_count_--;
-        total_releases_++;
-        return;
-    }
-
     std::lock_guard lock(mutex_);
 
     // Find a slot to return the connection to
@@ -182,7 +178,8 @@ void ConnectionPool::release(std::unique_ptr<AsyncSocket> socket) {
         }
     }
 
-    // No slot found, connection will be destroyed
+    // No slot found (e.g. for a connection created when pool was full),
+    // so the connection will be destroyed.
     available_semaphore_.release();
     active_count_--;
     total_releases_++;
@@ -251,10 +248,35 @@ ConnectionPool::Stats ConnectionPool::get_stats() const {
 }
 
 Result<std::unique_ptr<AsyncSocket>> ConnectionPool::create_connection() {
-    // This is a placeholder - should be replaced with factory pattern
-    // For now, return an error as we need a factory to create connections
-    return Error{ErrorCode::NotImplemented,
-                 "Connection factory not set - use UnixSocketFactory or TcpSocketFactory"};
+    std::shared_ptr<ConnectionFactory> factoryCopy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        factoryCopy = factory_;
+    }
+
+    if (!factoryCopy) {
+        return Error{ErrorCode::NotImplemented,
+                     "Connection factory not set - use UnixSocketFactory or TcpSocketFactory"};
+    }
+
+    // Create socket via factory
+    auto sockRes = factoryCopy->create();
+    if (!sockRes) {
+        return sockRes.error();
+    }
+    auto sock = std::move(sockRes).value();
+
+    // Validate the new connection
+    if (auto v = factoryCopy->validate(*sock); !v) {
+        return v.error();
+    }
+
+    // Apply pool-level socket options (keepalive/nodelay)
+    if (auto opt = apply_socket_options(*sock); !opt) {
+        return opt.error();
+    }
+
+    return sock;
 }
 
 void ConnectionPool::prune_idle_connections() {

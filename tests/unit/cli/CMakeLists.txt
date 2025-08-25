@@ -5,16 +5,16 @@ if(YAMS_ENABLE_TUI)
     add_executable(test_tui_services
         test_tui_services.cpp
     )
-    
+
     # Require C++20 to match the project configuration
     target_compile_features(test_tui_services PRIVATE cxx_std_20)
-    
+
     # Link against the CLI library to inherit include paths and dependencies
     target_link_libraries(test_tui_services
         PRIVATE
             yams_cli
     )
-    
+
     # Register test with CTest
     add_test(NAME tui_services COMMAND test_tui_services)
 endif()
@@ -46,3 +46,6 @@ if(TARGET yams_cli)
 else()
     message(WARNING "yams_cli target not found - skipping update_command_tests")
 endif()
+
+# PooledRequestManager unit tests removed in favor of real-daemon integration tests.
+# The integration suite exercises the pooled request path end-to-end.
