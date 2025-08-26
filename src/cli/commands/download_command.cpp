@@ -5,10 +5,12 @@
 #include <optional>
 #include <regex>
 #include <vector>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/downloader/downloader.hpp>
 
 namespace yams::cli {
 
@@ -125,73 +127,133 @@ public:
             return Error{ErrorCode::InvalidArgument, "Specify only one of <url> or --list"};
         }
 
-        // Build daemon request (using only protocol fields)
-        yams::daemon::DownloadRequest dreq;
+        // Get app context and download service
+        auto appContext = cli_->getAppContext();
+        if (!appContext) {
+            return Error{ErrorCode::NotInitialized, "Failed to initialize app context"};
+        }
+        auto downloadService = app::services::makeDownloadService(*appContext);
+        if (!downloadService) {
+            return Error{ErrorCode::NotInitialized, "Failed to create download service"};
+        }
+
+        // Build service request from CLI options
+        app::services::DownloadServiceRequest serviceReq;
         if (url_) {
-            dreq.url = *url_;
+            serviceReq.url = *url_;
         } else {
-            return Error{ErrorCode::InvalidArgument, "URL is required for download"};
+            // TODO: Handle --list option
+            return Error{ErrorCode::NotImplemented, "--list option is not yet implemented"};
         }
 
+        // Headers
+        for (const auto& h : headers_) {
+            auto pos = h.find(':');
+            if (pos != std::string::npos) {
+                std::string key = h.substr(0, pos);
+                std::string value = h.substr(pos + 1);
+                // trim leading space from value
+                if (!value.empty() && value[0] == ' ') {
+                    value.erase(0, 1);
+                }
+                serviceReq.headers.push_back({key, value});
+            }
+        }
+
+        // Checksum
+        if (checksum_) {
+            auto pos = checksum_->find(':');
+            if (pos != std::string::npos) {
+                std::string algo = checksum_->substr(0, pos);
+                std::string hex = checksum_->substr(pos + 1);
+                downloader::Checksum cs;
+                if (algo == "sha256")
+                    cs.algo = downloader::HashAlgo::Sha256;
+                else if (algo == "sha512")
+                    cs.algo = downloader::HashAlgo::Sha512;
+                else if (algo == "md5")
+                    cs.algo = downloader::HashAlgo::Md5;
+                cs.hex = hex;
+                serviceReq.checksum = cs;
+            }
+        }
+
+        // Concurrency and performance
+        serviceReq.concurrency = concurrency_;
+        serviceReq.chunkSizeBytes = chunkSize_;
+        serviceReq.timeout = std::chrono::milliseconds(timeoutMs_);
+        serviceReq.retry.maxAttempts = retryAttempts_;
+        serviceReq.retry.initialBackoff = std::chrono::milliseconds(backoffMs_);
+        serviceReq.retry.multiplier = backoffMult_;
+        serviceReq.retry.maxBackoff = std::chrono::milliseconds(maxBackoffMs_);
+        serviceReq.rateLimit.globalBps = rateLimitGlobalBps_;
+        serviceReq.rateLimit.perConnectionBps = rateLimitPerConnBps_;
+
+        // Resume and networking
+        serviceReq.resume = !noResume_;
+        serviceReq.proxy = proxy_;
+        serviceReq.tls.insecure = tlsInsecure_;
+        if (tlsCaPath_) {
+            serviceReq.tls.caPath = *tlsCaPath_;
+        }
+        serviceReq.followRedirects = !noFollowRedirects_;
+
+        // Export policy
+        serviceReq.storeOnly = !exportPath_ && !exportDir_;
         if (exportPath_) {
-            dreq.outputPath = exportPath_->string();
+            serviceReq.exportPath = exportPath_->string();
+        }
+        if (overwritePolicy_ == "never") {
+            serviceReq.overwrite = downloader::OverwritePolicy::Never;
+        } else if (overwritePolicy_ == "if-different-etag") {
+            serviceReq.overwrite = downloader::OverwritePolicy::IfDifferentEtag;
+        } else if (overwritePolicy_ == "always") {
+            serviceReq.overwrite = downloader::OverwritePolicy::Always;
         }
 
-        // Note: tags and metadata would be added here if CLI options existed
-        // dreq.tags = tags_;
-        // dreq.metadata = metadata_;
+        // Call the download service
+        auto result = downloadService->download(serviceReq);
 
-        dreq.quiet = quiet_;
-
-        // Render lambda for results (unused since we skip daemon)
-        [[maybe_unused]] auto render =
-            [&](const yams::daemon::DownloadResponse& resp) -> Result<void> {
+        // Handle result
+        if (!result) {
+            spdlog::error("Download failed: {}", result.error().message);
             if (jsonOutput_) {
                 json j;
-                j["success"] = resp.success;
-                j["url"] = resp.url;
-                j["hash"] = resp.hash;
-                j["local_path"] = resp.localPath;
-                j["size"] = resp.size;
-                if (!resp.error.empty()) {
-                    j["error"] = resp.error;
-                }
+                j["success"] = false;
+                j["url"] = serviceReq.url;
+                j["error"] = result.error().message;
                 std::cout << j.dump(2) << std::endl;
-            } else {
-                if (resp.success) {
-                    std::cout << "Downloaded: " << resp.url << std::endl;
-                    std::cout << "Hash: " << resp.hash << std::endl;
-                    std::cout << "Size: " << resp.size << " bytes" << std::endl;
-                    if (!resp.localPath.empty()) {
-                        std::cout << "Stored at: " << resp.localPath << std::endl;
-                    }
-                } else {
-                    std::cout << "Download failed: " << resp.error << std::endl;
-                }
             }
-            return Result<void>();
-        };
-
-        // Downloads should always be handled locally by CLI with rich functionality
-        // The daemon doesn't have HTTP client, progress indicators, resume support, etc.
-        // Skip daemon entirely and use local download implementation
-        spdlog::info("Using local download implementation (daemon not suited for downloads)");
-
-        // For now, return a clear message that local download needs implementation
-        if (jsonOutput_) {
-            json j;
-            j["success"] = false;
-            j["url"] = dreq.url;
-            j["error"] = "Local download implementation needed - daemon not suitable for downloads";
-            std::cout << j.dump(2) << std::endl;
-        } else {
-            std::cout << "Download failed: Local download implementation needed" << std::endl;
-            std::cout
-                << "The daemon is not suitable for downloads (missing HTTP client, progress, etc.)"
-                << std::endl;
+            return result.error();
         }
 
-        return Error{ErrorCode::NotImplemented, "Local download implementation required"};
+        const auto& resp = result.value();
+
+        if (jsonOutput_) {
+            json j;
+            j["success"] = resp.success;
+            j["url"] = resp.url;
+            j["hash"] = resp.hash;
+            j["stored_path"] = resp.storedPath.string();
+            j["size_bytes"] = resp.sizeBytes;
+            if (resp.httpStatus)
+                j["http_status"] = *resp.httpStatus;
+            if (resp.etag)
+                j["etag"] = *resp.etag;
+            if (resp.lastModified)
+                j["last_modified"] = *resp.lastModified;
+            if (resp.checksumOk)
+                j["checksum_ok"] = *resp.checksumOk;
+            std::cout << j.dump(2) << std::endl;
+        } else {
+            std::cout << "Download successful!" << std::endl;
+            std::cout << "  URL: " << resp.url << std::endl;
+            std::cout << "  Hash: " << resp.hash << std::endl;
+            std::cout << "  Size: " << resp.sizeBytes << " bytes" << std::endl;
+            std::cout << "  Stored at: " << resp.storedPath.string() << std::endl;
+        }
+
+        return Result<void>();
     }
 
 private:

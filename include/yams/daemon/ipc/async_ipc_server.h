@@ -84,13 +84,13 @@ private:
     [[nodiscard]] Result<void> create_socket();
     [[nodiscard]] Result<void> bind_socket();
     [[nodiscard]] Task<void> accept_loop(std::stop_token token);
+    void accept_loop_sync(std::stop_token token);
     [[nodiscard]] Task<void> handle_client(AsyncSocket socket, std::stop_token token);
     void cleanup_socket();
 
     Config config_;
     int listen_fd_ = -1;
     std::atomic<bool> running_{false};
-    std::stop_source stop_source_;
 
     // Own the AsyncIOContext for this server instance
     std::unique_ptr<AsyncIOContext> io_context_;
@@ -103,9 +103,9 @@ private:
     RequestHandlerFunc handler_func_;
 
     // Worker threads for handling connections
-    std::vector<std::thread> worker_threads_;
-    std::thread accept_thread_;
-    std::thread io_thread_; // Single thread for IO event loop
+    std::vector<std::jthread> worker_threads_;
+    std::jthread accept_thread_;
+    std::jthread io_thread_; // Single thread for IO event loop
 
     // Retain client tasks to ensure coroutine lifetime across threads
     std::mutex tasks_mutex_;

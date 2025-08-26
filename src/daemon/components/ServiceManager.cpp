@@ -35,8 +35,6 @@ Result<void> ServiceManager::initialize() {
         if (!result) {
             spdlog::error("Async resource initialization failed: {}", result.error().message);
         } else {
-            // Mark overall initialization as complete
-            state_.readiness.ipcServerReady = true;
             spdlog::info("All daemon services initialized successfully");
         }
     });

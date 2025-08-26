@@ -250,7 +250,7 @@ void ResultRanker::extractTermsRecursive(const QueryNode* node,
 }
 
 void ResultRanker::updateTermFrequencies(const std::string& documentText,
-                                         const std::string& documentId) {
+                                         [[maybe_unused]] const std::string& documentId) {
     // Simple term extraction - split by whitespace and punctuation
     std::regex wordRegex(R"(\b\w+\b)");
     std::sregex_iterator iter(documentText.begin(), documentText.end(), wordRegex);
@@ -325,7 +325,7 @@ float AdvancedRanker::calculateBM25Score(const SearchResultItem& item,
     auto queryTerms = baseRanker_.extractQueryTerms(query);
     float score = 0.0f;
 
-    for (const auto& term : queryTerms) {
+    for ([[maybe_unused]] const auto& term : queryTerms) {
         float tf = item.termFrequency;
         float idf = std::log((100.0f + 1.0f) / (1.0f + 1.0f)); // Simplified IDF
 

@@ -1,8 +1,12 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/async_socket.h>
 #include <yams/daemon/ipc/connection_pool.h>
+#include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
+
+#include <mutex>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -199,61 +203,48 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize the daemon connection pool
+    // Initialize the daemon connection pool (legacy config mapped by PooledRequestManager)
     yams::daemon::ConnectionPool::Config pool_config;
     pool_config.max_connections = 10; // Cap connections to the daemon
     pool_config.connection_timeout = std::chrono::seconds(5);
     pool_config.idle_timeout = std::chrono::minutes(1);
 
-    // Resolve daemon socket path and configure a UnixSocketFactory for real socket pooling
-    static yams::daemon::AsyncIOContext io_ctx;
-    auto socket_path = yams::daemon::DaemonClient::resolveSocketPath();
-    auto unix_factory =
-        std::make_shared<yams::daemon::UnixSocketFactory>(socket_path.string(), io_ctx);
+    // Construct pooled request managers; internal DaemonClientPool handles clients (no
+    // AsyncIOContext)
+    search_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<yams::daemon::SearchRequest, yams::daemon::SearchResponse>>(
+        pool_config);
 
-    // Initialize the request manager for the search tool and set its factory
-    search_req_manager_ =
-        std::make_unique<cli::PooledRequestManager<daemon::SearchRequest, daemon::SearchResponse>>(
-            pool_config);
-    search_req_manager_->set_socket_factory(unix_factory);
-
-    grep_req_manager_ =
-        std::make_unique<cli::PooledRequestManager<daemon::GrepRequest, daemon::GrepResponse>>(
-            pool_config);
-    grep_req_manager_->set_socket_factory(unix_factory);
+    grep_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<yams::daemon::GrepRequest, yams::daemon::GrepResponse>>(
+        pool_config);
 
     download_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<daemon::DownloadRequest, daemon::DownloadResponse>>(pool_config);
-    download_req_manager_->set_socket_factory(unix_factory);
-
-    store_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<daemon::AddDocumentRequest, daemon::AddDocumentResponse>>(
+        cli::PooledRequestManager<yams::daemon::DownloadRequest, yams::daemon::DownloadResponse>>(
         pool_config);
-    store_req_manager_->set_socket_factory(unix_factory);
 
-    retrieve_req_manager_ =
-        std::make_unique<cli::PooledRequestManager<daemon::GetRequest, daemon::GetResponse>>(
-            pool_config);
-    retrieve_req_manager_->set_socket_factory(unix_factory);
+    store_req_manager_ =
+        std::make_unique<cli::PooledRequestManager<yams::daemon::AddDocumentRequest,
+                                                   yams::daemon::AddDocumentResponse>>(pool_config);
 
-    list_req_manager_ =
-        std::make_unique<cli::PooledRequestManager<daemon::ListRequest, daemon::ListResponse>>(
-            pool_config);
-    list_req_manager_->set_socket_factory(unix_factory);
+    retrieve_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<yams::daemon::GetRequest, yams::daemon::GetResponse>>(
+        pool_config);
+
+    list_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<yams::daemon::ListRequest, yams::daemon::ListResponse>>(
+        pool_config);
 
     stats_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<daemon::GetStatsRequest, daemon::GetStatsResponse>>(pool_config);
-    stats_req_manager_->set_socket_factory(unix_factory);
-
-    delete_req_manager_ =
-        std::make_unique<cli::PooledRequestManager<daemon::DeleteRequest, daemon::DeleteResponse>>(
-            pool_config);
-    delete_req_manager_->set_socket_factory(unix_factory);
-
-    update_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<daemon::UpdateDocumentRequest, daemon::UpdateDocumentResponse>>(
+        cli::PooledRequestManager<yams::daemon::GetStatsRequest, yams::daemon::GetStatsResponse>>(
         pool_config);
-    update_req_manager_->set_socket_factory(unix_factory);
+
+    delete_req_manager_ = std::make_unique<
+        cli::PooledRequestManager<yams::daemon::DeleteRequest, yams::daemon::DeleteResponse>>(
+        pool_config);
+
+    update_req_manager_ = std::make_unique<cli::PooledRequestManager<
+        yams::daemon::UpdateDocumentRequest, yams::daemon::UpdateDocumentResponse>>(pool_config);
 
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
@@ -1127,44 +1118,179 @@ Result<MCPGrepResponse> MCPServer::handleGrepDocuments(const MCPGrepRequest& req
 }
 
 Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& req) {
-    // Convert MCP request to daemon request
-    daemon::DownloadRequest daemon_req;
-    daemon_req.url = req.url;
-    daemon_req.outputPath = req.exportPath;
-    // Note: More complex fields like headers, checksum, etc. would be mapped here
-    // if the daemon protocol supported them. For now, we map the basics.
-
+    const bool verbose =
+        (std::getenv("YAMS_POOL_VERBOSE") && std::string(std::getenv("YAMS_POOL_VERBOSE")) != "0" &&
+         std::string(std::getenv("YAMS_POOL_VERBOSE")) != "false");
+    if (verbose) {
+        spdlog::debug("[MCP] download: url='{}' post_index={} store_only={} export='{}'", req.url,
+                      req.postIndex, req.storeOnly, req.exportPath);
+    }
+    // Perform download locally using downloader manager (store into CAS), then optionally
+    // post-index.
     MCPDownloadResponse mcp_response;
-    std::optional<Error> execution_error;
 
-    auto render = [&](const daemon::DownloadResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.url = resp.url;
-        mcp_response.hash = resp.hash;
-        mcp_response.storedPath = resp.localPath;
-        mcp_response.sizeBytes = resp.size;
-        mcp_response.success = resp.success;
-        if (!resp.error.empty()) {
-            mcp_response.success = false;
-        }
-        return Result<void>();
-    };
+    // Build downloader request from MCP request
+    yams::downloader::DownloadRequest dreq;
+    dreq.url = req.url;
+    dreq.concurrency = std::max(1, req.concurrency);
+    dreq.chunkSizeBytes = req.chunkSizeBytes;
+    dreq.timeout = std::chrono::milliseconds{req.timeoutMs};
+    dreq.resume = req.resume;
+    dreq.followRedirects = req.followRedirects;
+    dreq.storeOnly = req.storeOnly;
 
-    auto fallback = [&]() -> Result<void> {
-        execution_error = Error{ErrorCode::NetworkError,
-                                "Daemon not available or download failed. Try restarting the "
-                                "daemon (yams daemon start) and re-run the command."};
-        return Result<void>();
-    };
-
-    auto result = download_req_manager_->execute(daemon_req, fallback, render);
-
-    if (execution_error) {
-        return execution_error.value();
+    // Optional proxy
+    if (!req.proxy.empty()) {
+        dreq.proxy = req.proxy;
     }
 
-    if (!result) {
-        return result.error();
+    // Optional export path (only honored when not storeOnly)
+    if (!req.exportPath.empty()) {
+        dreq.exportPath = std::filesystem::path(req.exportPath);
+    }
+
+    // Overwrite policy
+    if (req.overwrite == "always") {
+        dreq.overwrite = yams::downloader::OverwritePolicy::Always;
+    } else if (req.overwrite == "if-different-etag") {
+        dreq.overwrite = yams::downloader::OverwritePolicy::IfDifferentEtag;
+    } else {
+        dreq.overwrite = yams::downloader::OverwritePolicy::Never;
+    }
+
+    // Headers
+    for (const auto& h : req.headers) {
+        auto pos = h.find(':');
+        if (pos != std::string::npos) {
+            yams::downloader::Header hdr;
+            hdr.name = std::string(h.begin(), h.begin() + static_cast<std::ptrdiff_t>(pos));
+            // skip possible space after colon
+            std::string val = h.substr(pos + 1);
+            if (!val.empty() && val.front() == ' ')
+                val.erase(0, 1);
+            hdr.value = std::move(val);
+            dreq.headers.push_back(std::move(hdr));
+        }
+    }
+
+    // Expected checksum (format "algo:hex")
+    if (!req.checksum.empty()) {
+        auto colon = req.checksum.find(':');
+        if (colon != std::string::npos) {
+            std::string algo = req.checksum.substr(0, colon);
+            std::string hex = req.checksum.substr(colon + 1);
+            yams::downloader::Checksum sum;
+            if (algo == "sha256") {
+                sum.algo = yams::downloader::HashAlgo::Sha256;
+            } else if (algo == "sha512") {
+                sum.algo = yams::downloader::HashAlgo::Sha512;
+            } else if (algo == "md5") {
+                sum.algo = yams::downloader::HashAlgo::Md5;
+            }
+            sum.hex = std::move(hex);
+            dreq.checksum = std::move(sum);
+        }
+    }
+
+    // Construct manager with defaults (storage chosen by daemon/client configuration later if
+    // needed)
+    yams::downloader::StorageConfig storage{};
+    yams::downloader::DownloaderConfig cfg{};
+    cfg.defaultConcurrency = dreq.concurrency;
+    cfg.defaultChunkSizeBytes = dreq.chunkSizeBytes;
+    cfg.defaultTimeout = dreq.timeout;
+    cfg.followRedirects = dreq.followRedirects;
+    cfg.resume = dreq.resume;
+    cfg.storeOnly = dreq.storeOnly;
+
+    if (verbose) {
+        spdlog::debug("[MCP] download: starting manager (conc={}, chunk={}, timeout_ms={}, "
+                      "follow_redirects={}, resume={}, store_only={})",
+                      cfg.defaultConcurrency, cfg.defaultChunkSizeBytes, cfg.defaultTimeout.count(),
+                      cfg.followRedirects, cfg.resume, cfg.storeOnly);
+    }
+    auto manager = yams::downloader::makeDownloadManager(storage, cfg);
+    auto dlRes = manager->download(dreq);
+    if (!dlRes.ok()) {
+        if (verbose) {
+            spdlog::debug("[MCP] download: failed for url='{}' error='{}'", req.url,
+                          dlRes.error().message);
+        }
+        return Error{ErrorCode::InternalError, dlRes.error().message};
+    }
+
+    const auto& final = dlRes.value();
+    mcp_response.url = final.url;
+    mcp_response.hash = final.hash;
+    mcp_response.storedPath = final.storedPath.string();
+    mcp_response.sizeBytes = final.sizeBytes;
+    mcp_response.success = final.success;
+    if (final.httpStatus)
+        mcp_response.httpStatus = *final.httpStatus;
+    if (final.etag)
+        mcp_response.etag = *final.etag;
+    if (final.lastModified)
+        mcp_response.lastModified = *final.lastModified;
+    if (final.checksumOk)
+        mcp_response.checksumOk = *final.checksumOk;
+
+    if (verbose) {
+        spdlog::debug(
+            "[MCP] download: success url='{}' hash='{}' stored='{}' size={} http={} etag='{}' "
+            "lm='{}' checksum_ok={}",
+            mcp_response.url, mcp_response.hash, mcp_response.storedPath, mcp_response.sizeBytes,
+            (mcp_response.httpStatus ? *mcp_response.httpStatus : 0),
+            (mcp_response.etag ? *mcp_response.etag : ""),
+            (mcp_response.lastModified ? *mcp_response.lastModified : ""),
+            (mcp_response.checksumOk ? (*mcp_response.checksumOk ? "true" : "false") : "n/a"));
+    }
+    // Optionally post-index the artifact via daemon
+    if (mcp_response.success && req.postIndex) {
+        if (verbose) {
+            spdlog::debug("[MCP] post-index: starting for path='{}' collection='{}' "
+                          "snapshot_id='{}' snapshot_label='{}'",
+                          mcp_response.storedPath, req.collection, req.snapshotId,
+                          req.snapshotLabel);
+        }
+        daemon::AddDocumentRequest addReq;
+        addReq.path = mcp_response.storedPath; // index by stored path
+        addReq.collection = req.collection;
+        addReq.snapshotId = req.snapshotId;
+        addReq.snapshotLabel = req.snapshotLabel;
+
+        // tags and metadata: default 'downloaded' tag + user tags
+        addReq.tags.clear();
+        addReq.tags.push_back("downloaded");
+        for (const auto& t : req.tags) {
+            addReq.tags.push_back(t);
+        }
+        for (const auto& [k, v] : req.metadata) {
+            addReq.metadata[k] = v;
+        }
+
+        std::optional<Error> add_error;
+        auto renderAdd = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
+            (void)resp;
+            return Result<void>();
+        };
+        auto fallbackAdd = [&]() -> Result<void> {
+            add_error = Error{ErrorCode::NetworkError, "Daemon not available during post-index"};
+            return Result<void>();
+        };
+
+        if (auto res = store_req_manager_->execute(addReq, fallbackAdd, renderAdd); !res) {
+            if (verbose) {
+                spdlog::debug("[MCP] post-index: daemon call failed error='{}'",
+                              res.error().message);
+            }
+            return res.error();
+        }
+        if (add_error) {
+            if (verbose) {
+                spdlog::debug("[MCP] post-index: fallback error='{}'", add_error->message);
+            }
+            return add_error.value();
+        }
     }
 
     return mcp_response;
@@ -1510,20 +1636,59 @@ void MCPServer::initializeToolRegistry() {
 
     toolRegistry_->registerTool<MCPDownloadRequest, MCPDownloadResponse>(
         "download", [this](const MCPDownloadRequest& req) { return handleDownload(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"url", {{"type", "string"}, {"description", "URL to download"}}},
-               {"headers",
-                {{"type", "array"},
-                 {"items", {{"type", "string"}}},
-                 {"description", "HTTP headers"}}},
-               {"checksum", {{"type", "string"}, {"description", "Expected checksum (algo:hex)"}}},
-               {"concurrency",
-                {{"type", "integer"},
-                 {"description", "Number of concurrent connections"},
-                 {"default", 4}}}}},
-             {"required", json::array({"url"})}},
-        "Download files from URLs and store them in YAMS content-addressed storage");
+        json{
+            {"type", "object"},
+            {"properties",
+             {{"url", {{"type", "string"}, {"description", "URL to download"}}},
+              {"headers",
+               {{"type", "array"},
+                {"items", {{"type", "string"}}},
+                {"description", "HTTP headers"}}},
+              {"checksum", {{"type", "string"}, {"description", "Expected checksum (algo:hex)"}}},
+              {"concurrency",
+               {{"type", "integer"},
+                {"description", "Number of concurrent connections"},
+                {"default", 4}}},
+              {"chunk_size_bytes",
+               {{"type", "integer"}, {"description", "Chunk size in bytes"}, {"default", 8388608}}},
+              {"timeout_ms",
+               {{"type", "integer"},
+                {"description", "Per-connection timeout in milliseconds"},
+                {"default", 60000}}},
+              {"resume",
+               {{"type", "boolean"},
+                {"description", "Attempt to resume interrupted downloads"},
+                {"default", true}}},
+              {"proxy", {{"type", "string"}, {"description", "Proxy URL (optional)"}}},
+              {"follow_redirects",
+               {{"type", "boolean"}, {"description", "Follow HTTP redirects"}, {"default", true}}},
+              {"store_only",
+               {{"type", "boolean"},
+                {"description", "Store only in CAS without writing export path"},
+                {"default", true}}},
+              {"export_path",
+               {{"type", "string"}, {"description", "Export path (when store_only is false)"}}},
+              {"overwrite",
+               {{"type", "string"},
+                {"description", "Overwrite policy: never|if-different-etag|always"},
+                {"default", "never"}}},
+              {"post_index",
+               {{"type", "boolean"},
+                {"description", "Index the downloaded artifact after storing"},
+                {"default", false}}},
+              {"tags",
+               {{"type", "array"},
+                {"items", {{"type", "string"}}},
+                {"description", "Tags to apply when indexing"}}},
+              {"metadata",
+               {{"type", "object"}, {"description", "Metadata key/value pairs for indexing"}}},
+              {"collection", {{"type", "string"}, {"description", "Collection name for indexing"}}},
+              {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID for indexing"}}},
+              {"snapshot_label",
+               {{"type", "string"}, {"description", "Snapshot label for indexing"}}}}},
+            {"required", json::array({"url"})}},
+        "Download files from URLs and store them in YAMS content-addressed storage; optionally "
+        "post-index the artifact.");
 
     toolRegistry_->registerTool<MCPStoreDocumentRequest, MCPStoreDocumentResponse>(
         "store", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },

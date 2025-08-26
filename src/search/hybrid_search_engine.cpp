@@ -341,7 +341,7 @@ public:
          std::shared_ptr<KeywordSearchEngine> keyword_engine, const HybridSearchConfig& config,
          std::shared_ptr<vector::EmbeddingGenerator> embedding_generator = nullptr)
         : vector_index_(std::move(vector_index)), keyword_engine_(std::move(keyword_engine)),
-          config_(config), embedding_generator_(std::move(embedding_generator)) {
+          embedding_generator_(std::move(embedding_generator)), config_(config) {
         config_.normalizeWeights();
     }
 
@@ -776,7 +776,7 @@ private:
     }
 
     std::string generateCacheKey(const std::string& query, size_t k,
-                                 const vector::SearchFilter& filter) {
+                                 [[maybe_unused]] const vector::SearchFilter& filter) {
         // Simple cache key generation
         return query + "_" + std::to_string(k);
     }
@@ -815,7 +815,8 @@ private:
         cache_[key] = {results, std::chrono::steady_clock::now()};
     }
 
-    void generateExplanations(std::vector<HybridSearchResult>& results, const std::string& query) {
+    void generateExplanations(std::vector<HybridSearchResult>& results,
+                              [[maybe_unused]] const std::string& query) {
         for (auto& result : results) {
             HybridSearchResult::Explanation explanation;
 

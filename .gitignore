@@ -75,3 +75,4 @@ public/*
 conan.lock
 AGENTS.md
 .yams*
+CMakeUserPresets.json

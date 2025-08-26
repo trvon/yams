@@ -14,7 +14,67 @@
 #include <unistd.h>    // for fork(), setsid(), chdir(), close()
 #include <sys/types.h> // for pid_t
 
+// Fatal signal/backtrace support
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <exception>
+#include <sstream>
+#include <string>
+#include <thread>
+#if !defined(_WIN32)
+#include <execinfo.h>
+#endif
+
+namespace {
+void log_fatal(const char* what) {
+    try {
+        // Attempt to log via spdlog (if initialized)
+        spdlog::critical("FATAL: {}", what);
+        spdlog::critical("Aborting after fatal error");
+    } catch (...) {
+        // Fallback to stderr if logger is not ready
+        std::fprintf(stderr, "FATAL: %s\n", what);
+    }
+}
+
+void signal_handler(int signo) {
+    const char* sigstr = (signo == SIGSEGV)   ? "SIGSEGV"
+                         : (signo == SIGABRT) ? "SIGABRT"
+                                              : "UNKNOWN";
+    log_fatal(sigstr);
+#if !defined(_WIN32)
+    // Capture and log a backtrace
+    void* bt[64];
+    int n = backtrace(bt, 64);
+    char** syms = backtrace_symbols(bt, n);
+    if (syms) {
+        for (int i = 0; i < n; ++i) {
+            spdlog::critical("Backtrace[{}]: {}", i, syms[i]);
+        }
+        free(syms);
+    }
+#endif
+    // Give logger a moment to flush
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::_Exit(128 + signo);
+}
+
+void setup_fatal_handlers() {
+    std::signal(SIGSEGV, signal_handler);
+    std::signal(SIGABRT, signal_handler);
+    std::set_terminate([]() noexcept {
+        log_fatal("std::terminate called");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::_Exit(1);
+    });
+}
+} // namespace
+
 int main(int argc, char* argv[]) {
+    // Install fatal handlers as early as possible
+    setup_fatal_handlers();
+
     CLI::App app{"YAMS Daemon - background service"};
 
     // Configuration options
@@ -157,6 +217,96 @@ int main(int argc, char* argv[]) {
                     config.modelPoolConfig.lazyLoading =
                         (modelsSection.at("lazy_loading") == "true");
                 }
+            }
+
+            // Load daemon.download scaffolding (feature disabled by default)
+            if (tomlConfig.find("daemon.download") != tomlConfig.end()) {
+                const auto& dlSection = tomlConfig.at("daemon.download");
+
+                // Enable flag (default false)
+                if (dlSection.find("enable") != dlSection.end()) {
+                    config.downloadPolicy.enable = (dlSection.at("enable") == "true");
+                }
+
+                // Allowed hosts (comma or array in migrator-normalized string)
+                if (dlSection.find("allowed_hosts") != dlSection.end()) {
+                    // Expect a comma-separated list; split on ',' and trim
+                    std::stringstream ss(dlSection.at("allowed_hosts"));
+                    std::string host;
+                    while (std::getline(ss, host, ',')) {
+                        // trim spaces
+                        auto start = host.find_first_not_of(" \t");
+                        auto end = host.find_last_not_of(" \t");
+                        if (start != std::string::npos) {
+                            config.downloadPolicy.allowedHosts.emplace_back(
+                                host.substr(start, end - start + 1));
+                        }
+                    }
+                }
+
+                // Allowed schemes
+                if (dlSection.find("allowed_schemes") != dlSection.end()) {
+                    config.downloadPolicy.allowedSchemes.clear();
+                    std::stringstream ss(dlSection.at("allowed_schemes"));
+                    std::string scheme;
+                    while (std::getline(ss, scheme, ',')) {
+                        auto start = scheme.find_first_not_of(" \t");
+                        auto end = scheme.find_last_not_of(" \t");
+                        if (start != std::string::npos) {
+                            config.downloadPolicy.allowedSchemes.emplace_back(
+                                scheme.substr(start, end - start + 1));
+                        }
+                    }
+                }
+
+                // Require checksum
+                if (dlSection.find("require_checksum") != dlSection.end()) {
+                    config.downloadPolicy.requireChecksum =
+                        (dlSection.at("require_checksum") == "true");
+                }
+
+                // Store only (CAS-only)
+                if (dlSection.find("store_only") != dlSection.end()) {
+                    config.downloadPolicy.storeOnly = (dlSection.at("store_only") == "true");
+                }
+
+                // Timeout
+                if (dlSection.find("timeout_ms") != dlSection.end()) {
+                    try {
+                        config.downloadPolicy.timeout =
+                            std::chrono::milliseconds(std::stoll(dlSection.at("timeout_ms")));
+                    } catch (...) {
+                    }
+                }
+
+                // Max file bytes
+                if (dlSection.find("max_file_bytes") != dlSection.end()) {
+                    try {
+                        config.downloadPolicy.maxFileBytes =
+                            static_cast<std::uint64_t>(std::stoull(dlSection.at("max_file_bytes")));
+                    } catch (...) {
+                    }
+                }
+
+                // Rate limit RPS
+                if (dlSection.find("rate_limit_rps") != dlSection.end()) {
+                    try {
+                        config.downloadPolicy.rateLimitRps =
+                            static_cast<size_t>(std::stoul(dlSection.at("rate_limit_rps")));
+                    } catch (...) {
+                    }
+                }
+
+                // Sandbox strategy
+                if (dlSection.find("sandbox") != dlSection.end()) {
+                    config.downloadPolicy.sandbox = dlSection.at("sandbox");
+                }
+            }
+
+            // Continue processing daemon.models only if section still exists
+            if (config.enableModelProvider &&
+                tomlConfig.find("daemon.models") != tomlConfig.end()) {
+                const auto& modelsSection = tomlConfig.at("daemon.models");
 
                 if (modelsSection.find("enable_gpu") != modelsSection.end()) {
                     config.modelPoolConfig.enableGPU = (modelsSection.at("enable_gpu") == "true");

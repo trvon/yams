@@ -680,6 +680,7 @@ std::unique_ptr<SearchCache> SearchCacheFactory::create(const SearchCacheConfig&
 std::unique_ptr<SearchCache> SearchCacheFactory::createDistributed(const SearchCacheConfig& config,
                                                                    const std::string& redisUrl) {
     // Future enhancement: Create Redis-backed distributed cache
+    (void)redisUrl;
     // For now, return regular cache
     return std::make_unique<SearchCache>(config);
 }

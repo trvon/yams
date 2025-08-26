@@ -82,7 +82,11 @@ YamsCLI::YamsCLI() {
     spdlog::set_level(spdlog::level::warn);
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
+#ifdef YAMS_VERSION_LONG_STRING
+    app_->set_version_flag("--version", YAMS_VERSION_LONG_STRING);
+#else
     app_->set_version_flag("--version", YAMS_VERSION_STRING);
+#endif
 
     // Global options
     // Use XDG_DATA_HOME if set, otherwise ~/.local/share

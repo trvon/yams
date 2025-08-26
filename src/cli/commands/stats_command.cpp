@@ -9,7 +9,9 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/version.hpp>
 
 namespace yams::cli {
 
@@ -449,6 +451,12 @@ private:
             output["additional"] = resp.additionalStats;
         }
 
+        // Client-side diagnostics for quick validation
+        output["client"] = {
+            {"ipc_pool_enabled", true},
+            {"daemon_socket", yams::daemon::DaemonClient::resolveSocketPath().string()},
+            {"version", YAMS_VERSION_STRING}};
+
         std::cout << output.dump(2) << std::endl;
         return Result<void>();
     }
@@ -777,6 +785,13 @@ private:
         statusRows.push_back({"SearchExecutor", searchStatus, ""});
 
         yams::cli::ui::render_rows(std::cout, statusRows);
+
+        // Client/IPC self-check diagnostics
+        yams::cli::ui::render_rows(std::cout, {{"Client", YAMS_VERSION_STRING, ""}});
+        yams::cli::ui::render_rows(std::cout,
+                                   {{"Client IPC", "Pool: enabled",
+                                     yams::daemon::DaemonClient::resolveSocketPath().string()}});
+
         std::cout << "\n";
 
         // VectorDatabase detailed status

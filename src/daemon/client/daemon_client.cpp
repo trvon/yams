@@ -7,15 +7,69 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <string_view>
 #include <thread>
+
+#ifndef _WIN32
+#include <fcntl.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#else
+#include <afunix.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#endif
 
 namespace yams::daemon {
+
+namespace {
+inline std::string sanitize_for_terminal(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char c : in) {
+        if (c >= 0x20 && c <= 0x7E) {
+            out.push_back(static_cast<char>(c));
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('?');
+        }
+    }
+    return out;
+}
+
+#ifndef _WIN32
+bool canWriteToDirectory(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    if (!fs::exists(dir))
+        return false;
+    auto testFile = dir / (".yams-test-" + std::to_string(getpid()));
+    std::ofstream test(testFile);
+    if (test.good()) {
+        test.close();
+        std::error_code ec;
+        fs::remove(testFile, ec);
+        return true;
+    }
+    return false;
+}
+
+std::filesystem::path getXDGRuntimeDir() {
+    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
+    return xdgRuntime ? std::filesystem::path(xdgRuntime) : std::filesystem::path();
+}
+#endif
+
+} // namespace
 
 // Implementation class
 class DaemonClient::Impl {
@@ -24,7 +78,11 @@ public:
 
     ~Impl() {
         if (socketFd_ >= 0) {
+#ifdef _WIN32
+            closesocket(socketFd_);
+#else
             close(socketFd_);
+#endif
         }
     }
 
@@ -33,23 +91,61 @@ public:
             return Result<void>(); // Already connected
         }
 
+#ifdef _WIN32
+        // Initialize Winsock once
+        static bool wsInit = false;
+        if (!wsInit) {
+            WSADATA wsa;
+            if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) {
+                wsInit = true;
+            }
+        }
+#endif
         // Create socket
         socketFd_ = socket(AF_UNIX, SOCK_STREAM, 0);
         if (socketFd_ < 0) {
             return Error{ErrorCode::NetworkError,
                          "Failed to create socket: " + std::string(strerror(errno))};
         }
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+        // Prevent SIGPIPE on send; errors will be reported via errno (EPIPE)
+        {
+            int on = 1;
+            ::setsockopt(socketFd_, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
+#endif
 
         // Connect to server
         struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, config_.socketPath.c_str(), sizeof(addr.sun_path) - 1);
 
-        if (::connect(socketFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        // Connect to server with short retry window to avoid races with an already-running daemon
+        int rc = -1;
+        int lastErr = 0;
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            rc = ::connect(socketFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+            if (rc == 0) {
+                break;
+            }
+            lastErr = errno;
+            if (lastErr == ENOENT || lastErr == ECONNREFUSED) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                continue;
+            }
+            // Other errors: break and report
+            break;
+        }
+
+        if (rc < 0) {
+#ifdef _WIN32
+            closesocket(socketFd_);
+#else
             close(socketFd_);
+#endif
             socketFd_ = -1;
-            auto errorMsg = std::string(strerror(errno));
-            if (errno == ENOENT || errno == ECONNREFUSED) {
+            auto errorMsg = std::string(strerror(lastErr));
+            if (lastErr == ENOENT || lastErr == ECONNREFUSED) {
                 return Error{ErrorCode::NetworkError,
                              "Daemon not running. Start it with: yams daemon start"};
             }
@@ -58,18 +154,28 @@ public:
 
         // Ensure client socket is non-blocking so our manual timeouts work.
         // Without this, recv()/send() may block indefinitely and ignore our deadlines.
+#ifndef _WIN32
         int flags = fcntl(socketFd_, F_GETFL, 0);
         if (flags >= 0) {
             (void)fcntl(socketFd_, F_SETFL, flags | O_NONBLOCK);
         }
+#else
+        u_long mode = 1;
+        ioctlsocket(socketFd_, FIONBIO, &mode);
+#endif
 
-        spdlog::debug("Connected to daemon at {}", config_.socketPath.string());
+        spdlog::debug("Connected to daemon at {}",
+                      sanitize_for_terminal(config_.socketPath.string()));
         return Result<void>();
     }
 
     void disconnect() {
         if (socketFd_ >= 0) {
+#ifdef _WIN32
+            closesocket(socketFd_);
+#else
             close(socketFd_);
+#endif
             socketFd_ = -1;
         }
     }
@@ -96,30 +202,46 @@ DaemonClient& DaemonClient::operator=(DaemonClient&&) noexcept = default;
 
 Result<void> DaemonClient::connect() {
     // Auto-start daemon if configured and not running
-    if (pImpl->config_.autoStart && !isDaemonRunning(pImpl->config_.socketPath)) {
-        spdlog::info("Daemon not running, attempting to auto-start...");
-        if (auto result = startDaemon(pImpl->config_); !result) {
-            spdlog::warn("Failed to auto-start daemon: {}", result.error().message);
-            spdlog::info("Please manually start the daemon with: yams daemon start");
-        } else {
-            // Wait for daemon to start with exponential backoff
-            const int maxRetries = 10;
-            const auto baseDelay = std::chrono::milliseconds(100);
+    if (pImpl->config_.autoStart) {
+        // Quick retries before deciding it's not running, to avoid respawning when an existing
+        // daemon is just (re)creating/binding its socket.
+        const int quickChecks = 5;
+        const auto quickDelay = std::chrono::milliseconds(50);
+        bool alreadyRunning = false;
+        for (int i = 0; i < quickChecks; ++i) {
+            if (isDaemonRunning(pImpl->config_.socketPath)) {
+                alreadyRunning = true;
+                break;
+            }
+            std::this_thread::sleep_for(quickDelay);
+        }
 
-            for (int i = 0; i < maxRetries; ++i) {
-                auto delay = baseDelay * (1 << std::min(i, 5)); // Cap at 3.2 seconds
-                std::this_thread::sleep_for(delay);
+        if (!alreadyRunning && !isDaemonRunning(pImpl->config_.socketPath)) {
+            spdlog::info("Daemon not running, attempting to auto-start...");
+            if (auto result = startDaemon(pImpl->config_); !result) {
+                spdlog::warn("Failed to auto-start daemon: {}",
+                             sanitize_for_terminal(result.error().message));
+                spdlog::info("Please manually start the daemon with: yams daemon start");
+            } else {
+                // Wait for daemon to start with exponential backoff
+                const int maxRetries = 10;
+                const auto baseDelay = std::chrono::milliseconds(100);
 
-                // Check if daemon is now running and ready
-                if (isDaemonRunning(pImpl->config_.socketPath)) {
-                    spdlog::debug("Daemon started successfully after {} retries", i + 1);
-                    // Give it a bit more time to fully initialize
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    break;
-                }
+                for (int i = 0; i < maxRetries; ++i) {
+                    auto delay = baseDelay * (1 << std::min(i, 5)); // Cap at 3.2 seconds
+                    std::this_thread::sleep_for(delay);
 
-                if (i == maxRetries - 1) {
-                    spdlog::warn("Daemon failed to start after {} retries", maxRetries);
+                    // Check if daemon is now running and ready
+                    if (isDaemonRunning(pImpl->config_.socketPath)) {
+                        spdlog::debug("Daemon started successfully after {} retries", i + 1);
+                        // Give it a bit more time to fully initialize
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        break;
+                    }
+
+                    if (i == maxRetries - 1) {
+                        spdlog::warn("Daemon failed to start after {} retries", maxRetries);
+                    }
                 }
             }
         }
@@ -280,13 +402,22 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
                                 framedData.size() - totalSent, MSG_NOSIGNAL);
 
             if (sent < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
                 }
+                // Some platforms may surface errno==0 here when SIGPIPE is suppressed;
+                // map to a meaningful error (prefer EPIPE, fall back to ECONNRESET).
+                if (err == 0) {
+#ifdef EPIPE
+                    err = EPIPE;
+#else
+                    err = ECONNRESET;
+#endif
+                }
                 pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::NetworkError,
-                             "Send failed: " + std::string(strerror(errno))};
+                return Error{ErrorCode::NetworkError, "Send failed: " + std::string(strerror(err))};
             }
 
             totalSent += static_cast<size_t>(sent);
@@ -307,13 +438,19 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
                                     headerSize - totalReceived, 0);
 
             if (received < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
                 }
+                // Treat connection reset/pipe as remote close
+                if (err == ECONNRESET || err == EPIPE) {
+                    pImpl->breaker_.recordFailure();
+                    return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
+                }
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError,
-                             "Receive failed (header): " + std::string(strerror(errno))};
+                             "Receive failed (header): " + std::string(strerror(err))};
             } else if (received == 0) {
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
@@ -364,13 +501,19 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
                                     parsedHeader.payload_size - totalReceived, 0);
 
             if (received < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
                 }
+                // Treat connection reset/pipe as remote close
+                if (err == ECONNRESET || err == EPIPE) {
+                    pImpl->breaker_.recordFailure();
+                    return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
+                }
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError,
-                             "Receive failed (data): " + std::string(strerror(errno))};
+                             "Receive failed (data): " + std::string(strerror(err))};
             } else if (received == 0) {
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
@@ -502,52 +645,82 @@ Result<ModelStatusResponse> DaemonClient::getModelStatus(const ModelStatusReques
 }
 
 std::filesystem::path DaemonClient::resolveSocketPath() {
+#ifdef _WIN32
+    // Use temp directory on Windows; AF_UNIX is supported via afunix.h on recent Windows.
+    return std::filesystem::temp_directory_path() / "yams-daemon.sock";
+#else
     namespace fs = std::filesystem;
 
-    // Check if running as root
+    // 1. Prefer explicit override from environment variable
+    if (const char* env = std::getenv("YAMS_DAEMON_SOCKET")) {
+        return fs::path(env);
+    }
+
+    // 2. Check if running as root
     bool isRoot = (geteuid() == 0);
-
-    // Get user ID for user-specific paths
-    uid_t uid = getuid();
-
     if (isRoot) {
         return fs::path("/var/run/yams-daemon.sock");
     }
 
-    // Try XDG_RUNTIME_DIR first
-    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
-    if (xdgRuntime) {
-        auto xdgPath = fs::path(xdgRuntime);
-        if (fs::exists(xdgPath) && fs::is_directory(xdgPath)) {
-            return xdgPath / "yams-daemon.sock";
-        }
+    // 3. Check XDG_RUNTIME_DIR
+    if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg)) {
+        return xdg / "yams-daemon.sock";
     }
 
-    // Fall back to /tmp with user ID
+    // 4. Fallback to per-user socket under /tmp
+    uid_t uid = getuid();
     return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".sock");
+#endif
 }
 
 bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
     // Resolve socket path if not provided
     auto path = socketPath.empty() ? resolveSocketPath() : socketPath;
 
-    // Try to connect to the socket
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return false;
+    // Retry a few times to avoid races when the daemon is starting or rotating the socket
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        struct sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
+#ifdef _WIN32
+            closesocket(fd);
+#else
+            close(fd);
+#endif
+            return true;
+        }
+
+        int e = errno;
+#ifdef _WIN32
+        closesocket(fd);
+#else
+        close(fd);
+#endif
+
+        if (e == ENOENT || e == ECONNREFUSED) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            continue;
+        }
+
+        // Other errors imply not running or permission issues
+        break;
     }
 
-    struct sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-
-    bool running = (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
-    close(fd);
-
-    return running;
+    return false;
 }
 
 Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
+#ifdef _WIN32
+    return Error{ErrorCode::InternalError, "Auto-start not supported on Windows"};
+#else
     spdlog::info("Starting YAMS daemon...");
 
     // Resolve socket path if not provided
@@ -631,6 +804,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 
     return Error{ErrorCode::InternalError, "Daemon failed to start within timeout. Check " +
                                                logPath.string() + " for details."};
+#endif
 }
 
 // Circuit Breaker implementation

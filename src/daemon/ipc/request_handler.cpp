@@ -17,79 +17,131 @@ RequestHandler::RequestHandler(std::shared_ptr<RequestProcessor> processor)
 RequestHandler::~RequestHandler() = default;
 
 Task<void> RequestHandler::handle_connection(AsyncSocket socket, std::stop_token token) {
-    spdlog::debug("New connection established");
+    try {
+        spdlog::debug("RequestHandler::handle_connection coroutine started");
+        spdlog::debug("New connection established");
+        // Note: downstream clients may close early (e.g., pager exits). Treat write-side resets
+        // as non-fatal for the daemon; logs will be at debug level when detected.
 
-    FrameReader reader(1024 * 1024); // 1MB max frame size
+        FrameReader reader(1024 * 1024); // 1MB max frame size
 
-    while (!token.stop_requested() && socket.is_valid()) {
-        // Read as much as is available (up to 4096), do not block for exact size
-        std::array<uint8_t, 4096> buf{};
-        auto read_bytes = co_await socket.async_read(buf.data(), buf.size());
-        if (!read_bytes) {
-            if (read_bytes.error().code == ErrorCode::NetworkError) {
-                spdlog::debug("Connection closed by peer");
-            } else {
-                spdlog::error("Read error: {}", read_bytes.error().message);
+        while (!token.stop_requested() && socket.is_valid()) {
+            // Read as much as is available (up to 4096), do not block for exact size
+            std::array<uint8_t, 4096> buf{};
+            spdlog::debug("About to co_await socket.async_read");
+            auto read_bytes = co_await socket.async_read(buf.data(), buf.size());
+            spdlog::debug("socket.async_read returned with result={}", read_bytes.has_value());
+            if (!read_bytes) {
+                if (read_bytes.error().code == ErrorCode::NetworkError) {
+                    spdlog::debug("Connection closed or network error from peer");
+                } else {
+                    spdlog::error("Read error: {}", read_bytes.error().message);
+                }
+                break;
             }
-            break;
-        }
 
-        if (read_bytes.value() == 0) {
-            spdlog::debug("Connection closed (0 bytes)");
-            break;
-        }
-
-        // Feed data to frame reader
-        auto [consumed, status] = reader.feed(buf.data(), read_bytes.value());
-        stats_.bytes_received += consumed;
-
-        if (status == FrameReader::FrameStatus::InvalidFrame) {
-            spdlog::error("Invalid frame received");
-            co_await send_error(socket, ErrorCode::InvalidArgument, "Invalid frame format");
-            break;
-        }
-
-        if (status == FrameReader::FrameStatus::FrameTooLarge) {
-            spdlog::error("Frame too large");
-            co_await send_error(socket, ErrorCode::InvalidArgument, "Frame exceeds maximum size");
-            break;
-        }
-
-        // Process complete frames
-        while (reader.has_frame()) {
-            auto frame_result = reader.get_frame();
-            if (!frame_result) {
-                spdlog::error("Failed to get frame: {}", frame_result.error().message);
+            if (read_bytes.value() == 0) {
+                // Transient zero-byte read can occur with non-blocking IO; peek for real EOF
+                std::array<uint8_t, 1> peek{};
+                auto try_peek = co_await socket.async_read(peek.data(), peek.size());
+                if (!try_peek) {
+                    spdlog::debug("Zero-byte read followed by error: {}", try_peek.error().message);
+                    break;
+                }
+                if (try_peek.value() == 0) {
+                    spdlog::debug("Connection closed (EOF confirmed)");
+                    break;
+                }
+                // We read 1 byte; feed it first, then continue with main buffer below
+                spdlog::debug("Recovered from transient zero-byte read; feeding 1-byte peek");
+                auto [consumed_peek, status_peek] = reader.feed(peek.data(), try_peek.value());
+                stats_.bytes_received += consumed_peek;
+                if (status_peek == FrameReader::FrameStatus::InvalidFrame) {
+                    spdlog::error("Invalid frame received (after peek)");
+                    co_await send_error(socket, ErrorCode::InvalidArgument, "Invalid frame format");
+                    break;
+                }
+                if (status_peek == FrameReader::FrameStatus::FrameTooLarge) {
+                    spdlog::error("Frame too large (after peek)");
+                    co_await send_error(socket, ErrorCode::InvalidArgument,
+                                        "Frame exceeds maximum size");
+                    break;
+                }
+                // After handling peeked byte(s), continue loop to read more normally
                 continue;
             }
 
-            // Parse the frame
-            auto message_result = framer_.parse_frame(frame_result.value());
-            if (!message_result) {
-                spdlog::error("Failed to parse frame: {}", message_result.error().message);
-                co_await send_error(socket, ErrorCode::SerializationError,
-                                    "Failed to parse message");
-                continue;
+            // Feed data to frame reader
+            spdlog::debug("Feeding {} bytes to frame reader", read_bytes.value());
+            auto [consumed, status] = reader.feed(buf.data(), read_bytes.value());
+            stats_.bytes_received += consumed;
+            spdlog::debug("Frame reader consumed {} bytes, status={}", consumed,
+                          static_cast<int>(status));
+
+            if (status == FrameReader::FrameStatus::InvalidFrame) {
+                spdlog::error("Invalid frame received");
+                co_await send_error(socket, ErrorCode::InvalidArgument, "Invalid frame format");
+                break;
             }
 
-            // Extract request from message
-            const auto& message = message_result.value();
-            auto* request_ptr = std::get_if<Request>(&message.payload);
-            if (!request_ptr) {
-                spdlog::error("Received non-request message");
-                co_await send_error(socket, ErrorCode::InvalidArgument, "Expected request message");
-                continue;
+            if (status == FrameReader::FrameStatus::FrameTooLarge) {
+                spdlog::error("Frame too large");
+                co_await send_error(socket, ErrorCode::InvalidArgument,
+                                    "Frame exceeds maximum size");
+                break;
             }
 
-            // Handle the request with correlation id
-            auto handle_result = co_await handle_request(socket, *request_ptr, message.requestId);
-            if (!handle_result) {
-                spdlog::error("Request handling failed: {}", handle_result.error().message);
+            // Process complete frames
+            while (reader.has_frame()) {
+                auto frame_result = reader.get_frame();
+                if (!frame_result) {
+                    spdlog::error("Failed to get frame: {}", frame_result.error().message);
+                    continue;
+                }
+
+                // Parse the frame
+                auto message_result = framer_.parse_frame(frame_result.value());
+                if (!message_result) {
+                    spdlog::error("Failed to parse frame: {}", message_result.error().message);
+                    co_await send_error(socket, ErrorCode::SerializationError,
+                                        "Failed to parse message");
+                    continue;
+                }
+
+                // Extract request from message
+                const auto& message = message_result.value();
+                auto* request_ptr = std::get_if<Request>(&message.payload);
+                if (!request_ptr) {
+                    spdlog::error("Received non-request message");
+                    co_await send_error(socket, ErrorCode::InvalidArgument,
+                                        "Expected request message");
+                    continue;
+                }
+
+                // Handle the request with correlation id
+                auto handle_result =
+                    co_await handle_request(socket, *request_ptr, message.requestId);
+                if (!handle_result) {
+                    // Downgrade common client-initiated close errors to debug to avoid noisy logs
+                    const auto& msg = handle_result.error().message;
+                    if (msg.find("Connection reset by peer") != std::string::npos ||
+                        msg.find("Broken pipe") != std::string::npos ||
+                        msg.find("EPIPE") != std::string::npos ||
+                        msg.find("ECONNRESET") != std::string::npos) {
+                        spdlog::debug("Request handling ended by client: {}", msg);
+                    } else {
+                        spdlog::error("Request handling failed: {}", msg);
+                    }
+                }
             }
         }
+
+        spdlog::debug("Connection handler exiting normally");
+    } catch (const std::exception& e) {
+        spdlog::error("RequestHandler::handle_connection unhandled exception: {}", e.what());
+    } catch (...) {
+        spdlog::error("RequestHandler::handle_connection unhandled unknown exception");
     }
-
-    spdlog::debug("Connection handler exiting");
 }
 
 Task<Result<void>> RequestHandler::handle_request(AsyncSocket& socket, const Request& request,
@@ -173,7 +225,36 @@ Task<Result<void>> RequestHandler::write_message(AsyncSocket& socket, const Mess
     auto& frame = frame_result.value();
     stats_.bytes_sent += frame.size();
 
-    co_return co_await socket.async_write_all(frame);
+    // Write in smaller chunks to reduce partial send issues and handle EPIPE better.
+    // Additionally, when EAGAIN is observed from the async write path (reported as 0 bytes),
+    // briefly yield/sleep to provide backpressure and avoid busy-spinning.
+    constexpr std::size_t kChunk = 16 * 1024;
+    std::size_t offset = 0;
+    while (offset < frame.size()) {
+        std::size_t to_write = std::min<std::size_t>(kChunk, frame.size() - offset);
+        std::span<const uint8_t> chunk{frame.data() + offset, to_write};
+        auto r = co_await socket.async_write_all(chunk);
+        if (!r) {
+            // Downgrade common client-initiated close errors to debug
+            const auto& msg = r.error().message;
+            if (msg.find("Connection reset by peer") != std::string::npos ||
+                msg.find("Broken pipe") != std::string::npos ||
+                msg.find("EPIPE") != std::string::npos ||
+                msg.find("ECONNRESET") != std::string::npos) {
+                spdlog::debug("Client closed during write: {}", msg);
+            }
+            co_return r.error();
+        }
+        // Backpressure: if the async write loop indicated a non-progress scenario earlier
+        // (e.g., returned 0 from internal EAGAIN handling), apply a tiny delay.
+        if (to_write == 0) {
+            using namespace std::chrono_literals;
+            std::this_thread::sleep_for(1ms);
+        }
+        offset += to_write;
+    }
+
+    co_return Result<void>();
 }
 
 Task<Response> RequestHandler::process_request(const Request& request) {

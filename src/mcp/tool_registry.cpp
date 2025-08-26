@@ -239,22 +239,69 @@ MCPDownloadRequest MCPDownloadRequest::fromJson(const json& j) {
     req.exportPath = j.value("export_path", std::string{});
     req.overwrite = j.value("overwrite", std::string{"never"});
 
+    // Post-index fields
+    req.postIndex = j.value("post_index", false);
+
+    if (j.contains("tags") && j["tags"].is_array()) {
+        for (const auto& t : j["tags"]) {
+            if (t.is_string()) {
+                req.tags.push_back(t.get<std::string>());
+            }
+        }
+    }
+
+    if (j.contains("metadata") && j["metadata"].is_object()) {
+        for (auto it = j["metadata"].begin(); it != j["metadata"].end(); ++it) {
+            const std::string key = it.key();
+            if (it.value().is_string()) {
+                req.metadata[key] = it.value().get<std::string>();
+            } else if (it.value().is_number_integer()) {
+                req.metadata[key] = std::to_string(it.value().get<long long>());
+            } else if (it.value().is_number_unsigned()) {
+                req.metadata[key] = std::to_string(it.value().get<unsigned long long>());
+            } else if (it.value().is_number_float()) {
+                req.metadata[key] = std::to_string(it.value().get<double>());
+            } else if (it.value().is_boolean()) {
+                req.metadata[key] = it.value().get<bool>() ? "true" : "false";
+            } else {
+                // Fallback: dump JSON value to string
+                req.metadata[key] = it.value().dump();
+            }
+        }
+    }
+
+    req.collection = j.value("collection", std::string{});
+    req.snapshotId = j.value("snapshot_id", std::string{});
+    req.snapshotLabel = j.value("snapshot_label", std::string{});
+
     return req;
 }
 
 json MCPDownloadRequest::toJson() const {
-    return json{{"url", url},
-                {"headers", headers},
-                {"checksum", checksum},
-                {"concurrency", concurrency},
-                {"chunk_size_bytes", chunkSizeBytes},
-                {"timeout_ms", timeoutMs},
-                {"resume", resume},
-                {"proxy", proxy},
-                {"follow_redirects", followRedirects},
-                {"store_only", storeOnly},
-                {"export_path", exportPath},
-                {"overwrite", overwrite}};
+    json j{{"url", url},
+           {"headers", headers},
+           {"checksum", checksum},
+           {"concurrency", concurrency},
+           {"chunk_size_bytes", chunkSizeBytes},
+           {"timeout_ms", timeoutMs},
+           {"resume", resume},
+           {"proxy", proxy},
+           {"follow_redirects", followRedirects},
+           {"store_only", storeOnly},
+           {"export_path", exportPath},
+           {"overwrite", overwrite},
+           {"post_index", postIndex},
+           {"collection", collection},
+           {"snapshot_id", snapshotId},
+           {"snapshot_label", snapshotLabel}};
+    // tags
+    j["tags"] = tags;
+    // metadata
+    j["metadata"] = json::object();
+    for (const auto& [k, v] : metadata) {
+        j["metadata"][k] = v;
+    }
+    return j;
 }
 
 // MCPDownloadResponse implementation

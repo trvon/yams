@@ -24,7 +24,7 @@ enum class FieldType : uint8_t {
     StringMap = 4
 };
 
-void writeString(std::vector<std::byte>& buffer, const std::string& str) {
+[[maybe_unused]] void writeString(std::vector<std::byte>& buffer, const std::string& str) {
     uint32_t len = static_cast<uint32_t>(str.size());
     buffer.insert(buffer.end(), reinterpret_cast<const std::byte*>(&len),
                   reinterpret_cast<const std::byte*>(&len) + sizeof(len));
@@ -50,8 +50,8 @@ std::string readString(const std::byte*& ptr, const std::byte* end) {
     return result;
 }
 
-void writeTimestamp(std::vector<std::byte>& buffer,
-                    const std::chrono::system_clock::time_point& tp) {
+[[maybe_unused]] void writeTimestamp(std::vector<std::byte>& buffer,
+                                     const std::chrono::system_clock::time_point& tp) {
     auto duration = tp.time_since_epoch();
     auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
     buffer.insert(buffer.end(), reinterpret_cast<const std::byte*>(&millis),

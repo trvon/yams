@@ -30,6 +30,21 @@
 #define YAMS_VERSION_STRING "0.0.0+dev"
 #endif
 
+// Extended metadata (fall back to unknowns if not provided by build system)
+#ifndef YAMS_GIT_COMMIT
+#define YAMS_GIT_COMMIT "unknown"
+#endif
+
+#ifndef YAMS_BUILD_DATE
+#define YAMS_BUILD_DATE __DATE__ " " __TIME__
+#endif
+
+// Long version string: "X.Y.Z+qual (commit: abcdef1, built: YYYY-MM-DD HH:MM:SS)"
+#ifndef YAMS_VERSION_LONG_STRING
+#define YAMS_VERSION_LONG_STRING                                                                   \
+    YAMS_VERSION_STRING " (commit: " YAMS_GIT_COMMIT ", built: " YAMS_BUILD_DATE ")"
+#endif
+
 // Optional C++ convenience constants (do not rely on these in C code)
 #if defined(__cplusplus)
 namespace yams {
@@ -38,6 +53,9 @@ constexpr int major_v = YAMS_VERSION_MAJOR;
 constexpr int minor_v = YAMS_VERSION_MINOR;
 constexpr int patch_v = YAMS_VERSION_PATCH;
 constexpr const char* string_v = YAMS_VERSION_STRING;
+constexpr const char* commit_v = YAMS_GIT_COMMIT;
+constexpr const char* build_date_v = YAMS_BUILD_DATE;
+constexpr const char* long_string_v = YAMS_VERSION_LONG_STRING;
 } // namespace version
 } // namespace yams
 #endif

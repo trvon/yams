@@ -105,6 +105,22 @@ RequestDispatcher::RequestDispatcher(YamsDaemon* daemon, ServiceManager* service
 RequestDispatcher::~RequestDispatcher() = default;
 
 Response RequestDispatcher::dispatch(const Request& req) {
+    // For requests that need services, check readiness.
+    bool needs_services = !std::holds_alternative<StatusRequest>(req) &&
+                          !std::holds_alternative<ShutdownRequest>(req) &&
+                          !std::holds_alternative<PingRequest>(req);
+
+    if (needs_services) {
+        if (!state_->readiness.metadataRepoReady.load()) {
+            return ErrorResponse{ErrorCode::InvalidState,
+                                 "Metadata repository not ready. Please try again shortly."};
+        }
+        if (!state_->readiness.contentStoreReady.load()) {
+            return ErrorResponse{ErrorCode::InvalidState,
+                                 "Content store not ready. Please try again shortly."};
+        }
+    }
+
     return std::visit(
         [this](auto&& arg) -> Response {
             using T = std::decay_t<decltype(arg)>;
@@ -1164,21 +1180,32 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         }
 
         // Use vector count as indexed documents if we have it
+        size_t reportedIndexed = 0;
         if (vectorCount > 0) {
-            response.indexedDocuments = vectorCount;
+            reportedIndexed = vectorCount;
         } else {
             // Fall back to checking VectorIndexManager if available
             auto vectorIndexManager = serviceManager_->getVectorIndexManager();
             if (vectorIndexManager && vectorIndexManager->isInitialized()) {
                 auto stats = vectorIndexManager->getStats();
                 if (stats.num_vectors > 0) {
-                    response.indexedDocuments = stats.num_vectors;
+                    reportedIndexed = stats.num_vectors;
                 } else {
-                    response.indexedDocuments = indexedCount;
+                    reportedIndexed = indexedCount;
                 }
             } else {
-                response.indexedDocuments = indexedCount;
+                reportedIndexed = indexedCount;
             }
+        }
+
+        if (reportedIndexed > response.totalDocuments) {
+            spdlog::warn(
+                "Reported indexed/vector count ({}) is greater than total documents ({}). This may "
+                "indicate orphaned data. Capping stats to total document count for display.",
+                reportedIndexed, response.totalDocuments);
+            response.indexedDocuments = response.totalDocuments;
+        } else {
+            response.indexedDocuments = reportedIndexed;
         }
 
         response.vectorIndexSize = vectorDbSize;
@@ -1650,19 +1677,21 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
 
 Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
     try {
-        // Downloads are handled by CLI client with its rich functionality
-        // The daemon should not handle downloads directly - that's the CLI's job
-        // This handler exists for protocol completeness but should not be used
+        // Daemon-side download is disabled by default for security.
+        // Use MCP/CLI to perform downloads locally, then optionally index the result.
+        // To enable daemon downloads in the future, configure daemon.download policy
+        // (allowlist, schemes, checksum, store_only, sandbox) and set enable=true.
 
         DownloadResponse response;
         response.url = req.url;
         response.success = false;
-        response.error =
-            "Downloads should be handled by CLI client, not daemon. Use local fallback.";
+        response.error = "Daemon download is disabled. Perform download locally (MCP/CLI) and "
+                         "index, or enable daemon.download policy (enable=true, allowed_hosts, "
+                         "allowed_schemes, require_checksum, store_only, sandbox).";
 
         if (!req.quiet) {
-            spdlog::info(
-                "Download request received - CLI should handle downloads locally with fallback");
+            spdlog::info("Download request received; responding with policy reminder (daemon "
+                         "downloads disabled by default).");
         }
 
         return response;

@@ -2,9 +2,11 @@
 
 #include <spdlog/spdlog.h>
 #include <cstring>
+#include <fcntl.h> // F_GETFL, F_SETFL, O_NONBLOCK
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/select.h> // select(), fd_set
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -302,10 +304,22 @@ void ConnectionPool::prune_idle_connections() {
 // ============================================================================
 
 Result<std::unique_ptr<AsyncSocket>> UnixSocketFactory::create() {
+    spdlog::debug("[Pool/UnixFactory] Creating UNIX socket to {}", socket_path_);
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        return Error{ErrorCode::NetworkError,
-                     "Failed to create socket: " + std::string(strerror(errno))};
+        auto msg = std::string("Failed to create socket: ") + std::string(strerror(errno));
+        spdlog::error("[Pool/UnixFactory] {}", msg);
+        return Error{ErrorCode::NetworkError, msg};
+    }
+
+    // Set non-blocking for connect with timeout
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            spdlog::warn("[Pool/UnixFactory] Failed to set O_NONBLOCK: {}", strerror(errno));
+        }
+    } else {
+        spdlog::warn("[Pool/UnixFactory] fcntl(F_GETFL) failed: {}", strerror(errno));
     }
 
     struct sockaddr_un addr;
@@ -313,11 +327,52 @@ Result<std::unique_ptr<AsyncSocket>> UnixSocketFactory::create() {
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
 
-    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(fd);
-        return Error{ErrorCode::NetworkError, "Failed to connect: " + std::string(strerror(errno))};
+    spdlog::debug("[Pool/UnixFactory] Initiating connect()");
+    int rc = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    if (rc < 0) {
+        if (errno != EINPROGRESS) {
+            auto msg = std::string("Failed to connect: ") + std::string(strerror(errno));
+            spdlog::error("[Pool/UnixFactory] {}", msg);
+            close(fd);
+            return Error{ErrorCode::NetworkError, msg};
+        }
+        // Wait for writability within timeout
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        struct timeval tv;
+        tv.tv_sec = 5; // Fixed 5s connect timeout
+        tv.tv_usec = 0;
+
+        int sel = select(fd + 1, nullptr, &wfds, nullptr, &tv);
+        if (sel <= 0) {
+            auto msg =
+                (sel == 0) ? "Connect timeout" : std::string("select failed: ") + strerror(errno);
+            spdlog::error("[Pool/UnixFactory] {}", msg);
+            close(fd);
+            return Error{ErrorCode::Timeout, msg};
+        }
+
+        // Check socket error
+        int so_error = 0;
+        socklen_t len = sizeof(so_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
+            auto msg = std::string("Connect failed (post-select): ") +
+                       (so_error ? std::string(strerror(so_error)) : std::string(strerror(errno)));
+            spdlog::error("[Pool/UnixFactory] {}", msg);
+            close(fd);
+            return Error{ErrorCode::NetworkError, msg};
+        }
     }
 
+    // Restore blocking mode if we changed it
+    if (flags >= 0) {
+        if (fcntl(fd, F_SETFL, flags) < 0) {
+            spdlog::warn("[Pool/UnixFactory] Failed to restore blocking mode: {}", strerror(errno));
+        }
+    }
+
+    spdlog::debug("[Pool/UnixFactory] Connected, wrapping in AsyncSocket");
     return std::make_unique<AsyncSocket>(fd, context_);
 }
 
@@ -337,8 +392,9 @@ Result<void> UnixSocketFactory::validate(const AsyncSocket& socket) {
 Result<std::unique_ptr<AsyncSocket>> TcpSocketFactory::create() {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        return Error{ErrorCode::NetworkError,
-                     "Failed to create socket: " + std::string(strerror(errno))};
+        auto msg = std::string("Failed to create socket: ") + std::string(strerror(errno));
+        spdlog::error("[Pool/TcpFactory] {}", msg);
+        return Error{ErrorCode::NetworkError, msg};
     }
 
     struct sockaddr_in addr;
@@ -352,8 +408,10 @@ Result<std::unique_ptr<AsyncSocket>> TcpSocketFactory::create() {
     }
 
     if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        auto msg = std::string("Failed to connect: ") + std::string(strerror(errno));
+        spdlog::error("[Pool/TcpFactory] {}", msg);
         close(fd);
-        return Error{ErrorCode::NetworkError, "Failed to connect: " + std::string(strerror(errno))};
+        return Error{ErrorCode::NetworkError, msg};
     }
 
     return std::make_unique<AsyncSocket>(fd, context_);

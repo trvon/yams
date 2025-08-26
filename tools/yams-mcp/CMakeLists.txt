@@ -7,16 +7,9 @@ add_executable(yams-mcp-server
 target_link_libraries(yams-mcp-server
     PRIVATE
         yams_mcp
-        yams_app_services
-        yams_api
-        yams_storage
-        yams_search
-        yams_metadata
         CLI11::CLI11
-        nlohmann_json::nlohmann_json
         spdlog::spdlog
         Threads::Threads
-        ZLIB::ZLIB
 )
 
 target_include_directories(yams-mcp-server

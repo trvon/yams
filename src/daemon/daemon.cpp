@@ -73,6 +73,7 @@ Result<void> YamsDaemon::start() {
         lifecycleManager_->shutdown();
         return result;
     }
+    state_.readiness.ipcServerReady = true;
 
     daemonThread_ = std::jthread([this](std::stop_token token) { run(token); });
 

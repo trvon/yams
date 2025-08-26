@@ -13,6 +13,9 @@
 
 namespace yams::daemon {
 
+// Forward declaration for shared state
+struct ThreadPoolState;
+
 /**
  * Thread pool for executing tasks asynchronously.
  * Supports both traditional std::future and C++20 coroutines.
@@ -69,16 +72,21 @@ public:
      * Check if the thread pool is stopping.
      * @return true if stop() has been called
      */
-    bool is_stopping() const { return stopping_.load(); }
+    bool is_stopping() const { return state_->stopping.load(); }
 
 private:
-    void worker_thread();
+    // Shared state that worker threads can safely access
+    struct ThreadPoolState {
+        std::queue<std::function<void()>> tasks;
+        mutable std::mutex queue_mutex;
+        std::condition_variable condition;
+        std::atomic<bool> stopping{false};
+    };
+
+    void worker_thread(std::shared_ptr<ThreadPoolState> state, std::stop_token token);
 
     std::vector<std::jthread> workers_;
-    std::queue<std::function<void()>> tasks_;
-    mutable std::mutex queue_mutex_;
-    std::condition_variable condition_;
-    std::atomic<bool> stopping_{false};
+    std::shared_ptr<ThreadPoolState> state_;
 };
 
 // ThreadPoolAwaiter removed - using promise/future approach for better reliability
@@ -100,31 +108,31 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
     std::future<return_type> res = task->get_future();
 
     {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
+        std::unique_lock<std::mutex> lock(state_->queue_mutex);
 
-        if (stopping_) {
+        if (state_->stopping) {
             throw std::runtime_error("Cannot enqueue task: thread pool is stopping");
         }
 
-        tasks_.emplace([task]() { (*task)(); });
+        state_->tasks.emplace([task]() { (*task)(); });
     }
 
-    condition_.notify_one();
+    state_->condition.notify_one();
     return res;
 }
 
 template <typename F> void ThreadPool::enqueue_detached(F&& f) {
     {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
+        std::unique_lock<std::mutex> lock(state_->queue_mutex);
 
-        if (stopping_) {
+        if (state_->stopping) {
             return; // Silently drop task if stopping
         }
 
-        tasks_.emplace(std::forward<F>(f));
+        state_->tasks.emplace(std::forward<F>(f));
     }
 
-    condition_.notify_one();
+    state_->condition.notify_one();
 }
 
 } // namespace yams::daemon

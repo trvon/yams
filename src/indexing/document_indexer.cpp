@@ -30,8 +30,8 @@ public:
         textExtractor_ = factory.create(".txt"); // Default to plain text
     }
 
-    Result<IndexingResult> indexDocument(const std::filesystem::path& path,
-                                         const IndexingConfig& config) override {
+    [[nodiscard]] Result<IndexingResult> indexDocument(const std::filesystem::path& path,
+                                                       const IndexingConfig& config) override {
         auto startTime = std::chrono::steady_clock::now();
         IndexingResult result;
         result.path = path;
@@ -296,7 +296,7 @@ public:
         return result;
     }
 
-    Result<std::vector<IndexingResult>>
+    [[nodiscard]] Result<std::vector<IndexingResult>>
     indexDocuments(const std::vector<std::filesystem::path>& paths, const IndexingConfig& config,
                    ProgressCallback progress) override {
         std::vector<IndexingResult> results;
@@ -327,8 +327,8 @@ public:
         return results;
     }
 
-    Result<IndexingResult> updateDocument(const std::filesystem::path& path,
-                                          const IndexingConfig& config) override {
+    [[nodiscard]] Result<IndexingResult> updateDocument(const std::filesystem::path& path,
+                                                        const IndexingConfig& config) override {
         // Check if document exists in index
         auto needsUpdate = needsIndexing(path);
         if (!needsUpdate) {
@@ -365,7 +365,7 @@ public:
         return {};
     }
 
-    Result<bool> needsIndexing(const std::filesystem::path& path) override {
+    [[nodiscard]] Result<bool> needsIndexing(const std::filesystem::path& path) override {
         if (!std::filesystem::exists(path)) {
             return Error{ErrorCode::FileNotFound, "File does not exist: " + path.string()};
         }

@@ -100,6 +100,7 @@ target_link_libraries(yams_daemon
         yams_repair
         yams_app_services
         yams::daemon_ipc
+        yams_daemon_client
     PRIVATE
         spdlog::spdlog
         pthread

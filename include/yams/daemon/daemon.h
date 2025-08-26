@@ -40,6 +40,19 @@ struct DaemonConfig {
     bool enableAutoRepair = true;
     size_t autoRepairBatchSize = 32;
     size_t maxPendingRepairs = 1000;
+
+    // Daemon-side download policy scaffolding (disabled by default until sandboxed)
+    struct DownloadPolicy {
+        bool enable{false};                               // feature gate
+        std::vector<std::string> allowedHosts{};          // exact or wildcard patterns
+        std::vector<std::string> allowedSchemes{"https"}; // schemes to allow (default https)
+        bool requireChecksum{true};                       // require algo:hex on requests
+        bool storeOnly{true};                     // only write into CAS (no arbitrary paths)
+        std::chrono::milliseconds timeout{60000}; // per-request timeout
+        std::uint64_t maxFileBytes{0};            // 0 = unlimited
+        size_t rateLimitRps{0};                   // 0 = unlimited
+        std::string sandbox{"subprocess"};        // future: platform-specific isolation
+    } downloadPolicy;
 };
 
 class YamsDaemon {

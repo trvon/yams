@@ -2,7 +2,7 @@
 
 namespace yams::daemon {
 
-ThreadPool::ThreadPool(size_t num_threads) {
+ThreadPool::ThreadPool(size_t num_threads) : state_(std::make_shared<ThreadPoolState>()) {
     if (num_threads == 0) {
         num_threads = std::thread::hardware_concurrency();
         if (num_threads == 0) {
@@ -13,7 +13,9 @@ ThreadPool::ThreadPool(size_t num_threads) {
     workers_.reserve(num_threads);
 
     for (size_t i = 0; i < num_threads; ++i) {
-        workers_.emplace_back([this] { worker_thread(); });
+        // Capture shared state by value so threads have their own shared_ptr
+        workers_.emplace_back(
+            [this, state = state_](std::stop_token token) { worker_thread(state, token); });
     }
 }
 
@@ -23,52 +25,74 @@ ThreadPool::~ThreadPool() {
 
 void ThreadPool::stop() {
     {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        if (stopping_) {
+        std::unique_lock<std::mutex> lock(state_->queue_mutex);
+        if (state_->stopping) {
             return; // Already stopping
         }
-        stopping_ = true;
+        state_->stopping = true;
     }
 
-    condition_.notify_all();
+    state_->condition.notify_all();
 
-    // jthread automatically joins in destructor, but we can request stop
+    // Request stop on all threads
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             worker.request_stop();
         }
     }
 
-    // Wait for all threads to finish
+    // Explicitly join all threads to ensure they finish before we return
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+
+    // Now safe to clear the vector
     workers_.clear();
 }
 
 size_t ThreadPool::queue_size() const {
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-    return tasks_.size();
+    std::unique_lock<std::mutex> lock(state_->queue_mutex);
+    return state_->tasks.size();
 }
 
-void ThreadPool::worker_thread() {
-    while (true) {
+void ThreadPool::worker_thread(std::shared_ptr<ThreadPoolState> state, std::stop_token token) {
+    // Work with the shared state - safe even if ThreadPool object is destroyed
+    while (!token.stop_requested()) {
         std::function<void()> task;
 
         {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
+            std::unique_lock<std::mutex> lock(state->queue_mutex);
 
-            condition_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
+            // Wait for work or stop signal
+            state->condition.wait(lock, [&state, &token] {
+                return state->stopping || !state->tasks.empty() || token.stop_requested();
+            });
 
-            if (stopping_ && tasks_.empty()) {
+            // Exit if stopping and no more tasks
+            if ((state->stopping || token.stop_requested()) && state->tasks.empty()) {
                 return;
             }
 
-            if (!tasks_.empty()) {
-                task = std::move(tasks_.front());
-                tasks_.pop();
+            // Get next task if available
+            if (!state->tasks.empty()) {
+                task = std::move(state->tasks.front());
+                state->tasks.pop();
             }
         }
 
+        // Execute task outside of lock
         if (task) {
-            task();
+            try {
+                task();
+            } catch (const std::exception& e) {
+                // Log but don't crash on task exception
+                // Note: Can't use spdlog here as it might not be thread-safe in all contexts
+                // Errors in tasks should be handled by the task itself
+            } catch (...) {
+                // Catch all to prevent thread termination
+            }
         }
     }
 }

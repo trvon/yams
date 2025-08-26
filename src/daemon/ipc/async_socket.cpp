@@ -8,6 +8,7 @@
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -16,6 +17,19 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#if (defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)) && \
+    !defined(HAVE_KQUEUE)
+#define HAVE_KQUEUE 1
+#endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
+#ifndef _WIN32
+#include <sys/select.h>
+#endif
 
 #ifdef HAVE_IO_URING
 #include <liburing.h>
@@ -28,19 +42,28 @@
 
 namespace yams::daemon {
 
+// Static member definition
+std::atomic<uint64_t> AsyncSocket::next_generation_{0};
+
 // ============================================================================
 // AsyncSocket Implementation
 // ============================================================================
 
-AsyncSocket::AsyncSocket(int fd, AsyncIOContext& context) : fd_(fd), context_(&context) {
+AsyncSocket::AsyncSocket(int fd, AsyncIOContext& context)
+    : fd_(fd), context_(&context), generation_(++next_generation_) {
     if (fd_ >= 0) {
         make_nonblocking();
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+        int on = 1;
+        ::setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
         context_->register_socket(fd_);
     }
 }
 
 AsyncSocket::AsyncSocket(AsyncSocket&& other) noexcept
-    : fd_(std::exchange(other.fd_, -1)), context_(std::exchange(other.context_, nullptr)) {}
+    : fd_(std::exchange(other.fd_, -1)), context_(std::exchange(other.context_, nullptr)),
+      generation_(other.generation_.exchange(0)) {}
 
 AsyncSocket& AsyncSocket::operator=(AsyncSocket&& other) noexcept {
     if (this != &other) {
@@ -50,16 +73,21 @@ AsyncSocket& AsyncSocket::operator=(AsyncSocket&& other) noexcept {
         }
         fd_ = std::exchange(other.fd_, -1);
         context_ = std::exchange(other.context_, nullptr);
+        generation_ = other.generation_.exchange(0);
     }
     return *this;
 }
 
 AsyncSocket::~AsyncSocket() {
     if (fd_ >= 0) {
+        int old_fd = fd_;
+        fd_ = -1;
+
         if (context_) {
-            context_->unregister_socket(fd_);
+            context_->cancel_pending_operations(old_fd);
+            context_->unregister_socket(old_fd);
         }
-        ::close(fd_);
+        ::close(old_fd);
     }
 }
 
@@ -78,28 +106,6 @@ Result<void> AsyncSocket::make_nonblocking() {
     return Result<void>();
 }
 
-Result<void> AsyncSocket::set_timeout(std::chrono::milliseconds timeout) {
-    struct timeval tv;
-    tv.tv_sec = timeout.count() / 1000;
-    tv.tv_usec = (timeout.count() % 1000) * 1000;
-
-    if (auto result = set_socket_option(SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); !result) {
-        return result;
-    }
-
-    return set_socket_option(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
-Result<void> AsyncSocket::set_nodelay(bool enable) {
-    int val = enable ? 1 : 0;
-    return set_socket_option(IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-}
-
-Result<void> AsyncSocket::set_keepalive(bool enable) {
-    int val = enable ? 1 : 0;
-    return set_socket_option(SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val));
-}
-
 Result<void> AsyncSocket::set_socket_option(int level, int optname, const void* optval,
                                             socklen_t optlen) {
     if (setsockopt(fd_, level, optname, optval, optlen) < 0) {
@@ -109,12 +115,16 @@ Result<void> AsyncSocket::set_socket_option(int level, int optname, const void* 
     return Result<void>();
 }
 
-AsyncSocket::ReadAwaiter AsyncSocket::async_read(void* buffer, size_t size) {
-    return ReadAwaiter{this, buffer, size};
+AsyncSocket::AwaiterHolder<AsyncSocket::ReadAwaiter> AsyncSocket::async_read(void* buffer,
+                                                                             size_t size) {
+    auto awaiter = std::make_shared<ReadAwaiter>(this, buffer, size);
+    return AwaiterHolder<ReadAwaiter>(awaiter);
 }
 
-AsyncSocket::WriteAwaiter AsyncSocket::async_write(const void* buffer, size_t size) {
-    return WriteAwaiter{this, buffer, size};
+AsyncSocket::AwaiterHolder<AsyncSocket::WriteAwaiter> AsyncSocket::async_write(const void* buffer,
+                                                                               size_t size) {
+    auto awaiter = std::make_shared<WriteAwaiter>(this, buffer, size);
+    return AwaiterHolder<WriteAwaiter>(awaiter);
 }
 
 Task<Result<std::vector<uint8_t>>> AsyncSocket::async_read_exact(size_t size) {
@@ -156,396 +166,380 @@ Task<Result<void>> AsyncSocket::async_write_all(std::span<const uint8_t> data) {
     co_return Result<void>();
 }
 
+Result<void> AsyncSocket::set_timeout(std::chrono::milliseconds timeout) {
+    struct timeval tv;
+    tv.tv_sec = timeout.count() / 1000;
+    tv.tv_usec = (timeout.count() % 1000) * 1000;
+
+    if (auto result = set_socket_option(SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); !result) {
+        return result;
+    }
+
+    return set_socket_option(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+Result<void> AsyncSocket::set_nodelay(bool enable) {
+    int val = enable ? 1 : 0;
+    return set_socket_option(IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+}
+
+Result<void> AsyncSocket::set_keepalive(bool enable) {
+    int val = enable ? 1 : 0;
+    return set_socket_option(SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val));
+}
+
 // ============================================================================
-// ReadAwaiter Implementation
+// Awaiter Implementations
 // ============================================================================
 
-bool AsyncSocket::ReadAwaiter::await_ready() const noexcept {
-    // Try non-blocking read first
-    result = recv(socket->fd_, buffer, size, MSG_DONTWAIT);
-    if (result >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-        error_code = errno;
-        return true; // Operation completed immediately
+bool AsyncSocket::ReadAwaiter::await_ready() noexcept {
+    if (cancelled.load())
+        return true;
+    ssize_t res = recv(socket->fd_, buffer, size, MSG_DONTWAIT);
+    result.store(res, std::memory_order_relaxed);
+    if (res >= 0) {
+        error_code.store(0, std::memory_order_relaxed);
+        return true;
     }
-    return false; // Need to suspend
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        error_code.store(errno, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
 }
 
 void AsyncSocket::ReadAwaiter::await_suspend(std::coroutine_handle<> h) {
-    socket->context_->submit_read(socket->fd_, buffer, size, h, this);
+    auto shared_self = shared_from_this();
+    if (socket->fd_ >= 0) {
+        socket->context_->submit_read(socket->fd_, buffer, size, h,
+                                      std::static_pointer_cast<AwaiterBase>(shared_self),
+                                      socket->generation_.load());
+    } else {
+        result.store(-1);
+        error_code.store(ECONNRESET);
+        cancelled.store(true);
+        h.resume();
+    }
 }
 
 Result<size_t> AsyncSocket::ReadAwaiter::await_resume() {
-    if (result < 0) {
-        if (error_code == EAGAIN || error_code == EWOULDBLOCK) {
-            // Should retry - this shouldn't happen after suspend
-            return Error{ErrorCode::NetworkError, "Unexpected EAGAIN after async wait"};
-        }
-        return Error{ErrorCode::NetworkError, "Read failed: " + std::string(strerror(error_code))};
+    if (cancelled.load()) {
+        return Error{ErrorCode::OperationCancelled, "Read operation cancelled"};
     }
-    return static_cast<size_t>(result);
+    ssize_t res = result.load(std::memory_order_acquire);
+    int err = error_code.load(std::memory_order_acquire);
+    if (res < 0) {
+        int ec = (err == 0) ? ECONNRESET : err;
+        return Error{ErrorCode::NetworkError, "Read failed: " + std::string(strerror(ec))};
+    }
+    return static_cast<size_t>(res);
 }
 
-// ============================================================================
-// WriteAwaiter Implementation
-// ============================================================================
-
-bool AsyncSocket::WriteAwaiter::await_ready() const noexcept {
-    // Try non-blocking write first
-    result = send(socket->fd_, buffer, size, MSG_DONTWAIT | MSG_NOSIGNAL);
-    if (result >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-        error_code = errno;
-        return true; // Operation completed immediately
+bool AsyncSocket::WriteAwaiter::await_ready() noexcept {
+    if (cancelled.load())
+        return true;
+    ssize_t res = send(socket->fd_, buffer, size, MSG_DONTWAIT | MSG_NOSIGNAL);
+    result.store(res, std::memory_order_relaxed);
+    if (res >= 0) {
+        error_code.store(0, std::memory_order_relaxed);
+        return true;
     }
-    return false; // Need to suspend
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        error_code.store(errno, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
 }
 
 void AsyncSocket::WriteAwaiter::await_suspend(std::coroutine_handle<> h) {
-    socket->context_->submit_write(socket->fd_, buffer, size, h, this);
+    auto shared_self = shared_from_this();
+    if (socket->fd_ >= 0) {
+        socket->context_->submit_write(socket->fd_, buffer, size, h,
+                                       std::static_pointer_cast<AwaiterBase>(shared_self),
+                                       socket->generation_.load());
+    } else {
+        result.store(-1);
+        error_code.store(ECONNRESET);
+        cancelled.store(true);
+        h.resume();
+    }
 }
 
 Result<size_t> AsyncSocket::WriteAwaiter::await_resume() {
-    if (result < 0) {
-        if (error_code == EAGAIN || error_code == EWOULDBLOCK) {
-            // Should retry - this shouldn't happen after suspend
-            return Error{ErrorCode::NetworkError, "Unexpected EAGAIN after async wait"};
-        }
-        return Error{ErrorCode::NetworkError, "Write failed: " + std::string(strerror(error_code))};
+    if (cancelled.load()) {
+        return Error{ErrorCode::OperationCancelled, "Write operation cancelled"};
     }
-    return static_cast<size_t>(result);
+    ssize_t res = result.load(std::memory_order_acquire);
+    int err = error_code.load(std::memory_order_acquire);
+    if (res < 0) {
+        int ec = (err == 0) ? ECONNRESET : err;
+        return Error{ErrorCode::NetworkError, "Write failed: " + std::string(strerror(ec))};
+    }
+    return static_cast<size_t>(res);
 }
 
 // ============================================================================
 // Platform-specific AsyncIOContext Implementation
 // ============================================================================
 
-#ifdef HAVE_IO_URING
-
-// Linux implementation using io_uring
-class AsyncIOContext::Impl {
-public:
-    Impl() {
-        if (io_uring_queue_init(QUEUE_DEPTH, &ring_, 0) < 0) {
-            throw std::runtime_error("Failed to initialize io_uring");
-        }
-    }
-
-    ~Impl() {
-        // Cancel all pending operations before destroying
-        stop_requested_ = true;
-
-        // Cancel pending operations
-        {
-            std::lock_guard<std::mutex> lock(pending_ops_mutex_);
-            for (auto* op : pending_ops_) {
-                if (op) {
-                    op->cancelled.store(true);
-                    op->completed.store(true);
-                }
-            }
-            pending_ops_.clear();
-        }
-
-        io_uring_queue_exit(&ring_);
-    }
-
-    Result<void> register_socket(int fd) {
-        // io_uring doesn't require explicit registration for basic I/O
-        return Result<void>();
-    }
-
-    Result<void> unregister_socket(int fd) {
-        // io_uring doesn't require explicit unregistration
-        return Result<void>();
-    }
-
-    struct UringOp {
-        std::coroutine_handle<> handle;
-        void* awaiter;
-        bool isWrite;
-        // Use atomic to ensure thread-safe access
-        std::atomic<bool> completed{false};
-        std::atomic<bool> cancelled{false}; // Track if operation was cancelled
-        ssize_t result = -1;
-        int error_code = 0;
-
-        ~UringOp() {
-            // Ensure we don't have dangling operations
-            completed.store(true);
-            cancelled.store(true);
-        }
-    };
-
-    void submit_read(int fd, void* buffer, size_t size, std::coroutine_handle<> h,
-                     void* awaiterPtr) {
-        auto* sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-            auto* awaiter = reinterpret_cast<AsyncSocket::ReadAwaiter*>(awaiterPtr);
-            awaiter->result = -1;
-            awaiter->error_code = EAGAIN;
-            h.resume();
-            return;
-        }
-
-        io_uring_prep_recv(sqe, fd, buffer, size, 0);
-        auto* op = new UringOp{h, awaiterPtr, false};
-
-        // Track the operation
-        {
-            std::lock_guard<std::mutex> lock(pending_ops_mutex_);
-            pending_ops_.insert(op);
-        }
-
-        io_uring_sqe_set_data(sqe, op);
-        io_uring_submit(&ring_);
-    }
-
-    void submit_write(int fd, const void* buffer, size_t size, std::coroutine_handle<> h,
-                      void* awaiterPtr) {
-        auto* sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-            auto* awaiter = reinterpret_cast<AsyncSocket::WriteAwaiter*>(awaiterPtr);
-            awaiter->result = -1;
-            awaiter->error_code = EAGAIN;
-            h.resume();
-            return;
-        }
-
-        io_uring_prep_send(sqe, fd, buffer, size, MSG_NOSIGNAL);
-        auto* op = new UringOp{h, awaiterPtr, true};
-
-        // Track the operation
-        {
-            std::lock_guard<std::mutex> lock(pending_ops_mutex_);
-            pending_ops_.insert(op);
-        }
-
-        io_uring_sqe_set_data(sqe, op);
-        io_uring_submit(&ring_);
-    }
-
-    void run() {
-        struct io_uring_cqe* cqe;
-
-        while (!stop_requested_) {
-            if (io_uring_wait_cqe(&ring_, &cqe) < 0) {
-                continue;
-            }
-
-            auto* op = reinterpret_cast<UringOp*>(io_uring_cqe_get_data(cqe));
-            if (op) {
-                // Store results first
-                op->result = cqe->res;
-                op->error_code = (cqe->res < 0) ? -cqe->res : 0;
-
-                // Remove from pending operations
-                {
-                    std::lock_guard<std::mutex> lock(pending_ops_mutex_);
-                    pending_ops_.erase(op);
-                }
-
-                // Check if operation was cancelled
-                bool was_cancelled = op->cancelled.load();
-                if (was_cancelled) {
-                    // Operation was cancelled, just clean up
-                    delete op;
-                    io_uring_cqe_seen(&ring_, cqe);
-                    continue;
-                }
-
-                // Mark as completed atomically
-                bool was_completed = op->completed.exchange(true);
-
-                if (!was_completed && op->awaiter) {
-                    // Use a local copy to avoid race conditions
-                    void* awaiter_ptr = op->awaiter;
-                    bool is_write = op->isWrite;
-                    ssize_t result = op->result;
-                    int error_code = op->error_code;
-                    auto h2 = op->handle;
-
-                    // Clear the awaiter pointer before accessing it
-                    op->awaiter = nullptr;
-
-                    // Copy results to the awaiter (if still valid)
-                    if (awaiter_ptr) {
-                        if (is_write) {
-                            auto* awaiter =
-                                reinterpret_cast<AsyncSocket::WriteAwaiter*>(awaiter_ptr);
-                            awaiter->result = result;
-                            awaiter->error_code = error_code;
-                        } else {
-                            auto* awaiter =
-                                reinterpret_cast<AsyncSocket::ReadAwaiter*>(awaiter_ptr);
-                            awaiter->result = result;
-                            awaiter->error_code = error_code;
-                        }
-                    }
-
-                    // Delete op before resuming to avoid use-after-free
-                    delete op;
-
-                    // Resume the coroutine if valid
-                    if (h2 && awaiter_ptr) {
-                        h2.resume();
-                    }
-                } else {
-                    // Already completed or awaiter invalid, just clean up
-                    delete op;
-                }
-            }
-
-            io_uring_cqe_seen(&ring_, cqe);
-        }
-    }
-
-    void stop() { stop_requested_ = true; }
-
-private:
-    static constexpr unsigned QUEUE_DEPTH = 256;
-    struct io_uring ring_;
-    std::atomic<bool> stop_requested_{false};
-
-    // Track pending operations to prevent use-after-free
-    std::mutex pending_ops_mutex_;
-    std::unordered_set<UringOp*> pending_ops_;
-};
-
-#elif defined(HAVE_KQUEUE)
+#ifdef HAVE_KQUEUE
 
 // macOS/BSD implementation using kqueue
 class AsyncIOContext::Impl {
 public:
-    Impl() {
+    Impl() : stop_requested_(false) {
         kq_ = kqueue();
         if (kq_ < 0) {
             throw std::runtime_error("Failed to create kqueue");
         }
 
-        // Create wake pipe for clean shutdown
         if (pipe(wake_pipe_) != 0) {
             ::close(kq_);
             throw std::runtime_error("Failed to create wake pipe");
         }
 
-        // Make read end non-blocking
         int flags = fcntl(wake_pipe_[0], F_GETFL, 0);
         fcntl(wake_pipe_[0], F_SETFL, flags | O_NONBLOCK);
 
-        // Register wake pipe with kqueue
         struct kevent ev;
         EV_SET(&ev, wake_pipe_[0], EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
         kevent(kq_, &ev, 1, nullptr, 0, nullptr);
     }
 
     ~Impl() {
-        if (wake_pipe_[0] >= 0) {
+        if (wake_pipe_[0] >= 0)
             ::close(wake_pipe_[0]);
-        }
-        if (wake_pipe_[1] >= 0) {
+        if (wake_pipe_[1] >= 0)
             ::close(wake_pipe_[1]);
-        }
-        if (kq_ >= 0) {
+        if (kq_ >= 0)
             ::close(kq_);
-        }
     }
 
-    Result<void> register_socket(int fd) {
-        // kqueue doesn't require explicit registration
-        return Result<void>();
+    Result<void> register_socket([[maybe_unused]] int fd) { return Result<void>(); }
+
+    void cancel_pending_operations(int fd) {
+        std::deque<PendingOp> ops_to_cancel;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = pending_ops_.find(fd);
+            if (it != pending_ops_.end()) {
+                ops_to_cancel = std::move(it->second);
+                pending_ops_.erase(it);
+            }
+        }
+
+        for (auto& op : ops_to_cancel) {
+            cancel_operation(op);
+        }
     }
 
     Result<void> unregister_socket(int fd) {
-        // Remove any pending events for this fd
         struct kevent ev;
         EV_SET(&ev, fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
         kevent(kq_, &ev, 1, nullptr, 0, nullptr);
         EV_SET(&ev, fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
         kevent(kq_, &ev, 1, nullptr, 0, nullptr);
+
+        std::lock_guard lock(mutex_);
+        socket_generations_.erase(fd);
         return Result<void>();
     }
 
     void submit_read(int fd, void* buffer, size_t size, std::coroutine_handle<> h,
-                     void* awaiterPtr) {
-        PendingOp op{h, awaiterPtr, fd, buffer, size, OpType::Read};
+                     std::shared_ptr<AsyncSocket::AwaiterBase> awaiter, uint64_t generation) {
+        if (!awaiter || !h)
+            return;
+        awaiter->generation_snapshot = generation;
+
+        PendingOp op;
+        op.handle = h;
+        op.awaiter_shared = awaiter;
+        op.fd = fd;
+        op.buffer = buffer;
+        op.size = size;
+        op.type = OpType::Read;
+        op.generation = generation;
 
         {
             std::lock_guard lock(mutex_);
-            pending_ops_[fd].push_back(op);
+            socket_generations_[fd] = generation;
+            pending_ops_[fd].push_back(std::move(op));
         }
 
         struct kevent ev;
         EV_SET(&ev, fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, reinterpret_cast<void*>(fd));
-        kevent(kq_, &ev, 1, nullptr, 0, nullptr);
+        if (kevent(kq_, &ev, 1, nullptr, 0, nullptr) == -1) {
+            spdlog::error("kevent EVFILT_READ register failed for fd {}: {}", fd, strerror(errno));
+            // If registration fails, immediately complete with error
+            std::lock_guard lock(mutex_);
+            auto it = pending_ops_.find(fd);
+            if (it != pending_ops_.end()) {
+                std::erase_if(it->second,
+                              [&](const PendingOp& p) { return p.awaiter_shared == awaiter; });
+            }
+            awaiter->result.store(-1);
+            awaiter->error_code.store(errno);
+            awaiter->cancelled.store(true);
+            if (!h.done())
+                h.resume();
+        }
     }
 
     void submit_write(int fd, const void* buffer, size_t size, std::coroutine_handle<> h,
-                      void* awaiterPtr) {
-        PendingOp op{h, awaiterPtr, fd, const_cast<void*>(buffer), size, OpType::Write};
+                      std::shared_ptr<AsyncSocket::AwaiterBase> awaiter, uint64_t generation) {
+        if (!awaiter || !h)
+            return;
+        awaiter->generation_snapshot = generation;
+
+        PendingOp op;
+        op.handle = h;
+        op.awaiter_shared = awaiter;
+        op.fd = fd;
+        op.data.assign(static_cast<const uint8_t*>(buffer),
+                       static_cast<const uint8_t*>(buffer) + size);
+        op.size = size;
+        op.type = OpType::Write;
+        op.generation = generation;
 
         {
             std::lock_guard lock(mutex_);
-            pending_ops_[fd].push_back(op);
+            socket_generations_[fd] = generation;
+            pending_ops_[fd].push_back(std::move(op));
         }
 
         struct kevent ev;
         EV_SET(&ev, fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, reinterpret_cast<void*>(fd));
-        kevent(kq_, &ev, 1, nullptr, 0, nullptr);
+        if (kevent(kq_, &ev, 1, nullptr, 0, nullptr) == -1) {
+            spdlog::error("kevent EVFILT_WRITE register failed for fd {}: {}", fd, strerror(errno));
+            std::lock_guard lock(mutex_);
+            auto it = pending_ops_.find(fd);
+            if (it != pending_ops_.end()) {
+                std::erase_if(it->second,
+                              [&](const PendingOp& p) { return p.awaiter_shared == awaiter; });
+            }
+            awaiter->result.store(-1);
+            awaiter->error_code.store(errno);
+            awaiter->cancelled.store(true);
+            if (!h.done())
+                h.resume();
+        }
     }
 
     void run() {
         struct kevent events[MAX_EVENTS];
+        struct timespec timeout = {0, 100000000}; // 100ms
 
-        // Use 100ms timeout to allow checking stop_requested_ periodically
-        struct timespec timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_nsec = 100000000; // 100ms
-
-        while (!stop_requested_) {
+        while (!stop_requested_.load(std::memory_order_acquire)) {
             int nev = kevent(kq_, nullptr, 0, events, MAX_EVENTS, &timeout);
-
-            // Check if we should stop even if no events
-            if (stop_requested_) {
+            if (stop_requested_.load(std::memory_order_acquire))
                 break;
+
+            if (nev < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                spdlog::warn("AsyncIOContext(kqueue): kevent() error: {}", strerror(errno));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
             }
 
             for (int i = 0; i < nev; ++i) {
                 int fd = static_cast<int>(events[i].ident);
 
-                // Handle wake pipe - just drain it and continue
+                // Wake pipe
                 if (fd == wake_pipe_[0]) {
-                    char buffer[256];
+                    char buffer[8];
                     while (read(wake_pipe_[0], buffer, sizeof(buffer)) > 0) {
-                        // Drain the pipe
                     }
                     continue;
                 }
 
-                std::lock_guard lock(mutex_);
-                auto it = pending_ops_.find(fd);
-                if (it != pending_ops_.end() && !it->second.empty()) {
-                    auto op = it->second.front();
-                    it->second.pop_front();
-
-                    // Perform the actual I/O operation
-                    if (op.type == OpType::Read) {
-                        auto* awaiter = reinterpret_cast<AsyncSocket::ReadAwaiter*>(op.awaiter);
-                        awaiter->result = recv(fd, op.buffer, op.size, 0);
-                        awaiter->error_code = errno;
-                    } else {
-                        auto* awaiter = reinterpret_cast<AsyncSocket::WriteAwaiter*>(op.awaiter);
-                        awaiter->result = send(fd, op.buffer, op.size, MSG_NOSIGNAL);
-                        awaiter->error_code = errno;
-                    }
-
-                    op.handle.resume();
+                // Defensive error/EOF handling
+                if (events[i].flags & EV_ERROR) {
+                    int err = static_cast<int>(events[i].data);
+                    spdlog::debug("AsyncIOContext(kqueue): EV_ERROR on fd {}: {}", fd,
+                                  strerror(err));
+                    cancel_pending_operations(fd);
+                    unregister_socket(fd);
+                    continue;
                 }
-            }
-        }
+                if (events[i].flags & EV_EOF) {
+                    spdlog::debug("AsyncIOContext(kqueue): EV_EOF (peer closed) on fd {}", fd);
+                    cancel_pending_operations(fd);
+                    continue;
+                }
+
+                // Extract one pending op for this fd/filter
+                PendingOp op;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    auto it = pending_ops_.find(fd);
+                    if (it != pending_ops_.end() && !it->second.empty()) {
+                        OpType want =
+                            (events[i].filter == EVFILT_READ) ? OpType::Read : OpType::Write;
+                        auto& dq = it->second;
+                        auto op_it = std::find_if(dq.begin(), dq.end(), [&](const PendingOp& p) {
+                            return p.type == want;
+                        });
+                        if (op_it != dq.end()) {
+                            op = std::move(*op_it);
+                            dq.erase(op_it);
+                        }
+                    }
+                }
+
+                if (!op.awaiter_shared || !op.handle)
+                    continue;
+
+                // Validate generation and cancellation before I/O
+                bool is_valid = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    auto gen_it = socket_generations_.find(fd);
+                    is_valid =
+                        (gen_it != socket_generations_.end() && gen_it->second == op.generation);
+                }
+                if (!is_valid || op.handle.done() || op.awaiter_shared->cancelled.load()) {
+                    spdlog::debug("AsyncIOContext(kqueue): stale/cancelled op (fd={}, gen={})", fd,
+                                  op.generation);
+                    continue;
+                }
+
+                // Perform non-blocking I/O
+                ssize_t io_result = -1;
+                int io_errno = 0;
+                if (op.type == OpType::Read) {
+                    io_result = recv(fd, op.buffer, op.size, MSG_DONTWAIT);
+                    io_errno = errno;
+                } else {
+                    io_result = send(fd, op.data.data(), op.size, MSG_DONTWAIT | MSG_NOSIGNAL);
+                    io_errno = errno;
+                }
+                if (io_result < 0) {
+                    if (io_errno == 0) {
+#ifdef EPIPE
+                        io_errno = EPIPE;
+#else
+                        io_errno = ECONNRESET;
+#endif
+                    }
+                    op.awaiter_shared->error_code.store(io_errno, std::memory_order_release);
+                }
+                op.awaiter_shared->result.store(io_result, std::memory_order_release);
+
+                // Resume safely (final check)
+                if (!op.handle.done() && !op.awaiter_shared->cancelled.load()) {
+                    op.handle.resume();
+                } else {
+                    spdlog::debug("AsyncIOContext(kqueue): skip resume (done/cancelled) for fd {}",
+                                  fd);
+                }
+            } // for events
+        } // while
     }
 
     void stop() {
-        stop_requested_ = true;
-        // Wake up blocked kevent
+        stop_requested_.store(true, std::memory_order_release);
         if (wake_pipe_[1] >= 0) {
             char byte = 1;
             write(wake_pipe_[1], &byte, 1);
@@ -557,55 +551,74 @@ private:
 
     struct PendingOp {
         std::coroutine_handle<> handle;
-        void* awaiter;
+        std::shared_ptr<AsyncSocket::AwaiterBase> awaiter_shared;
         int fd;
         void* buffer;
+        std::vector<uint8_t> data;
         size_t size;
         OpType type;
+        uint64_t generation = 0;
     };
+
+    void cancel_operation(PendingOp& op) {
+        auto awaiter = op.awaiter_shared;
+        if (!awaiter || !op.handle || op.handle.done())
+            return;
+
+        awaiter->result.store(-1, std::memory_order_release);
+        awaiter->error_code.store(ECONNRESET, std::memory_order_release);
+        awaiter->cancelled.store(true, std::memory_order_release);
+
+        try {
+            op.handle.resume();
+        } catch (...) {
+        }
+    }
 
     static constexpr int MAX_EVENTS = 64;
     int kq_;
     int wake_pipe_[2] = {-1, -1};
-    std::atomic<bool> stop_requested_{false};
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unordered_map<int, std::deque<PendingOp>> pending_ops_;
+    std::unordered_map<int, uint64_t> socket_generations_;
+    std::atomic<bool> stop_requested_{false};
 };
 
-#else
+#else // Fallback implementation
 
-// Fallback implementation using poll/select for other platforms
 class AsyncIOContext::Impl {
 public:
-    Impl() {}
-    ~Impl() {}
+    Impl() = default;
+    ~Impl() = default;
 
-    Result<void> register_socket(int /*fd*/) { return Result<void>(); }
+    Result<void> register_socket(int) { return Result<void>(); }
+    Result<void> unregister_socket(int) { return Result<void>(); }
 
-    Result<void> unregister_socket(int /*fd*/) { return Result<void>(); }
+    void cancel_pending_operations(int) {}
 
     void submit_read(int fd, void* buffer, size_t size, std::coroutine_handle<> h,
-                     void* awaiterPtr) {
-        // Simple blocking read for fallback
-        ssize_t result = recv(fd, buffer, size, 0);
-        auto* awaiter = reinterpret_cast<AsyncSocket::ReadAwaiter*>(awaiterPtr);
-        awaiter->result = result;
-        awaiter->error_code = errno;
+                     std::shared_ptr<AsyncSocket::AwaiterBase> awaiter, uint64_t) {
+        ssize_t bytes = recv(fd, buffer, size, MSG_DONTWAIT);
+        if (awaiter) {
+            awaiter->result = bytes;
+            if (bytes < 0)
+                awaiter->error_code = errno;
+        }
         h.resume();
     }
 
     void submit_write(int fd, const void* buffer, size_t size, std::coroutine_handle<> h,
-                      void* awaiterPtr) {
-        // Simple blocking write for fallback
-        ssize_t result = send(fd, buffer, size, MSG_NOSIGNAL);
-        auto* awaiter = reinterpret_cast<AsyncSocket::WriteAwaiter*>(awaiterPtr);
-        awaiter->result = result;
-        awaiter->error_code = errno;
+                      std::shared_ptr<AsyncSocket::AwaiterBase> awaiter, uint64_t) {
+        ssize_t bytes = send(fd, buffer, size, MSG_NOSIGNAL);
+        if (awaiter) {
+            awaiter->result = bytes;
+            if (bytes < 0)
+                awaiter->error_code = errno;
+        }
         h.resume();
     }
 
     void run() {
-        // Fallback: no event loop needed for blocking I/O
         while (!stop_requested_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
@@ -620,37 +633,44 @@ private:
 #endif
 
 // ============================================================================
-// AsyncIOContext Implementation
+// AsyncIOContext Public Methods
 // ============================================================================
 
 AsyncIOContext::AsyncIOContext() : pImpl(std::make_unique<Impl>()) {}
-AsyncIOContext::~AsyncIOContext() = default;
-
+AsyncIOContext::~AsyncIOContext() {
+    if (pImpl) {
+        pImpl->stop();
+    }
+}
 AsyncIOContext::AsyncIOContext(AsyncIOContext&&) noexcept = default;
 AsyncIOContext& AsyncIOContext::operator=(AsyncIOContext&&) noexcept = default;
 
 Result<void> AsyncIOContext::register_socket(int fd) {
     return pImpl->register_socket(fd);
 }
-
 Result<void> AsyncIOContext::unregister_socket(int fd) {
     return pImpl->unregister_socket(fd);
 }
+void AsyncIOContext::cancel_pending_operations(int fd) {
+    pImpl->cancel_pending_operations(fd);
+}
 
 void AsyncIOContext::submit_read(int fd, void* buffer, size_t size, std::coroutine_handle<> h,
-                                 void* awaiterPtr) {
-    pImpl->submit_read(fd, buffer, size, h, awaiterPtr);
+                                 std::shared_ptr<AsyncSocket::AwaiterBase> awaiter,
+                                 uint64_t generation) {
+    pImpl->submit_read(fd, buffer, size, h, awaiter, generation);
 }
 
 void AsyncIOContext::submit_write(int fd, const void* buffer, size_t size,
-                                  std::coroutine_handle<> h, void* awaiterPtr) {
-    pImpl->submit_write(fd, buffer, size, h, awaiterPtr);
+                                  std::coroutine_handle<> h,
+                                  std::shared_ptr<AsyncSocket::AwaiterBase> awaiter,
+                                  uint64_t generation) {
+    pImpl->submit_write(fd, buffer, size, h, awaiter, generation);
 }
 
 void AsyncIOContext::run() {
     pImpl->run();
 }
-
 void AsyncIOContext::stop() {
     pImpl->stop();
 }

@@ -429,8 +429,8 @@ public:
         return Result<void>();
     }
 
-    Result<std::vector<RawTextEntry>> fuzzySearch(const std::string& query,
-                                                  float threshold) override {
+    Result<std::vector<RawTextEntry>> fuzzySearch([[maybe_unused]] const std::string& query,
+                                                  [[maybe_unused]] float threshold) override {
         try {
             std::vector<RawTextEntry> results;
 
@@ -466,16 +466,16 @@ public:
         return entries;
     }
 
-    Result<std::vector<RawTextEntry>> searchByKeyword(const std::string& keyword,
-                                                      size_t limit) override {
+    Result<std::vector<RawTextEntry>> searchByKeyword([[maybe_unused]] const std::string& keyword,
+                                                      [[maybe_unused]] size_t limit) override {
         // Implementation would use the text indexer
         std::vector<RawTextEntry> results;
         // TODO: Implement using textIndexer_
         return results;
     }
 
-    Result<std::vector<RawTextEntry>>
-    searchByMetadata(const std::unordered_map<std::string, std::string>& criteria) override {
+    Result<std::vector<RawTextEntry>> searchByMetadata(
+        [[maybe_unused]] const std::unordered_map<std::string, std::string>& criteria) override {
         // Implementation would query metadata store
         std::vector<RawTextEntry> results;
         // TODO: Implement using metadataStore_

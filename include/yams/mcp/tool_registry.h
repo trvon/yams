@@ -123,6 +123,7 @@ struct MCPGrepResponse {
 struct MCPDownloadRequest {
     using RequestType = MCPDownloadRequest;
 
+    // Download parameters
     std::string url;
     std::vector<std::string> headers;
     std::string checksum;
@@ -135,6 +136,14 @@ struct MCPDownloadRequest {
     bool storeOnly = true;
     std::string exportPath;
     std::string overwrite = "never";
+
+    // Optional post-indexing parameters (when true, index downloaded artifact)
+    bool postIndex = true;
+    std::vector<std::string> tags;
+    std::map<std::string, std::string> metadata;
+    std::string collection;
+    std::string snapshotId;
+    std::string snapshotLabel;
 
     static MCPDownloadRequest fromJson(const json& j);
     json toJson() const;

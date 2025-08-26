@@ -43,7 +43,7 @@ public:
 
         // Create option group for deletion methods (only one can be used at a time)
         auto* group = cmd->add_option_group("deletion_method");
-        group->add_option("hash", hash_, "Document hash to delete");
+        group->add_option("--hash", hash_, "Document hash to delete");
         group->add_option("--name", name_, "Delete document by name");
         group->add_option("--names", names_,
                           "Delete multiple documents by names (comma-separated)");
@@ -320,6 +320,29 @@ private:
             // Delete the document from storage
             auto deleteResult = store->remove(hash);
             if (!deleteResult) {
+                // If deletion fails due to corruption, and --force is used,
+                // still try to remove the metadata entry.
+                if (deleteResult.error().message.find("Corrupted data") != std::string::npos &&
+                    force_) {
+                    spdlog::warn("Storage data is corrupted for {}. Forcing metadata deletion.",
+                                 name);
+                    if (auto metadataRepo = cli_->getMetadataRepository()) {
+                        auto docResult = metadataRepo->getDocumentByHash(hash);
+                        if (docResult && docResult.value()) {
+                            auto deleteMetaResult =
+                                metadataRepo->deleteDocument(docResult.value()->id);
+                            if (deleteMetaResult) {
+                                successCount++;
+                                if (verbose_) {
+                                    std::cout << "  Force-deleted corrupted metadata for " << name
+                                              << "\n";
+                                }
+                                continue; // Skip adding to failures
+                            }
+                        }
+                    }
+                }
+
                 failures.push_back(name + ": " + deleteResult.error().message);
                 failCount++;
             } else {
@@ -482,9 +505,10 @@ private:
             pos++;
         }
 
-        // Add % for path matching if pattern doesn't start with /
-        if (sqlPattern[0] != '/') {
-            sqlPattern = "%/" + sqlPattern;
+        // If pattern contains no slashes, assume it's a filename pattern.
+        // The LIKE query will be broad, and we'll filter with the glob matcher.
+        if (pattern.find('/') == std::string::npos && pattern.find('\\') == std::string::npos) {
+            sqlPattern = "%" + sqlPattern + "%";
         }
 
         auto documentsResult = metadataRepo->findDocumentsByPath(sqlPattern);

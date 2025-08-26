@@ -4,12 +4,45 @@
 
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
 #include <future>
 #include <optional>
+
+#ifdef _WIN32
+#include <afunix.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#ifndef SHUT_RDWR
+#define SHUT_RDWR SD_BOTH
+#endif
+// Provide minimal fcntl-style nonblocking handling only within this TU
+#ifndef F_GETFL
+#define F_GETFL 0
+#endif
+#ifndef F_SETFL
+#define F_SETFL 1
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0x800
+#endif
+namespace yams::daemon::detail {
+inline int win32_fcntl(int fd, int cmd, int arg = 0) {
+    if (cmd == F_SETFL) {
+        u_long mode = (arg & O_NONBLOCK) ? 1 : 0;
+        return ::ioctlsocket(fd, FIONBIO, &mode) == 0 ? 0 : -1;
+    }
+    // F_GETFL: return 0 (no flags)
+    return 0;
+}
+} // namespace yams::daemon::detail
+#define fcntl(fd, cmd, ...) yams::daemon::detail::win32_fcntl((fd), (cmd), ##__VA_ARGS__)
+#define close(fd) ::closesocket(fd)
+#else
+#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#endif
 
 namespace yams::daemon {
 
@@ -31,8 +64,8 @@ AsyncIpcServer::~AsyncIpcServer() {
 
 AsyncIpcServer::AsyncIpcServer(AsyncIpcServer&& other) noexcept
     : config_(std::move(other.config_)), listen_fd_(std::exchange(other.listen_fd_, -1)),
-      running_(other.running_.load()), stop_source_(std::move(other.stop_source_)),
-      io_context_(std::move(other.io_context_)), thread_pool_(std::move(other.thread_pool_)),
+      running_(other.running_.load()), io_context_(std::move(other.io_context_)),
+      thread_pool_(std::move(other.thread_pool_)),
       request_handler_(std::move(other.request_handler_)), processor_(std::move(other.processor_)),
       handler_func_(std::move(other.handler_func_)),
       worker_threads_(std::move(other.worker_threads_)),
@@ -49,7 +82,6 @@ AsyncIpcServer& AsyncIpcServer::operator=(AsyncIpcServer&& other) noexcept {
         config_ = std::move(other.config_);
         listen_fd_ = std::exchange(other.listen_fd_, -1);
         running_ = other.running_.load();
-        stop_source_ = std::move(other.stop_source_);
         io_context_ = std::move(other.io_context_);
         thread_pool_ = std::move(other.thread_pool_);
         request_handler_ = std::move(other.request_handler_);
@@ -107,6 +139,16 @@ void AsyncIpcServer::set_processor(std::shared_ptr<RequestProcessor> processor) 
 }
 
 Result<void> AsyncIpcServer::start() {
+#ifndef _WIN32
+    // Ignore SIGPIPE to prevent daemon termination on write to closed sockets
+    {
+        struct sigaction sa{};
+        sa.sa_handler = SIG_IGN;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGPIPE, &sa, nullptr);
+    }
+#endif
     if (running_.exchange(true)) {
         return Error{ErrorCode::InvalidState, "Server already running"};
     }
@@ -156,11 +198,16 @@ Result<void> AsyncIpcServer::start() {
 
     // Start a single IO thread for the event loop (kqueue doesn't support multiple threads)
     // The worker_threads will be used for processing requests, not for the IO loop
-    io_thread_ = std::thread([this]() {
+    io_thread_ = std::jthread([this](std::stop_token token) {
         try {
             spdlog::debug("AsyncIpcServer IO thread started");
-            // Run until io_context_->stop() is called
-            io_context_->run();
+            // Run until io_context_->stop() is called or stop requested
+            while (!token.stop_requested()) {
+                // Run with a timeout to check stop token periodically
+                io_context_->run();
+                if (token.stop_requested())
+                    break;
+            }
             spdlog::debug("AsyncIpcServer IO thread exiting");
         } catch (const std::exception& e) {
             spdlog::error("AsyncIpcServer IO thread crashed: {}", e.what());
@@ -170,10 +217,9 @@ Result<void> AsyncIpcServer::start() {
     });
 
     // Start accept thread
-    accept_thread_ = std::thread([this]() {
+    accept_thread_ = std::jthread([this](std::stop_token token) {
         try {
             spdlog::debug("AsyncIpcServer accept thread started");
-            auto token = stop_source_.get_token();
             // Run accept loop synchronously
             accept_loop_sync(token);
             spdlog::debug("AsyncIpcServer accept thread exiting");
@@ -197,17 +243,29 @@ void AsyncIpcServer::stop() {
 
     spdlog::info("Stopping AsyncIpcServer...");
 
-    // Signal all threads to stop
-    stop_source_.request_stop();
+    // Request stop on all jthreads (they have built-in stop tokens)
+    if (accept_thread_.joinable()) {
+        accept_thread_.request_stop();
+    }
+    if (io_thread_.joinable()) {
+        io_thread_.request_stop();
+    }
 
     // Stop accepting new connections
     if (listen_fd_ >= 0) {
         shutdown(listen_fd_, SHUT_RDWR);
+        close(listen_fd_);
+        listen_fd_ = -1;
     }
 
     // Stop IO context (our instance)
     if (io_context_) {
         io_context_->stop();
+    }
+
+    // Stop the thread pool explicitly to ensure clean shutdown
+    if (thread_pool_) {
+        thread_pool_->stop();
     }
 
     // Wait for threads to finish
@@ -231,11 +289,7 @@ void AsyncIpcServer::stop() {
         }
     }
 
-    for (auto& thread : worker_threads_) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
+    // worker_threads_ is not used - ThreadPool manages its own threads
     worker_threads_.clear();
 
     // Cleanup socket
@@ -401,7 +455,7 @@ void AsyncIpcServer::accept_loop_sync(std::stop_token token) {
     spdlog::debug("Accept loop exiting");
 }
 
-Task<void> AsyncIpcServer::accept_loop(std::stop_token token) {
+Task<void> AsyncIpcServer::accept_loop([[maybe_unused]] std::stop_token token) {
     // Coroutine version kept for compatibility but not used
     co_return;
 }
