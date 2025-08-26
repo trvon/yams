@@ -3,6 +3,7 @@ set(EXTRACTION_SOURCES
     text_extractor_factory.cpp
     plain_text_extractor.cpp
     html_text_extractor.cpp
+    format_handlers/format_handler.cpp
 )
 
 # Add PDF extractor if enabled
@@ -33,12 +34,12 @@ if(YAMS_HAS_PDF_SUPPORT)
         PUBLIC
             pdfium::pdfium
     )
-    
+
     target_compile_definitions(yams_extraction
         PUBLIC
             YAMS_HAS_PDF_SUPPORT=1
     )
-    
+
     message(STATUS "PDF text extraction support enabled in yams_extraction")
 endif()
 

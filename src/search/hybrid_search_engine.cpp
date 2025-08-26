@@ -1,5 +1,6 @@
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/kg_scorer.h>
+#include <yams/search/query_qualifiers.hpp>
 #include <yams/vector/embedding_generator.h>
 
 #include <spdlog/spdlog.h>
@@ -42,9 +43,33 @@ public:
         for (const auto& [doc_id, doc_content] : documents_) {
             // Apply filter if provided
             if (filter && filter->hasFilters()) {
+                // Exclude by id
                 if (!filter->exclude_ids.empty()) {
                     if (std::find(filter->exclude_ids.begin(), filter->exclude_ids.end(), doc_id) !=
                         filter->exclude_ids.end()) {
+                        continue;
+                    }
+                }
+                // Enforce metadata key/value matches (e.g., file_name, extension, mime_type)
+                if (!filter->metadata_filters.empty()) {
+                    auto itMeta = metadata_.find(doc_id);
+                    const std::map<std::string, std::string>* docMeta =
+                        (itMeta != metadata_.end()) ? &itMeta->second : nullptr;
+                    bool metaOk = true;
+                    for (const auto& kv : filter->metadata_filters) {
+                        const auto& key = kv.first;
+                        const auto& val = kv.second;
+                        if (!docMeta) {
+                            metaOk = false;
+                            break;
+                        }
+                        auto it = docMeta->find(key);
+                        if (it == docMeta->end() || it->second != val) {
+                            metaOk = false;
+                            break;
+                        }
+                    }
+                    if (!metaOk) {
                         continue;
                     }
                 }
@@ -413,9 +438,13 @@ public:
 
         auto start_time = std::chrono::high_resolution_clock::now();
 
+        // Parse inline qualifiers and normalize query text
+        auto parsed = yams::search::parseQueryQualifiers(query);
+        const std::string& normalizedQuery = parsed.normalizedQuery;
+
         // Check cache
         if (config_.enable_cache) {
-            auto cache_key = generateCacheKey(query, k, filter);
+            auto cache_key = generateCacheKey(normalizedQuery, k, filter);
             auto cached = getCachedResult(cache_key);
             if (cached.has_value()) {
                 metrics_.cache_hits++;
@@ -424,10 +453,10 @@ public:
             metrics_.cache_misses++;
         }
 
-        // Expand query if enabled
-        std::string expanded_query = query;
+        // Expand query if enabled (use normalized query)
+        std::string expanded_query = normalizedQuery;
         if (config_.enable_query_expansion) {
-            auto expanded_terms = expandQuery(query);
+            auto expanded_terms = expandQuery(normalizedQuery);
             if (!expanded_terms.empty()) {
                 expanded_query += " " + joinStrings(expanded_terms, " ");
             }
@@ -459,9 +488,9 @@ public:
         if (config_.parallel_search) {
             // Launch searches in parallel honoring gates
             if (!env_disable_vector) {
-                vector_future = std::async(std::launch::async, [this, &query, &filter]() {
-                    // Generate embedding for query
-                    auto query_vector = generateQueryEmbedding(query);
+                vector_future = std::async(std::launch::async, [this, &normalizedQuery, &filter]() {
+                    // Generate embedding for normalized query
+                    auto query_vector = generateQueryEmbedding(normalizedQuery);
                     return vector_index_->search(query_vector, config_.vector_top_k, filter);
                 });
             }
@@ -492,8 +521,8 @@ public:
         } else {
             // Sequential search honoring gates
             if (!env_disable_vector) {
-                // Generate embedding for query
-                auto query_vector = generateQueryEmbedding(query);
+                // Generate embedding for normalized query
+                auto query_vector = generateQueryEmbedding(normalizedQuery);
                 auto vector_result =
                     vector_index_->search(query_vector, config_.vector_top_k, filter);
                 if (vector_result.has_value()) {
@@ -551,11 +580,102 @@ public:
         // Re-rank if enabled
         if (config_.enable_reranking && !fused_results.empty()) {
             auto rerank_start = std::chrono::high_resolution_clock::now();
-            fused_results = rerankResults(fused_results, query);
+            fused_results = rerankResults(fused_results, normalizedQuery);
             auto rerank_end = std::chrono::high_resolution_clock::now();
             auto rerank_duration =
                 std::chrono::duration_cast<std::chrono::microseconds>(rerank_end - rerank_start);
             metrics_.rerank_time_ms = rerank_duration.count() / 1000.0;
+        }
+
+        // Scoped snippet shaping for lines:<range>
+        if (parsed.scope.type == yams::search::ExtractScopeType::Lines &&
+            !parsed.scope.range.empty()) {
+            auto parseRanges = [](const std::string& expr) {
+                std::vector<std::pair<int, int>> out;
+                std::stringstream ss(expr);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    if (token.empty())
+                        continue;
+                    // trim
+                    token.erase(token.begin(),
+                                std::find_if(token.begin(), token.end(),
+                                             [](unsigned char c) { return !std::isspace(c); }));
+                    token.erase(std::find_if(token.rbegin(), token.rend(),
+                                             [](unsigned char c) { return !std::isspace(c); })
+                                    .base(),
+                                token.end());
+                    auto pos = token.find('-');
+                    if (pos == std::string::npos) {
+                        try {
+                            int v = std::stoi(token);
+                            if (v > 0)
+                                out.emplace_back(v, v);
+                        } catch (...) {
+                            // ignore malformed token
+                        }
+                    } else {
+                        try {
+                            int a = std::stoi(token.substr(0, pos));
+                            int b = std::stoi(token.substr(pos + 1));
+                            if (a > 0 && b >= a)
+                                out.emplace_back(a, b);
+                        } catch (...) {
+                            // ignore malformed range
+                        }
+                    }
+                }
+                std::sort(out.begin(), out.end());
+                std::vector<std::pair<int, int>> merged;
+                for (const auto& r : out) {
+                    if (merged.empty() || r.first > merged.back().second + 1) {
+                        merged.push_back(r);
+                    } else {
+                        merged.back().second = std::max(merged.back().second, r.second);
+                    }
+                }
+                return merged;
+            };
+
+            const auto ranges = parseRanges(parsed.scope.range);
+            if (!ranges.empty()) {
+                for (auto& r : fused_results) {
+                    if (r.content.empty())
+                        continue;
+
+                    // Split into lines
+                    std::vector<std::string> lines;
+                    lines.reserve(256);
+                    {
+                        std::stringstream ss(r.content);
+                        std::string line;
+                        while (std::getline(ss, line)) {
+                            if (!line.empty() && line.back() == '\r')
+                                line.pop_back();
+                            lines.push_back(std::move(line));
+                        }
+                    }
+                    if (lines.empty())
+                        continue;
+
+                    // Rebuild content keeping only requested line ranges (1-based indices)
+                    std::string scoped;
+                    bool firstOut = true;
+                    for (const auto& [a, b] : ranges) {
+                        const int start = std::max(1, a);
+                        const int end = std::min(static_cast<int>(lines.size()), b);
+                        for (int idx = start; idx <= end; ++idx) {
+                            if (!firstOut)
+                                scoped.push_back('\n');
+                            firstOut = false;
+                            scoped += lines[static_cast<size_t>(idx - 1)];
+                        }
+                    }
+                    if (!scoped.empty()) {
+                        r.content = std::move(scoped);
+                    }
+                }
+            }
         }
 
         // Take top k results
@@ -570,7 +690,7 @@ public:
 
         // Generate explanations if enabled
         if (config_.generate_explanations) {
-            generateExplanations(fused_results, query);
+            generateExplanations(fused_results, normalizedQuery);
         }
 
         // Update metrics
@@ -579,7 +699,7 @@ public:
 
         // Cache result if enabled
         if (config_.enable_cache) {
-            auto cache_key = generateCacheKey(query, k, filter);
+            auto cache_key = generateCacheKey(normalizedQuery, k, filter);
             cacheResult(cache_key, fused_results);
         }
 

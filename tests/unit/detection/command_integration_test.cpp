@@ -53,10 +53,7 @@ TEST_F(CommandIntegrationTest, FindMagicNumbersFile_MultiplePaths) {
     auto foundPath = YamsCLI::findMagicNumbersFile();
 
     // Should return a path (may be empty if not found)
-    EXPECT_NO_THROW({
-        std::string pathStr = foundPath.string();
-        bool isEmpty = foundPath.empty();
-    });
+    EXPECT_NO_THROW({ std::string pathStr = foundPath.string(); });
 
     // If found, file should exist
     if (!foundPath.empty()) {

@@ -96,7 +96,7 @@ public:
                 "DownloadService: Download completed successfully. Hash: {}, Size: {} bytes",
                 finalResult.hash, finalResult.sizeBytes);
             DownloadServiceResponse response;
-            // Ingest into ContentStore and index metadata for MCP/CLI parity
+            // Ingest into ContentStore and index metadata/tags for MCP/CLI parity
             try {
                 if (ctx_.store) {
                     auto storeRes = ctx_.store->store(finalResult.storedPath);
@@ -105,6 +105,8 @@ public:
                                      storeRes.error().message);
                     } else if (ctx_.metadataRepo) {
                         metadata::DocumentInfo docInfo;
+
+                        // Derive filename from URL for name-based retrieval
                         std::string filename = finalResult.url;
                         auto lastSlash = filename.find_last_of('/');
                         if (lastSlash != std::string::npos) {
@@ -117,7 +119,9 @@ public:
                         if (filename.empty()) {
                             filename = "downloaded_file";
                         }
-                        docInfo.filePath = finalResult.url;
+
+                        // Use the filename as filePath to make name-based retrieval work
+                        docInfo.filePath = filename;
                         docInfo.fileName = filename;
                         docInfo.fileExtension = "";
                         auto dotPos = filename.rfind('.');
@@ -131,9 +135,12 @@ public:
                         docInfo.createdTime = now;
                         docInfo.modifiedTime = now;
                         docInfo.indexedTime = now;
+
                         auto ins = ctx_.metadataRepo->insertDocument(docInfo);
                         if (ins) {
                             const int64_t docId = ins.value();
+
+                            // Core provenance metadata
                             ctx_.metadataRepo->setMetadata(
                                 docId, "source_url", metadata::MetadataValue(finalResult.url));
                             if (finalResult.etag) {
@@ -151,6 +158,50 @@ public:
                                     metadata::MetadataValue(
                                         std::to_string(*finalResult.httpStatus)));
                             }
+                            if (finalResult.checksumOk) {
+                                ctx_.metadataRepo->setMetadata(
+                                    docId, "checksum_ok",
+                                    metadata::MetadataValue(*finalResult.checksumOk ? "true"
+                                                                                    : "false"));
+                            }
+
+                            // Derive and index helper tags for discoverability
+                            // downloaded, host:..., scheme:...
+                            ctx_.metadataRepo->setMetadata(docId, "tag",
+                                                           metadata::MetadataValue("downloaded"));
+                            // parse host/scheme from URL
+                            try {
+                                std::string scheme, host;
+                                const std::string& u = finalResult.url;
+                                auto pos = u.find("://");
+                                if (pos != std::string::npos) {
+                                    scheme = u.substr(0, pos);
+                                    auto rest = u.substr(pos + 3);
+                                    auto slash = rest.find('/');
+                                    host =
+                                        (slash == std::string::npos) ? rest : rest.substr(0, slash);
+                                }
+                                if (!host.empty()) {
+                                    ctx_.metadataRepo->setMetadata(
+                                        docId, "tag", metadata::MetadataValue("host:" + host));
+                                }
+                                if (!scheme.empty()) {
+                                    ctx_.metadataRepo->setMetadata(
+                                        docId, "tag", metadata::MetadataValue("scheme:" + scheme));
+                                }
+                                if (finalResult.httpStatus) {
+                                    int code = *finalResult.httpStatus;
+                                    std::string bucket = (code >= 200 && code < 300)   ? "2xx"
+                                                         : (code >= 400 && code < 500) ? "4xx"
+                                                                                       : "5xx";
+                                    ctx_.metadataRepo->setMetadata(
+                                        docId, "tag", metadata::MetadataValue("status:" + bucket));
+                                }
+                            } catch (...) {
+                                // best-effort tag derivation
+                            }
+
+                            // Index content for search/snippet
                             auto contentBytes =
                                 ctx_.store->retrieveBytes(storeRes.value().contentHash);
                             if (contentBytes) {

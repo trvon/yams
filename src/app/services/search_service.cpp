@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/search/query_qualifiers.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -118,27 +119,48 @@ public:
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
-        // Validate request parameters
-        if (req.query.empty() && req.hash.empty()) {
+        // Normalize query via qualifiers parser, then validate request parameters
+        auto parsed = yams::search::parseQueryQualifiers(req.query);
+        SearchRequest normalizedReq = req;
+        normalizedReq.query = parsed.normalizedQuery;
+
+        if (normalizedReq.query.empty() && normalizedReq.hash.empty()) {
             return Error{ErrorCode::InvalidArgument, "Query or hash is required"};
         }
-        if (req.limit < 0) {
+        if (normalizedReq.limit < 0) {
             return Error{ErrorCode::InvalidArgument, "Limit must be non-negative"};
         }
 
+        // Merge parsed qualifiers into request fields when not explicitly set
+        // Note: SearchRequest has no 'name' field; fold name qualifier into pathPattern for
+        // metadata parity
+        if (!parsed.scope.name.empty()) {
+            if (normalizedReq.pathPattern.empty()) {
+                normalizedReq.pathPattern = parsed.scope.name;
+            } else if (normalizedReq.pathPattern.find(parsed.scope.name) == std::string::npos) {
+                normalizedReq.pathPattern += " " + parsed.scope.name;
+            }
+        }
+        if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
+            normalizedReq.extension = parsed.scope.ext;
+        }
+        if (normalizedReq.mimeType.empty() && !parsed.scope.mime.empty()) {
+            normalizedReq.mimeType = parsed.scope.mime;
+        }
+
         // Hash-first handling (explicit), otherwise auto-detect from query string
-        if (!req.hash.empty()) {
-            if (!looksLikeHash(req.hash)) {
+        if (!normalizedReq.hash.empty()) {
+            if (!looksLikeHash(normalizedReq.hash)) {
                 return Error{ErrorCode::InvalidArgument,
                              "Invalid hash format (expected hex, 8-64 chars)"};
             }
-            auto result = searchByHashPrefix(req);
+            auto result = searchByHashPrefix(normalizedReq);
             setExecTime(result, t0);
             return result;
         }
 
-        if (looksLikeHash(req.query)) {
-            auto result = searchByHashPrefix(req);
+        if (looksLikeHash(normalizedReq.query)) {
+            auto result = searchByHashPrefix(normalizedReq);
             setExecTime(result, t0);
             return result;
         }
@@ -152,20 +174,20 @@ public:
 
         if (type == "hybrid" || type == "semantic") {
             if (ctx_.hybridEngine) {
-                auto result = hybridSearch(req);
+                auto result = hybridSearch(normalizedReq, parsed.scope);
                 setExecTime(result, t0);
                 if (result)
                     return result;
                 // Fall through to metadata if hybrid fails
             }
             // Hybrid not available or failed, fallback to metadata search paths
-            auto result = metadataSearch(req);
+            auto result = metadataSearch(normalizedReq);
             setExecTime(result, t0);
             return result;
         }
 
         // "keyword" or anything else -> metadata search
-        auto result = metadataSearch(req);
+        auto result = metadataSearch(normalizedReq);
         setExecTime(result, t0);
         return result;
     }
@@ -221,10 +243,24 @@ private:
                 else
                     pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
             }
-            if (!pathOk)
+            // Enforce ext/mime filters when available
+            bool metaFiltersOk = true;
+            if (!req.fileType.empty()) {
+                // keep current behavior (type handled elsewhere)
+            }
+            if (!req.extension.empty()) {
+                if (doc.fileExtension != req.extension &&
+                    doc.fileExtension != ("." + req.extension)) {
+                    metaFiltersOk = false;
+                }
+            }
+            if (!req.mimeType.empty() && doc.mimeType != req.mimeType) {
+                metaFiltersOk = false;
+            }
+            if (!pathOk || !metaFiltersOk ||
+                !metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) {
                 continue;
-            if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags))
-                continue;
+            }
 
             if (req.pathsOnly) {
                 resp.paths.push_back(doc.filePath);
@@ -247,14 +283,25 @@ private:
         return resp;
     }
 
-    Result<SearchResponse> hybridSearch(const SearchRequest& req) {
+    Result<SearchResponse> hybridSearch(const SearchRequest& req,
+                                        const yams::search::ExtractScope& scope) {
         // Expect ctx_.hybridEngine->search(query, limit) returning Result<vector<...>>
         // Shape inferred from existing MCP code: each result has:
         //  - id
         //  - metadata map with "title" and "path"
         //  - hybrid_score, vector_score, keyword_score, kg_entity_score, structural_score
         //  - content snippet (optional)
-        auto hres = ctx_.hybridEngine->search(req.query, req.limit);
+        yams::vector::SearchFilter filter;
+        if (!scope.name.empty()) {
+            filter.metadata_filters["file_name"] = scope.name;
+        }
+        if (!scope.ext.empty()) {
+            filter.metadata_filters["extension"] = scope.ext;
+        }
+        if (!scope.mime.empty()) {
+            filter.metadata_filters["mime_type"] = scope.mime;
+        }
+        auto hres = ctx_.hybridEngine->search(req.query, req.limit, filter);
         if (!hres) {
             return Error{ErrorCode::InternalError, "Hybrid search failed: " + hres.error().message};
         }
@@ -339,8 +386,23 @@ private:
                         else
                             pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
                     }
-                    if (pathOk && metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                                  req.matchAllTags)) {
+                    // Enforce ext/mime filters when available
+                    bool metaFiltersOk = true;
+                    if (!req.fileType.empty()) {
+                        // keep current behavior (type handled elsewhere)
+                    }
+                    if (!req.extension.empty()) {
+                        if (d.fileExtension != req.extension &&
+                            d.fileExtension != ("." + req.extension)) {
+                            metaFiltersOk = false;
+                        }
+                    }
+                    if (!req.mimeType.empty() && d.mimeType != req.mimeType) {
+                        metaFiltersOk = false;
+                    }
+                    if (pathOk && metaFiltersOk &&
+                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                        req.matchAllTags)) {
                         resp.paths.push_back(d.filePath);
                     }
                 }
@@ -357,7 +419,22 @@ private:
                     else
                         pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
                 }
-                if (!pathOk ||
+                // Enforce name/ext/mime filters when available
+                bool metaFiltersOk = true;
+                if (!req.fileType.empty()) {
+                    // keep current behavior (type handled elsewhere)
+                }
+                if (!req.extension.empty()) {
+                    if (d.fileExtension != req.extension &&
+                        d.fileExtension != ("." + req.extension)) {
+                        metaFiltersOk = false;
+                    }
+                }
+                if (!req.mimeType.empty() && d.mimeType != req.mimeType) {
+                    metaFiltersOk = false;
+                }
+
+                if (!pathOk || !metaFiltersOk ||
                     !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) {
                     continue;
                 }
@@ -396,8 +473,23 @@ private:
                         else
                             pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
                     }
-                    if (pathOk && metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                                  req.matchAllTags)) {
+                    // Enforce ext/mime filters when available
+                    bool metaFiltersOk = true;
+                    if (!req.fileType.empty()) {
+                        // keep current behavior (type handled elsewhere)
+                    }
+                    if (!req.extension.empty()) {
+                        if (d.fileExtension != req.extension &&
+                            d.fileExtension != ("." + req.extension)) {
+                            metaFiltersOk = false;
+                        }
+                    }
+                    if (!req.mimeType.empty() && d.mimeType != req.mimeType) {
+                        metaFiltersOk = false;
+                    }
+                    if (pathOk && metaFiltersOk &&
+                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                        req.matchAllTags)) {
                         resp.paths.push_back(d.filePath);
                     }
                 }
@@ -414,7 +506,22 @@ private:
                     else
                         pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
                 }
-                if (!pathOk ||
+                // Enforce name/ext/mime filters when available
+                bool metaFiltersOk = true;
+                if (!req.fileType.empty()) {
+                    // keep current behavior (type handled elsewhere)
+                }
+                if (!req.extension.empty()) {
+                    if (d.fileExtension != req.extension &&
+                        d.fileExtension != ("." + req.extension)) {
+                        metaFiltersOk = false;
+                    }
+                }
+                if (!req.mimeType.empty() && d.mimeType != req.mimeType) {
+                    metaFiltersOk = false;
+                }
+
+                if (!pathOk || !metaFiltersOk ||
                     !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) {
                     continue;
                 }

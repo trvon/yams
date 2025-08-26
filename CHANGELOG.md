@@ -8,14 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.5.7] - 2025-08-26
 
 ### Added
-- Groundwork for PBI-007 (Folder tracking/sync architecture readiness): introduced daemon pooled request pattern across MCP/CLI boundaries.
+- **Groundwork for PBI-006**
+  - Shared qualifier parser: inline query qualifiers (lines:, pages:, section:, selector:, name:, ext:, mime:) with quotes and spaces supported.
+  - Hybrid search normalization: qualifiers are stripped from scoring text and passed as structured hints to engines.
+  - Lines-range scoped snippets in hybrid engine: when `lines:` is specified, result snippets are sliced to requested line windows.
+  - Integrated PDF content extraction into search, cat, get. This will evolve into a plugin system to support custom file type search from stored files.
+- Introduced daemon pooled request pattern across MCP/CLI boundaries.
 - Lightweight `daemon_first` wrapper in CLI that uses `DaemonClient::call<T>` to preserve daemon-first behavior while commands migrate to pooled execution.
 
 ### Changed
+- Hybrid/metadata parity: name/ext/mime qualifiers are honored across engines
+  - Hybrid: mapped to `vector::SearchFilter.metadata_filters` and enforced by both vector and keyword paths.
+  - Metadata fallback: qualifiers merged into service filters (pathPattern, extension, mimeType) so behavior matches hybrid.
 - MCPServer constructor simplified to `(std::unique_ptr<ITransport>, std::atomic<bool>*)`; serve command and yams-mcp tool updated to STDIO-only transport.
 - `daemon_helpers` generalized to accept generic callables (lambdas) instead of `std::function`, improving template deduction and avoiding copies.
 
 ### Fixed
+- Search service: hash-prefix path used the wrong local variable; corrected to ensure path/type filters are applied correctly.
+- Metadata search: removed references to non-existent request fields and unified name filtering via path pattern.
 - MCP tools/call responses were not rendered by some clients due to missing MCP content wrapper. Non-MCP-shaped tool results are now wrapped in a top-level content array.
 - search: paths_only results could be empty; fixed to return service-provided paths.
 - list: limit and offset were not wired from MCP -> services; pagination is now honored.

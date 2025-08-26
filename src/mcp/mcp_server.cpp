@@ -1,3 +1,4 @@
+#include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/async_socket.h>
@@ -1192,13 +1193,89 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
         }
     }
 
-    // Construct manager with defaults (storage chosen by daemon/client configuration later if
-    // needed)
+    // Construct manager with defaults from config (fallback to request values)
     yams::downloader::StorageConfig storage{};
     yams::downloader::DownloaderConfig cfg{};
-    cfg.defaultConcurrency = dreq.concurrency;
-    cfg.defaultChunkSizeBytes = dreq.chunkSizeBytes;
-    cfg.defaultTimeout = dreq.timeout;
+
+    // Reuse existing ConfigMigrator to read config.v2 values (downloader.*)
+    try {
+        namespace fs = std::filesystem;
+        // Resolve default config path like daemon does
+        std::string cfgPath;
+        if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
+            cfgPath = (fs::path(xdgConfigHome) / "yams" / "config.toml").string();
+        } else if (const char* homeEnv = std::getenv("HOME")) {
+            cfgPath = (fs::path(homeEnv) / ".config" / "yams" / "config.toml").string();
+        }
+
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            yams::config::ConfigMigrator migrator;
+            auto parsed = migrator.parseTomlConfig(cfgPath);
+            if (parsed) {
+                const auto& toml = parsed.value();
+                if (toml.find("downloader") != toml.end()) {
+                    const auto& dl = toml.at("downloader");
+                    if (dl.find("default_concurrency") != dl.end()) {
+                        try {
+                            cfg.defaultConcurrency = std::stoi(dl.at("default_concurrency"));
+                        } catch (...) {
+                        }
+                    }
+                    if (dl.find("default_chunk_size_bytes") != dl.end()) {
+                        try {
+                            cfg.defaultChunkSizeBytes = static_cast<std::size_t>(
+                                std::stoull(dl.at("default_chunk_size_bytes")));
+                        } catch (...) {
+                        }
+                    }
+                    if (dl.find("default_timeout_ms") != dl.end()) {
+                        try {
+                            cfg.defaultTimeout =
+                                std::chrono::milliseconds(std::stoll(dl.at("default_timeout_ms")));
+                        } catch (...) {
+                        }
+                    }
+                    if (dl.find("follow_redirects") != dl.end()) {
+                        cfg.followRedirects = (dl.at("follow_redirects") == "true");
+                    }
+                    if (dl.find("resume") != dl.end()) {
+                        cfg.resume = (dl.at("resume") == "true");
+                    }
+                    if (dl.find("store_only") != dl.end()) {
+                        cfg.storeOnly = (dl.at("store_only") == "true");
+                    }
+                    if (dl.find("max_file_bytes") != dl.end()) {
+                        try {
+                            cfg.maxFileBytes =
+                                static_cast<std::uint64_t>(std::stoull(dl.at("max_file_bytes")));
+                        } catch (...) {
+                        }
+                    }
+                    // rate limits and checksum algo are present in config; if needed later, map
+                    // similarly
+                }
+                if (toml.find("storage") != toml.end()) {
+                    const auto& st = toml.at("storage");
+                    if (st.find("objects_dir") != st.end()) {
+                        storage.objectsDir = fs::path(st.at("objects_dir"));
+                    }
+                    if (st.find("staging_dir") != st.end()) {
+                        storage.stagingDir = fs::path(st.at("staging_dir"));
+                    }
+                }
+            }
+        }
+    } catch (...) {
+        // Use defaults silently if config parsing fails
+    }
+
+    // Apply request-level overrides (request has priority)
+    if (dreq.concurrency > 0)
+        cfg.defaultConcurrency = dreq.concurrency;
+    if (dreq.chunkSizeBytes > 0)
+        cfg.defaultChunkSizeBytes = dreq.chunkSizeBytes;
+    if (dreq.timeout.count() > 0)
+        cfg.defaultTimeout = dreq.timeout;
     cfg.followRedirects = dreq.followRedirects;
     cfg.resume = dreq.resume;
     cfg.storeOnly = dreq.storeOnly;
@@ -1245,6 +1322,7 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             (mcp_response.checksumOk ? (*mcp_response.checksumOk ? "true" : "false") : "n/a"));
     }
     // Optionally post-index the artifact via daemon
+    // Optionally post-index the artifact via daemon
     if (mcp_response.success && req.postIndex) {
         if (verbose) {
             spdlog::debug("[MCP] post-index: starting for path='{}' collection='{}' "
@@ -1258,15 +1336,63 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
         addReq.snapshotId = req.snapshotId;
         addReq.snapshotLabel = req.snapshotLabel;
 
-        // tags and metadata: default 'downloaded' tag + user tags
+        // Tags and metadata enrichment
+        // 1) Default tag
         addReq.tags.clear();
         addReq.tags.push_back("downloaded");
-        for (const auto& t : req.tags) {
+
+        // 2) Derived tags: host:..., scheme:..., status:2xx/4xx/5xx
+        auto extract_host = [](const std::string& url) -> std::string {
+            auto p = url.find("://");
+            if (p == std::string::npos)
+                return {};
+            auto rest = url.substr(p + 3);
+            auto slash = rest.find('/');
+            return (slash == std::string::npos) ? rest : rest.substr(0, slash);
+        };
+        auto extract_scheme = [](const std::string& url) -> std::string {
+            auto p = url.find("://");
+            return (p == std::string::npos) ? std::string{} : url.substr(0, p);
+        };
+        auto host = extract_host(req.url);
+        auto scheme = extract_scheme(req.url);
+        if (!host.empty())
+            addReq.tags.push_back("host:" + host);
+        if (!scheme.empty())
+            addReq.tags.push_back("scheme:" + scheme);
+        if (mcp_response.httpStatus) {
+            int code = *mcp_response.httpStatus;
+            std::string bucket = (code >= 200 && code < 300)   ? "2xx"
+                                 : (code >= 400 && code < 500) ? "4xx"
+                                                               : "5xx";
+            addReq.tags.push_back("status:" + bucket);
+        }
+
+        // Include user tags at the end
+        for (const auto& t : req.tags)
             addReq.tags.push_back(t);
+
+        // 3) Provenance metadata
+        addReq.metadata["source_url"] = req.url;
+        if (mcp_response.httpStatus)
+            addReq.metadata["http_status"] = std::to_string(*mcp_response.httpStatus);
+        if (mcp_response.etag)
+            addReq.metadata["etag"] = *mcp_response.etag;
+        if (mcp_response.lastModified)
+            addReq.metadata["last_modified"] = *mcp_response.lastModified;
+        if (mcp_response.checksumOk)
+            addReq.metadata["checksum_ok"] = *mcp_response.checksumOk ? "true" : "false";
+        // RFC3339-like timestamp (best-effort)
+        {
+            auto now = std::chrono::system_clock::now();
+            auto t = std::chrono::system_clock::to_time_t(now);
+            std::stringstream ss;
+            ss << std::put_time(std::localtime(&t), "%FT%T%z");
+            addReq.metadata["downloaded_at"] = ss.str();
         }
-        for (const auto& [k, v] : req.metadata) {
+        // Merge user metadata
+        for (const auto& [k, v] : req.metadata)
             addReq.metadata[k] = v;
-        }
 
         std::optional<Error> add_error;
         auto renderAdd = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
@@ -1277,7 +1403,6 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             add_error = Error{ErrorCode::NetworkError, "Daemon not available during post-index"};
             return Result<void>();
         };
-
         if (auto res = store_req_manager_->execute(addReq, fallbackAdd, renderAdd); !res) {
             if (verbose) {
                 spdlog::debug("[MCP] post-index: daemon call failed error='{}'",
@@ -1675,7 +1800,7 @@ void MCPServer::initializeToolRegistry() {
               {"post_index",
                {{"type", "boolean"},
                 {"description", "Index the downloaded artifact after storing"},
-                {"default", false}}},
+                {"default", true}}},
               {"tags",
                {{"type", "array"},
                 {"items", {{"type", "string"}}},

@@ -1,121 +1,16 @@
 #pragma once
 
-#include <yams/core/types.h>
-
-// Try to include shared Task; if unavailable, provide a local minimal Task
-#if __has_include(<yams/core/task.h>)
-#include <yams/core/task.h>
-#else
-#include <coroutine>
-#include <exception>
-#include <optional>
-#include <utility>
-namespace yams {
-template <typename T> class Task {
-public:
-    struct promise_type {
-        std::optional<T> value_;
-        std::exception_ptr exception_;
-        Task get_return_object() {
-            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        template <typename U> void return_value(U&& value) { value_ = std::forward<U>(value); }
-        void unhandled_exception() { exception_ = std::current_exception(); }
-    };
-    using handle_type = std::coroutine_handle<promise_type>;
-    explicit Task(handle_type h) : handle_(h) {}
-    Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
-    Task& operator=(Task&& other) noexcept {
-        if (this != &other) {
-            if (handle_)
-                handle_.destroy();
-            handle_ = std::exchange(other.handle_, {});
-        }
-        return *this;
-    }
-    Task(const Task&) = delete;
-    Task& operator=(const Task&) = delete;
-    ~Task() {
-        if (handle_)
-            handle_.destroy();
-    }
-    bool await_ready() const noexcept { return handle_.done(); }
-    void await_suspend(std::coroutine_handle<>) { handle_.resume(); }
-    T await_resume() {
-        if (handle_.promise().exception_)
-            std::rethrow_exception(handle_.promise().exception_);
-        return std::move(handle_.promise().value_.value());
-    }
-    T get() {
-        if (!handle_.done())
-            handle_.resume();
-        if (handle_.promise().exception_)
-            std::rethrow_exception(handle_.promise().exception_);
-        return std::move(handle_.promise().value_.value());
-    }
-
-private:
-    handle_type handle_{};
-};
-template <> class Task<void> {
-public:
-    struct promise_type {
-        std::exception_ptr exception_;
-        Task get_return_object() {
-            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        void return_void() noexcept {}
-        void unhandled_exception() { exception_ = std::current_exception(); }
-    };
-    using handle_type = std::coroutine_handle<promise_type>;
-    explicit Task(handle_type h) : handle_(h) {}
-    Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
-    Task& operator=(Task&& other) noexcept {
-        if (this != &other) {
-            if (handle_)
-                handle_.destroy();
-            handle_ = std::exchange(other.handle_, {});
-        }
-        return *this;
-    }
-    Task(const Task&) = delete;
-    Task& operator=(Task&) = delete;
-    ~Task() {
-        if (handle_)
-            handle_.destroy();
-    }
-    bool await_ready() const noexcept { return handle_.done(); }
-    void await_suspend(std::coroutine_handle<>) { handle_.resume(); }
-    void await_resume() {
-        if (handle_.promise().exception_)
-            std::rethrow_exception(handle_.promise().exception_);
-    }
-    void get() {
-        if (!handle_.done())
-            handle_.resume();
-        if (handle_.promise().exception_)
-            std::rethrow_exception(handle_.promise().exception_);
-    }
-
-private:
-    handle_type handle_{};
-};
-} // namespace yams
-namespace yams::daemon {
-template <typename T = void> using Task = ::yams::Task<T>;
-}
-#endif
-
 #include <atomic>
 #include <chrono>
 #include <coroutine>
+#include <exception>
 #include <memory>
+#include <optional>
 #include <span>
+#include <utility>
 #include <vector>
+#include <yams/core/task.h>
+#include <yams/core/types.h>
 
 // Platform socket includes/typedefs
 #ifdef _WIN32
@@ -183,6 +78,9 @@ public:
     Task<Result<std::vector<uint8_t>>> async_read_exact(size_t size);
     Task<Result<void>> async_write_all(std::span<const uint8_t> data);
 
+    // Connection management
+    void close();
+
     // Socket options
     Result<void> set_timeout(std::chrono::milliseconds timeout);
     Result<void> set_nodelay(bool enable);
@@ -207,6 +105,8 @@ public:
         std::atomic<ssize_t> result{0};
         std::atomic<int> error_code{0};
         std::atomic<bool> cancelled{false};
+        // Single-resume guard: ensures a coroutine is resumed at most once across all paths
+        std::atomic<bool> scheduled{false};
         uint64_t generation_snapshot{0};
 
         explicit AwaiterBase(AsyncSocket* s) : socket(s) {}
@@ -263,5 +163,4 @@ private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
 };
-
 } // namespace yams::daemon

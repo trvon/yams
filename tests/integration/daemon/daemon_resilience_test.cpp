@@ -2,11 +2,17 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <thread>
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/message_framing.h>
+#include <yams/daemon/ipc/message_serializer.h>
 
 namespace yams::daemon::integration::test {
 
@@ -475,6 +481,81 @@ TEST_F(DaemonResilienceTest, LongRunningStability) {
     auto finalStatus = client.status();
     ASSERT_TRUE(finalStatus);
     EXPECT_TRUE(finalStatus.value().running);
+}
+
+// Test that the daemon survives a client disconnecting abruptly after a request
+TEST_F(DaemonResilienceTest, AbruptClientDisconnect) {
+    // Start the daemon
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    auto result = daemon_->start();
+    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+
+    // Wait for the socket to be created
+    bool socket_exists = false;
+    for (int i = 0; i < 100; ++i) {
+        if (fs::exists(config_.socketPath)) {
+            socket_exists = true;
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_TRUE(socket_exists) << "Daemon socket not found";
+
+    // Fork a client process that will connect, send, and exit immediately
+    pid_t clientPid = fork();
+    ASSERT_GE(clientPid, 0) << "Fork failed for client process";
+
+    if (clientPid == 0) {
+        // Child (client) process
+        int clientFd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (clientFd < 0) {
+            exit(1); // Parent will see this as failure
+        }
+
+        struct sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, config_.socketPath.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (connect(clientFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+            exit(1);
+        }
+
+        // Create and send a PingRequest
+        Message msg;
+        msg.version = PROTOCOL_VERSION;
+        msg.requestId = 123;
+        msg.payload = PingRequest{};
+
+        MessageFramer framer;
+        auto framedResult = framer.frame_message(msg);
+        if (!framedResult) {
+            exit(1);
+        }
+        auto& data = framedResult.value();
+        send(clientFd, data.data(), data.size(), MSG_NOSIGNAL);
+
+        // Immediately exit without waiting for response
+        exit(0);
+    }
+
+    // Parent process
+    int status;
+    waitpid(clientPid, &status, 0);
+    ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << "Client process failed";
+
+    // Give the daemon a moment to potentially crash
+    std::this_thread::sleep_for(500ms);
+
+    // Check if the daemon is still running
+    DaemonClient client(clientConfig_);
+    auto connectResult = client.connect();
+    EXPECT_TRUE(connectResult) << "Daemon crashed after abrupt client disconnect. "
+                               << "Failed to reconnect: " << connectResult.error().message;
+
+    if (connectResult) {
+        auto pingResult = client.ping();
+        EXPECT_TRUE(pingResult) << "Daemon is unresponsive after abrupt client disconnect.";
+    }
 }
 
 } // namespace yams::daemon::integration::test

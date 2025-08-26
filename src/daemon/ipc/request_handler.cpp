@@ -24,6 +24,7 @@ Task<void> RequestHandler::handle_connection(AsyncSocket socket, std::stop_token
         // as non-fatal for the daemon; logs will be at debug level when detected.
 
         FrameReader reader(1024 * 1024); // 1MB max frame size
+        bool should_exit = false;
 
         while (!token.stop_requested() && socket.is_valid()) {
             // Read as much as is available (up to 4096), do not block for exact size
@@ -132,8 +133,12 @@ Task<void> RequestHandler::handle_connection(AsyncSocket socket, std::stop_token
                     } else {
                         spdlog::error("Request handling failed: {}", msg);
                     }
+                    should_exit = true;
+                    break;
                 }
             }
+            if (should_exit)
+                break;
         }
 
         spdlog::debug("Connection handler exiting normally");
@@ -253,7 +258,6 @@ Task<Result<void>> RequestHandler::write_message(AsyncSocket& socket, const Mess
         }
         offset += to_write;
     }
-
     co_return Result<void>();
 }
 

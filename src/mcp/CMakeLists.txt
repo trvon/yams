@@ -17,6 +17,7 @@ target_link_libraries(yams_mcp
         yams_app_services
         yams_downloader
         yams::daemon_ipc
+        yams_config
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         OpenSSL::SSL

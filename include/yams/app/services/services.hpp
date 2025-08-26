@@ -12,6 +12,7 @@
 #include <yams/search/search_executor.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <regex>
@@ -52,11 +53,56 @@ bool matchGlob(const std::string& text, const std::string& pattern);
 namespace yams::app::services {
 
 // Shared application context for services. Construct once and pass to service implementations.
+
 struct AppContext {
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<search::SearchExecutor> searchExecutor;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<search::HybridSearchEngine> hybridEngine;
+};
+
+// ===========================
+// Extraction (PBI-006 DTOs)
+// ===========================
+struct ExtractionBBox {
+    int x{0};
+    int y{0};
+    int w{0};
+    int h{0};
+};
+
+struct ExtractionMatch {
+    std::optional<int> page; // page index (when applicable)
+    std::optional<int> line; // line index (when applicable)
+    std::size_t start{0};
+    std::size_t end{0};
+    std::vector<ExtractionBBox> bboxes; // optional bounding boxes
+};
+
+struct ExtractionQuery {
+    // Core fields (format-agnostic)
+    std::string scope{"all"};             // "all" | "range" | "section" | "selector"
+    std::string range;                    // e.g., "1-3,5" (pages/lines/rows depending on format)
+    std::vector<std::string> sectionPath; // e.g., ["Chapter 2","Section 2.3"]
+    std::string selector;                 // CSS/XPath/JSONPath (format-specific)
+    std::string search;                   // string or regex (format-specific)
+    int maxMatches{50};
+    bool includeBBoxes{false};
+
+    // Output formatting
+    std::string format{"text"}; // "text" | "markdown" | "json"
+
+    // Format-specific knobs (simple key/value map for Phase 1)
+    std::unordered_map<std::string, std::string> formatOptions;
+};
+
+struct ExtractionResult {
+    std::string mime;                     // normalized mime of result
+    std::optional<std::string> text;      // extracted text/markdown
+    std::optional<std::string> json;      // structured JSON payload (as string for Phase 1)
+    std::vector<ExtractionMatch> matches; // match locations (when search applied)
+    std::vector<int> pages;               // page indices included (when applicable)
+    std::vector<std::string> sections;    // section titles included (when applicable)
 };
 
 // ===========================
@@ -365,7 +411,8 @@ struct RetrieveDocumentRequest {
     std::string indexedBefore;
 
     // Display options
-    bool verbose{false}; // detailed output
+    bool verbose{false};                            // detailed output
+    std::optional<ExtractionQuery> extractionQuery; // PBI-006: optional rich extraction query
 };
 
 struct RetrievedDocument {
@@ -569,6 +616,7 @@ struct UpdateMetadataResponse {
 struct CatDocumentRequest {
     std::string hash;
     std::string name; // alternative selector
+    std::optional<ExtractionQuery> extractionQuery;
 };
 
 struct CatDocumentResponse {
@@ -576,6 +624,7 @@ struct CatDocumentResponse {
     std::size_t size{0};
     std::string hash;
     std::string name;
+    std::optional<ExtractionResult> extraction;
 };
 
 struct DeleteByNameRequest {
@@ -583,6 +632,7 @@ struct DeleteByNameRequest {
     std::string hash; // delete by hash (full or partial)
     std::vector<std::string> names;
     std::string pattern; // glob-like
+
     bool dryRun{false};
     bool force{false};     // skip confirmation
     bool keepRefs{false};  // keep reference counts (don't decrement)

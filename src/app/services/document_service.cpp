@@ -2,6 +2,8 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
+#include <yams/extraction/format_handlers/format_handler.hpp>
+#include <yams/extraction/format_handlers/text_basic_handler.hpp>
 #include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
@@ -341,6 +343,19 @@ public:
             }
         }
 
+        // PBI-006 Phase 1: attach extracted text via MetadataRepository when requested
+        if (req.extract && ctx_.metadataRepo && foundDoc) {
+            auto contentResult = ctx_.metadataRepo->getContent(foundDoc->id);
+            if (contentResult) {
+                const auto& optionalContent = contentResult.value();
+                if (optionalContent.has_value()) {
+                    const auto& content = optionalContent.value();
+                    if (!content.contentText.empty()) {
+                        doc.extractedText = content.contentText;
+                    }
+                }
+            }
+        }
         resp.document = doc;
 
         // Build simple related graph (same directory = distance 1)
@@ -386,6 +401,96 @@ public:
             return Error{ErrorCode::InvalidArgument, "Provide 'hash' or 'name'"};
         }
 
+        // If an extraction query is present, route through the format handler registry
+        if (req.extractionQuery.has_value()) {
+            // Retrieve raw bytes
+            std::vector<std::byte> contentBytes;
+            {
+                auto rb = ctx_.store->retrieveBytes(hash);
+                if (!rb) {
+                    return Error{ErrorCode::InternalError,
+                                 "Failed to retrieve content bytes: " + rb.error().message};
+                }
+                contentBytes = std::move(rb.value());
+            }
+
+            // Determine mime and extension (best-effort)
+            std::string mime;
+            std::string ext;
+            if (ctx_.metadataRepo) {
+                auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                if (docsRes) {
+                    for (const auto& d : docsRes.value()) {
+                        if (d.sha256Hash == hash) {
+                            mime = d.mimeType;
+                            ext = d.fileExtension;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (ext.empty() && !name.empty()) {
+                ext = std::filesystem::path(name).extension().string();
+            }
+
+            // Build handler registry with basic text handler for Phase 1
+            yams::extraction::format::HandlerRegistry registry;
+            yams::extraction::format::registerTextBasicHandler(registry);
+
+            // Map services::ExtractionQuery -> format::ExtractionQuery
+            const auto& q = *req.extractionQuery;
+            yams::extraction::format::ExtractionQuery fq;
+            auto toLower = [](std::string s) {
+                std::transform(s.begin(), s.end(), s.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return s;
+            };
+            const std::string scope = toLower(q.scope);
+            if (scope == "range") {
+                fq.scope = yams::extraction::format::Scope::Range;
+            } else if (scope == "section") {
+                fq.scope = yams::extraction::format::Scope::Section;
+            } else if (scope == "selector") {
+                fq.scope = yams::extraction::format::Scope::Selector;
+            } else {
+                fq.scope = yams::extraction::format::Scope::All;
+            }
+            fq.range = q.range;
+            fq.sectionPath = q.sectionPath;
+            fq.selector = q.selector;
+            fq.search = q.search;
+            fq.maxMatches = q.maxMatches;
+            fq.includeBBoxes = q.includeBBoxes;
+            fq.format = q.format;
+            fq.formatOptions = q.formatOptions;
+
+            auto span = std::span<const std::byte>(contentBytes.data(), contentBytes.size());
+            auto er = registry.extract(mime, ext, span, fq); // best handler based on mime/ext
+            if (!er) {
+                return Error{er.error().code, "Extraction failed: " + er.error().message};
+            }
+
+            const auto& r = er.value();
+            CatDocumentResponse out;
+            out.hash = hash;
+            out.name = name;
+
+            // Prefer JSON when requested, otherwise text
+            if (fq.format == "json" && r.json.has_value()) {
+                out.content = *r.json;
+            } else if (r.text.has_value()) {
+                out.content = *r.text;
+            } else {
+                // Fallback: raw bytes to string
+                out.content.assign(reinterpret_cast<const char*>(contentBytes.data()),
+                                   reinterpret_cast<const char*>(contentBytes.data()) +
+                                       contentBytes.size());
+            }
+            out.size = out.content.size();
+            return out;
+        }
+
+        // Default path (backward compatible): raw content stream
         std::ostringstream oss;
         auto rs = ctx_.store->retrieveStream(hash, oss, nullptr);
         if (!rs) {

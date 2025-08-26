@@ -36,6 +36,8 @@ public:
         cmd->add_flag("--optimize", optimizeDb_, "Optimize and vacuum database");
         cmd->add_flag("--checksums", verifyChecksums_, "Verify and repair checksums");
         cmd->add_flag("--duplicates", mergeDuplicates_, "Find and optionally merge duplicates");
+        cmd->add_flag("--downloads", repairDownloads_,
+                      "Repair download documents: add tags/metadata and normalize names");
         cmd->add_flag("--all", repairAll_, "Run all repair operations");
         cmd->add_flag("--dry-run", dryRun_, "Preview changes without applying");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed progress");
@@ -80,6 +82,7 @@ public:
                 repairChunks_ = true;
                 repairEmbeddings_ = true;
                 optimizeDb_ = true;
+                repairDownloads_ = true;
                 // verifyChecksums_ = true;  // Not implemented yet
                 // mergeDuplicates_ = true;  // Not implemented yet
             }
@@ -139,6 +142,13 @@ public:
                 anyRepairs = true;
             }
 
+            if (repairDownloads_) {
+                auto result = repairDownloads(metadataRepo);
+                if (!result)
+                    return result;
+                anyRepairs = true;
+            }
+
             // Verify checksums (not implemented yet)
             if (verifyChecksums_) {
                 std::cout << "Checksum verification: Not implemented yet\n";
@@ -173,6 +183,7 @@ private:
     bool optimizeDb_ = false;
     bool verifyChecksums_ = false;
     bool mergeDuplicates_ = false;
+    bool repairDownloads_ = false;
     bool repairAll_ = false;
     bool dryRun_ = false;
     bool verbose_ = false;
@@ -271,6 +282,104 @@ private:
             std::cout << "  [DRY RUN] Would clean " << orphanedCount << " orphaned entries\n";
         }
 
+        return Result<void>();
+    }
+
+    Result<void> repairDownloads(std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
+        std::cout << "Repairing downloaded documents (tags/metadata/filenames)...\n";
+
+        // Fetch all docs
+        auto docsResult = metadataRepo->findDocumentsByPath("%");
+        if (!docsResult) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to query documents: " + docsResult.error().message};
+        }
+
+        auto is_url = [](const std::string& s) { return s.find("://") != std::string::npos; };
+        auto extract_host = [](const std::string& url) -> std::string {
+            auto p = url.find("://");
+            if (p == std::string::npos)
+                return {};
+            auto rest = url.substr(p + 3);
+            auto slash = rest.find('/');
+            return (slash == std::string::npos) ? rest : rest.substr(0, slash);
+        };
+        auto extract_scheme = [](const std::string& url) -> std::string {
+            auto p = url.find("://");
+            return (p == std::string::npos) ? std::string{} : url.substr(0, p);
+        };
+        auto filename_from_url = [](std::string url) -> std::string {
+            auto lastSlash = url.find_last_of('/');
+            if (lastSlash != std::string::npos) {
+                url = url.substr(lastSlash + 1);
+            }
+            auto q = url.find('?');
+            if (q != std::string::npos)
+                url = url.substr(0, q);
+            if (url.empty())
+                url = "downloaded_file";
+            return url;
+        };
+
+        size_t updated = 0;
+        for (auto doc : docsResult.value()) {
+            const std::string originalPath = doc.filePath;
+
+            // Determine a candidate source URL
+            std::string sourceUrl;
+            if (is_url(doc.filePath)) {
+                sourceUrl = doc.filePath;
+            } else {
+                // Try reading existing metadata (if available); ignoring if no accessor exists
+                // (Optionally, if repo has getMetadataValue(docId, "source_url"), use it)
+            }
+
+            if (sourceUrl.empty()) {
+                // Not obviously a download; skip
+                continue;
+            }
+
+            // Normalize name for retrieval by name
+            std::string filename = filename_from_url(sourceUrl);
+            std::string ext;
+            auto dotPos = filename.rfind('.');
+            if (dotPos != std::string::npos) {
+                ext = filename.substr(dotPos);
+            }
+
+            // Update document path/name
+            doc.filePath = filename;
+            doc.fileName = filename;
+            doc.fileExtension = ext;
+
+            // Persist update
+            if (auto up = metadataRepo->updateDocument(doc); !up) {
+                spdlog::warn("Repair(downloads): updateDocument failed for id={} path='{}': {}",
+                             doc.id, originalPath, up.error().message);
+            } else {
+                updated++;
+            }
+
+            // Set download tags/metadata
+            try {
+                metadataRepo->setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
+                const auto host = extract_host(sourceUrl);
+                const auto scheme = extract_scheme(sourceUrl);
+
+                metadataRepo->setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
+                if (!host.empty())
+                    metadataRepo->setMetadata(doc.id, "tag",
+                                              metadata::MetadataValue("host:" + host));
+                if (!scheme.empty())
+                    metadataRepo->setMetadata(doc.id, "tag",
+                                              metadata::MetadataValue("scheme:" + scheme));
+            } catch (const std::exception& e) {
+                spdlog::warn("Repair(downloads): tagging failed for id={} path='{}': {}", doc.id,
+                             originalPath, e.what());
+            }
+        }
+
+        std::cout << "✓ Downloads repair updated " << updated << " document(s)\n";
         return Result<void>();
     }
 

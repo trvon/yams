@@ -166,10 +166,7 @@ TEST_F(FileTypeGracefulFallbackTest, FindMagicNumbersFile_NoFileFound) {
     auto path = cli::YamsCLI::findMagicNumbersFile();
 
     // Should return empty path gracefully (not crash)
-    EXPECT_NO_THROW({
-        bool isEmpty = path.empty();
-        std::string pathStr = path.string();
-    });
+    EXPECT_NO_THROW({ std::string pathStr = path.string(); });
 
     // If path is empty, detector should still work with built-in patterns
     if (path.empty()) {
