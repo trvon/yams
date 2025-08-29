@@ -5,6 +5,15 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.8] - 2025-08-29
+
+### Fixed
+- Release workflow: replaced invalid fromJSON() usage for matrix runner selection with direct `matrix.runs_on` reference.
+- Docker workflow: stabilized ARM64 build by moving from macOS runner (no Docker daemon) to ubuntu-latest with QEMU emulation; added early `docker info` checks for both arches.
+
+### Changed
+- Docker: standardized multi-arch build steps (QEMU + Buildx) and ensured consistent labels/tags across architectures.
+
 ## [v0.5.7] - 2025-08-2
 
 ### Known Issues
@@ -120,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All document ingestion centralized through IndexingService
   - Eliminated direct IndexingPipeline calls from CLI commands
   - Directory recursion uses IndexingService::addDirectory() for consistency
-  - Embedding lifecycle managed exclusively by IndexinService
+  - Embedding lifecycle managed exclusively by Indexin Service
 - **Auto-Repair for Vector Embeddings**
   - Daemon automatically generates missing embeddings when documents are added (hot-load behavior)
   - New `enableAutoRepair` configuration flag in DaemonConfig (default: true)
@@ -177,7 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Implemented PluginLoader class for runtime plugin loading
   - Added automatic plugin discovery from standard directories
   - Support for YAMS_PLUGIN_DIR environment variable
-  - ONNX model provider now loads dynamically as a plugin
+  - Onnx model provider now loads dynamically as a plugin
   - Daemon automatically loads plugins on startup
   - Created comprehensive test suite for plugin loader
 
@@ -585,7 +594,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Improved metadata cleanup when deleting documents
   - Added progress indicator for large deletion operations
   - Properly removes both manifest and chunk files
-  - Fixed orphaned metadata cleanup after storage deletion
 
 - **Config Command Enhancements**:
   - Added compression tuning support via configuration
@@ -810,7 +818,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Enhanced get_stats tool** with file type breakdown analysis
     - Added `file_types` parameter for detailed file type distribution
     - Shows file type counts, sizes, top extensions per type, and top MIME types
-    - Provides comprehensive storage analytics for better content understanding
 
 ### Enhanced
 - **MCP Tool Documentation** comprehensively updated with new schemas and examples
@@ -922,7 +929,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **List Command Enhancement**: Added `--recent N` flag to show N most recent documents
   - Filters to the N most recent documents before applying other sorting
   - Works with all existing sort options (name, size, date, hash)
-  - Useful for quickly viewing recently added content
 - **PDF Text Extraction**: Full PDF text extraction support using PDFium library
   - Extract text from all PDF pages with proper UTF-16 to UTF-8 conversion
   - Extract PDF metadata (title, author, subject, keywords, creation date)
@@ -931,7 +937,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic section detection for academic papers
 - **Metadata Update Command**: New `update` command for modifying document metadata
   - Update metadata by document hash or name
-  - Support for multiple key-value pairs in single command
+  - Support for multiple key-value pairs in single operation
   - Enables task tracking and status management workflows
   - Works with both file and stdin documents
 - **Task Tracking System**: Comprehensive benchmark and test enhancement tracking
@@ -1041,7 +1047,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `add --snapshot-id <id> --snapshot-label <label>`: Add documents to a snapshot for point-in-time grouping
   - `add --recursive`: Recursively add files from directories
   - `restore --collection <name>`: Restore all documents from a specific collection
-  - `restore --snapshot-id <id>`: Restore all documents from a specific snapshot
+  - `restore --snapshot-id <id>`: Restore all documents from a snapshot
   - `restore --layout <template>`: Flexible output patterns like `{collection}/{path}` for restore operations
 - **MCP Server Tools** for directory operations with full CLI parity
   - `add_directory`: Add directory contents with collection/snapshot support

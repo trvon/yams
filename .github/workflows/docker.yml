@@ -42,6 +42,13 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Determined version: $VERSION"
 
+      - name: Verify Docker daemon is running
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker daemon is not available. Ensure Docker is installed and running, and the runner user has permission to access /var/run/docker.sock."
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -90,19 +97,27 @@ jobs:
           cache-from: type=gha,scope=amd64
           cache-to: type=gha,mode=max,scope=amd64
 
-  # Build ARM64 image on macOS ARM64 runner
+  # Build ARM64 image on Linux runner with QEMU emulation
   build-arm64:
     name: Build Docker Image (linux/arm64)
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify Docker is available
+      - name: Verify Docker daemon is running
         run: |
-          docker version || echo "Docker not found, please ensure Docker Desktop or Colima is installed"
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker daemon is not available. Ensure Docker is installed and running, and the runner user has permission to access /var/run/docker.sock."
+            exit 1
+          fi
+
+      - name: Set up QEMU (for ARM emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Determine version
         id: version

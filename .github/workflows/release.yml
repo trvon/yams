@@ -49,7 +49,7 @@ jobs:
              cmake_args: ""
              suffix: windows-x86_64
              hosted: true
-    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    runs-on: ${{ matrix.runs_on }}
     env:
       BUILD_DIR: build/yams-release
       STAGE_DIR: stage
