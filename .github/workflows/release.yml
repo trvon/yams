@@ -135,8 +135,7 @@ jobs:
         shell: bash
         run: |
           conan profile detect --force
-          if [[ "$OSTYPE" == "darwin"* ]]
-          then
+          if [[ "$OSTYPE" == "darwin"* ]]; then
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           else
             sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
@@ -205,12 +204,7 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          conan install .
-            --output-folder=build/yams-release
-            -s build_type=Release
-            -o build_tests=True
-            -o build_benchmarks=True
-            --build=missing
+          conan install . --output-folder=build/yams-release -s build_type=Release -o build_tests=True -o build_benchmarks=True --build=missing
           cmake --preset yams-release \
             -DYAMS_BUILD_TESTS=ON \
             -DYAMS_BUILD_BENCHMARKS=ON \
@@ -238,10 +232,7 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          conan install .
-            --output-folder=build/yams-release
-            -s build_type=Release
-            --build=missing
+          conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
           cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
@@ -275,21 +266,17 @@ jobs:
           "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           conan --version
 
-          conan install .
-            --output-folder=build/yams-release
-            -s build_type=Release
-            --build=missing
+          conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
 
-          cmake --preset yams-release \
-            -DYAMS_BUILD_PROFILE=release \
-            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\
-            ${{ env.STAGE_DIR }}" \
-                        ${{ matrix.cmake_args }}
+          cmake --preset yams-release `
+            -DYAMS_BUILD_PROFILE=release `
+            -DYAMS_VERSION="${{ steps.v.outputs.version }}" `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\${{ env.STAGE_DIR }}" `
+            ${{ matrix.cmake_args }}
 
-                      cmake --build --preset build-yams-release --parallel
+          cmake --build --preset yams-release --parallel
 
-                      "BUILD_DIR=build/yams-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          "BUILD_DIR=build/yams-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: Collect benchmark results
         shell: bash
@@ -410,20 +397,19 @@ jobs:
         if: ${{ startsWith(matrix.os, 'windows') }}
         shell: pwsh
         run: |
-          $stage = "${{ github.workspace }}\
-          ${{ env.STAGE_DIR }}"
-                    $version = "${{ steps.v.outputs.version }}"
-                    $suffix = "${{ matrix.suffix }}"
-                    $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
-                    if (Test-Path $out) { Remove-Item $out -Force }
-                    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
-                    "ASSET_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-                    Write-Host "Created asset: $out"
+          $stage = "${{ github.workspace }}\${{ env.STAGE_DIR }}"
+          $version = "${{ steps.v.outputs.version }}"
+          $suffix = "${{ matrix.suffix }}"
+          $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
+          if (Test-Path $out) { Remove-Item $out -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
+          "ASSET_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          Write-Host "Created asset: $out"
 
-                - name: Build Linux packages (DEB/RPM)
-                  if: matrix.build_packages == true && matrix.os == 'linux-hosted'
-                  shell: bash
-                  run: |
+      - name: Build Linux packages (DEB/RPM)
+        if: matrix.build_packages == true && matrix.os == 'linux-hosted'
+        shell: bash
+        run: |
           cd "$BUILD_DIR"
           VERSION="${{ steps.v.outputs.version }}"
 
@@ -635,7 +621,7 @@ jobs:
         run: |
           mkdir -p assets
           # Collect all release files
-          for dir in release-artifacts/release-*;
+          for dir in release-artifacts/release-*; 
           do
             if [ -d "$dir" ]; then
               # Move main archive
