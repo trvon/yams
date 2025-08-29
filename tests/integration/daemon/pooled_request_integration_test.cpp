@@ -33,9 +33,9 @@ protected:
 };
 
 TEST_F(PooledRequestIT, Search_Succeeds_With_Render_Or_Fallback) {
-    // Small pool to exercise gating (daemon client still owns the actual socket)
-    ConnectionPool::Config pool_cfg;
-    pool_cfg.max_connections = 2;
+    // Small pool to exercise gating
+    yams::cli::DaemonClientPool::Config pool_cfg;
+    pool_cfg.max_clients = 2;
 
     yams::cli::PooledRequestManager<SearchRequest, SearchResponse> mgr(pool_cfg);
 
@@ -65,8 +65,8 @@ TEST_F(PooledRequestIT, Search_Succeeds_With_Render_Or_Fallback) {
 }
 
 TEST_F(PooledRequestIT, Grep_Succeeds_With_Render_Or_Fallback) {
-    ConnectionPool::Config pool_cfg;
-    pool_cfg.max_connections = 1;
+    yams::cli::DaemonClientPool::Config pool_cfg;
+    pool_cfg.max_clients = 1;
 
     yams::cli::PooledRequestManager<GrepRequest, GrepResponse> mgr(pool_cfg);
 
@@ -99,9 +99,10 @@ TEST_F(PooledRequestIT, Grep_Succeeds_With_Render_Or_Fallback) {
 }
 
 TEST_F(PooledRequestIT, Pool_Unavailable_Still_Proceeds_With_DaemonClient) {
-    // Force pool acquisition failure (0 slots). Our manager should log and proceed without gating.
-    ConnectionPool::Config pool_cfg;
-    pool_cfg.max_connections = 0;
+    // Force pool acquisition failure (0 slots)
+    yams::cli::DaemonClientPool::Config pool_cfg;
+    pool_cfg.max_clients = 0;
+    pool_cfg.acquire_timeout = std::chrono::milliseconds{5};
 
     yams::cli::PooledRequestManager<SearchRequest, SearchResponse> mgr(pool_cfg);
 
@@ -130,8 +131,8 @@ TEST_F(PooledRequestIT, Pool_Unavailable_Still_Proceeds_With_DaemonClient) {
 
 TEST_F(PooledRequestIT, Concurrent_Execute_Basic) {
     // Modest gating to allow some contention
-    ConnectionPool::Config pool_cfg;
-    pool_cfg.max_connections = 2;
+    yams::cli::DaemonClientPool::Config pool_cfg;
+    pool_cfg.max_clients = 2;
 
     yams::cli::PooledRequestManager<SearchRequest, SearchResponse> mgr(pool_cfg);
 

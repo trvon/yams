@@ -2,8 +2,12 @@
 
 #include <yams/core/types.h>
 
+#include <chrono>  // std::chrono::steady_clock
+#include <cstddef> // std::byte
 #include <cstdint>
 #include <mutex>
+#include <optional> // std::optional
+#include <string>   // std::string
 #include <unordered_map>
 #include <vector>
 

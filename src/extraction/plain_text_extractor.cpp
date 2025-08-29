@@ -197,21 +197,22 @@ void PlainTextExtractor::processTextByType(ExtractionResult& result,
         result.metadata["programming_language"] = ext.substr(1); // Remove dot
     }
 
-    // Process formatting if requested
-    if (!config.preserveFormatting) {
+    // Preserve original formatting for plain .txt by default; otherwise normalize
+    // only when preserveFormatting is explicitly disabled.
+    if (!config.preserveFormatting && ext != ".txt") {
         // Normalize whitespace
         std::string processed;
         processed.reserve(result.text.size());
 
         bool inSpace = false;
-        for (char c : result.text) {
-            if (std::isspace(c)) {
+        for (unsigned char uc : result.text) {
+            if (std::isspace(uc)) {
                 if (!inSpace) {
                     processed += ' ';
                     inSpace = true;
                 }
             } else {
-                processed += c;
+                processed += static_cast<char>(uc);
                 inSpace = false;
             }
         }

@@ -7,15 +7,6 @@ add_executable(yams
 target_link_libraries(yams
     PRIVATE
         yams_cli
-        yams_api
-        yams_search
-        yams_metadata
-        yams_storage
-        yams::daemon
-        CLI11::CLI11
-        nlohmann_json::nlohmann_json
-        spdlog::spdlog
-        Threads::Threads
 )
 
 # Link MCP library only if enabled

@@ -78,9 +78,9 @@ set_target_properties(yams_reference_counter PROPERTIES
 )
 
 # Link Tracy if profiling is enabled
-if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
-    target_link_libraries(yams_storage_engine PRIVATE Tracy::TracyClient)
-    target_link_libraries(yams_reference_counter PRIVATE Tracy::TracyClient)
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    target_link_libraries(yams_storage_engine PRIVATE $<BUILD_INTERFACE:yams_profiling>)
+    target_link_libraries(yams_reference_counter PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()
 
 # Export targets

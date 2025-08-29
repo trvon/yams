@@ -58,10 +58,10 @@ Result<void> YamsDaemon::start() {
         return result;
     }
 
-    AsyncIpcServer::Config serverConfig;
+    SimpleAsyncIpcServer::Config serverConfig;
     serverConfig.socket_path = config_.socketPath;
     serverConfig.worker_threads = config_.workerThreads;
-    ipcServer_ = std::make_unique<AsyncIpcServer>(serverConfig);
+    ipcServer_ = std::make_unique<SimpleAsyncIpcServer>(serverConfig);
     ipcServer_->set_handler([this](const Request& req) -> Response {
         state_.stats.requestsProcessed++;
         return requestDispatcher_->dispatch(req);

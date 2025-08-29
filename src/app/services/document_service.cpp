@@ -337,10 +337,11 @@ public:
         if (req.includeContent) {
             std::ostringstream oss;
             auto rs = ctx_.store->retrieveStream(resolvedHash, oss, nullptr);
-            if (rs) {
-                doc.content = oss.str();
-                doc.size = static_cast<uint64_t>(doc.content->size());
+            if (!rs) {
+                return Error{ErrorCode::NotFound, "Document content not found"};
             }
+            doc.content = oss.str();
+            doc.size = static_cast<uint64_t>(doc.content->size());
         }
 
         // PBI-006 Phase 1: attach extracted text via MetadataRepository when requested
@@ -980,6 +981,26 @@ public:
                 targets.emplace_back(d.fileName, d.sha256Hash);
             }
         };
+
+        // If a hash is provided (full or prefix), resolve it first
+        if (!req.hash.empty()) {
+            auto all = ctx_.metadataRepo->findDocumentsByPath("%");
+            if (!all) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to enumerate documents: " + all.error().message};
+            }
+            const bool isPrefix = req.hash.size() < 64; // treat shorter as prefix
+            std::vector<metadata::DocumentInfo> matched;
+            for (const auto& d : all.value()) {
+                if ((isPrefix && d.sha256Hash.rfind(req.hash, 0) == 0) ||
+                    (!isPrefix && d.sha256Hash == req.hash)) {
+                    matched.push_back(d);
+                }
+            }
+            if (!matched.empty()) {
+                addDocVec(matched);
+            }
+        }
 
         if (!req.pattern.empty()) {
             auto pat = globToSqlLike(req.pattern);

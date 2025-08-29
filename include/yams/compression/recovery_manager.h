@@ -2,14 +2,18 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <span>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <yams/compression/compressor_interface.h>
 #include <yams/compression/error_handler.h>
 #include <yams/compression/integrity_validator.h>

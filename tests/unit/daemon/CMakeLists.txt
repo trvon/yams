@@ -12,6 +12,7 @@ target_link_libraries(daemon_test PRIVATE
 # Define YAMS_TESTING to enable test API
 target_compile_definitions(daemon_test PRIVATE YAMS_TESTING)
 add_test(NAME daemon_test COMMAND daemon_test)
+set_tests_properties(daemon_test PROPERTIES LABELS "daemon;unit")
 
 # IPC server tests
 add_executable(ipc_server_test
@@ -23,6 +24,7 @@ target_link_libraries(ipc_server_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME ipc_server_test COMMAND ipc_server_test)
+set_tests_properties(ipc_server_test PROPERTIES LABELS "daemon;unit")
 
 # IPC client tests
 add_executable(ipc_client_test
@@ -34,6 +36,7 @@ target_link_libraries(ipc_client_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME ipc_client_test COMMAND ipc_client_test)
+set_tests_properties(ipc_client_test PROPERTIES LABELS "daemon;unit")
 
 # Message framing tests
 add_executable(message_framing_test
@@ -46,6 +49,7 @@ target_link_libraries(message_framing_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME message_framing_test COMMAND message_framing_test)
+set_tests_properties(message_framing_test PROPERTIES LABELS "daemon;unit")
 
 # Resource pool tests
 add_executable(resource_pool_test
@@ -57,6 +61,7 @@ target_link_libraries(resource_pool_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME resource_pool_test COMMAND resource_pool_test)
+set_tests_properties(resource_pool_test PROPERTIES LABELS "daemon;unit")
 
 # Plugin loader tests
 add_executable(plugin_loader_test
@@ -69,6 +74,7 @@ target_link_libraries(plugin_loader_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME plugin_loader_test COMMAND plugin_loader_test)
+set_tests_properties(plugin_loader_test PROPERTIES LABELS "daemon;unit")
 
 # ONNX Model pool tests - only if ONNX plugin is available
 find_package(onnxruntime QUIET)
@@ -85,7 +91,8 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
         GTest::gtest_main
     )
     add_test(NAME onnx_model_pool_test COMMAND onnx_model_pool_test)
-    
+    set_tests_properties(onnx_model_pool_test PROPERTIES LABELS "daemon;unit")
+
     # ONNX Model Provider tests
     add_executable(onnx_model_provider_test
         onnx_model_provider_test.cpp
@@ -97,6 +104,7 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
         GTest::gtest_main
     )
     add_test(NAME onnx_model_provider_test COMMAND onnx_model_provider_test)
+    set_tests_properties(onnx_model_provider_test PROPERTIES LABELS "daemon;unit")
 else()
     message(STATUS "Skipping ONNX tests - ONNX Runtime not available")
 endif()
@@ -111,6 +119,7 @@ target_link_libraries(response_of_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME response_of_test COMMAND response_of_test)
+set_tests_properties(response_of_test PROPERTIES LABELS "daemon;unit")
 
 # Download protocol tests
 add_executable(download_protocol_test
@@ -123,3 +132,4 @@ target_link_libraries(download_protocol_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME download_protocol_test COMMAND download_protocol_test)
+set_tests_properties(download_protocol_test PROPERTIES LABELS "daemon;unit")

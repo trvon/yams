@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -1864,8 +1865,8 @@ struct SearchResult {
 
 struct SearchResponse {
     std::vector<SearchResult> results;
-    size_t totalCount;
-    std::chrono::milliseconds elapsed;
+    size_t totalCount = 0;
+    std::chrono::milliseconds elapsed{0};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

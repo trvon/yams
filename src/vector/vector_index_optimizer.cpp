@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
-#include <format>
 #include <future>
 #include <iostream>
 #include <mutex>
@@ -11,6 +10,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <fmt/format.h>
 #include <yams/vector/vector_index_optimizer.h>
 
 namespace yams::vector {
@@ -119,7 +119,7 @@ public:
 
             result.success = true;
             result.message =
-                std::format("Compaction completed: removed {} vectors, merged {} segments",
+                fmt::format("Compaction completed: removed {} vectors, merged {} segments",
                             result.vectors_removed, result.segments_merged);
 
             // Record in history
@@ -135,7 +135,7 @@ public:
 
         } catch (const std::exception& e) {
             result.success = false;
-            result.message = std::format("Compaction failed: {}", e.what());
+            result.message = fmt::format("Compaction failed: {}", e.what());
         }
 
         is_optimizing_ = false;
@@ -218,7 +218,7 @@ public:
 
         } catch (const std::exception& e) {
             result.success = false;
-            result.message = std::format("Rebalancing failed: {}", e.what());
+            result.message = fmt::format("Rebalancing failed: {}", e.what());
         }
 
         is_optimizing_ = false;
@@ -297,7 +297,7 @@ public:
 
             result.success = true;
             result.message =
-                std::format("Rebuild completed: {} vectors reindexed", all_vectors.size());
+                fmt::format("Rebuild completed: {} vectors reindexed", all_vectors.size());
             result.vectors_after = all_vectors.size();
 
             // Record in history
@@ -310,7 +310,7 @@ public:
 
         } catch (const std::exception& e) {
             result.success = false;
-            result.message = std::format("Rebuild failed: {}", e.what());
+            result.message = fmt::format("Rebuild failed: {}", e.what());
         }
 
         is_optimizing_ = false;
@@ -447,7 +447,7 @@ public:
 
     std::string getOptimizationStatus() const {
         if (is_optimizing_) {
-            return std::format("Optimizing... {:.1f}% complete", optimization_progress_ * 100);
+            return fmt::format("Optimizing... {:.1f}% complete", optimization_progress_ * 100);
         } else if (isOptimizationScheduled()) {
             return "Optimization scheduled";
         } else {

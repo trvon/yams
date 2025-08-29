@@ -1,10 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <zstd.h>
 #include <yams/compression/compressor_interface.h>
-#include <yams/core/span.h>
 
 namespace yams::compression {
 
@@ -20,10 +21,10 @@ public:
     ~ZstandardCompressor() override;
 
     // ICompressor implementation
-    [[nodiscard]] Result<CompressionResult> compress(yams::span<const std::byte> data,
+    [[nodiscard]] Result<CompressionResult> compress(std::span<const std::byte> data,
                                                      uint8_t level = 0) override;
 
-    [[nodiscard]] Result<std::vector<std::byte>> decompress(yams::span<const std::byte> data,
+    [[nodiscard]] Result<std::vector<std::byte>> decompress(std::span<const std::byte> data,
                                                             size_t expectedSize = 0) override;
 
     [[nodiscard]] CompressionAlgorithm algorithm() const override {
@@ -59,10 +60,10 @@ public:
 
     [[nodiscard]] Result<void> init(uint8_t level = 0) override;
 
-    [[nodiscard]] Result<size_t> compress(yams::span<const std::byte> input,
-                                          yams::span<std::byte> output) override;
+    [[nodiscard]] Result<size_t> compress(std::span<const std::byte> input,
+                                          std::span<std::byte> output) override;
 
-    [[nodiscard]] Result<size_t> finish(yams::span<std::byte> output) override;
+    [[nodiscard]] Result<size_t> finish(std::span<std::byte> output) override;
 
     void reset() override;
 
@@ -85,8 +86,8 @@ public:
 
     [[nodiscard]] Result<void> init() override;
 
-    [[nodiscard]] Result<size_t> decompress(yams::span<const std::byte> input,
-                                            yams::span<std::byte> output) override;
+    [[nodiscard]] Result<size_t> decompress(std::span<const std::byte> input,
+                                            std::span<std::byte> output) override;
 
     void reset() override;
 

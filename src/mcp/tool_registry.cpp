@@ -851,7 +851,7 @@ json MCPRestoreSnapshotResponse::toJson() const {
 }
 
 // MCPListCollectionsRequest implementation
-MCPListCollectionsRequest MCPListCollectionsRequest::fromJson(const json& j) {
+MCPListCollectionsRequest MCPListCollectionsRequest::fromJson([[maybe_unused]] const json& j) {
     MCPListCollectionsRequest req;
     // No fields to parse
     return req;

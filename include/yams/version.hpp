@@ -18,7 +18,7 @@
 #endif
 
 #ifndef YAMS_VERSION_MINOR
-#define YAMS_VERSION_MINOR 0
+#define YAMS_VERSION_MINOR 5
 #endif
 
 #ifndef YAMS_VERSION_PATCH
@@ -27,7 +27,7 @@
 
 // Combined version string (fallback)
 #ifndef YAMS_VERSION_STRING
-#define YAMS_VERSION_STRING "0.0.0+dev"
+#define YAMS_VERSION_STRING "0.5.0"
 #endif
 
 // Extended metadata (fall back to unknowns if not provided by build system)

@@ -2,7 +2,6 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/async_socket.h>
-#include <yams/daemon/ipc/connection_pool.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
@@ -204,14 +203,13 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize the daemon connection pool (legacy config mapped by PooledRequestManager)
-    yams::daemon::ConnectionPool::Config pool_config;
-    pool_config.max_connections = 10; // Cap connections to the daemon
-    pool_config.connection_timeout = std::chrono::seconds(5);
+    // Initialize the daemon client pool configuration (new DaemonClientPool)
+    yams::cli::DaemonClientPool::Config pool_config;
+    pool_config.max_clients = 10; // Cap clients to the daemon
+    pool_config.client_config.requestTimeout = std::chrono::seconds(5);
     pool_config.idle_timeout = std::chrono::minutes(1);
 
-    // Construct pooled request managers; internal DaemonClientPool handles clients (no
-    // AsyncIOContext)
+    // Construct pooled request managers; internal DaemonClientPool handles clients
     search_req_manager_ = std::make_unique<
         cli::PooledRequestManager<yams::daemon::SearchRequest, yams::daemon::SearchResponse>>(
         pool_config);
@@ -458,495 +456,485 @@ json MCPServer::readResource(const std::string& uri) {
 }
 
 json MCPServer::listTools() {
-    return {
-        {"tools",
-         json::array(
-             {// Core document operations
-              {{"name", "search"},
-               {"description",
-                "Search for documents using keywords, fuzzy matching, or similarity"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"query",
-                    {{"type", "string"},
-                     {"description", "Search query (keywords, phrases, or hash)"}}},
-                   {"limit",
-                    {{"type", "integer"},
-                     {"description", "Maximum number of results"},
-                     {"default", 10}}},
-                   {"fuzzy",
-                    {{"type", "boolean"},
-                     {"description", "Enable fuzzy matching"},
-                     {"default", false}}},
-                   {"similarity",
-                    {{"type", "number"},
-                     {"description", "Minimum similarity threshold (0-1)"},
-                     {"default", 0.7}}},
-                   {"hash",
-                    {{"type", "string"},
-                     {"description",
-                      "Search by file hash (full or partial, minimum 8 characters)"}}},
-                   {"verbose",
-                    {{"type", "boolean"},
-                     {"description", "Enable verbose output"},
-                     {"default", false}}},
-                   {"type",
-                    {{"type", "string"},
-                     {"description", "Search type: keyword, semantic, hybrid"},
-                     {"default", "hybrid"}}},
-                   {"paths_only",
-                    {{"type", "boolean"},
-                     {"description", "Return only file paths (LLM-friendly)"},
-                     {"default", false}}},
-                   {"line_numbers",
-                    {{"type", "boolean"},
-                     {"description", "Include line numbers in content"},
-                     {"default", false}}},
-                   {"after_context",
-                    {{"type", "integer"},
-                     {"description", "Lines of context after matches"},
-                     {"default", 0}}},
-                   {"before_context",
-                    {{"type", "integer"},
-                     {"description", "Lines of context before matches"},
-                     {"default", 0}}},
-                   {"context",
-                    {{"type", "integer"},
-                     {"description", "Lines of context around matches"},
-                     {"default", 0}}},
-                   {"color",
-                    {{"type", "string"},
-                     {"description",
-                      "Color highlighting for matches (values: always, never, auto)"},
-                     {"default", "auto"}}},
-                   {"path_pattern",
-                    {{"type", "string"},
-                     {"description",
-                      "Glob-like filename/path filter (e.g., **/*.md or substring)"}}},
-                   {"path",
-                    {{"type", "string"},
-                     {"description", "Alias for path_pattern (substring or glob-like filter)"}}},
-                   {"tags",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Filter by tags (presence-based, matches any by default)"}}},
-                   {"match_all_tags",
-                    {{"type", "boolean"},
-                     {"description", "Require all specified tags to be present"},
-                     {"default", false}}}}},
-                 {"required", {"query"}}}}},
-              {{"name", "grep"},
-               {"description", "Search document contents using regular expressions"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"pattern", {{"type", "string"}, {"description", "Regular expression pattern"}}},
-                   {"paths",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Specific paths to search (optional)"}}},
-                   {"ignore_case",
-                    {{"type", "boolean"},
-                     {"description", "Case-insensitive search"},
-                     {"default", false}}},
-                   {"word",
-                    {{"type", "boolean"},
-                     {"description", "Match whole words only"},
-                     {"default", false}}},
-                   {"invert",
-                    {{"type", "boolean"},
-                     {"description", "Invert match (show non-matching lines)"},
-                     {"default", false}}},
-                   {"line_numbers",
-                    {{"type", "boolean"},
-                     {"description", "Show line numbers"},
-                     {"default", false}}},
-                   {"with_filename",
-                    {{"type", "boolean"},
-                     {"description", "Show filename with matches"},
-                     {"default", true}}},
-                   {"count",
-                    {{"type", "boolean"},
-                     {"description", "Count matches instead of showing them"},
-                     {"default", false}}},
-                   {"files_with_matches",
-                    {{"type", "boolean"},
-                     {"description", "Show only filenames with matches"},
-                     {"default", false}}},
-                   {"files_without_match",
-                    {{"type", "boolean"},
-                     {"description", "Show only filenames without matches"},
-                     {"default", false}}},
-                   {"after_context",
-                    {{"type", "integer"}, {"description", "Lines after match"}, {"default", 0}}},
-                   {"before_context",
-                    {{"type", "integer"}, {"description", "Lines before match"}, {"default", 0}}},
-                   {"context",
-                    {{"type", "integer"}, {"description", "Lines around match"}, {"default", 0}}},
-                   {"max_count",
-                    {{"type", "integer"}, {"description", "Maximum matches per file"}}},
-                   {"color",
-                    {{"type", "string"},
-                     {"description", "Color highlighting (values: always, never, auto)"},
-                     {"default", "auto"}}}}},
-                 {"required", {"pattern"}}}}},
-              {{"name", "download"},
-               {"description",
-                "Robust downloader: store into CAS (store-only by default) with optional export"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"url", {{"type", "string"}, {"description", "Source URL"}}},
-                   {"headers",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Custom headers, e.g., Authorization: Bearer <token>"}}},
-                   {"checksum",
-                    {{"type", "string"}, {"description", "Expected checksum '<algo>:<hex>'"}}},
-                   {"concurrency",
-                    {{"type", "integer"}, {"description", "Parallel connections"}, {"default", 4}}},
-                   {"chunk_size_bytes",
-                    {{"type", "integer"},
-                     {"description", "Chunk size in bytes"},
-                     {"default", 8388608}}},
-                   {"timeout_ms",
-                    {{"type", "integer"},
-                     {"description", "Per-connection timeout (ms)"},
-                     {"default", 60000}}},
-                   {"retry",
-                    {{"type", "object"},
-                     {"properties",
-                      {{"max_attempts", {{"type", "integer"}, {"default", 5}}},
-                       {"backoff_ms", {{"type", "integer"}, {"default", 500}}},
-                       {"backoff_multiplier", {{"type", "number"}, {"default", 2.0}}},
-                       {"max_backoff_ms", {{"type", "integer"}, {"default", 15000}}}}}}},
-                   {"rate_limit",
-                    {{"type", "object"},
-                     {"properties",
-                      {{"global_bps", {{"type", "integer"}, {"default", 0}}},
-                       {"per_conn_bps", {{"type", "integer"}, {"default", 0}}}}}}},
-                   {"resume", {{"type", "boolean"}, {"default", true}}},
-                   {"proxy", {{"type", "string"}}},
-                   {"tls",
-                    {{"type", "object"},
-                     {"properties",
-                      {{"insecure", {{"type", "boolean"}, {"default", false}}},
-                       {"ca_path", {{"type", "string"}}}}}}},
-                   {"follow_redirects", {{"type", "boolean"}, {"default", true}}},
-                   {"store_only", {{"type", "boolean"}, {"default", true}}},
-                   {"export_path", {{"type", "string"}, {"description", "Optional export path"}}},
-                   {"overwrite",
-                    {{"type", "string"},
-                     {"description", "Overwrite policy: never|if-different-etag|always"},
-                     {"default", "never"}}}}},
-                 {"required", json::array({"url"})}}}},
-              {{"name", "add"},
-               {"description", "Store a document in YAMS"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"path", {{"type", "string"}, {"description", "File path to store"}}},
-                   {"directory_path",
-                    {{"type", "string"}, {"description", "Directory path to add files from"}}},
-                   {"content", {{"type", "string"}, {"description", "Document content"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name/filename"}}},
-                   {"mime_type", {{"type", "string"}, {"description", "MIME type of the content"}}},
-                   {"collection",
-                    {{"type", "string"}, {"description", "Collection name for grouping"}}},
-                   {"tags",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Tags for the document"}}},
-                   {"metadata",
-                    {{"type", "object"}, {"description", "Additional metadata key-value pairs"}}}}},
-                 {"required", json::array()}}}}, // Note: either path OR (content+name) required
-              {{"name", "get"},
-               {"description", "Retrieve a document by hash or name"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name"}}},
-                   {"outputPath",
-                    {{"type", "string"},
-                     {"description", "Output file path for retrieved content"}}},
-                   {"graph",
-                    {{"type", "boolean"},
-                     {"description", "Include knowledge graph relationships"},
-                     {"default", false}}},
-                   {"depth",
-                    {{"type", "integer"},
-                     {"description", "Graph traversal depth (1-5)"},
-                     {"default", 1},
-                     {"minimum", 1},
-                     {"maximum", 5}}},
-                   {"include_content",
-                    {{"type", "boolean"},
-                     {"description", "Include full content in graph results"},
-                     {"default", false}}}}}}}},
-              {{"name", "delete_by_name"},
-               {"description", "Delete a document by hash or name"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name"}}}}}}}},
-              {{"name", "update"},
-               {"description", "Update document metadata"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
-                   {"name",
-                    {{"type", "string"}, {"description", "Document name (alternative to hash)"}}},
-                   {"metadata",
-                    {{"type", "object"}, {"description", "Metadata key-value pairs to update"}}},
-                   {"tags",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Tags to add or update"}}}}}}}},
+    json tools = json::array();
 
-              // List and filter operations
-              {{"name", "list"},
-               {"description", "List documents with optional filtering"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"limit",
-                    {{"type", "integer"},
-                     {"description", "Maximum number of results"},
-                     {"default", 100}}},
-                   {"offset",
-                    {{"type", "integer"},
-                     {"description", "Offset for pagination"},
-                     {"default", 0}}},
-                   {"pattern",
-                    {{"type", "string"}, {"description", "Glob pattern for filtering names"}}},
-                   {"tags",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Filter by tags"}}},
-                   {"type", {{"type", "string"}, {"description", "Filter by file type category"}}},
-                   {"mime", {{"type", "string"}, {"description", "Filter by MIME type pattern"}}},
-                   {"extension", {{"type", "string"}, {"description", "Filter by file extension"}}},
-                   {"binary", {{"type", "boolean"}, {"description", "Filter binary files"}}},
-                   {"text", {{"type", "boolean"}, {"description", "Filter text files"}}},
-                   {"created_after",
-                    {{"type", "string"}, {"description", "ISO 8601 timestamp or relative time"}}},
-                   {"created_before",
-                    {{"type", "string"}, {"description", "ISO 8601 timestamp or relative time"}}},
-                   {"modified_after",
-                    {{"type", "string"}, {"description", "ISO 8601 timestamp or relative time"}}},
-                   {"modified_before",
-                    {{"type", "string"}, {"description", "ISO 8601 timestamp or relative time"}}},
-                   {"indexed_after",
-                    {{"type", "string"}, {"description", "ISO 8601 timestamp or relative time"}}},
-                   {"indexed_before",
-                    {{"type", "string"}, {"description", "ISO 8601 timestamp or relative time"}}},
-                   {"recent",
-                    {{"type", "integer"}, {"description", "Get N most recent documents"}}},
-                   {"sort_by",
-                    {{"type", "string"},
-                     {"description", "Sort field (values: name, size, created, modified, indexed)"},
-                     {"default", "indexed"}}},
-                   {"sort_order",
-                    {{"type", "string"},
-                     {"description", "Sort order (values: asc, desc)"},
-                     {"default", "desc"}}},
-                   {"with_labels",
-                    {{"type", "boolean"},
-                     {"description", "Include snapshot labels in results"},
-                     {"default", false}}}}}}}},
+    // Helper lambdas
+    auto makeProp = [](const std::string& type, const std::string& desc) {
+        json j;
+        j["type"] = type;
+        if (!desc.empty())
+            j["description"] = desc;
+        return j;
+    };
 
-              // Statistics and maintenance
-              {{"name", "stats"},
-               {"description", "Get storage statistics and health status"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"detailed", {{"type", "boolean"}, {"default", false}}},
-                   {"file_types",
-                    {{"type", "boolean"},
-                     {"description", "Include file type breakdown"},
-                     {"default", false}}}}}}}},
+    // search
+    {
+        json tool;
+        tool["name"] = "search";
+        tool["description"] = "Search for documents using keywords, fuzzy matching, or similarity";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["query"] = makeProp("string", "Search query (keywords, phrases, or hash)");
+        props["limit"] = makeProp("integer", "Maximum number of results");
+        props["limit"]["default"] = 10;
+        props["fuzzy"] = makeProp("boolean", "Enable fuzzy matching");
+        props["fuzzy"]["default"] = false;
+        props["similarity"] = makeProp("number", "Minimum similarity threshold (0-1)");
+        props["similarity"]["default"] = 0.7;
+        props["hash"] =
+            makeProp("string", "Search by file hash (full or partial, minimum 8 characters)");
+        props["verbose"] = makeProp("boolean", "Enable verbose output");
+        props["verbose"]["default"] = false;
+        props["type"] = makeProp("string", "Search type: keyword, semantic, hybrid");
+        props["type"]["default"] = "hybrid";
+        props["paths_only"] = makeProp("boolean", "Return only file paths (LLM-friendly)");
+        props["paths_only"]["default"] = false;
+        props["line_numbers"] = makeProp("boolean", "Include line numbers in content");
+        props["line_numbers"]["default"] = false;
+        props["after_context"] = makeProp("integer", "Lines of context after matches");
+        props["after_context"]["default"] = 0;
+        props["before_context"] = makeProp("integer", "Lines of context before matches");
+        props["before_context"]["default"] = 0;
+        props["context"] = makeProp("integer", "Lines of context around matches");
+        props["context"]["default"] = 0;
+        props["color"] =
+            makeProp("string", "Color highlighting for matches (values: always, never, auto)");
+        props["color"]["default"] = "auto";
+        props["path_pattern"] =
+            makeProp("string", "Glob-like filename/path filter (e.g., **/*.md or substring)");
+        props["path"] =
+            makeProp("string", "Alias for path_pattern (substring or glob-like filter)");
+        props["tags"] =
+            json{{"type", "array"},
+                 {"items", json{{"type", "string"}}},
+                 {"description", "Filter by tags (presence-based, matches any by default)"}};
+        props["match_all_tags"] = makeProp("boolean", "Require all specified tags to be present");
+        props["match_all_tags"]["default"] = false;
+        schema["properties"] = props;
+        schema["required"] = json::array({"query"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
 
-              // CLI parity tools from v0.0.2
-              {{"name", "delete_by_name"},
-               {"description", "Delete documents by name with pattern support"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"name", {{"type", "string"}, {"description", "Document name"}}},
-                   {"names",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Multiple document names"}}},
-                   {"pattern",
-                    {{"type", "string"}, {"description", "Glob pattern for matching names"}}},
-                   {"dry_run",
-                    {{"type", "boolean"},
-                     {"description", "Preview what would be deleted"},
-                     {"default", false}}}}}}}},
-              {{"name", "get_by_name"},
-               {"description", "Retrieve document content by name"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"name", {{"type", "string"}, {"description", "Document name"}}},
-                   {"raw_content",
-                    {{"type", "boolean"},
-                     {"description", "Return raw content without text extraction"},
-                     {"default", false}}},
-                   {"extract_text",
-                    {{"type", "boolean"},
-                     {"description", "Extract text from HTML/PDF files"},
-                     {"default", true}}}}},
-                 {"required", json::array({"name"})}}}},
-              {{"name", "cat"},
-               {"description", "Display document content (like cat command)"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name"}}},
-                   {"raw_content",
-                    {{"type", "boolean"},
-                     {"description", "Return raw content without text extraction"},
-                     {"default", false}}},
-                   {"extract_text",
-                    {{"type", "boolean"},
-                     {"description", "Extract text from HTML/PDF files"},
-                     {"default", true}}}}}}}},
+    // grep
+    {
+        json tool;
+        tool["name"] = "grep";
+        tool["description"] = "Search document contents using regular expressions";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["pattern"] = makeProp("string", "Regular expression pattern");
+        props["paths"] = json{{"type", "array"},
+                              {"items", json{{"type", "string"}}},
+                              {"description", "Specific paths to search (optional)"}};
+        props["ignore_case"] = makeProp("boolean", "Case-insensitive search");
+        props["ignore_case"]["default"] = false;
+        props["word"] = makeProp("boolean", "Match whole words only");
+        props["word"]["default"] = false;
+        props["invert"] = makeProp("boolean", "Invert match (show non-matching lines)");
+        props["invert"]["default"] = false;
+        props["line_numbers"] = makeProp("boolean", "Show line numbers");
+        props["line_numbers"]["default"] = false;
+        props["with_filename"] = makeProp("boolean", "Show filename with matches");
+        props["with_filename"]["default"] = true;
+        props["count"] = makeProp("boolean", "Count matches instead of showing them");
+        props["count"]["default"] = false;
+        props["files_with_matches"] = makeProp("boolean", "Show only filenames with matches");
+        props["files_with_matches"]["default"] = false;
+        props["files_without_match"] = makeProp("boolean", "Show only filenames without matches");
+        props["files_without_match"]["default"] = false;
+        props["after_context"] = makeProp("integer", "Lines after match");
+        props["after_context"]["default"] = 0;
+        props["before_context"] = makeProp("integer", "Lines before match");
+        props["before_context"]["default"] = 0;
+        props["context"] = makeProp("integer", "Lines around match");
+        props["context"]["default"] = 0;
+        props["max_count"] = makeProp("integer", "Maximum matches per file");
+        props["color"] = makeProp("string", "Color highlighting (values: always, never, auto)");
+        props["color"]["default"] = "auto";
+        schema["properties"] = props;
+        schema["required"] = json::array({"pattern"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
 
-              // Directory operations from v0.0.4
-              {{"name", "add_directory"},
-               {"description", "Add all files from a directory"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"directory_path", {{"type", "string"}, {"description", "Directory path"}}},
-                   {"recursive",
-                    {{"type", "boolean"},
-                     {"description", "Recursively add subdirectories"},
-                     {"default", false}}},
-                   {"collection",
-                    {{"type", "string"}, {"description", "Collection name for grouping"}}},
-                   {"snapshot_id",
-                    {{"type", "string"}, {"description", "Snapshot ID for versioning"}}},
-                   {"snapshot_label",
-                    {{"type", "string"}, {"description", "Human-readable snapshot label"}}},
-                   {"include_patterns",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Include patterns (e.g., *.txt)"}}},
-                   {"exclude_patterns",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Exclude patterns"}}},
-                   {"tags",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Tags to add to each stored document"}}},
-                   {"metadata",
-                    {{"type", "object"},
-                     {"description",
-                      "Additional metadata key-value pairs applied to each document"}}}}},
-                 {"required", json::array({"directory_path"})}}}},
-              {{"name", "restore_collection"},
-               {"description", "Restore all documents from a collection"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
-                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
-                   {"layout_template",
-                    {{"type", "string"},
-                     {"description", "Layout template (e.g., {collection}/{path})"},
-                     {"default", "{path}"}}},
-                   {"include_patterns",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Only restore files matching these patterns"}}},
-                   {"exclude_patterns",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Exclude files matching these patterns"}}},
-                   {"overwrite",
-                    {{"type", "boolean"},
-                     {"description", "Overwrite files if they already exist"},
-                     {"default", false}}},
-                   {"create_dirs",
-                    {{"type", "boolean"},
-                     {"description", "Create parent directories if needed"},
-                     {"default", true}}},
-                   {"dry_run",
-                    {{"type", "boolean"},
-                     {"description", "Show what would be restored without writing files"},
-                     {"default", false}}}}},
-                 {"required", json::array({"collection", "output_directory"})}}}},
-              {{"name", "restore_snapshot"},
-               {"description", "Restore all documents from a snapshot"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
-                   {"snapshot_label",
-                    {{"type", "string"},
-                     {"description", "Snapshot label (alternative to snapshot_id)"}}},
-                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
-                   {"layout_template",
-                    {{"type", "string"},
-                     {"description", "Layout template"},
-                     {"default", "{path}"}}},
-                   {"include_patterns",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Only restore files matching these patterns"}}},
-                   {"exclude_patterns",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Exclude files matching these patterns"}}},
-                   {"overwrite",
-                    {{"type", "boolean"},
-                     {"description", "Overwrite files if they already exist"},
-                     {"default", false}}},
-                   {"create_dirs",
-                    {{"type", "boolean"},
-                     {"description", "Create parent directories if needed"},
-                     {"default", true}}},
-                   {"dry_run",
-                    {{"type", "boolean"},
-                     {"description", "Show what would be restored without writing files"},
-                     {"default", false}}}}},
-                 {"required", json::array({"snapshot_id", "output_directory"})}}}},
-              {{"name", "restore"},
-               {"description", "Restore documents from a collection or snapshot"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
-                   {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
-                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
-                   {"overwrite",
-                    {{"type", "boolean"},
-                     {"description", "Overwrite existing files"},
-                     {"default", false}}}}},
-                 {"required", json::array({"output_directory"})}}}},
-              {{"name", "list_collections"},
-               {"description", "List available collections"},
-               {"inputSchema",
-                {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}},
-              {{"name", "list_snapshots"},
-               {"description", "List available snapshots"},
-               {"inputSchema",
-                {{"type", "object"},
-                 {"properties",
-                  {{"collection", {{"type", "string"}, {"description", "Filter by collection"}}},
-                   {"with_labels",
-                    {{"type", "boolean"},
-                     {"description", "Include snapshot labels"},
-                     {"default", true}}}}}}}}})}};
+    // download
+    {
+        json tool;
+        tool["name"] = "download";
+        tool["description"] =
+            "Robust downloader: store into CAS (store-only by default) with optional export";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["url"] = makeProp("string", "Source URL");
+        props["headers"] = json{{"type", "array"},
+                                {"items", json{{"type", "string"}}},
+                                {"description", "Custom headers"}};
+        props["checksum"] = makeProp("string", "Expected checksum '<algo>:<hex>'");
+        props["concurrency"] = makeProp("integer", "Parallel connections");
+        props["concurrency"]["default"] = 4;
+        props["chunk_size_bytes"] = makeProp("integer", "Chunk size in bytes");
+        props["chunk_size_bytes"]["default"] = 8388608;
+        props["timeout_ms"] = makeProp("integer", "Per-connection timeout (ms)");
+        props["timeout_ms"]["default"] = 60000;
+        props["resume"] = makeProp("boolean", "");
+        props["resume"]["default"] = true;
+        props["proxy"] = makeProp("string", "");
+        props["follow_redirects"] = makeProp("boolean", "");
+        props["follow_redirects"]["default"] = true;
+        props["store_only"] = makeProp("boolean", "");
+        props["store_only"]["default"] = true;
+        props["export_path"] = makeProp("string", "Optional export path");
+        props["overwrite"] = makeProp("string", "Overwrite policy: never|if-different-etag|always");
+        props["overwrite"]["default"] = "never";
+        schema["properties"] = props;
+        schema["required"] = json::array({"url"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // add (store single)
+    {
+        json tool;
+        tool["name"] = "add";
+        tool["description"] = "Store a document in YAMS";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["path"] = makeProp("string", "File path to store");
+        props["content"] = makeProp("string", "Document content");
+        props["name"] = makeProp("string", "Document name/filename");
+        props["mime_type"] = makeProp("string", "MIME type of the content");
+        props["collection"] = makeProp("string", "Collection name for grouping");
+        props["tags"] = json{{"type", "array"},
+                             {"items", json{{"type", "string"}}},
+                             {"description", "Tags for the document"}};
+        props["metadata"] = makeProp("object", "Additional metadata key-value pairs");
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // get
+    {
+        json tool;
+        tool["name"] = "get";
+        tool["description"] = "Retrieve a document by hash or name";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["hash"] = makeProp("string", "Document SHA-256 hash");
+        props["name"] = makeProp("string", "Document name");
+        props["outputPath"] = makeProp("string", "Output file path for retrieved content");
+        props["graph"] = makeProp("boolean", "Include knowledge graph relationships");
+        props["graph"]["default"] = false;
+        props["depth"] = makeProp("integer", "Graph traversal depth (1-5)");
+        props["depth"]["default"] = 1;
+        props["include_content"] = makeProp("boolean", "Include full content in graph results");
+        props["include_content"]["default"] = false;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // delete_by_name
+    {
+        json tool;
+        tool["name"] = "delete_by_name";
+        tool["description"] = "Delete documents by name with pattern support";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["name"] = makeProp("string", "Document name");
+        props["names"] = json{{"type", "array"},
+                              {"items", json{{"type", "string"}}},
+                              {"description", "Multiple document names"}};
+        props["pattern"] = makeProp("string", "Glob pattern for matching names");
+        props["dry_run"] = makeProp("boolean", "Preview what would be deleted");
+        props["dry_run"]["default"] = false;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // update
+    {
+        json tool;
+        tool["name"] = "update";
+        tool["description"] = "Update document metadata";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["hash"] = makeProp("string", "Document SHA-256 hash");
+        props["name"] = makeProp("string", "Document name (alternative to hash)");
+        props["type"] = makeProp("string", "Update target discriminator (e.g., metadata, tags)");
+        props["metadata"] = makeProp("object", "Metadata key-value pairs to update");
+        props["tags"] = json{{"type", "array"},
+                             {"items", json{{"type", "string"}}},
+                             {"description", "Tags to add or update"}};
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // list
+    {
+        json tool;
+        tool["name"] = "list";
+        tool["description"] = "List documents with optional filtering";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["limit"] = makeProp("integer", "Maximum number of results");
+        props["limit"]["default"] = 100;
+        props["offset"] = makeProp("integer", "Offset for pagination");
+        props["offset"]["default"] = 0;
+        props["name"] = makeProp("string", "Exact name filter (optional)");
+        props["pattern"] = makeProp("string", "Glob pattern for filtering names");
+        props["tags"] = json{{"type", "array"},
+                             {"items", json{{"type", "string"}}},
+                             {"description", "Filter by tags"}};
+        props["metadata"] = makeProp("object", "Metadata key/value filter (optional)");
+        props["type"] = makeProp("string", "Filter by file type category");
+        props["mime"] = makeProp("string", "Filter by MIME type pattern");
+        props["extension"] = makeProp("string", "Filter by file extension");
+        props["binary"] = makeProp("boolean", "Filter binary files");
+        props["text"] = makeProp("boolean", "Filter text files");
+        props["created_after"] = makeProp("string", "ISO 8601 timestamp or relative time");
+        props["created_before"] = makeProp("string", "ISO 8601 timestamp or relative time");
+        props["modified_after"] = makeProp("string", "ISO 8601 timestamp or relative time");
+        props["modified_before"] = makeProp("string", "ISO 8601 timestamp or relative time");
+        props["indexed_after"] = makeProp("string", "ISO 8601 timestamp or relative time");
+        props["indexed_before"] = makeProp("string", "ISO 8601 timestamp or relative time");
+        props["recent"] = makeProp("integer", "Get N most recent documents");
+        props["sort_by"] =
+            makeProp("string", "Sort field (values: name, size, created, modified, indexed)");
+        props["sort_by"]["default"] = "indexed";
+        props["sort_order"] = makeProp("string", "Sort order (values: asc, desc)");
+        props["sort_order"]["default"] = "desc";
+        props["with_labels"] = makeProp("boolean", "Include snapshot labels in results");
+        props["with_labels"]["default"] = false;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // stats
+    {
+        json tool;
+        tool["name"] = "stats";
+        tool["description"] = "Get storage statistics and health status";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["detailed"] = makeProp("boolean", "");
+        props["detailed"]["default"] = false;
+        props["file_types"] = makeProp("boolean", "Include file type breakdown");
+        props["file_types"]["default"] = false;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // get_by_name
+    {
+        json tool;
+        tool["name"] = "get_by_name";
+        tool["description"] = "Retrieve document content by name";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["name"] = makeProp("string", "Document name");
+        props["raw_content"] = makeProp("boolean", "Return raw content without text extraction");
+        props["raw_content"]["default"] = false;
+        props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
+        props["extract_text"]["default"] = true;
+        schema["properties"] = props;
+        schema["required"] = json::array({"name"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // cat
+    {
+        json tool;
+        tool["name"] = "cat";
+        tool["description"] = "Display document content (like cat command)";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["hash"] = makeProp("string", "Document SHA-256 hash");
+        props["name"] = makeProp("string", "Document name");
+        props["raw_content"] = makeProp("boolean", "Return raw content without text extraction");
+        props["raw_content"]["default"] = false;
+        props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
+        props["extract_text"]["default"] = true;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // add_directory
+    {
+        json tool;
+        tool["name"] = "add_directory";
+        tool["description"] = "Add all files from a directory";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["directory_path"] = makeProp("string", "Directory path");
+        props["recursive"] = makeProp("boolean", "Recursively add subdirectories");
+        props["recursive"]["default"] = false;
+        props["collection"] = makeProp("string", "Collection name for grouping");
+        props["snapshot_id"] = makeProp("string", "Snapshot ID for versioning");
+        props["snapshot_label"] = makeProp("string", "Human-readable snapshot label");
+        props["include_patterns"] = json{{"type", "array"},
+                                         {"items", json{{"type", "string"}}},
+                                         {"description", "Include patterns (e.g., *.txt)"}};
+        props["exclude_patterns"] = json{{"type", "array"},
+                                         {"items", json{{"type", "string"}}},
+                                         {"description", "Exclude patterns"}};
+        props["tags"] = json{{"type", "array"},
+                             {"items", json{{"type", "string"}}},
+                             {"description", "Tags to add to each stored document"}};
+        props["metadata"] =
+            makeProp("object", "Additional metadata key-value pairs applied to each document");
+        schema["properties"] = props;
+        schema["required"] = json::array({"directory_path"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // restore_collection
+    {
+        json tool;
+        tool["name"] = "restore_collection";
+        tool["description"] = "Restore all documents from a collection";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["collection"] = makeProp("string", "Collection name");
+        props["output_directory"] = makeProp("string", "Output directory");
+        props["layout_template"] =
+            makeProp("string", "Layout template (e.g., {collection}/{path})");
+        props["layout_template"]["default"] = "{path}";
+        props["include_patterns"] =
+            json{{"type", "array"},
+                 {"items", json{{"type", "string"}}},
+                 {"description", "Only restore files matching these patterns"}};
+        props["exclude_patterns"] = json{{"type", "array"},
+                                         {"items", json{{"type", "string"}}},
+                                         {"description", "Exclude files matching these patterns"}};
+        props["overwrite"] = makeProp("boolean", "Overwrite files if they already exist");
+        props["overwrite"]["default"] = false;
+        props["create_dirs"] = makeProp("boolean", "Create parent directories if needed");
+        props["create_dirs"]["default"] = true;
+        props["dry_run"] = makeProp("boolean", "Show what would be restored without writing files");
+        props["dry_run"]["default"] = false;
+        schema["properties"] = props;
+        schema["required"] = json::array({"collection", "output_directory"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // restore_snapshot
+    {
+        json tool;
+        tool["name"] = "restore_snapshot";
+        tool["description"] = "Restore all documents from a snapshot";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["snapshot_id"] = makeProp("string", "Snapshot ID");
+        props["snapshot_label"] = makeProp("string", "Snapshot label (alternative to snapshot_id)");
+        props["output_directory"] = makeProp("string", "Output directory");
+        props["layout_template"] = makeProp("string", "Layout template");
+        props["layout_template"]["default"] = "{path}";
+        props["include_patterns"] =
+            json{{"type", "array"},
+                 {"items", json{{"type", "string"}}},
+                 {"description", "Only restore files matching these patterns"}};
+        props["exclude_patterns"] = json{{"type", "array"},
+                                         {"items", json{{"type", "string"}}},
+                                         {"description", "Exclude files matching these patterns"}};
+        props["overwrite"] = makeProp("boolean", "Overwrite files if they already exist");
+        props["overwrite"]["default"] = false;
+        props["create_dirs"] = makeProp("boolean", "Create parent directories if needed");
+        props["create_dirs"]["default"] = true;
+        props["dry_run"] = makeProp("boolean", "Show what would be restored without writing files");
+        props["dry_run"]["default"] = false;
+        schema["properties"] = props;
+        schema["required"] = json::array({"snapshot_id", "output_directory"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // restore (combined)
+    {
+        json tool;
+        tool["name"] = "restore";
+        tool["description"] = "Restore documents from a collection or snapshot";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["collection"] = makeProp("string", "Collection name");
+        props["snapshot_id"] = makeProp("string", "Snapshot ID");
+        props["output_directory"] = makeProp("string", "Output directory");
+        props["layout_template"] =
+            makeProp("string", "Layout template (e.g., {collection}/{path})");
+        props["layout_template"]["default"] = "{path}";
+        props["include_patterns"] =
+            json{{"type", "array"},
+                 {"items", json{{"type", "string"}}},
+                 {"description", "Only restore files matching these patterns"}};
+        props["exclude_patterns"] = json{{"type", "array"},
+                                         {"items", json{{"type", "string"}}},
+                                         {"description", "Exclude files matching these patterns"}};
+        props["overwrite"] = makeProp("boolean", "Overwrite existing files");
+        props["overwrite"]["default"] = false;
+        props["create_dirs"] = makeProp("boolean", "Create parent directories if needed");
+        props["create_dirs"]["default"] = true;
+        props["dry_run"] = makeProp("boolean", "Show what would be restored without writing files");
+        props["dry_run"]["default"] = false;
+        schema["properties"] = props;
+        schema["required"] = json::array({"output_directory"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // list_collections
+    {
+        json tool;
+        tool["name"] = "list_collections";
+        tool["description"] = "List available collections";
+        json schema;
+        schema["type"] = "object";
+        schema["properties"] = json::object();
+        schema["required"] = json::array();
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // list_snapshots
+    {
+        json tool;
+        tool["name"] = "list_snapshots";
+        tool["description"] = "List available snapshots";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["collection"] = makeProp("string", "Filter by collection");
+        props["with_labels"] = makeProp("boolean", "Include snapshot labels");
+        props["with_labels"]["default"] = true;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    return json{{"tools", tools}};
 }
 
 json yams::mcp::MCPServer::listPrompts() {

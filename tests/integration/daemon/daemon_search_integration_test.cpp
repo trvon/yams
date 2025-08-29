@@ -28,6 +28,7 @@ protected:
         daemonConfig_.socketPath = testDir_ / "daemon.sock";
         daemonConfig_.pidFile = testDir_ / "daemon.pid";
         daemonConfig_.logFile = testDir_ / "daemon.log";
+        daemonConfig_.dataDir = dataDir_;
 
         clientConfig_.socketPath = daemonConfig_.socketPath;
         clientConfig_.autoStart = false;
@@ -89,7 +90,9 @@ TEST_F(DaemonSearchIntegrationTest, BasicSearch) {
     ASSERT_TRUE(client.connect());
 
     // Search for "quick"
-    SearchRequest req{"quick", 10};
+    SearchRequest req;
+    req.query = "quick";
+    req.limit = 10;
     req.fuzzy = false;
 
     auto result = client.search(req);
@@ -120,7 +123,9 @@ TEST_F(DaemonSearchIntegrationTest, FuzzySearch) {
     ASSERT_TRUE(client.connect());
 
     // Search with typo: "qwick" instead of "quick"
-    SearchRequest req{"qwick", 10};
+    SearchRequest req;
+    req.query = "qwick";
+    req.limit = 10;
     req.fuzzy = true;
     req.similarity = 0.7;
 
@@ -148,7 +153,8 @@ TEST_F(DaemonSearchIntegrationTest, SearchWithLimit) {
     ASSERT_TRUE(client.connect());
 
     // Search with small limit
-    SearchRequest req{"test", 3};
+    SearchRequest req;
+    req.query = "test";
     req.limit = 3;
 
     auto result = client.search(req);
@@ -166,7 +172,9 @@ TEST_F(DaemonSearchIntegrationTest, EmptyQuery) {
     DaemonClient client(clientConfig_);
     ASSERT_TRUE(client.connect());
 
-    SearchRequest req{"", 10};
+    SearchRequest req;
+    req.query = "";
+    req.limit = 10;
 
     auto result = client.search(req);
 
@@ -185,7 +193,9 @@ TEST_F(DaemonSearchIntegrationTest, SpecialCharacterSearch) {
     std::vector<std::string> queries = {"**bold**", "hello_world()", "{\"server\":", "#", "30,New"};
 
     for (const auto& query : queries) {
-        SearchRequest req{query, 10};
+        SearchRequest req;
+        req.query = query;
+        req.limit = 10;
 
         auto result = client.search(req);
 
@@ -208,7 +218,7 @@ TEST_F(DaemonSearchIntegrationTest, ConcurrentSearches) {
 
     std::vector<std::thread> threads;
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &queries, &successCount, &errorCount, t, searchesPerThread]() {
+        threads.emplace_back([this, &queries, &successCount, &errorCount, searchesPerThread]() {
             DaemonClient client(clientConfig_);
             if (!client.connect()) {
                 errorCount += searchesPerThread;
@@ -216,7 +226,9 @@ TEST_F(DaemonSearchIntegrationTest, ConcurrentSearches) {
             }
 
             for (int i = 0; i < searchesPerThread; ++i) {
-                SearchRequest req{queries[i % queries.size()], 10};
+                SearchRequest req;
+                req.query = queries[i % queries.size()];
+                req.limit = 10;
                 req.fuzzy = (i % 2 == 0);
 
                 auto result = client.search(req);
@@ -245,7 +257,9 @@ TEST_F(DaemonSearchIntegrationTest, SearchPerformance) {
     ASSERT_TRUE(client.connect());
 
     // Warm up
-    SearchRequest warmupReq{"test", 1};
+    SearchRequest warmupReq;
+    warmupReq.query = "test";
+    warmupReq.limit = 1;
     client.search(warmupReq);
 
     // Measure search performance
@@ -254,7 +268,9 @@ TEST_F(DaemonSearchIntegrationTest, SearchPerformance) {
 
     int successCount = 0;
     for (int i = 0; i < numSearches; ++i) {
-        SearchRequest req{"quick brown fox", 10};
+        SearchRequest req;
+        req.query = "quick brown fox";
+        req.limit = 10;
         auto result = client.search(req);
         if (result || result.error().code == ErrorCode::NotFound) {
             successCount++;
@@ -278,7 +294,9 @@ TEST_F(DaemonSearchIntegrationTest, SearchWithMetadata) {
     DaemonClient client(clientConfig_);
     ASSERT_TRUE(client.connect());
 
-    SearchRequest req{"document", 10};
+    SearchRequest req;
+    req.query = "document";
+    req.limit = 10;
     // Add metadata filters if supported
     // req.filters["extension"] = ".md";
 
@@ -305,7 +323,9 @@ TEST_F(DaemonSearchIntegrationTest, LiteralTextSearch) {
     ASSERT_TRUE(client.connect());
 
     // Search for exact phrase
-    SearchRequest req{"quick brown fox", 10};
+    SearchRequest req;
+    req.query = "quick brown fox";
+    req.limit = 10;
     req.literalText = true;
 
     auto result = client.search(req);
@@ -331,7 +351,9 @@ TEST_F(DaemonSearchIntegrationTest, SearchResultRanking) {
     DaemonClient client(clientConfig_);
     ASSERT_TRUE(client.connect());
 
-    SearchRequest req{"quick", 10};
+    SearchRequest req;
+    req.query = "quick";
+    req.limit = 10;
 
     auto result = client.search(req);
 
@@ -358,7 +380,9 @@ TEST_F(DaemonSearchIntegrationTest, SearchTimeout) {
     ASSERT_TRUE(client.connect());
 
     // Complex query that might take time
-    SearchRequest req{"quick OR brown OR fox OR jumps OR lazy OR dog", 100};
+    SearchRequest req;
+    req.query = "quick OR brown OR fox OR jumps OR lazy OR dog";
+    req.limit = 100;
     req.fuzzy = true;
 
     auto result = client.search(req);
@@ -380,7 +404,9 @@ TEST_F(DaemonSearchIntegrationTest, CompareDaemonVsDirect) {
     std::string query = "test";
 
     // Search through daemon
-    SearchRequest daemonReq{query, 10};
+    SearchRequest daemonReq;
+    daemonReq.query = query;
+    daemonReq.limit = 10;
     auto daemonResult = client.search(daemonReq);
 
     // In a real test, we'd also search directly using SearchExecutor

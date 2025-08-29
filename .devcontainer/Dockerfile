@@ -15,16 +15,21 @@ RUN apt-get update && \
     cmake \
     ninja-build \
     pkg-config \
-    git \
     curl \
+    pipx \
+    git \
     jq \
     zip \
     unzip \
     tar \
+    cppcheck \
+    clang-tidy \
+    clang-format \
     ca-certificates \
     openssh-client \
     libssl-dev \
     libsqlite3-dev \
+    libncurses-dev \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,6 +47,11 @@ RUN set -euo pipefail; \
     curl -fsSL -o /usr/local/bin/act "https://github.com/nektos/act/releases/download/${ACT_VERSION}/${ACT_ASSET}" && \
     chmod +x /usr/local/bin/act && \
     /usr/local/bin/act --version || true
+
+# Conan setuo
+RUN pipx install conan
+RUN conan profile detect --force
+RUN sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/'  /home/vscode/.conan2/profiles/default || true
 
 # Optional: place project setup scripts in a known location
 # A matching postCreate.sh should exist at .devcontainer/postCreate.sh in the repo.

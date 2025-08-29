@@ -1,7 +1,9 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <set>
 #include <sstream>
 #include <yams/config/config_migration.h>
 
@@ -123,6 +125,29 @@ Result<void> ConfigMigrator::createDefaultV2Config(const fs::path& configPath) {
     v2.patch = 0;
 
     return writeTomlConfig(configPath, v2Defaults, v2);
+}
+
+std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2AdditiveDefaults() {
+    // Additive keys introduced post-initial v2 rollout. These will be merged non-destructively.
+    return {{"cli.streaming",
+             {{"enable", "true"},
+              {"payload_threshold_bytes", "262144"},
+              {"ttfb_threshold_ms", "150"},
+              {"chunk_size_bytes", "65536"},
+              {"max_inflight_chunks", "4"}}},
+            {"cli.pool",
+             {{"max_clients", "8"},
+              {"min_clients", "1"},
+              {"acquire_timeout_ms", "5000"},
+              {"max_waiters", "0"},
+              {"fair_queue", "true"},
+              {"health_check_interval_ms", "30000"},
+              {"health_check_timeout_ms", "500"},
+              {"reconnect_backoff_base_ms", "100"},
+              {"reconnect_backoff_max_ms", "5000"},
+              {"reconnect_backoff_jitter_pct", "0.2"},
+              {"circuit_breaker_error_threshold", "5"},
+              {"circuit_breaker_reset_ms", "10000"}}}};
 }
 
 std::vector<MigrationEntry> ConfigMigrator::getV1ToV2MigrationMap() {
@@ -622,6 +647,8 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "search.enhanced",
                                              "migrations"};
 
+    std::set<std::string> written;
+
     for (const auto& section : sectionOrder) {
         if (config.find(section) != config.end()) {
             file << "[" << section << "]\n";
@@ -646,7 +673,31 @@ Result<void> ConfigMigrator::writeTomlConfig(
                 }
             }
             file << "\n";
+            written.insert(section);
         }
+    }
+
+    // Append any remaining sections not covered by the canonical order (e.g., cli.*)
+    for (const auto& [section, kv] : config) {
+        if (written.find(section) != written.end())
+            continue;
+        file << "[" << section << "]\n";
+        for (const auto& [key, value] : kv) {
+            if (value.empty()) {
+                file << "# " << key << " = \"\"\n";
+            } else if (!value.empty() && value[0] == '[') {
+                file << key << " = " << value << "\n";
+            } else if (value == "true" || value == "false" ||
+                       std::all_of(value.begin(), value.end(), ::isdigit) ||
+                       (value.find('.') != std::string::npos &&
+                        std::all_of(value.begin(), value.end(),
+                                    [](char c) { return ::isdigit(c) || c == '.'; }))) {
+                file << key << " = " << value << "\n";
+            } else {
+                file << key << " = \"" << value << "\"\n";
+            }
+        }
+        file << "\n";
     }
 
     return Result<void>();
@@ -775,6 +826,81 @@ Result<void> ConfigMigrator::validateV2Config(const fs::path& configPath) {
     }
 
     return Result<void>();
+}
+
+Result<std::vector<std::string>>
+ConfigMigrator::updateV2SchemaAdditive(const fs::path& configPath, bool makeBackup, bool dryRun) {
+    if (!fs::exists(configPath)) {
+        return Error{ErrorCode::FileNotFound, "Config file not found: " + configPath.string()};
+    }
+
+    auto parseResult = parseTomlConfig(configPath);
+    if (!parseResult) {
+        return Error{parseResult.error()};
+    }
+    auto config = parseResult.value();
+
+    auto additives = getV2AdditiveDefaults();
+    std::vector<std::string> addedKeys;
+
+    // Determine missing keys
+    for (const auto& [section, kv] : additives) {
+        auto& destSection = config[section]; // creates if missing (used later only if we add)
+        bool sectionExists = (parseResult.value().find(section) != parseResult.value().end());
+        for (const auto& [k, v] : kv) {
+            bool missing = true;
+            if (sectionExists) {
+                const auto& existingSection = parseResult.value().at(section);
+                missing = (existingSection.find(k) == existingSection.end());
+            }
+            if (missing) {
+                addedKeys.emplace_back(section + "." + k);
+                // Stage value
+                destSection[k] = v;
+            }
+        }
+    }
+
+    if (addedKeys.empty()) {
+        return addedKeys; // No changes needed
+    }
+
+    if (dryRun) {
+        return addedKeys;
+    }
+
+    // Backup if requested
+    if (makeBackup) {
+        auto backup = this->createBackup(configPath);
+        if (!backup) {
+            return Error{backup.error()};
+        }
+        spdlog::info("Created backup before update: {}", backup.value().string());
+    }
+
+    // Update version metadata
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&t), "%Y-%m-%d");
+    config["version"]["config_version"] = "2"; // ensure v2
+    config["version"]["migration_date"] = ss.str();
+    if (config["version"].find("migrated_from") == config["version"].end()) {
+        config["version"]["migrated_from"] = "2";
+    }
+
+    // Write updated config
+    ConfigVersion v2;
+    v2.major = 2;
+    v2.minor = 0;
+    v2.patch = 0;
+    auto writeResult = writeTomlConfig(configPath, config, v2);
+    if (!writeResult) {
+        return Error{writeResult.error()};
+    }
+
+    spdlog::info("Config updated additively with {} keys", addedKeys.size());
+    return addedKeys;
 }
 
 } // namespace yams::config

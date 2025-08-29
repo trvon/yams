@@ -1,8 +1,12 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
+#include <optional>
 #include <shared_mutex>
+#include <sstream>
 #include <thread>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
@@ -284,8 +288,9 @@ public:
     }
 
     Result<CompressionResult> compressInTransaction(std::span<const std::byte> data,
-                                                    CompressionAlgorithm algorithm, uint8_t level,
-                                                    std::optional<TransactionId> txId) {
+                                                    CompressionAlgorithm algorithm,
+                                                    std::optional<TransactionId> txId,
+                                                    uint8_t level) {
         // Create transaction if not provided
         TransactionId actualTxId;
         bool autoCommit = false;
@@ -713,9 +718,9 @@ Result<void> TransactionManager::rollbackTransaction(TransactionId txId) {
 
 Result<CompressionResult>
 TransactionManager::compressInTransaction(std::span<const std::byte> data,
-                                          CompressionAlgorithm algorithm, uint8_t level,
-                                          std::optional<TransactionId> txId) {
-    return pImpl->compressInTransaction(data, algorithm, level, txId);
+                                          CompressionAlgorithm algorithm,
+                                          std::optional<TransactionId> txId, uint8_t level) {
+    return pImpl->compressInTransaction(data, algorithm, txId, level);
 }
 
 Result<std::vector<std::byte>>

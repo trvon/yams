@@ -48,6 +48,9 @@ print_ver cmake CMake
 print_ver ninja Ninja --version
 print_ver pkg-config "pkg-config"
 print_ver git Git
+print_ver cppcheck cppcheck --version
+print_ver clang-tidy "clang-tidy" --version
+print_ver clang-format "clang-format" --version
 print_ver openssl OpenSSL "<raw>"
 print_ver sqlite3 SQLite3 --version
 print_ver protoc Protobuf "—version"
@@ -78,5 +81,23 @@ fi
 hr
 say "YAMS DevContainer postCreate complete."
 hr
+
+cat <<'EOT'
+[tip] Recommended local build flow (yams-* presets):
+
+  # Debug with tests/benchmarks (use scoped options '&:' to avoid warnings)
+  conan install . \
+    -of build/yams-debug \
+    -s build_type=Debug \
+    -o '&:build_tests=True' \
+    -o '&:build_benchmarks=True' \
+    -b missing
+  cmake --preset yams-debug -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON
+  cmake --build --preset yams-debug -j
+  ctest --preset test-yams-debug --output-on-failure
+
+[tip] If you see "Duplicate preset" after running Conan, remove the generated user presets:
+  rm -f CMakeUserPresets.json
+EOT
 
 exit 0

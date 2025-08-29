@@ -21,7 +21,7 @@ using json = nlohmann::json;
 
 // ============================================================================
 // Generic Search Result Rendering System
-// ============================================================================
+// ====================================================================================
 
 /**
  * @brief concept for basic result adapters
@@ -58,7 +58,7 @@ concept DocumentInfoAdapter = ResultAdapter<T> && requires(const T& t) {
 
 // ============================================================================
 // Concrete Adapters for Different Data Types
-// ============================================================================
+// ==========================================================================
 
 /**
  * @brief Adapter for metadata::SearchResult (search results with scores)
@@ -69,33 +69,27 @@ private:
 
 public:
     // Allow implicit conversion from SearchResult for ranges compatibility
-    constexpr MetadataSearchResultAdapter(const metadata::SearchResult& result) : result_(result) {}
+    MetadataSearchResultAdapter(const metadata::SearchResult& result) : result_(result) {}
 
-    [[nodiscard]] constexpr std::string_view path() const noexcept {
+    [[nodiscard]] std::string_view path() const noexcept {
         return (!result_.document.filePath.empty() && result_.document.filePath != "stdin")
                    ? std::string_view{result_.document.filePath}
                    : std::string_view{result_.document.fileName};
     }
 
-    [[nodiscard]] constexpr std::string_view title() const noexcept {
-        return result_.document.fileName;
-    }
+    [[nodiscard]] std::string_view title() const noexcept { return result_.document.fileName; }
 
     [[nodiscard]] std::string id() const { return std::to_string(result_.document.id); }
 
-    [[nodiscard]] constexpr double score() const noexcept { return result_.score; }
+    [[nodiscard]] double score() const noexcept { return result_.score; }
 
-    [[nodiscard]] constexpr std::string_view snippet() const noexcept { return result_.snippet; }
+    [[nodiscard]] std::string_view snippet() const noexcept { return result_.snippet; }
 
-    [[nodiscard]] constexpr std::string_view hash() const noexcept {
-        return result_.document.sha256Hash;
-    }
+    [[nodiscard]] std::string_view hash() const noexcept { return result_.document.sha256Hash; }
 
-    [[nodiscard]] constexpr int64_t size() const noexcept { return result_.document.fileSize; }
+    [[nodiscard]] int64_t size() const noexcept { return result_.document.fileSize; }
 
-    [[nodiscard]] constexpr std::string_view mimeType() const noexcept {
-        return result_.document.mimeType;
-    }
+    [[nodiscard]] std::string_view mimeType() const noexcept { return result_.document.mimeType; }
 };
 
 /**
@@ -107,23 +101,23 @@ private:
 
 public:
     // Allow implicit conversion from DocumentInfo for ranges compatibility
-    constexpr DocumentInfoResultAdapter(const metadata::DocumentInfo& doc) : doc_(doc) {}
+    DocumentInfoResultAdapter(const metadata::DocumentInfo& doc) : doc_(doc) {}
 
-    [[nodiscard]] constexpr std::string_view path() const noexcept {
+    [[nodiscard]] std::string_view path() const noexcept {
         return (!doc_.filePath.empty() && doc_.filePath != "stdin")
                    ? std::string_view{doc_.filePath}
                    : std::string_view{doc_.fileName};
     }
 
-    [[nodiscard]] constexpr std::string_view title() const noexcept { return doc_.fileName; }
+    [[nodiscard]] std::string_view title() const noexcept { return doc_.fileName; }
 
     [[nodiscard]] std::string id() const { return std::to_string(doc_.id); }
 
-    [[nodiscard]] constexpr std::string_view hash() const noexcept { return doc_.sha256Hash; }
+    [[nodiscard]] std::string_view hash() const noexcept { return doc_.sha256Hash; }
 
-    [[nodiscard]] constexpr int64_t size() const noexcept { return doc_.fileSize; }
+    [[nodiscard]] int64_t size() const noexcept { return doc_.fileSize; }
 
-    [[nodiscard]] constexpr std::string_view mimeType() const noexcept { return doc_.mimeType; }
+    [[nodiscard]] std::string_view mimeType() const noexcept { return doc_.mimeType; }
 
     [[nodiscard]] constexpr std::chrono::system_clock::time_point createdTime() const noexcept {
         return doc_.createdTime;
@@ -147,32 +141,28 @@ private:
 
 public:
     // Allow implicit conversion from SearchResultItem for ranges compatibility
-    constexpr HybridSearchResultAdapter(const search::SearchResultItem& item) : item_(item) {}
+    HybridSearchResultAdapter(const search::SearchResultItem& item) : item_(item) {}
 
-    [[nodiscard]] constexpr std::string_view path() const noexcept { return item_.path; }
+    [[nodiscard]] std::string_view path() const noexcept { return item_.path; }
 
-    [[nodiscard]] constexpr std::string_view title() const noexcept { return item_.title; }
+    [[nodiscard]] std::string_view title() const noexcept { return item_.title; }
 
     [[nodiscard]] std::string id() const { return std::to_string(item_.documentId); }
 
-    [[nodiscard]] constexpr double score() const noexcept {
+    [[nodiscard]] double score() const noexcept {
         return static_cast<double>(item_.relevanceScore);
     }
 
-    [[nodiscard]] constexpr std::string_view snippet() const noexcept {
-        return item_.contentPreview;
-    }
+    [[nodiscard]] std::string_view snippet() const noexcept { return item_.contentPreview; }
 
-    [[nodiscard]] constexpr std::string_view hash() const noexcept {
+    [[nodiscard]] std::string_view hash() const noexcept {
         // Search results don't typically have hashes, return empty
         return "";
     }
 
-    [[nodiscard]] constexpr int64_t size() const noexcept {
-        return static_cast<int64_t>(item_.fileSize);
-    }
+    [[nodiscard]] int64_t size() const noexcept { return static_cast<int64_t>(item_.fileSize); }
 
-    [[nodiscard]] constexpr std::string_view mimeType() const noexcept { return item_.contentType; }
+    [[nodiscard]] std::string_view mimeType() const noexcept { return item_.contentType; }
 
     [[nodiscard]] constexpr std::chrono::system_clock::time_point createdTime() const noexcept {
         return item_.lastModified; // Use lastModified as creation time
@@ -197,11 +187,12 @@ private:
 public:
     explicit FilePathAdapter(std::string path) : path_(std::move(path)) {}
 
-    [[nodiscard]] constexpr std::string_view path() const noexcept { return path_; }
+    [[nodiscard]] std::string_view path() const noexcept { return path_; }
 
-    [[nodiscard]] constexpr std::string_view title() const noexcept {
+    [[nodiscard]] std::string_view title() const noexcept {
         auto pos = path_.find_last_of('/');
-        return pos != std::string::npos ? std::string_view{path_}.substr(pos + 1) : path_;
+        return pos != std::string::npos ? std::string_view{path_}.substr(pos + 1)
+                                        : std::string_view{path_};
     }
 
     [[nodiscard]] std::string id() const { return path_; }
@@ -228,7 +219,7 @@ static_assert(ResultAdapter<FilePathAdapter>);
 
 // ============================================================================
 // Generic Result Renderer
-// ============================================================================
+// ==========================================================================
 
 /**
  * @brief Output format modes supported by the renderer
@@ -261,13 +252,12 @@ template <ResultAdapter AdapterType> class ResultRenderer {
 private:
     RenderConfig config_;
 
-    [[nodiscard]] constexpr bool matchesPathFilter(std::string_view path) const noexcept {
+    [[nodiscard]] bool matchesPathFilter(std::string_view path) const noexcept {
         return config_.pathFilter.empty() ||
                path.find(config_.pathFilter) != std::string_view::npos;
     }
 
-    [[nodiscard]] static constexpr std::string truncateSnippet(std::string_view snippet,
-                                                               size_t maxLength) {
+    [[nodiscard]] static std::string truncateSnippet(std::string_view snippet, size_t maxLength) {
         if (snippet.length() <= maxLength) {
             return std::string{snippet};
         }
@@ -311,7 +301,7 @@ public:
     }
 
 public:
-    explicit constexpr ResultRenderer(RenderConfig config) : config_(std::move(config)) {}
+    explicit ResultRenderer(RenderConfig config) : config_(std::move(config)) {}
 
     /**
      * @brief Render results using ranges with path filtering
@@ -617,7 +607,7 @@ private:
 
 // ============================================================================
 // Convenience Factory Functions
-// ============================================================================
+// ==========================================================================
 
 /**
  * @brief Create a renderer for search results with default configuration

@@ -3,32 +3,12 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
-// Mock Socket and SocketFactory for testing
-class MockSocket : public yams::daemon::AsyncSocket {
-public:
-    MockSocket() : yams::daemon::AsyncSocket(-1, dummy_context) {}
-    // Mock methods as needed
-private:
-    yams::daemon::AsyncIOContext dummy_context;
-};
-
-class MockSocketFactory : public yams::daemon::SocketFactory {
-public:
-    yams::Result<std::unique_ptr<yams::daemon::AsyncSocket>> create() override {
-        return std::make_unique<MockSocket>();
-    }
-    yams::Result<void> validate(const yams::daemon::AsyncSocket&) override {
-        return yams::Result<void>();
-    }
-};
-
 TEST(PooledRequestManagerTest, ExecuteSuccess) {
     // Arrange
-    yams::daemon::ConnectionPool::Config pool_config;
-    pool_config.max_connections = 1;
+    yams::cli::DaemonClientPool::Config pool_config;
+    pool_config.max_clients = 1;
     yams::cli::PooledRequestManager<yams::daemon::StatusRequest, yams::daemon::StatusResponse>
         manager(pool_config);
-    manager.set_socket_factory(std::make_unique<MockSocketFactory>());
 
     yams::daemon::StatusRequest req;
     bool fallback_called = false;
@@ -65,11 +45,11 @@ TEST(PooledRequestManagerTest, ExecuteSuccess) {
 
 TEST(PooledRequestManagerTest, ExecuteFallback) {
     // Arrange
-    yams::daemon::ConnectionPool::Config pool_config;
-    pool_config.max_connections = 0; // Force acquisition to fail
+    yams::cli::DaemonClientPool::Config pool_config;
+    pool_config.max_clients = 0; // Force acquisition to fail
+    pool_config.acquire_timeout = std::chrono::milliseconds{5};
     yams::cli::PooledRequestManager<yams::daemon::StatusRequest, yams::daemon::StatusResponse>
         manager(pool_config);
-    manager.set_socket_factory(std::make_unique<MockSocketFactory>());
 
     yams::daemon::StatusRequest req;
     bool fallback_called = false;

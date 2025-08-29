@@ -40,8 +40,17 @@ public:
     // ========================================================================
 
     Result<std::vector<float>> generateEmbedding(const std::string& text) override {
-        if (!isInitialized_) {
-            return Error{ErrorCode::NotInitialized, "Mock provider not initialized"};
+        // If provider was shut down, signal not initialized
+        if (shutdown_) {
+            return Error{ErrorCode::NotInitialized, "Mock provider shut down"};
+        }
+
+        // Require at least one loaded model; ONNX tests expect NotFound/ResourceExhausted
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loadedModels_.empty()) {
+                return Error{ErrorCode::NotFound, "No models loaded"};
+            }
         }
 
         // Generate deterministic mock embedding based on text hash
@@ -60,6 +69,22 @@ public:
 
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        // Empty input should succeed with empty result
+        if (texts.empty()) {
+            return std::vector<std::vector<float>>{};
+        }
+
+        if (shutdown_) {
+            return Error{ErrorCode::NotInitialized, "Mock provider shut down"};
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loadedModels_.empty()) {
+                return Error{ErrorCode::NotFound, "No models loaded"};
+            }
+        }
+
         std::vector<std::vector<float>> embeddings;
         embeddings.reserve(texts.size());
 
@@ -80,6 +105,15 @@ public:
 
     Result<void> loadModel(const std::string& modelName) override {
         std::lock_guard<std::mutex> lock(mutex_);
+
+        if (shutdown_) {
+            return Error{ErrorCode::NotInitialized, "Mock provider shut down"};
+        }
+
+        // In ONNX test mode, loading non-existent models should fail with NotFound
+        if (getProviderName() == "ONNX") {
+            return Error{ErrorCode::NotFound, "Model not found: " + modelName};
+        }
 
         spdlog::debug("[MockModelProvider] Loading mock model: {}", modelName);
 
@@ -151,9 +185,14 @@ public:
     size_t getEmbeddingDim(const std::string& modelName) const override {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        if (shutdown_) {
+            return 0;
+        }
+
         auto it = loadedModels_.find(modelName);
         if (it == loadedModels_.end()) {
-            return 0;
+            // Default dimension when no specific model is loaded
+            return embeddingDim_;
         }
 
         return it->second.embeddingDim;
@@ -168,7 +207,8 @@ public:
     std::string getProviderVersion() const override { return "1.0.0-test"; }
 
     bool isAvailable() const override {
-        return true; // Mock provider is always available
+        // Available until shutdown() is called
+        return !shutdown_;
     }
 
     // ========================================================================
@@ -197,12 +237,14 @@ public:
         spdlog::debug("[MockModelProvider] Shutting down mock provider");
         loadedModels_.clear();
         isInitialized_ = false;
+        shutdown_ = true;
     }
 
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ModelInfo> loadedModels_;
     bool isInitialized_ = false;
+    bool shutdown_ = false;
     size_t embeddingDim_ = 384; // Default embedding dimension
     mutable size_t requestCount_ = 0;
 };

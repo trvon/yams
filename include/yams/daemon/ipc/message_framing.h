@@ -1,12 +1,12 @@
 #pragma once
 
+#include <yams/common/expected_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <bit>
 #include <concepts>
 #include <cstdint>
-#include <expected>
 #include <span>
 #include <vector>
 
@@ -24,13 +24,54 @@ class MessageFramer {
 public:
     static constexpr uint32_t MAGIC = 0x59414D53; // "YAMS" in hex
     static constexpr uint32_t VERSION = 1;
-    static constexpr size_t HEADER_SIZE = 16; // 4 * sizeof(uint32_t)
+    static constexpr size_t HEADER_SIZE = 20; // 5 * sizeof(uint32_t)
 
     struct FrameHeader {
         uint32_t magic = MAGIC;
         uint32_t version = VERSION;
         uint32_t payload_size = 0;
         uint32_t checksum = 0; // CRC32 of payload
+        uint32_t flags = 0;    // Bit flags for frame properties
+
+        // Flag bits
+        static constexpr uint32_t FLAG_CHUNKED = 0x00000001;     // Chunked transfer encoding
+        static constexpr uint32_t FLAG_LAST_CHUNK = 0x00000002;  // Last chunk in sequence
+        static constexpr uint32_t FLAG_ERROR = 0x00000004;       // Error response
+        static constexpr uint32_t FLAG_HEADER_ONLY = 0x00000008; // Header-only frame (metadata)
+
+        // Helper methods for flag operations
+        void set_chunked(bool is_chunked = true) noexcept {
+            if (is_chunked)
+                flags |= FLAG_CHUNKED;
+            else
+                flags &= ~FLAG_CHUNKED;
+        }
+
+        void set_last_chunk(bool is_last = true) noexcept {
+            if (is_last)
+                flags |= FLAG_LAST_CHUNK;
+            else
+                flags &= ~FLAG_LAST_CHUNK;
+        }
+
+        void set_error(bool is_error = true) noexcept {
+            if (is_error)
+                flags |= FLAG_ERROR;
+            else
+                flags &= ~FLAG_ERROR;
+        }
+
+        void set_header_only(bool is_header_only = true) noexcept {
+            if (is_header_only)
+                flags |= FLAG_HEADER_ONLY;
+            else
+                flags &= ~FLAG_HEADER_ONLY;
+        }
+
+        bool is_chunked() const noexcept { return (flags & FLAG_CHUNKED) != 0; }
+        bool is_last_chunk() const noexcept { return (flags & FLAG_LAST_CHUNK) != 0; }
+        bool is_error() const noexcept { return (flags & FLAG_ERROR) != 0; }
+        bool is_header_only() const noexcept { return (flags & FLAG_HEADER_ONLY) != 0; }
 
         // Convert to network byte order
         void to_network() noexcept {
@@ -39,6 +80,7 @@ public:
                 version = __builtin_bswap32(version);
                 payload_size = __builtin_bswap32(payload_size);
                 checksum = __builtin_bswap32(checksum);
+                flags = __builtin_bswap32(flags);
             }
         }
 
@@ -49,6 +91,7 @@ public:
                 version = __builtin_bswap32(version);
                 payload_size = __builtin_bswap32(payload_size);
                 checksum = __builtin_bswap32(checksum);
+                flags = __builtin_bswap32(flags);
             }
         }
 
@@ -59,7 +102,10 @@ public:
     };
 
     // Frame a message with header and checksum
-    template <FramedMessage T> [[nodiscard]] Result<std::vector<uint8_t>> frame(const T& message) {
+    template <FramedMessage T>
+    [[nodiscard]] Result<std::vector<uint8_t>> frame(const T& message, bool chunked = false,
+                                                     bool last_chunk = false,
+                                                     bool header_only = false) {
         // Serialize message
         auto payload = message.serialize();
 
@@ -67,6 +113,9 @@ public:
         FrameHeader header;
         header.payload_size = static_cast<uint32_t>(payload.size());
         header.checksum = calculate_crc32(payload);
+        header.set_chunked(chunked);
+        header.set_last_chunk(last_chunk);
+        header.set_header_only(header_only);
         header.to_network();
 
         // Combine header and payload
@@ -77,10 +126,27 @@ public:
         const auto* header_bytes = reinterpret_cast<const uint8_t*>(&header);
         frame.insert(frame.end(), header_bytes, header_bytes + sizeof(header));
 
-        // Write payload
-        frame.insert(frame.end(), payload.begin(), payload.end());
+        // Write payload if not header-only frame
+        if (!header_only) {
+            frame.insert(frame.end(), payload.begin(), payload.end());
+        }
 
         return frame;
+    }
+
+    // Create a header-only frame (for streaming responses)
+    template <FramedMessage T>
+    [[nodiscard]] Result<std::vector<uint8_t>>
+    frame_header(const T& message, uint64_t total_size = 0, bool chunked = true) {
+        (void)total_size;
+        return frame(message, chunked, false, true);
+    }
+
+    // Create a chunk frame (for streaming responses)
+    template <FramedMessage T>
+    [[nodiscard]] Result<std::vector<uint8_t>> frame_chunk(const T& message,
+                                                           bool last_chunk = false) {
+        return frame(message, true, last_chunk, false);
     }
 
     // Parse frame header
@@ -142,11 +208,26 @@ public:
     static constexpr uint32_t FRAME_MAGIC = MAGIC;
     static constexpr uint32_t FRAME_VERSION = VERSION;
 
-    explicit MessageFramer(size_t max_message_size = MAX_MESSAGE_SIZE)
+    explicit MessageFramer(size_t max_message_size = 16 * 1024 * 1024)
         : max_message_size_(max_message_size) {}
 
     Result<std::vector<uint8_t>> frame_message(const Message& message);
+    Result<std::vector<uint8_t>> frame_message_header(const Message& message,
+                                                      uint64_t total_size = 0);
+    Result<std::vector<uint8_t>> frame_message_chunk(const Message& message,
+                                                     bool last_chunk = false);
     Result<Message> parse_frame(const std::vector<uint8_t>& frame);
+
+    // Stream-oriented message framing
+    struct ChunkedMessageInfo {
+        bool is_chunked = false;
+        bool is_last_chunk = false;
+        bool is_header_only = false;
+        bool is_error = false;
+        uint32_t payload_size = 0;
+    };
+
+    Result<ChunkedMessageInfo> get_frame_info(std::span<const uint8_t> data);
 
 private:
     size_t max_message_size_;
@@ -206,16 +287,44 @@ public:
     // Legacy interface for implementation
     void reset();
 
-    enum class FrameStatus { NeedMoreData, FrameComplete, InvalidFrame, FrameTooLarge };
+    enum class FrameStatus {
+        NeedMoreData,
+        FrameComplete,
+        InvalidFrame,
+        FrameTooLarge,
+        ChunkedFrame,   // Valid chunk in a chunked response
+        ChunkedComplete // Final chunk in a chunked response
+    };
+
+    // Information about the current frame being processed
+    struct FrameInfo {
+        FrameStatus status = FrameStatus::NeedMoreData;
+        bool is_chunked = false;
+        bool is_last_chunk = false;
+        bool is_header_only = false;
+        bool is_error = false;
+        uint32_t payload_size = 0;
+    };
+
+    // Get information about the current frame
+    [[nodiscard]] FrameInfo get_frame_info() const;
 
     struct FeedResult {
         size_t consumed;
         FrameStatus status;
+        bool is_chunked = false;
+        bool is_last_chunk = false;
+        bool is_header_only = false;
+        bool is_error = false;
     };
 
     FeedResult feed(const uint8_t* data, size_t size);
     bool has_frame() const;
     Result<std::vector<uint8_t>> get_frame();
+
+    // Handle chunked streaming responses
+    bool is_processing_chunked() const { return processing_chunked_; }
+    uint64_t get_chunks_received() const { return chunks_received_; }
 
 private:
     std::vector<uint8_t> buffer_;
@@ -225,6 +334,14 @@ private:
 
     State state_ = State::WaitingForHeader;
     size_t expected_size_ = sizeof(MessageFramer::FrameHeader);
+
+    // Chunked streaming state
+    bool processing_chunked_ = false;
+    bool received_last_chunk_ = false;
+    uint64_t chunks_received_ = 0;
+    uint64_t total_bytes_received_ = 0;
+    uint64_t expected_total_bytes_ = 0;
+    MessageFramer::FrameHeader current_header_{};
 };
 
 } // namespace yams::daemon

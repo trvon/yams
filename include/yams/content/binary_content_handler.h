@@ -3,13 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <concepts>
-#include <format>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <string_view>
 #include <unordered_set>
 #include <yams/content/content_handler.h>
+#include <yams/core/format.h>
 #include <yams/crypto/hasher.h>
 #include <yams/detection/file_type_detector.h>
 
@@ -260,11 +260,11 @@ private:
      */
     template <typename... Args>
     [[nodiscard]] std::string formatError(std::string_view operation,
-                                          const std::filesystem::path& path,
-                                          std::format_string<Args...> fmt, Args&&... args) const {
-        auto details = std::format(fmt, std::forward<Args>(args)...);
-        return std::format("Binary processing failed: {} for '{}' - {}", operation, path.string(),
-                           details);
+                                          const std::filesystem::path& path, std::string_view fmt,
+                                          Args&&... args) const {
+        auto details = yams::format(fmt, std::forward<Args>(args)...);
+        return yams::format("Binary processing failed: {} for '{}' - {}", operation, path.string(),
+                            details);
     }
 
     /**

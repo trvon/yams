@@ -1,7 +1,55 @@
-# Integration test subdirectories
-add_subdirectory(manifest)
-add_subdirectory(search)
-add_subdirectory(daemon)
+# Toggle legacy integration tests (pre-tinyfsm IPC, older flows)
+option(YAMS_BUILD_LEGACY_INTEGRATION_TESTS "Build legacy integration tests (pre-tinyfsm IPC)" OFF)
+
+# Integration test subdirectories (legacy)
+if(YAMS_BUILD_LEGACY_INTEGRATION_TESTS)
+    add_subdirectory(manifest)
+    add_subdirectory(search)
+    add_subdirectory(daemon)
+endif()
+
+# Add-then-query pooled request test (always build)
+if(NOT TARGET pool_add_then_query_test)
+    add_executable(pool_add_then_query_test
+        daemon/pool_add_then_query_test.cpp
+    )
+    target_link_libraries(pool_add_then_query_test PRIVATE
+        yams_mcp
+        yams_cli
+        yams_api
+        yams_search
+        yams_metadata
+        spdlog::spdlog
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+        Threads::Threads
+    )
+    add_test(NAME pool_add_then_query_test COMMAND pool_add_then_query_test)
+    set_tests_properties(pool_add_then_query_test PROPERTIES LABELS "daemon;integration")
+endif()
+
+# Always build the pooled request integration test for PBI-007-01, even if legacy daemon tests are disabled
+if(NOT TARGET pooled_request_integration_test)
+    add_executable(pooled_request_integration_test
+        daemon/pooled_request_integration_test.cpp
+    )
+    target_link_libraries(pooled_request_integration_test PRIVATE
+        yams_mcp
+        yams_cli
+        yams_api
+        yams_search
+        yams_metadata
+        yams_downloader
+        spdlog::spdlog
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+        Threads::Threads
+    )
+    add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)
+    set_tests_properties(pooled_request_integration_test PROPERTIES LABELS "daemon;integration")
+endif()
 # MCP downloader integration test (header-only MCP tool registry)
 add_executable(mcp_downloader_integration_test
     mcp/mcp_downloader_integration_test.cpp
@@ -13,19 +61,29 @@ target_link_libraries(mcp_downloader_integration_test PRIVATE
     yams_mcp
 )
 add_test(NAME mcp_downloader_integration_test COMMAND mcp_downloader_integration_test)
-option(YAMS_ENABLE_NEW_INTEGRATION_TESTS "Build ported integration tests" OFF)
 
-# Integration tests - temporarily disabled due to GoogleTest configuration issues
-# TODO: Fix GoogleTest header include directories (gtest/gtest.h not found)
-# The GoogleTest targets are built successfully but headers aren't propagated correctly
-add_executable(integration_tests
-    placeholder.cpp               # Minimal placeholder until GoogleTest issues are fixed
-    # main.cpp                      # Disabled: GoogleTest header issues
-    # full_system_test.cpp          # API changes needed
-    # compression_integration_test.cpp  # API changes needed
-    # cli_init_integration_test.cpp # Disabled: GoogleTest header issues
-    # cli_delete_test.cpp           # Has its own main() - conflicts
-)
+
+# Pooled streaming reuse test (always build)
+if(NOT TARGET pool_streaming_reuse_test)
+    add_executable(pool_streaming_reuse_test
+        daemon/pool_streaming_reuse_test.cpp
+    )
+    target_link_libraries(pool_streaming_reuse_test PRIVATE
+        yams_mcp
+        yams_cli
+        yams_api
+        yams_search
+        yams_metadata
+        spdlog::spdlog
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+        Threads::Threads
+    )
+    add_test(NAME pool_streaming_reuse_test COMMAND pool_streaming_reuse_test)
+    set_tests_properties(pool_streaming_reuse_test PROPERTIES LABELS "daemon;integration")
+endif()
+
 
 # New comprehensive integration tests
 if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)
@@ -49,20 +107,7 @@ if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)
     task_management_test.cpp
 )
 
-    target_link_libraries(integration_tests
-    PRIVATE
-        # Minimal dependencies for placeholder - no GoogleTest needed
-        yams::api
-        # test_utils                  # Disabled: may have GoogleTest dependencies
-        # yams::manifest             # Disabled: not needed for placeholder
-        # yams::storage_engine       # Disabled: not needed for placeholder
-        # yams::chunking             # Disabled: not needed for placeholder
-        # yams::crypto               # Disabled: not needed for placeholder
-        # yams::wal                  # Disabled: not needed for placeholder
-        # yams::integrity            # Disabled: not needed for placeholder
-        # yams::compression          # Disabled: not needed for placeholder
-        # GoogleTest targets removed since placeholder doesn't use them
-)
+    # Legacy target linking moved to legacy guard above
 
     # Debug: Check which GoogleTest targets exist (disabled for placeholder)
     # TODO: Re-enable debugging when fixing GoogleTest issues
@@ -146,11 +191,37 @@ if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)
     endforeach()
 endif()
 
-gtest_discover_tests(integration_tests
-    PROPERTIES
-        LABELS "integration"
-        TIMEOUT 60
-)
+# Streaming concurrency test: ensure stream returns while data is being added (always build)
+if(NOT TARGET stream_return_while_adding_test)
+    add_executable(stream_return_while_adding_test
+        daemon/stream_return_while_adding_test.cpp
+    )
+    target_link_libraries(stream_return_while_adding_test PRIVATE
+        yams_mcp
+        yams_cli
+        yams_api
+        yams_search
+        yams_metadata
+        spdlog::spdlog
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+        Threads::Threads
+    )
+    add_test(NAME stream_return_while_adding_test COMMAND stream_return_while_adding_test)
+    set_tests_properties(stream_return_while_adding_test PROPERTIES LABELS "daemon;integration")
+endif()
+
+# Discover legacy tests only if enabled and target exists
+if(YAMS_BUILD_LEGACY_INTEGRATION_TESTS)
+    if(TARGET integration_tests)
+        gtest_discover_tests(integration_tests
+            PROPERTIES
+                LABELS "integration"
+                TIMEOUT 60
+        )
+    endif()
+endif()
 
 # Discover new integration tests
 if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)

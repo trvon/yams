@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug yams-daemon (LLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/yams-debug/src/daemon/yams-daemon",
+      "args": ["--log-level", "debug","--socket", "/tmp/yams-daemon-501.sock", "--data-dir", "/Volumes/picaso/yams", "--pid-file", "/tmp/yams-daemon.pid", "--foreground"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build (Debug)",
+      "env": {
+        "YAMS_LOG_LEVEL": "debug",
+        "YAMS_STORAGE": "/Volumes/picaso/yams",
+        "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1"
+      },
+      "stdio": [null, null, null]
+    },
+    {
+      "name": "Attach to yams-daemon (LLDB)",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickProcess}",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "YAMS_LOG_LEVEL": "debug",
+        "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1"
+      }
+    }
+  ]
+}

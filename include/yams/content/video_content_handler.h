@@ -3,7 +3,6 @@
 #include <atomic>
 #include <chrono>
 #include <concepts>
-#include <format>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -12,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 #include <yams/content/content_handler.h>
+#include <yams/core/format.h>
 #include <yams/detection/file_type_detector.h>
 
 namespace yams::content {

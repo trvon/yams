@@ -7,6 +7,7 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
+#include <yams/common/format.h>
 #include <yams/content/image_content_handler.h>
 #include <yams/detection/file_type_detector.h>
 
@@ -37,7 +38,7 @@ constexpr auto IMAGE_MIME_TYPES = createImageMimeTypes();
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file) {
             return Error{ErrorCode::FileNotFound,
-                         std::format("Cannot open file: {}", path.string())};
+                         yams::fmt_format("Cannot open file: {}", path.string())};
         }
 
         const auto size = file.tellg();
@@ -55,7 +56,7 @@ constexpr auto IMAGE_MIME_TYPES = createImageMimeTypes();
 
         return data;
     } catch (const std::exception& e) {
-        return Error{ErrorCode::IOError, std::format("File read error: {}", e.what())};
+        return Error{ErrorCode::IOError, yams::fmt_format("File read error: {}", e.what())};
     }
 }
 
@@ -177,9 +178,9 @@ Result<void> ImageContentHandler::validate(const std::filesystem::path& path) co
     try {
         const auto fileSize = std::filesystem::file_size(path);
         if (fileSize > maxFileSize()) {
-            return Error{
-                ErrorCode::InvalidArgument,
-                std::format("Image file too large: {} bytes (max: {})", fileSize, maxFileSize())};
+            return Error{ErrorCode::InvalidArgument,
+                         yams::fmt_format("Image file too large: {} bytes (max: {})", fileSize,
+                                          maxFileSize())};
         }
 
         if (fileSize == 0) {
@@ -187,7 +188,7 @@ Result<void> ImageContentHandler::validate(const std::filesystem::path& path) co
         }
 
     } catch (const std::filesystem::filesystem_error& e) {
-        return Error{ErrorCode::IOError, std::format("Filesystem error: {}", e.what())};
+        return Error{ErrorCode::IOError, yams::fmt_format("Filesystem error: {}", e.what())};
     }
 
     return Result<void>{};
@@ -245,16 +246,17 @@ Result<ContentResult> ImageContentHandler::processBuffer(std::span<const std::by
     auto& detector = detection::FileTypeDetector::instance();
     auto signatureResult = detector.detectFromBuffer(data);
     if (!signatureResult) {
-        return Error{ErrorCode::NotSupported, std::format("Failed to detect image format: {}",
-                                                          signatureResult.error().message)};
+        return Error{ErrorCode::NotSupported, yams::fmt_format("Failed to detect image format: {}",
+                                                               signatureResult.error().message)};
     }
 
     const auto& signature = signatureResult.value();
 
     // Verify this is actually an image
     if (!signature.mimeType.starts_with("image/") && signature.fileType != "image") {
-        return Error{ErrorCode::NotSupported, std::format("Not an image file: detected as {} ({})",
-                                                          signature.mimeType, signature.fileType)};
+        return Error{ErrorCode::NotSupported,
+                     yams::fmt_format("Not an image file: detected as {} ({})", signature.mimeType,
+                                      signature.fileType)};
     }
 
     // Convert MIME type to our ImageFormat enum
@@ -270,8 +272,8 @@ Result<ContentResult> ImageContentHandler::processBuffer(std::span<const std::by
 
     // Validate dimensions
     if (!isValidDimension(metadata.width, metadata.height)) {
-        return Error{ErrorCode::InvalidArgument, std::format("Invalid image dimensions: {}x{}",
-                                                             metadata.width, metadata.height)};
+        return Error{ErrorCode::InvalidArgument, yams::fmt_format("Invalid image dimensions: {}x{}",
+                                                                  metadata.width, metadata.height)};
     }
 
     // Extract EXIF data if requested
@@ -381,7 +383,7 @@ ImageContentHandler::extractExifMetadata(std::span<const std::byte> data,
         exifData["format"] = std::string{formatToString(format)};
         exifData["size"] = std::to_string(data.size());
         exifData["processing_date"] =
-            std::format("{:%Y-%m-%d %H:%M:%S}", std::chrono::system_clock::now());
+            yams::fmt_format("{:%Y-%m-%d %H:%M:%S}", std::chrono::system_clock::now());
         // Add more EXIF extraction logic here
     }
 
@@ -404,7 +406,7 @@ ImageContentHandler::generateThumbnail(std::span<const std::byte> data, ImageFor
 
     // For now, just store a minimal header indicating it's a placeholder
     const std::string placeholder =
-        std::format("THUMBNAIL_PLACEHOLDER_{}x{}", targetSize, targetSize);
+        yams::fmt_format("THUMBNAIL_PLACEHOLDER_{}x{}", targetSize, targetSize);
     std::ranges::transform(placeholder, std::back_inserter(thumbnail),
                            [](char c) { return static_cast<std::byte>(c); });
 

@@ -85,10 +85,10 @@ pip install conan
 conan profile detect --force
 
 # Build with Conan (recommended - this is what creates the release binaries)
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
-cmake --preset conan-release
-cmake --build --preset conan-release
-sudo cmake --install build/conan-release/build/Release
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+cmake --preset yams-release
+cmake --build --preset yams-release
+sudo cmake --install build/yams-release
 ```
 
 **Requirements:**
@@ -158,12 +158,12 @@ sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || 
 Then re-run:
 ```bash
 conan install . \
-  --output-folder=build/conan-ninja-release \
+  --output-folder=build/yams-release \
   -s build_type=Release \
   --build=missing
 
-cmake --preset conan-ninja-release
-cmake --build build/conan-ninja-release -j
+cmake --preset yams-release
+cmake --build --preset yams-release -j
 ```
 
 #### PDF Support Issues

@@ -15,7 +15,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include <yams/daemon/ipc/connection_pool.h>
 
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -45,33 +44,48 @@ public:
         bool verbose = false;
     };
 
+    // Stable pool entry object
+    struct Entry {
+        std::unique_ptr<yams::daemon::DaemonClient> client;
+        std::chrono::steady_clock::time_point last_used{};
+        bool in_use = false;
+        size_t id = 0;
+
+        Entry() = default;
+        Entry(Entry&& other) noexcept
+            : client(std::move(other.client)), last_used(other.last_used), in_use(other.in_use),
+              id(other.id) {}
+
+        Entry& operator=(Entry&& other) noexcept {
+            if (this != &other) {
+                client = std::move(other.client);
+                last_used = other.last_used;
+                in_use = other.in_use;
+                id = other.id;
+            }
+            return *this;
+        }
+
+        Entry(const Entry&) = delete;
+        Entry& operator=(const Entry&) = delete;
+    };
+
     // RAII lease for a pooled client
     class Lease {
     public:
         Lease() = default;
-        Lease(DaemonClientPool* pool, size_t index, yams::daemon::DaemonClient* client,
-              std::chrono::milliseconds waited)
-            : pool_(pool), index_(index), client_(client), waited_(waited) {
-            if (client_) {
-                // Mark in-flight usage
-                pool_->entries_[index_].inflight.fetch_add(1, std::memory_order_acq_rel);
-                // Light sanity: if >1, we're double-using the same client concurrently
-                auto inflight = pool_->entries_[index_].inflight.load(std::memory_order_acquire);
-                if (inflight > 1) {
-                    spdlog::warn("[DaemonClientPool] Client {} reused concurrently (inflight={}) - "
-                                 "this indicates misuse",
-                                 pool_->entries_[index_].id, inflight);
-                }
-            }
-        }
+        Lease(DaemonClientPool* pool, std::shared_ptr<struct Entry> entry,
+              yams::daemon::DaemonClient* client, std::chrono::milliseconds waited,
+              size_t client_id)
+            : pool_(pool), entry_(std::move(entry)), client_(client), waited_(waited),
+              client_id_cached_(client_id) {}
 
         ~Lease() { release(); }
 
         Lease(const Lease&) = delete;
         Lease& operator=(const Lease&) = delete;
 
-        Lease(Lease&& other) noexcept
-            : pool_(nullptr), index_(static_cast<size_t>(-1)), client_(nullptr), waited_(0) {
+        Lease(Lease&& other) noexcept : pool_(nullptr), client_(nullptr), waited_(0) {
             move_from(std::move(other));
         }
         Lease& operator=(Lease&& other) noexcept {
@@ -91,9 +105,7 @@ public:
         const yams::daemon::DaemonClient* operator->() const { return client_; }
         const yams::daemon::DaemonClient& operator*() const { return *client_; }
 
-        size_t client_id() const {
-            return pool_ ? pool_->entries_[index_].id : static_cast<size_t>(-1);
-        }
+        size_t client_id() const { return client_id_cached_; }
         std::chrono::milliseconds waited() const { return waited_; }
 
     private:
@@ -101,37 +113,37 @@ public:
             if (!pool_ || client_ == nullptr) {
                 return;
             }
-            // Clear in-flight and mark entry free
-            auto& e = pool_->entries_[index_];
-            e.inflight.store(0, std::memory_order_release);
+            // Mark entry free under lock
             {
                 std::lock_guard<std::mutex> lk(pool_->mtx_);
-                e.in_use = false;
-                e.last_used = std::chrono::steady_clock::now();
+                if (entry_) {
+                    entry_->in_use = false;
+                    entry_->last_used = std::chrono::steady_clock::now();
+                }
                 pool_->total_releases_++;
             }
             pool_->cv_.notify_one();
 
             pool_ = nullptr;
             client_ = nullptr;
-            index_ = static_cast<size_t>(-1);
+            entry_.reset();
         }
 
         void move_from(Lease&& other) noexcept {
             pool_ = other.pool_;
-            index_ = other.index_;
+            entry_ = std::move(other.entry_);
             client_ = other.client_;
             waited_ = other.waited_;
             other.pool_ = nullptr;
-            other.index_ = static_cast<size_t>(-1);
             other.client_ = nullptr;
             other.waited_ = std::chrono::milliseconds{0};
         }
 
         DaemonClientPool* pool_ = nullptr;
-        size_t index_ = static_cast<size_t>(-1);
+        std::shared_ptr<struct Entry> entry_;
         yams::daemon::DaemonClient* client_ = nullptr;
         std::chrono::milliseconds waited_{0};
+        size_t client_id_cached_ = static_cast<size_t>(-1);
     };
 
     explicit DaemonClientPool(Config cfg) : cfg_(std::move(cfg)), next_id_(1), stop_(false) {
@@ -190,6 +202,7 @@ public:
             lk, timeout, [this] { return stop_ || find_free_unlocked_index_unlocked() != npos; });
 
         if (!woke || stop_) {
+            acquire_timeouts_++;
             return Error{ErrorCode::Timeout, "Timed out waiting for daemon client from pool"};
         }
 
@@ -222,6 +235,8 @@ public:
         size_t idle_clients = 0;
         size_t total_acquires = 0;
         size_t total_releases = 0;
+        size_t acquire_timeouts = 0;
+        size_t connect_failures = 0;
     };
 
     Stats stats() const {
@@ -229,7 +244,7 @@ public:
         Stats s;
         s.total_clients = entries_.size();
         for (auto const& e : entries_) {
-            if (e.in_use) {
+            if (e->in_use) {
                 s.busy_clients++;
             } else {
                 s.idle_clients++;
@@ -237,46 +252,33 @@ public:
         }
         s.total_acquires = total_acquires_;
         s.total_releases = total_releases_;
+        s.acquire_timeouts = acquire_timeouts_;
+        s.connect_failures = connect_failures_;
         return s;
     }
 
     const Config& config() const { return cfg_; }
 
-private:
-    struct Entry {
-        std::unique_ptr<yams::daemon::DaemonClient> client;
-        std::chrono::steady_clock::time_point last_used{};
-        std::atomic<uint32_t> inflight{0};
-        bool in_use = false;
-        size_t id = 0;
-
-        Entry() = default;
-        Entry(Entry&& other) noexcept
-            : client(std::move(other.client)), last_used(other.last_used),
-              inflight(other.inflight.load(std::memory_order_relaxed)), in_use(other.in_use),
-              id(other.id) {}
-
-        Entry& operator=(Entry&& other) noexcept {
-            if (this != &other) {
-                client = std::move(other.client);
-                last_used = other.last_used;
-                inflight.store(other.inflight.load(std::memory_order_relaxed),
-                               std::memory_order_relaxed);
-                in_use = other.in_use;
-                id = other.id;
+    // Mark a specific client as bad so that it reconnects on next use.
+    void mark_bad(size_t client_id) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto& e : entries_) {
+            if (e->id == client_id) {
+                if (e->client) {
+                    e->client->disconnect();
+                }
+                e->last_used = std::chrono::steady_clock::now();
+                break;
             }
-            return *this;
         }
+    }
 
-        Entry(const Entry&) = delete;
-        Entry& operator=(const Entry&) = delete;
-    };
-
+private:
     static constexpr size_t npos = static_cast<size_t>(-1);
 
     size_t find_free_unlocked_index_unlocked() const {
         for (size_t i = 0; i < entries_.size(); ++i) {
-            if (!entries_[i].in_use) {
+            if (!entries_[i]->in_use) {
                 return i;
             }
         }
@@ -288,40 +290,54 @@ private:
             return npos;
         }
 
-        auto client = std::make_unique<yams::daemon::DaemonClient>(cfg_.client_config);
+        auto client_cfg = cfg_.client_config;
+        client_cfg.singleUseConnections = false;
+        // Nudge timeouts up slightly to handle bursty conditions
+        if (client_cfg.headerTimeout < std::chrono::milliseconds(45000)) {
+            client_cfg.headerTimeout = std::chrono::milliseconds(45000);
+        }
+        if (client_cfg.bodyTimeout < std::chrono::milliseconds(120000)) {
+            client_cfg.bodyTimeout = std::chrono::milliseconds(120000);
+        }
+        auto client = std::make_unique<yams::daemon::DaemonClient>(client_cfg);
 
-        Entry e;
-        e.client = std::move(client);
-        e.last_used = std::chrono::steady_clock::now();
-        e.inflight.store(0, std::memory_order_relaxed);
-        e.in_use = false;
-        e.id = next_id_++;
+        auto e = std::make_shared<Entry>();
+        e->client = std::move(client);
+        e->last_used = std::chrono::steady_clock::now();
+        e->in_use = false;
+        e->id = next_id_++;
 
-        entries_.emplace_back(std::move(e));
+        entries_.emplace_back(e);
         if (cfg_.verbose) {
-            spdlog::debug("[DaemonClientPool] Created client {}", entries_.back().id);
+            spdlog::debug("[DaemonClientPool] Created client {}", entries_.back()->id);
         }
         return entries_.size() - 1;
     }
 
     Result<Lease> make_lease_unlocked(std::unique_lock<std::mutex>& lk, size_t idx,
                                       std::chrono::milliseconds waited) {
-        auto& e = entries_[idx];
-        e.in_use = true;
-        e.last_used = std::chrono::steady_clock::now();
+        // Mark the entry as in use and capture required state while locked.
+        auto entry = entries_[idx];
+        entry->in_use = true;
+        entry->last_used = std::chrono::steady_clock::now();
         total_acquires_++;
-        auto id = e.id;
+        const auto captured_id = entry->id;
+        // Capture client pointer while still holding the lock
+        yams::daemon::DaemonClient* client_ptr = entry->client.get();
 
         // We drop the lock during connect; another thread won't see this entry because in_use=true
         lk.unlock();
 
-        // Ensure connection is ready
-        if (!e.client->isConnected()) {
-            auto rc = e.client->connect();
+        // Ensure connection is ready (outside lock)
+        if (!client_ptr->isConnected()) {
+            auto rc = client_ptr->connect();
             if (!rc) {
                 // Failed to connect, mark free and return error
                 lk.lock();
-                e.in_use = false;
+                // Use stable shared entry pointer under lock
+                entry->in_use = false;
+                entry->last_used = std::chrono::steady_clock::now();
+                connect_failures_++;
                 cv_.notify_one();
                 lk.unlock();
                 return rc.error();
@@ -331,11 +347,11 @@ private:
         if (cfg_.verbose) {
             spdlog::debug("[DaemonClientPool] Acquire client {} (waited {} ms, timeout={} ms, "
                           "request_timeout={} ms)",
-                          id, waited.count(), cfg_.acquire_timeout.count(),
+                          captured_id, waited.count(), cfg_.acquire_timeout.count(),
                           cfg_.client_config.requestTimeout.count());
         }
 
-        return Lease(this, idx, e.client.get(), waited);
+        return Lease(this, entry, client_ptr, waited, captured_id);
     }
 
     void pruning_loop() {
@@ -354,10 +370,10 @@ private:
                     size_t removed = 0;
                     for (size_t i = 0; i < entries_.size();) {
                         auto& e = entries_[i];
-                        if (!e.in_use && (now - e.last_used) > cfg_.idle_timeout &&
+                        if (!e->in_use && (now - e->last_used) > cfg_.idle_timeout &&
                             entries_.size() - removed > cfg_.min_clients) {
                             if (cfg_.verbose) {
-                                spdlog::debug("[DaemonClientPool] Pruning idle client {}", e.id);
+                                spdlog::debug("[DaemonClientPool] Pruning idle client {}", e->id);
                             }
                             // erase by swap-pop
                             using std::swap;
@@ -378,7 +394,7 @@ private:
     Config cfg_;
     mutable std::mutex mtx_;
     std::condition_variable cv_;
-    std::vector<Entry> entries_;
+    std::vector<std::shared_ptr<Entry>> entries_;
     std::atomic<size_t> next_id_;
     std::thread pruning_thread_;
     bool stop_;
@@ -386,6 +402,8 @@ private:
     // Stats
     size_t total_acquires_ = 0;
     size_t total_releases_ = 0;
+    size_t acquire_timeouts_ = 0;
+    size_t connect_failures_ = 0;
 
     friend class Lease;
 };
@@ -395,6 +413,78 @@ private:
 // Pools DaemonClient instances and funnels requests through DaemonClient::call
 // ============================================================================
 
+// Prefer streaming-aware client calls where available to reduce large single-frame responses
+// Simple heuristics decide when to stream to reduce latency and memory for large results.
+inline bool should_stream(const yams::daemon::SearchRequest& r) {
+    // Env override for search limit threshold
+    size_t limit_threshold = 50;
+    if (const char* s = std::getenv("YAMS_STREAM_SEARCH_LIMIT")) {
+        long v = std::strtol(s, nullptr, 10);
+        if (v > 0)
+            limit_threshold = static_cast<size_t>(v);
+    }
+    // Stream when results likely large or progressive output is useful
+    return (r.limit > limit_threshold) || (!r.pathsOnly && r.limit > limit_threshold / 2) ||
+           r.jsonOutput; // json can be large; stream to avoid big single frame
+}
+inline bool should_stream(const yams::daemon::ListRequest& r) {
+    size_t limit_threshold = 100;
+    if (const char* s = std::getenv("YAMS_STREAM_LIST_LIMIT")) {
+        long v = std::strtol(s, nullptr, 10);
+        if (v > 0)
+            limit_threshold = static_cast<size_t>(v);
+    }
+    return (r.limit > limit_threshold) || r.showSnippets || r.pathsOnly;
+}
+inline bool should_stream(const yams::daemon::GrepRequest& r) {
+    // Grep generally benefits from streaming when scanning many files or printing paths
+    size_t file_hint_threshold = 10;
+    if (const char* s = std::getenv("YAMS_STREAM_GREP_FILE_HINT")) {
+        long v = std::strtol(s, nullptr, 10);
+        if (v > 0)
+            file_hint_threshold = static_cast<size_t>(v);
+    }
+    return r.pathsOnly || r.filesOnly || r.countOnly || r.maxMatches > 0 || (!r.path.empty()) ||
+           (!r.paths.empty() && r.paths.size() >= file_hint_threshold) || r.recursive;
+}
+inline Result<yams::daemon::SearchResponse> call_pref(yams::daemon::DaemonClient* c,
+                                                      const yams::daemon::SearchRequest& r) {
+    // Always use streaming for search requests to match server behavior
+    spdlog::debug("[PooledRequestManager] Using streamingSearch for query='{}' limit={}", r.query,
+                  r.limit);
+    return c->streamingSearch(r);
+}
+inline Result<yams::daemon::ListResponse> call_pref(yams::daemon::DaemonClient* c,
+                                                    const yams::daemon::ListRequest& r) {
+    if (should_stream(r)) {
+        spdlog::debug(
+            "[PooledRequestManager] Using streamingList limit={} showSnippets={} pathsOnly={}",
+            r.limit, r.showSnippets, r.pathsOnly);
+        return c->streamingList(r);
+    }
+    spdlog::debug("[PooledRequestManager] Using unary list limit={} showSnippets={} pathsOnly={}",
+                  r.limit, r.showSnippets, r.pathsOnly);
+    return c->list(r);
+}
+inline Result<yams::daemon::GrepResponse> call_pref(yams::daemon::DaemonClient* c,
+                                                    const yams::daemon::GrepRequest& r) {
+    if (should_stream(r)) {
+        spdlog::debug("[PooledRequestManager] Using streamingGrep pattern='{}' paths={} "
+                      "recursive={} maxMatches={}",
+                      r.pattern, r.paths.size(), r.recursive, r.maxMatches);
+        return c->streamingGrep(r);
+    }
+    spdlog::debug(
+        "[PooledRequestManager] Using unary grep pattern='{}' paths={} recursive={} maxMatches={}",
+        r.pattern, r.paths.size(), r.recursive, r.maxMatches);
+    return c->grep(r);
+}
+template <class Req>
+inline Result<yams::daemon::ResponseOfT<Req>> call_pref(yams::daemon::DaemonClient* c,
+                                                        const Req& r) {
+    return c->template call<Req>(r);
+}
+
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>>
 class PooledRequestManager {
 public:
@@ -402,19 +492,6 @@ public:
 
     explicit PooledRequestManager(DaemonClientPool::Config pool_cfg = DaemonClientPool::Config{})
         : pool_(std::make_unique<DaemonClientPool>(std::move(pool_cfg))) {}
-    // Legacy compatibility: construct from ConnectionPool::Config by mapping fields
-    explicit PooledRequestManager(yams::daemon::ConnectionPool::Config pool_cfg_legacy) {
-        DaemonClientPool::Config mapped;
-        mapped.min_clients = pool_cfg_legacy.min_connections;
-        mapped.max_clients = pool_cfg_legacy.max_connections;
-        mapped.idle_timeout = pool_cfg_legacy.idle_timeout;
-        mapped.acquire_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
-            pool_cfg_legacy.connection_timeout);
-        // Map a conservative request timeout from connection_timeout as a baseline
-        mapped.client_config.requestTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(
-            pool_cfg_legacy.connection_timeout);
-        pool_ = std::make_unique<DaemonClientPool>(std::move(mapped));
-    }
 
     // Executes request via a pooled DaemonClient.
     // If pool acquisition fails, fallback() is invoked (caller may perform local handling).
@@ -440,7 +517,7 @@ public:
 
         // Instrument request timing
         auto t0 = std::chrono::steady_clock::now();
-        auto resp = lease->template call<TRequest>(req);
+        auto resp = call_pref(lease.operator->(), req);
         auto t1 = std::chrono::steady_clock::now();
 
         auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
@@ -452,7 +529,37 @@ public:
         }
 
         if (!resp) {
-            return resp.error();
+            // If daemon call failed, log and attempt fallback (e.g., local handling)
+            daemon_failures_.fetch_add(1, std::memory_order_relaxed);
+            const bool is_network = (resp.error().code == ErrorCode::NetworkError);
+            spdlog::error(
+                "[PooledRequestManager] Daemon call failed on client {} after {} ms: {}{}.",
+                client_id, call_ms.count(), resp.error().message, is_network ? " (network)" : "");
+            if (is_network) {
+                pool_->mark_bad(client_id);
+            }
+            // Attempt recovery via fallback
+            try {
+                if (!fallback) {
+                    spdlog::error(
+                        "[PooledRequestManager] No fallback provided; surfacing daemon error");
+                    return resp.error();
+                }
+                auto fb = fallback();
+                if (fb) {
+                    fallbacks_succeeded_.fetch_add(1, std::memory_order_relaxed);
+                    spdlog::info(
+                        "[PooledRequestManager] Recovered from daemon failure via fallback");
+                    return fb; // success via recovery
+                }
+                fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+                spdlog::error("[PooledRequestManager] Fallback path failed after daemon error: {}",
+                              fb.error().message);
+                return fb; // propagate fallback error
+            } catch (...) {
+                fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+                return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+            }
         }
 
         return render(resp.value());
@@ -461,8 +568,23 @@ public:
     DaemonClientPool& pool() { return *pool_; }
     const DaemonClientPool& pool() const { return *pool_; }
 
+    struct RecoveryStats {
+        size_t daemon_failures = 0;
+        size_t fallbacks_succeeded = 0;
+        size_t fallbacks_failed = 0;
+    };
+
+    RecoveryStats recovery_stats() const {
+        return RecoveryStats{daemon_failures_.load(std::memory_order_relaxed),
+                             fallbacks_succeeded_.load(std::memory_order_relaxed),
+                             fallbacks_failed_.load(std::memory_order_relaxed)};
+    }
+
 private:
     std::unique_ptr<DaemonClientPool> pool_;
+    std::atomic<size_t> daemon_failures_{0};
+    std::atomic<size_t> fallbacks_succeeded_{0};
+    std::atomic<size_t> fallbacks_failed_{0};
 };
 
 // ============================================================================
@@ -481,8 +603,7 @@ inline Result<void> daemon_first_pooled(PooledRequestManager<TRequest, TResponse
 // Legacy-like shim that keeps a static pool per TRequest/TResponse
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>,
           typename Fallback, typename Render>
-inline Result<void> daemon_first(const TRequest& req, Fallback&& /*fallback_unused*/,
-                                 Render&& render) {
+inline Result<void> daemon_first(const TRequest& req, Fallback&& fallback, Render&& render) {
     // Static pool with basic defaults. Tunable via env if desired.
     static DaemonClientPool::Config cfg = [] {
         DaemonClientPool::Config c;
@@ -503,7 +624,7 @@ inline Result<void> daemon_first(const TRequest& req, Fallback&& /*fallback_unus
     }();
 
     static PooledRequestManager<TRequest, TResponse> manager(cfg);
-    return manager.execute(req, [] { return Result<void>(); }, std::forward<Render>(render));
+    return manager.execute(req, std::forward<Fallback>(fallback), std::forward<Render>(render));
 }
 
 } // namespace yams::cli

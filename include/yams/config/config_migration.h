@@ -76,6 +76,23 @@ public:
     static std::map<std::string, std::map<std::string, std::string>> getV2ConfigDefaults();
 
     /**
+     * @brief Additional v2 keys introduced after initial v2 rollout (additive only)
+     * These are merged non-destructively into existing v2 configs during update.
+     */
+    static std::map<std::string, std::map<std::string, std::string>> getV2AdditiveDefaults();
+
+    /**
+     * @brief Update existing v2 config by adding any missing keys from additive defaults.
+     * - Does not overwrite existing values
+     * - Optionally creates a timestamped backup
+     * - When dryRun=true, no file is written; returns the list of keys that would be added
+     * @return list of dot-keys (section.key) added or to be added
+     */
+    Result<std::vector<std::string>> updateV2SchemaAdditive(const std::filesystem::path& configPath,
+                                                            bool makeBackup = true,
+                                                            bool dryRun = false);
+
+    /**
      * @brief Parse TOML config file
      */
     Result<std::map<std::string, std::map<std::string, std::string>>>

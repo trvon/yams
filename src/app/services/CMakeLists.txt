@@ -7,6 +7,7 @@ set(APP_SERVICES_SOURCES
     download_service.cpp
     indexing_service.cpp
     stats_service.cpp
+    utils.cpp
     factory.cpp
 )
 
@@ -32,8 +33,8 @@ target_include_directories(yams_app_services
 target_compile_features(yams_app_services PUBLIC cxx_std_20)
 
 # Link Tracy if profiling is enabled
-if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
-    target_link_libraries(yams_app_services PRIVATE Tracy::TracyClient)
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    target_link_libraries(yams_app_services PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()
 
 # Export and install app services library

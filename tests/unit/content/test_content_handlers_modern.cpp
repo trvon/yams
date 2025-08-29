@@ -1,7 +1,6 @@
 #include <chrono>
 #include <concepts>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <memory>
 #include <ranges>          // C++20
@@ -10,6 +9,7 @@
 #include <string_view>
 #include <vector>
 #include <gtest/gtest.h>
+#include <yams/core/format.h>
 
 #include <yams/content/audio_content_handler.h>
 #include <yams/content/binary_content_handler.h>

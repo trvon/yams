@@ -10,6 +10,7 @@ target_link_libraries(daemon_lifecycle_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_lifecycle_integration_test COMMAND daemon_lifecycle_integration_test)
+set_tests_properties(daemon_lifecycle_integration_test PROPERTIES LABELS "daemon;integration")
 
 # Daemon search integration test
 add_executable(daemon_search_integration_test
@@ -25,6 +26,7 @@ target_link_libraries(daemon_search_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_search_integration_test COMMAND daemon_search_integration_test)
+set_tests_properties(daemon_search_integration_test PROPERTIES LABELS "daemon;integration")
 
 # Daemon streaming test
 add_executable(daemon_streaming_test
@@ -38,6 +40,7 @@ target_link_libraries(daemon_streaming_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_streaming_test COMMAND daemon_streaming_test)
+set_tests_properties(daemon_streaming_test PROPERTIES LABELS "daemon;integration")
 
 # Daemon resilience test
 add_executable(daemon_resilience_test
@@ -49,6 +52,7 @@ target_link_libraries(daemon_resilience_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_resilience_test COMMAND daemon_resilience_test)
+set_tests_properties(daemon_resilience_test PROPERTIES LABELS "daemon;integration")
 
 # Daemon download integration test
 add_executable(daemon_download_integration_test
@@ -62,6 +66,7 @@ target_link_libraries(daemon_download_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_download_integration_test COMMAND daemon_download_integration_test)
+set_tests_properties(daemon_download_integration_test PROPERTIES LABELS "daemon;integration")
 
 # Split tests: daemon add normalization and daemon delete parity
 add_executable(daemon_add_normalization_integration_test
@@ -75,6 +80,7 @@ target_link_libraries(daemon_add_normalization_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_add_normalization_integration_test COMMAND daemon_add_normalization_integration_test)
+set_tests_properties(daemon_add_normalization_integration_test PROPERTIES LABELS "daemon;integration")
 
 add_executable(daemon_delete_parity_integration_test
     daemon_delete_add_integration_test.cpp
@@ -87,6 +93,7 @@ target_link_libraries(daemon_delete_parity_integration_test PRIVATE
     GTest::gtest_main
 )
 add_test(NAME daemon_delete_parity_integration_test COMMAND daemon_delete_parity_integration_test)
+set_tests_properties(daemon_delete_parity_integration_test PROPERTIES LABELS "daemon;integration")
 
 # Pooled request integration test (uses real daemon)
 add_executable(pooled_request_integration_test
@@ -106,3 +113,4 @@ target_link_libraries(pooled_request_integration_test PRIVATE
     Threads::Threads
 )
 add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)
+set_tests_properties(pooled_request_integration_test PROPERTIES LABELS "daemon;integration")

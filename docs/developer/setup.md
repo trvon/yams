@@ -39,23 +39,23 @@ conan profile detect --force
 pip3 install --upgrade conan
 
 # Resolve deps to a dedicated build folder
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
 
-# Configure (Conan generates a CMake preset named "conan-release")
-cmake --preset conan-release
+# Configure
+cmake --preset yams-release
 
 # Build
-cmake --build --preset conan-release
+cmake --build --preset yams-release
 
 # Install (optional; may require sudo depending on CMAKE_INSTALL_PREFIX)
-sudo cmake --install build/conan-release/build/Release
+sudo cmake --install build/yams-release
 ```
 
 ## Debug build
 ```bash
-conan install . --output-folder=build/conan-debug -s build_type=Debug --build=missing
-cmake --preset conan-debug
-cmake --build --preset conan-debug
+conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
+cmake --preset yams-debug   # configure preset
+cmake --build --preset yams-debug  # build preset
 ```
 
 ## Run unit tests
@@ -65,21 +65,21 @@ Common options:
 
 Examples:
 ```bash
-# Debug tree (typical multi-config layout)
-ctest --output-on-failure --test-dir build/conan-debug/build/Debug -j
+# Debug (single-config Ninja default layout)
+ctest --preset test-yams-debug --output-on-failure
 
 # Release
-ctest --output-on-failure --test-dir build/conan-release/build/Release -j
+ctest --preset test-yams-release --output-on-failure
 ```
 
 Notes:
-- If your generator uses single-config (e.g., Ninja), the inner build dir path may differ (e.g., build/conan-debug/build).
+- If your generator uses single-config (Ninja), the inner build dir path is build/yams-*/build.
 - ctest will discover tests if the project enables testing (enable_testing/add_test).
 
 ## Developer loop
 - Edit code
 - Rebuild (incremental):
-  - cmake --build --preset conan-debug -j
+  - cmake --build --preset yams-debug -j
 - Smoke test CLI (example):
   - ./yams --version (from install location) or from the built binary path inside the build tree
 - Use a temporary data directory while developing:
@@ -94,10 +94,10 @@ If YAMS_STORAGE is not supported in your version, run yams from a working direct
 Build with sanitizers for faster defect discovery:
 ```bash
 # Example via CMake cache flags (per build directory)
-cmake --preset conan-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
-cmake --build --preset conan-debug -j
+cmake --preset yams-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
+cmake --build --preset yams-debug -j
 # Run tests to exercise instrumented code
-ctest --output-on-failure --test-dir build/conan-debug/build/Debug -j
+ctest --preset test-yams-debug --output-on-failure -j
 ```
 If your project doesn’t expose YA_ENABLE_ASAN/UBSAN, you can add compile/link flags via CMAKE_<LANG>_FLAGS_* cache entries or a toolchain overlay.
 
@@ -108,7 +108,7 @@ If your project doesn’t expose YA_ENABLE_ASAN/UBSAN, you can add compile/link 
   ```
 - clang-tidy (example invocation):
   ```bash
-  cmake --build --preset conan-debug --target clang-tidy
+  cmake --build --preset yams-debug --target clang-tidy
   ```
 Adjust targets/paths to your repository layout. If a .clang-format or .clang-tidy exists at repo root, it will be used.
 
@@ -144,5 +144,5 @@ mkdocs serve -f yams/mkdocs.yml
 
 ## Notes
 - Use Release for benchmarking and production builds; Debug + sanitizers for local development.
-- Keep your build trees (build/conan-debug, build/conan-release) out of version control.
+- Keep your build trees (build/yams-debug, build/yams-release) out of version control.
 - File issues with exact compiler/CMake/Conan versions and commands you ran for fast triage.

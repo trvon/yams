@@ -8,6 +8,7 @@
 #include <regex>
 #include <string>
 #include <unordered_set>
+#include <yams/common/format.h>
 #include <yams/content/audio_content_handler.h>
 
 #ifdef YAMS_HAVE_TAGLIB
@@ -153,8 +154,8 @@ std::optional<AudioMetadata> analyzeWAVHeader(const std::filesystem::path& path)
 // Command-line fallback using system tools
 std::optional<AudioMetadata> extractUsingFFProbe(const std::filesystem::path& path) {
 #ifdef YAMS_HAVE_FFPROBE
-    std::string cmd = std::format("ffprobe -v quiet -show_format -show_streams -of csv=p=0 \"{}\"",
-                                  path.string());
+    std::string cmd = yams::format("ffprobe -v quiet -show_format -show_streams -of csv=p=0 \"{}\"",
+                                   path.string());
 
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
         char buffer[4096];
@@ -332,7 +333,7 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
         updateStats(false, processingTime, 0);
 
         return Error{ErrorCode::InternalError,
-                     std::format("Audio processing failed: {}", e.what())};
+                     yams::fmt_format("Audio processing failed: {}", e.what())};
     }
 }
 
@@ -355,8 +356,9 @@ Result<void> AudioContentHandler::validate(const std::filesystem::path& path) co
 
     const auto fileSize = std::filesystem::file_size(path);
     if (fileSize > audioConfig_.maxFileSize) {
-        return Error{ErrorCode::ResourceExhausted,
-                     std::format("File too large: {} > {}", fileSize, audioConfig_.maxFileSize)};
+        return Error{
+            ErrorCode::ResourceExhausted,
+            yams::fmt_format("File too large: {} > {}", fileSize, audioConfig_.maxFileSize)};
     }
 
     if (fileSize == 0) {

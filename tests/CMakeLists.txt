@@ -2,7 +2,7 @@ include(GoogleTest)
 
 # Test utilities library
 add_library(test_utils INTERFACE)
-target_include_directories(test_utils INTERFACE 
+target_include_directories(test_utils INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/utils
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
@@ -18,8 +18,10 @@ set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 # Unit tests
 add_subdirectory(unit)
 
+
 # Integration tests
 add_subdirectory(integration)
+
 
 # Tools tests
 add_subdirectory(tools)

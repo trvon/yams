@@ -5,7 +5,9 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
 
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -54,11 +56,39 @@ constexpr const char* kTestUrl =
 class DaemonDownloadIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Nothing special; DaemonClient will auto-start the daemon if needed.
+        // Enable daemon-side download for test via policy override
+        ::setenv("YAMS_ENABLE_DAEMON_DOWNLOAD", "1", 1);
+        // Give generous timeouts for header/body to tolerate first-request service warmup
+        ::setenv("YAMS_HEADER_TIMEOUT", "60000", 1); // 60s
+        ::setenv("YAMS_BODY_TIMEOUT", "120000", 1);  // 120s
+
+        // Isolate the daemon instance for this test by using a unique socket and storage dir
+        namespace fs = std::filesystem;
+        const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto sock =
+            fs::temp_directory_path() / ("yams-daemon-test-" + std::to_string(ts) + ".sock");
+        auto stor = fs::temp_directory_path() / ("yams-test-storage-" + std::to_string(ts));
+        (void)fs::create_directories(stor);
+        // Remove any stale socket path if present
+        std::error_code ec;
+        (void)fs::remove(sock, ec);
+        ::setenv("YAMS_DAEMON_SOCKET", sock.c_str(), 1);
+        ::setenv("YAMS_STORAGE", stor.c_str(), 1);
     }
 
     void TearDown() override {
-        // Nothing special; leave daemon running for subsequent tests.
+        // Gracefully shutdown the isolated daemon instance started for this test
+        using namespace yams::daemon;
+        ClientConfig cfg;
+        cfg.autoStart = false; // don't spawn a new one if not present
+        DaemonClient client(cfg);
+        (void)client.shutdown(true);
+
+        // Best-effort cleanup of test storage directory
+        if (const char* stor = std::getenv("YAMS_STORAGE")) {
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(stor), ec);
+        }
     }
 };
 
@@ -78,6 +108,25 @@ TEST_F(DaemonDownloadIntegrationTest, EndToEnd_Download_Ingest_Metadata) {
     auto connectRes = client.connect();
     ASSERT_TRUE(connectRes) << "Failed to connect/start daemon: "
                             << (connectRes ? "" : connectRes.error().message);
+
+    // Wait for daemon readiness of core services to avoid early InvalidState errors
+    // (metadata repo and content store). Poll Status for up to ~10s.
+    bool ready = false;
+    for (int i = 0; i < 100; ++i) {
+        auto st = client.status();
+        if (st) {
+            const auto& r = st.value();
+            auto itMeta = r.readinessStates.find("metadata_repo");
+            auto itStore = r.readinessStates.find("content_store");
+            if (itMeta != r.readinessStates.end() && itStore != r.readinessStates.end() &&
+                itMeta->second && itStore->second) {
+                ready = true;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_TRUE(ready) << "Daemon core services not ready in time";
 
     // Prepare and send DownloadRequest
     DownloadRequest dreq;

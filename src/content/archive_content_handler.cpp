@@ -8,6 +8,7 @@
 #include <regex>
 #include <string>
 #include <unordered_set>
+#include <yams/common/format.h>
 #include <yams/content/archive_content_handler.h>
 
 #ifdef YAMS_HAVE_LIBARCHIVE
@@ -252,7 +253,7 @@ std::optional<ArchiveMetadata> extractUsingLibArchive(const std::filesystem::pat
 
 // Simple command-line fallback
 std::optional<ArchiveMetadata> extractUsingUnzip(const std::filesystem::path& path) {
-    std::string cmd = std::format("unzip -l \"{}\" 2>/dev/null", path.string());
+    std::string cmd = yams::fmt_format("unzip -l \"{}\" 2>/dev/null", path.string());
 
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
         char buffer[4096];
@@ -404,13 +405,14 @@ Result<ContentResult> ArchiveContentHandler::process(const std::filesystem::path
         // Generate file list as text content if requested
         if (archiveConfig_.extractFileList && !archiveMeta.entries.empty()) {
             std::string fileListText =
-                std::format("Archive: {} ({})\n", path.filename().string(),
-                            formatToString(static_cast<ArchiveFormat>(archiveMeta.format)));
-            fileListText += std::format("Files: {}, Directories: {}\n\n", archiveMeta.totalFiles,
-                                        archiveMeta.totalDirectories);
+                yams::fmt_format("Archive: {} ({})\n", path.filename().string(),
+                                 formatToString(static_cast<ArchiveFormat>(archiveMeta.format)));
+            fileListText += yams::fmt_format("Files: {}, Directories: {}\n\n",
+                                             archiveMeta.totalFiles, archiveMeta.totalDirectories);
 
             for (const auto& entry : archiveMeta.entries) {
-                fileListText += std::format("{}{}\n", entry.path, entry.isDirectory ? "/" : "");
+                fileListText +=
+                    yams::fmt_format("{}{}\n", entry.path, entry.isDirectory ? "/" : "");
             }
 
             result.text = fileListText;
@@ -438,7 +440,7 @@ Result<ContentResult> ArchiveContentHandler::process(const std::filesystem::path
         updateStats(false, processingTime, 0);
 
         return Error{ErrorCode::InternalError,
-                     std::format("Archive processing failed: {}", e.what())};
+                     yams::fmt_format("Archive processing failed: {}", e.what())};
     }
 }
 
@@ -461,8 +463,9 @@ Result<void> ArchiveContentHandler::validate(const std::filesystem::path& path) 
 
     const auto fileSize = std::filesystem::file_size(path);
     if (fileSize > archiveConfig_.maxFileSize) {
-        return Error{ErrorCode::ResourceExhausted,
-                     std::format("File too large: {} > {}", fileSize, archiveConfig_.maxFileSize)};
+        return Error{
+            ErrorCode::ResourceExhausted,
+            yams::fmt_format("File too large: {} > {}", fileSize, archiveConfig_.maxFileSize)};
     }
 
     if (fileSize < minArchiveFileSize()) {

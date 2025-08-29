@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <yams/api/content_store_builder.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -28,6 +29,36 @@ ServiceManager::~ServiceManager() {
 }
 
 Result<void> ServiceManager::initialize() {
+    // Validate data directory synchronously to fail fast if unwritable
+    namespace fs = std::filesystem;
+    fs::path dataDir = config_.dataDir;
+    if (dataDir.empty()) {
+        if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
+            dataDir = fs::path(storageEnv);
+        } else if (const char* homeEnv = std::getenv("HOME")) {
+            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
+        } else {
+            dataDir = fs::path(".") / "yams_data";
+        }
+    }
+    std::error_code ec;
+    fs::create_directories(dataDir, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError,
+                     std::string("Failed to create storage directory: ") + ec.message()};
+    }
+    // Probe write access
+    const auto probe = dataDir / ".yams-write-test";
+    {
+        std::ofstream f(probe);
+        if (!f.good()) {
+            return Error{ErrorCode::IOError, "Data directory is not writable: " + dataDir.string()};
+        }
+        f << "ok";
+        f.close();
+    }
+    fs::remove(probe, ec);
+
     // Start background resource initialization
     initThread_ = std::jthread([this](std::stop_token token) {
         spdlog::info("Starting async resource initialization...");

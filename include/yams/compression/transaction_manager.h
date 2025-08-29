@@ -1,9 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -178,7 +182,7 @@ public:
      */
     [[nodiscard]] Result<CompressionResult>
     compressInTransaction(std::span<const std::byte> data, CompressionAlgorithm algorithm,
-                          uint8_t level = 0, std::optional<TransactionId> txId = std::nullopt);
+                          std::optional<TransactionId> txId = std::nullopt, uint8_t level = 0);
 
     /**
      * @brief Execute decompression in transaction

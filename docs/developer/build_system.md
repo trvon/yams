@@ -15,13 +15,13 @@ Concise overview of YAMS build and dependency tooling for contributors.
 Conan generates CMakePresets and an out-of-source build tree per configuration:
 
 - Release:
-  - Conan output: build/conan-release
-  - Configure preset: conan-release
-  - Inner CMake build dir: build/conan-release/build/Release (multi-config) or build/conan-release/build (single-config generators)
+  - Conan output: build/yams-release
+  - Configure preset: yams-release
+  - Inner CMake build dir: build/yams-release/build
 - Debug:
-  - Conan output: build/conan-debug
-  - Configure preset: conan-debug
-  - Inner build dir: build/conan-debug/build/Debug (multi-config) or build/conan-debug/build
+  - Conan output: build/yams-debug
+  - Configure preset: yams-debug
+  - Inner build dir: build/yams-debug/build
 
 Notes:
 - Paths may differ slightly depending on the generator; use the preset’s inner build path for ctest and artifacts.
@@ -42,13 +42,13 @@ Conan resolves and fetches third-party libraries and generates CMake presets.
 Release:
 
 ```bash
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
 ```
 
 Debug:
 
 ```bash
-conan install . --output-folder=build/conan-debug -s build_type=Debug --build=missing
+conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
 ```
 
 Tips:
@@ -60,23 +60,23 @@ Tips:
 CMake configure (from repo root):
 
 ```bash
-cmake --preset conan-release
+cmake --preset yams-release
 # or
-cmake --preset conan-debug
+cmake --preset yams-debug
 ```
 
 Build:
 
 ```bash
-cmake --build --preset conan-release -j
+cmake --build --preset yams-release -j
 # or
-cmake --build --preset conan-debug -j
+cmake --build --preset yams-debug -j
 ```
 
 Install (optional):
 
 ```bash
-sudo cmake --install build/conan-release/build/Release
+sudo cmake --install build/yams-release
 # set a custom prefix with -DCMAKE_INSTALL_PREFIX=/opt/yams when configuring
 ```
 
@@ -86,13 +86,13 @@ Run tests with ctest from the inner build directory:
 
 ```bash
 # Debug
-ctest --output-on-failure --test-dir build/conan-debug/build/Debug -j
+ctest --preset yams-debug --output-on-failure -j
 
 # Release
-ctest --output-on-failure --test-dir build/conan-release/build/Release -j
+ctest --preset yams-release --output-on-failure -j
 ```
 
-If your generator is single-config, omit the trailing /Debug or /Release.
+For single-config Ninja (default here), CMake puts intermediate build files under build/yams-*/build; use the test presets, not raw paths.
 
 ## Build options and toolchain notes
 
@@ -115,19 +115,19 @@ Example round-trip after editing dependencies:
 
 ```bash
 # Release
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
-cmake --preset conan-release
-cmake --build --preset conan-release -j
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+cmake --preset yams-release
+cmake --build --preset yams-release -j
 ```
 
 ## CI-friendly flow
 
 ```bash
 conan profile detect --force
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
-cmake --preset conan-release
-cmake --build --preset conan-release -j$(nproc)
-ctest --output-on-failure --test-dir build/conan-release/build/Release -j$(nproc)
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+cmake --preset yams-release
+cmake --build --preset yams-release -j$(nproc)
+ctest --preset yams-release --output-on-failure -j$(nproc)
 ```
 
 Cache:
@@ -157,7 +157,7 @@ For containerized builds, use a dev image with toolchains or mount your build ca
 - Preset not found:
   - Re-run conan install to regenerate presets.
 - Link errors after dependency changes:
-  - Clean or re-generate: delete the build/conan-*/CMakeCache.txt or start with a fresh output-folder.
+  - Clean or re-generate: delete the build/yams-*/CMakeCache.txt (inner build folder) or start with a fresh output-folder.
 - Tests not discovered:
   - Run ctest from the correct inner build directory; confirm enable_testing/add_test in the codebase.
 - ABI or stdlib mismatches:

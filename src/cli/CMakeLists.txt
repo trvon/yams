@@ -97,6 +97,6 @@ endif()
 target_compile_features(yams_cli PUBLIC cxx_std_20)
 
 # Link Tracy if profiling is enabled
-if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
-    target_link_libraries(yams_cli PRIVATE Tracy::TracyClient)
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    target_link_libraries(yams_cli PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()

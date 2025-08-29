@@ -315,9 +315,8 @@ Result<size_t> PluginLoader::autoLoadPlugins() {
     // Also try to load specific known plugins from build directory if in development
     if (totalLoaded == 0) {
         // Try to find and load the ONNX plugin specifically
-        std::vector<fs::path> searchPaths = {
-            fs::path("build/conan-release/build/Release/src/daemon"), fs::path("build/src/daemon"),
-            fs::path("src/daemon")};
+        std::vector<fs::path> searchPaths = {fs::path("build/yams-release/src/daemon"),
+                                             fs::path("build/src/daemon"), fs::path("src/daemon")};
 
         std::string pluginName = getPluginLibraryName("yams_onnx_plugin");
 

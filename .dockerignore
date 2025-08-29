@@ -9,7 +9,6 @@ target/
 CMakeCache.txt
 CMakeFiles/
 CMakeUserPresets.json
-CMakePresets.json
 
 # Conan caches (keep local; don’t send to Docker context)
 .conan/

@@ -74,7 +74,8 @@ std::filesystem::path getXDGRuntimeDir() {
 // Implementation class
 class DaemonClient::Impl {
 public:
-    explicit Impl(const ClientConfig& config) : config_(config) {}
+    explicit Impl(const ClientConfig& config)
+        : config_(config), headerTimeout_(config.headerTimeout), bodyTimeout_(config.bodyTimeout) {}
 
     ~Impl() {
         if (socketFd_ >= 0) {
@@ -185,6 +186,8 @@ public:
     ClientConfig config_;
     int socketFd_ = -1;
     CircuitBreaker breaker_;
+    std::chrono::milliseconds headerTimeout_{30000}; // 30s default
+    std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
 };
 
 // DaemonClient implementation
@@ -199,6 +202,18 @@ DaemonClient::~DaemonClient() = default;
 
 DaemonClient::DaemonClient(DaemonClient&&) noexcept = default;
 DaemonClient& DaemonClient::operator=(DaemonClient&&) noexcept = default;
+
+void DaemonClient::setHeaderTimeout(std::chrono::milliseconds timeout) {
+    if (pImpl) {
+        pImpl->headerTimeout_ = timeout;
+    }
+}
+
+void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
+    if (pImpl) {
+        pImpl->bodyTimeout_ = timeout;
+    }
+}
 
 Result<void> DaemonClient::connect() {
     // Auto-start daemon if configured and not running
@@ -259,6 +274,12 @@ bool DaemonClient::isConnected() const {
 }
 
 Result<SearchResponse> DaemonClient::search(const SearchRequest& req) {
+    // Use streaming search if enabled
+    if (pImpl->config_.enableChunkedResponses) {
+        return streamingSearch(req);
+    }
+
+    // Fall back to traditional request/response
     auto response = sendRequest(req);
     if (!response) {
         return Error{response.error().code, response.error().message};
@@ -275,6 +296,17 @@ Result<SearchResponse> DaemonClient::search(const SearchRequest& req) {
     return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
+Result<SearchResponse> DaemonClient::streamingSearch(const SearchRequest& req) {
+    auto handler = std::make_shared<StreamingSearchHandler>(req.pathsOnly, req.limit);
+
+    auto result = sendRequestStreaming(req, handler);
+    if (!result) {
+        return result.error();
+    }
+
+    return handler->getResults();
+}
+
 Result<GetResponse> DaemonClient::get(const GetRequest& req) {
     auto response = sendRequest(req);
     if (!response) {
@@ -282,6 +314,52 @@ Result<GetResponse> DaemonClient::get(const GetRequest& req) {
     }
 
     if (auto* res = std::get_if<GetResponse>(&response.value())) {
+        return *res;
+    }
+
+    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
+        return Error{err->code, err->message};
+    }
+
+    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+}
+
+Result<ListResponse> DaemonClient::list(const ListRequest& req) {
+    // Use streaming list if enabled
+    if (pImpl->config_.enableChunkedResponses) {
+        return streamingList(req);
+    }
+
+    // Fall back to traditional request/response
+    auto response = sendRequest(req);
+    if (!response) {
+        return Error{response.error().code, response.error().message};
+    }
+
+    if (auto* res = std::get_if<ListResponse>(&response.value())) {
+        return *res;
+    }
+
+    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
+        return Error{err->code, err->message};
+    }
+
+    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+}
+
+Result<GrepResponse> DaemonClient::grep(const GrepRequest& req) {
+    // Prefer streaming if enabled
+    if (pImpl->config_.enableChunkedResponses) {
+        return streamingGrep(req);
+    }
+
+    // Fallback to traditional request/response
+    auto response = sendRequest(req);
+    if (!response) {
+        return Error{response.error().code, response.error().message};
+    }
+
+    if (auto* res = std::get_if<GrepResponse>(&response.value())) {
         return *res;
     }
 
@@ -367,6 +445,26 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
         return Error{ErrorCode::NetworkError, "Circuit breaker is open"};
     }
 
+    // Read environment variables for timeout configuration
+    const char* headerTimeoutEnv = std::getenv("YAMS_HEADER_TIMEOUT");
+    const char* bodyTimeoutEnv = std::getenv("YAMS_BODY_TIMEOUT");
+
+    if (headerTimeoutEnv) {
+        try {
+            pImpl->headerTimeout_ = std::chrono::milliseconds(std::stoi(headerTimeoutEnv));
+        } catch (...) {
+            // Ignore invalid values
+        }
+    }
+
+    if (bodyTimeoutEnv) {
+        try {
+            pImpl->bodyTimeout_ = std::chrono::milliseconds(std::stoi(bodyTimeoutEnv));
+        } catch (...) {
+            // Ignore invalid values
+        }
+    }
+
     try {
         // Create message
         Message msg;
@@ -392,6 +490,9 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
         size_t totalSent = 0;
         const auto deadline = std::chrono::steady_clock::now() + pImpl->config_.requestTimeout;
 
+        // Allow a single transparent reconnect+retry on EPIPE/ECONNRESET to handle servers that
+        // close connections after a response while the pool reuses sockets.
+        bool retriedAfterPipe = false;
         while (totalSent < framedData.size()) {
             if (std::chrono::steady_clock::now() > deadline) {
                 pImpl->breaker_.recordFailure();
@@ -416,6 +517,24 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
                     err = ECONNRESET;
 #endif
                 }
+                // If the peer closed (EPIPE/ECONNRESET), attempt a single reconnect+retry.
+                if ((err == EPIPE || err == ECONNRESET) && !retriedAfterPipe) {
+                    spdlog::warn(
+                        "[DaemonClient] Send failed with {}. Reconnecting and retrying once...",
+                        strerror(err));
+                    // Reset connection and retry from the beginning.
+                    disconnect();
+                    auto rc = connect();
+                    if (!rc) {
+                        pImpl->breaker_.recordFailure();
+                        return Error{ErrorCode::NetworkError,
+                                     std::string("Reconnect failed after send error: ") +
+                                         rc.error().message};
+                    }
+                    retriedAfterPipe = true;
+                    totalSent = 0;
+                    continue;
+                }
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError, "Send failed: " + std::string(strerror(err))};
             }
@@ -423,13 +542,14 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
             totalSent += static_cast<size_t>(sent);
         }
 
-        // Read framed response header first
+        // Read framed response header first with the header timeout
+        auto headerDeadline = std::chrono::steady_clock::now() + pImpl->headerTimeout_;
         size_t totalReceived = 0;
         const size_t headerSize = sizeof(MessageFramer::FrameHeader);
         std::vector<uint8_t> headerData(headerSize);
 
         while (totalReceived < headerSize) {
-            if (std::chrono::steady_clock::now() > deadline) {
+            if (std::chrono::steady_clock::now() > headerDeadline) {
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError, "Receive timeout (header)"};
             }
@@ -487,12 +607,13 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
                          "Response size too large: " + std::to_string(parsedHeader.payload_size)};
         }
 
-        // Read the response payload
+        // Read the response payload with the body timeout
+        auto bodyDeadline = std::chrono::steady_clock::now() + pImpl->bodyTimeout_;
         std::vector<uint8_t> responseData(parsedHeader.payload_size);
         totalReceived = 0;
 
         while (totalReceived < parsedHeader.payload_size) {
-            if (std::chrono::steady_clock::now() > deadline) {
+            if (std::chrono::steady_clock::now() > bodyDeadline) {
                 pImpl->breaker_.recordFailure();
                 return Error{ErrorCode::NetworkError, "Receive timeout (data)"};
             }
@@ -550,11 +671,724 @@ Result<Response> DaemonClient::sendRequest(const Request& req) {
         }
 
         pImpl->breaker_.recordSuccess();
-        return std::get<Response>(responseMsg.value().payload);
+        auto out = std::get<Response>(responseMsg.value().payload);
+        if (pImpl->config_.singleUseConnections) {
+            disconnect();
+        }
+        return out;
+    } catch (const std::exception& e) {
+        pImpl->breaker_.recordFailure();
+        return Error{ErrorCode::InternalError, "Error sending request: " + std::string(e.what())};
+    }
+}
+
+Result<MessageFramer::FrameHeader> DaemonClient::readFrameHeader(int socketFd) {
+    // Read framed response header first with the header timeout
+    auto headerDeadline = std::chrono::steady_clock::now() + pImpl->headerTimeout_;
+    size_t totalReceived = 0;
+    const size_t headerSize = sizeof(MessageFramer::FrameHeader);
+    std::vector<uint8_t> headerData(headerSize);
+
+    while (totalReceived < headerSize) {
+        if (std::chrono::steady_clock::now() > headerDeadline) {
+            pImpl->breaker_.recordFailure();
+            return Error{ErrorCode::NetworkError, "Receive timeout (header)"};
+        }
+
+        ssize_t received =
+            recv(socketFd, headerData.data() + totalReceived, headerSize - totalReceived, 0);
+
+        if (received < 0) {
+            int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            // Treat connection reset/pipe as remote close
+            if (err == ECONNRESET || err == EPIPE) {
+                pImpl->breaker_.recordFailure();
+                return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
+            }
+            pImpl->breaker_.recordFailure();
+            return Error{ErrorCode::NetworkError,
+                         "Receive failed (header): " + std::string(strerror(err))};
+        } else if (received == 0) {
+            pImpl->breaker_.recordFailure();
+            return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
+        }
+
+        totalReceived += static_cast<size_t>(received);
+    }
+
+    // Parse frame header
+    MessageFramer::FrameHeader header;
+    std::memcpy(&header, headerData.data(), sizeof(header));
+    header.from_network();
+
+    // Validate header
+    if (!header.is_valid()) {
+        pImpl->breaker_.recordFailure();
+        return Error{ErrorCode::InvalidData, "Invalid frame magic"};
+    }
+
+    if (header.payload_size > MAX_MESSAGE_SIZE) {
+        pImpl->breaker_.recordFailure();
+        return Error{ErrorCode::InvalidData,
+                     "Response size too large: " + std::to_string(header.payload_size)};
+    }
+
+    return header;
+}
+
+Result<std::vector<uint8_t>>
+DaemonClient::readFramedData(int socketFd, std::chrono::milliseconds timeout, size_t size) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::vector<uint8_t> data(size);
+    size_t totalReceived = 0;
+
+    while (totalReceived < size) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            pImpl->breaker_.recordFailure();
+            return Error{ErrorCode::NetworkError, "Receive timeout (data)"};
+        }
+
+        ssize_t received = recv(socketFd, data.data() + totalReceived, size - totalReceived, 0);
+
+        if (received < 0) {
+            int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            // Treat connection reset/pipe as remote close
+            if (err == ECONNRESET || err == EPIPE) {
+                pImpl->breaker_.recordFailure();
+                return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
+            }
+            pImpl->breaker_.recordFailure();
+            return Error{ErrorCode::NetworkError,
+                         "Receive failed (data): " + std::string(strerror(err))};
+        } else if (received == 0) {
+            pImpl->breaker_.recordFailure();
+            return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
+        }
+
+        totalReceived += static_cast<size_t>(received);
+    }
+
+    return data;
+}
+
+Result<std::vector<uint8_t>> DaemonClient::readFullFrame(int socketFd,
+                                                         const MessageFramer::FrameHeader& header) {
+    // Read the header data first
+    const size_t headerSize = sizeof(MessageFramer::FrameHeader);
+    std::vector<uint8_t> headerData(headerSize);
+
+    // Convert header back to network byte order
+    MessageFramer::FrameHeader networkHeader = header;
+    networkHeader.to_network();
+
+    // Copy header to buffer
+    std::memcpy(headerData.data(), &networkHeader, headerSize);
+
+    // Read the payload with body timeout
+    auto payloadResult = readFramedData(socketFd, pImpl->bodyTimeout_, header.payload_size);
+    if (!payloadResult) {
+        return payloadResult.error();
+    }
+
+    // Combine header and payload
+    std::vector<uint8_t> completeFrame;
+    completeFrame.reserve(headerSize + header.payload_size);
+    completeFrame.insert(completeFrame.end(), headerData.begin(), headerData.end());
+    completeFrame.insert(completeFrame.end(), payloadResult.value().begin(),
+                         payloadResult.value().end());
+
+    return completeFrame;
+}
+
+// StreamingListHandler implementation
+void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& headerResponse) {
+    // Parse header information from response
+    if (auto* listRes = std::get_if<ListResponse>(&headerResponse)) {
+        // Store total count from header
+        totalCount_ = listRes->totalCount;
+
+        // Pre-allocate results vector if we know the size
+        if (totalCount_ > 0 && limit_ > 0) {
+            items_.reserve(static_cast<size_t>(
+                std::min<uint64_t>(totalCount_, static_cast<uint64_t>(limit_))));
+        } else if (totalCount_ > 0) {
+            items_.reserve(totalCount_);
+        } else {
+            items_.reserve(100); // Default reservation
+        }
+
+        // Add any items that might be in the header
+        for (const auto& item : listRes->items) {
+            if (limit_ > 0 && count_ >= limit_) {
+                break;
+            }
+
+            items_.push_back(item);
+            count_++;
+
+            // Print result immediately if progressive output is enabled
+            if (pathsOnly_) {
+                std::cout << item.path << std::endl;
+            }
+        }
+    } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
+        // Store error
+        error_ = Error{errRes->code, errRes->message};
+    }
+}
+
+// StreamingSearchHandler implementation
+void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& headerResponse) {
+    // Parse header information from response
+    if (auto* searchRes = std::get_if<SearchResponse>(&headerResponse)) {
+        // Store total count and elapsed time from header
+        totalCount_ = searchRes->totalCount;
+        elapsed_ = searchRes->elapsed;
+
+        // Pre-allocate results vector if we know the size
+        if (totalCount_ > 0 && limit_ > 0) {
+            results_.reserve(static_cast<size_t>(
+                std::min<uint64_t>(totalCount_, static_cast<uint64_t>(limit_))));
+        } else if (totalCount_ > 0) {
+            results_.reserve(totalCount_);
+        } else {
+            results_.reserve(100); // Default reservation
+        }
+
+        // Add any results that might be in the header
+        for (const auto& result : searchRes->results) {
+            if (limit_ > 0 && count_ >= limit_) {
+                break;
+            }
+
+            results_.push_back(result);
+            count_++;
+
+            // Print result immediately if progressive output is enabled
+            if (pathsOnly_) {
+                std::cout << result.path << std::endl;
+            }
+        }
+    } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
+        // Store error
+        error_ = Error{errRes->code, errRes->message};
+    }
+}
+
+bool DaemonClient::StreamingListHandler::onChunkReceived(const Response& chunkResponse,
+                                                         bool isLastChunk) {
+    (void)isLastChunk;
+    // Process chunk data
+    if (auto* listRes = std::get_if<ListResponse>(&chunkResponse)) {
+        // Update totals if they changed
+        if (listRes->totalCount > 0) {
+            totalCount_ = listRes->totalCount;
+        }
+
+        // Process items in this chunk
+        for (const auto& item : listRes->items) {
+            if (limit_ > 0 && count_ >= limit_) {
+                return false; // Stop processing if we reached the limit
+            }
+
+            items_.push_back(item);
+            count_++;
+
+            // Print result immediately if progressive output is enabled
+            if (pathsOnly_) {
+                std::cout << item.path << std::endl;
+            }
+        }
+    } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
+        // Store error
+        error_ = Error{errRes->code, errRes->message};
+        return false; // Stop processing on error
+    }
+
+    return true; // Continue processing next chunks
+}
+
+bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunkResponse,
+                                                           bool isLastChunk) {
+    (void)isLastChunk;
+    // Process chunk data
+    if (auto* searchRes = std::get_if<SearchResponse>(&chunkResponse)) {
+        // Update totals if they changed
+        if (searchRes->totalCount > 0) {
+            totalCount_ = searchRes->totalCount;
+        }
+
+        // Process results in this chunk
+        for (const auto& result : searchRes->results) {
+            if (limit_ > 0 && count_ >= limit_) {
+                return false; // Stop processing if we reached the limit
+            }
+
+            results_.push_back(result);
+            count_++;
+
+            // Print result immediately if progressive output is enabled
+            if (pathsOnly_) {
+                std::cout << result.path << std::endl;
+            }
+        }
+    } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
+        // Store error
+        error_ = Error{errRes->code, errRes->message};
+        return false; // Stop processing on error
+    }
+
+    return true; // Continue processing next chunks
+}
+
+void DaemonClient::StreamingListHandler::onError(const Error& error) {
+    error_ = error;
+
+    // Log error for immediate feedback
+    spdlog::error("List error: {}", error.message);
+}
+
+void DaemonClient::StreamingListHandler::onComplete() {
+    // Final processing when all chunks have been received
+    if (!error_ && !pathsOnly_) {
+        spdlog::debug("List complete: found {} items (of {} total)", count_, totalCount_);
+    }
+}
+
+Result<ListResponse> DaemonClient::StreamingListHandler::getResults() const {
+    if (error_) {
+        return *error_;
+    }
+
+    // Construct complete response
+    ListResponse response;
+    response.items = items_;
+    response.totalCount = totalCount_;
+
+    return response;
+}
+
+void DaemonClient::StreamingSearchHandler::onError(const Error& error) {
+    error_ = error;
+
+    // Log error for immediate feedback
+    spdlog::error("Search error: {}", error.message);
+}
+
+void DaemonClient::StreamingSearchHandler::onComplete() {
+    // Final processing when all chunks have been received
+    if (!error_ && !pathsOnly_) {
+        spdlog::debug("Search complete: found {} results (of {} total) in {}ms", count_,
+                      totalCount_, elapsed_.count());
+    }
+}
+
+Result<SearchResponse> DaemonClient::StreamingSearchHandler::getResults() const {
+    if (error_) {
+        return *error_;
+    }
+
+    // Construct complete response
+    SearchResponse response;
+    response.results = results_;
+    response.totalCount = totalCount_;
+    response.elapsed = elapsed_;
+
+    return response;
+}
+
+// Static helper to set timeout environment variables
+void DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
+                                     std::chrono::milliseconds bodyTimeout) {
+    // Set environment variables
+    setenv("YAMS_HEADER_TIMEOUT", std::to_string(headerTimeout.count()).c_str(), 1);
+    setenv("YAMS_BODY_TIMEOUT", std::to_string(bodyTimeout.count()).c_str(), 1);
+}
+
+// Streaming list helper method
+Result<ListResponse> DaemonClient::streamingList(const ListRequest& req) {
+    auto handler = std::make_shared<StreamingListHandler>(req.pathsOnly, req.limit);
+
+    auto result = sendRequestStreaming(req, handler);
+    if (!result) {
+        return result.error();
+    }
+
+    return handler->getResults();
+}
+
+// Streaming Grep handler methods
+void DaemonClient::StreamingGrepHandler::onHeaderReceived(const Response& headerResponse) {
+    if (auto* grepRes = std::get_if<GrepResponse>(&headerResponse)) {
+        totalMatches_ = grepRes->totalMatches;
+        filesSearched_ = grepRes->filesSearched;
+
+        // Process any matches included in the header
+        for (const auto& m : grepRes->matches) {
+            // Enforce per-file cap if set
+            if (perFileMax_ > 0) {
+                auto& cnt = perFileCount_[m.file];
+                if (cnt >= perFileMax_) {
+                    continue;
+                }
+                cnt++;
+            }
+            matches_.push_back(m);
+            if (pathsOnly_) {
+                std::cout << m.file << std::endl;
+            }
+        }
+    } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
+        error_ = Error{errRes->code, errRes->message};
+    }
+}
+
+bool DaemonClient::StreamingGrepHandler::onChunkReceived(const Response& chunkResponse,
+                                                         bool /*isLastChunk*/) {
+    if (auto* grepRes = std::get_if<GrepResponse>(&chunkResponse)) {
+        // Update totals if present
+        if (grepRes->totalMatches > 0) {
+            totalMatches_ = grepRes->totalMatches;
+        }
+        if (grepRes->filesSearched > 0) {
+            filesSearched_ = grepRes->filesSearched;
+        }
+
+        for (const auto& m : grepRes->matches) {
+            if (perFileMax_ > 0) {
+                auto& cnt = perFileCount_[m.file];
+                if (cnt >= perFileMax_) {
+                    continue;
+                }
+                cnt++;
+            }
+            matches_.push_back(m);
+            if (pathsOnly_) {
+                std::cout << m.file << std::endl;
+            }
+        }
+    } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
+        error_ = Error{errRes->code, errRes->message};
+        return false;
+    }
+    return true;
+}
+
+void DaemonClient::StreamingGrepHandler::onError(const Error& error) {
+    error_ = error;
+    spdlog::error("Grep error: {}", error.message);
+}
+
+void DaemonClient::StreamingGrepHandler::onComplete() {
+    if (!error_ && !pathsOnly_) {
+        spdlog::debug("Grep complete: {} matches across {} files", totalMatches_, filesSearched_);
+    }
+}
+
+Result<GrepResponse> DaemonClient::StreamingGrepHandler::getResults() const {
+    if (error_) {
+        return *error_;
+    }
+    GrepResponse r;
+    r.matches = matches_;
+    r.totalMatches = totalMatches_;
+    r.filesSearched = filesSearched_;
+    return r;
+}
+
+// Streaming grep helper method
+Result<GrepResponse> DaemonClient::streamingGrep(const GrepRequest& req) {
+    // If pathsOnly or filesOnly/countOnly, we can progressively print in handler
+    size_t perFileCap = 0;
+    if (req.maxMatches > 0) {
+        perFileCap = req.maxMatches;
+    }
+    auto handler =
+        std::make_shared<StreamingGrepHandler>(req.pathsOnly || req.filesOnly, perFileCap);
+
+    auto result = sendRequestStreaming(req, handler);
+    if (!result) {
+        return result.error();
+    }
+
+    return handler->getResults();
+}
+
+Result<void> DaemonClient::sendRequestStreaming(const Request& req,
+                                                std::shared_ptr<ChunkedResponseHandler> handler) {
+    if (!isConnected()) {
+        if (auto result = connect(); !result) {
+            return result.error();
+        }
+    }
+
+    // Check circuit breaker
+    if (!pImpl->breaker_.shouldAllow()) {
+        return Error{ErrorCode::NetworkError, "Circuit breaker is open"};
+    }
+
+    try {
+        // Create message
+        Message msg;
+        msg.version = PROTOCOL_VERSION;
+        msg.requestId =
+            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        msg.timestamp = std::chrono::steady_clock::now();
+        msg.payload = req;
+        msg.clientVersion = "yams-client-0.3.4";
+
+        // Use MessageFramer to frame the message with CRC32 checksum
+        MessageFramer framer;
+        auto framedResult = framer.frame_message(msg);
+        if (!framedResult) {
+            pImpl->breaker_.recordFailure();
+            return framedResult.error();
+        }
+
+        auto& framedData = framedResult.value();
+        spdlog::debug("Sending {} bytes to daemon (framed with CRC32)", framedData.size());
+
+        // Send framed message data with timeout
+        const auto t_start = std::chrono::steady_clock::now();
+        size_t totalSent = 0;
+        const auto deadline = std::chrono::steady_clock::now() + pImpl->config_.requestTimeout;
+
+        // Allow a single transparent reconnect+retry on EPIPE/ECONNRESET to handle servers that
+        // close connections after a response while the pool reuses sockets.
+        bool retriedAfterPipe = false;
+        while (totalSent < framedData.size()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                pImpl->breaker_.recordFailure();
+                return Error{ErrorCode::NetworkError, "Send timeout"};
+            }
+
+            ssize_t sent = send(pImpl->socketFd_, framedData.data() + totalSent,
+                                framedData.size() - totalSent, MSG_NOSIGNAL);
+
+            if (sent < 0) {
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                // Some platforms may surface errno==0 here when SIGPIPE is suppressed;
+                // map to a meaningful error (prefer EPIPE, fall back to ECONNRESET).
+                if (err == 0) {
+#ifdef EPIPE
+                    err = EPIPE;
+#else
+                    err = ECONNRESET;
+#endif
+                }
+                // If the peer closed (EPIPE/ECONNRESET), attempt a single reconnect+retry.
+                if ((err == EPIPE || err == ECONNRESET) && !retriedAfterPipe) {
+                    spdlog::warn(
+                        "[DaemonClient] Send failed with {}. Reconnecting and retrying once...",
+                        strerror(err));
+                    // Reset connection and retry from the beginning.
+                    disconnect();
+                    auto rc = connect();
+                    if (!rc) {
+                        pImpl->breaker_.recordFailure();
+                        Error e{ErrorCode::NetworkError,
+                                std::string("Reconnect failed after send error: ") +
+                                    rc.error().message};
+                        handler->onError(e);
+                        return e;
+                    }
+                    retriedAfterPipe = true;
+                    totalSent = 0;
+                    continue;
+                }
+                pImpl->breaker_.recordFailure();
+                return Error{ErrorCode::NetworkError, "Send failed: " + std::string(strerror(err))};
+            }
+
+            totalSent += static_cast<size_t>(sent);
+        }
+
+        // Read framed response header first
+        auto headerResult = readFrameHeader(pImpl->socketFd_);
+        if (!headerResult) {
+            handler->onError(headerResult.error());
+            return headerResult.error();
+        }
+
+        auto header = headerResult.value();
+        const auto ttfb = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_start);
+        spdlog::debug("[DaemonClient] TTFB={} ms (requestId={})", ttfb.count(), msg.requestId);
+
+        // If server sent a header-only streaming frame, synthesize an empty header response
+        // and skip reading a (non-existent) payload. Otherwise, read and parse the full frame.
+        Response headerResponse;
+        bool haveParsedHeaderPayload = false;
+        if (header.is_header_only()) {
+            // Synthesize a minimal header aligned with the request type
+            if (std::holds_alternative<SearchRequest>(req)) {
+                SearchResponse r; // empty; totals will arrive in chunks
+                headerResponse = r;
+            } else if (std::holds_alternative<ListRequest>(req)) {
+                ListResponse r;
+                headerResponse = r;
+            } else if (std::holds_alternative<GrepRequest>(req)) {
+                GrepResponse r;
+                headerResponse = r;
+            } else {
+                // Generic success header for other types
+                headerResponse = SuccessResponse{"Streaming"};
+            }
+        } else {
+            // Read the complete frame for the header
+            auto frameResult = readFullFrame(pImpl->socketFd_, header);
+            if (!frameResult) {
+                handler->onError(frameResult.error());
+                return frameResult.error();
+            }
+
+            // Parse and verify the complete frame
+            auto responseMsgResult = framer.parse_frame(frameResult.value());
+            if (!responseMsgResult) {
+                pImpl->breaker_.recordFailure();
+                handler->onError(responseMsgResult.error());
+                return responseMsgResult.error();
+            }
+            auto& responseMsg = responseMsgResult.value();
+
+            // Verify response ID matches request
+            if (responseMsg.requestId != msg.requestId) {
+                pImpl->breaker_.recordFailure();
+                Error err{ErrorCode::InvalidData, "Response ID mismatch"};
+                handler->onError(err);
+                return err;
+            }
+
+            // Extract response from message
+            if (!std::holds_alternative<Response>(responseMsg.payload)) {
+                pImpl->breaker_.recordFailure();
+                Error err{ErrorCode::InvalidData, "Expected response, got request"};
+                handler->onError(err);
+                return err;
+            }
+            headerResponse = std::get<Response>(responseMsg.payload);
+            haveParsedHeaderPayload = true;
+
+            // If error response, report and exit
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                handler->onError(Error{err->code, err->message});
+                pImpl->breaker_.recordFailure();
+                return Error{err->code, err->message};
+            }
+        }
+
+        // Process header frame
+        handler->onHeaderReceived(headerResponse);
+
+        // If not chunked or last chunk already, we're done
+        if (!header.is_chunked() || header.is_last_chunk()) {
+            // If we parsed a payload-bearing header, also pass it as the final chunk
+            if (haveParsedHeaderPayload) {
+                handler->onChunkReceived(headerResponse, true);
+            }
+            handler->onComplete();
+            pImpl->breaker_.recordSuccess();
+            if (pImpl->config_.singleUseConnections) {
+                disconnect();
+            }
+            return Result<void>();
+        }
+
+        // Process chunks until we get the last one
+        bool lastChunkReceived = false;
+        while (!lastChunkReceived) {
+            // Read next chunk header
+            auto chunkHeaderResult = readFrameHeader(pImpl->socketFd_);
+            if (!chunkHeaderResult) {
+                handler->onError(chunkHeaderResult.error());
+                return chunkHeaderResult.error();
+            }
+
+            auto chunkHeader = chunkHeaderResult.value();
+
+            // Validate it's a chunk
+            if (!chunkHeader.is_chunked()) {
+                Error err{ErrorCode::InvalidData, "Expected chunked frame"};
+                handler->onError(err);
+                return err;
+            }
+
+            // Check if it's the last chunk
+            lastChunkReceived = chunkHeader.is_last_chunk();
+
+            // Read the complete chunk frame
+            auto chunkFrameResult = readFullFrame(pImpl->socketFd_, chunkHeader);
+            if (!chunkFrameResult) {
+                handler->onError(chunkFrameResult.error());
+                return chunkFrameResult.error();
+            }
+
+            // Parse and verify the chunk frame
+            auto chunkResponseMsgResult = framer.parse_frame(chunkFrameResult.value());
+            if (!chunkResponseMsgResult) {
+                handler->onError(chunkResponseMsgResult.error());
+                pImpl->breaker_.recordFailure();
+                return chunkResponseMsgResult.error();
+            }
+            auto& chunkResponseMsg = chunkResponseMsgResult.value();
+
+            // Verify chunk ID matches request
+            if (chunkResponseMsg.requestId != msg.requestId) {
+                Error err{ErrorCode::InvalidData, "Chunk response ID mismatch"};
+                handler->onError(err);
+                pImpl->breaker_.recordFailure();
+                return err;
+            }
+
+            // Extract chunk response
+            if (!std::holds_alternative<Response>(chunkResponseMsg.payload)) {
+                Error err{ErrorCode::InvalidData, "Expected response in chunk, got request"};
+                handler->onError(err);
+                pImpl->breaker_.recordFailure();
+                return err;
+            }
+
+            // Process the chunk response
+            auto& chunkResponse = std::get<Response>(chunkResponseMsg.payload);
+
+            // If error in chunk, report and exit
+            if (auto* err = std::get_if<ErrorResponse>(&chunkResponse)) {
+                handler->onError(Error{err->code, err->message});
+                pImpl->breaker_.recordFailure();
+                return Error{err->code, err->message};
+            }
+
+            // Process the chunk with handler
+            if (!handler->onChunkReceived(chunkResponse, lastChunkReceived)) {
+                break;
+            }
+        }
+
+        // All chunks processed
+        handler->onComplete();
+        pImpl->breaker_.recordSuccess();
+        if (pImpl->config_.singleUseConnections) {
+            disconnect();
+        }
+        return Result<void>();
 
     } catch (const std::exception& e) {
         pImpl->breaker_.recordFailure();
-        return Error{ErrorCode::InternalError, "Send request failed: " + std::string(e.what())};
+        Error err{ErrorCode::InternalError, "Error in streaming request: " + std::string(e.what())};
+        handler->onError(err);
+        return err;
     }
 }
 
@@ -756,14 +1590,18 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             configPath = std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
         }
 
-        // Use execlp to search PATH for yams-daemon
-        // Pass socket and config arguments
+        // Allow overriding daemon path for development via YAMS_DAEMON_BIN
+        const char* daemonBin = std::getenv("YAMS_DAEMON_BIN");
+        const char* exe = daemonBin && *daemonBin ? daemonBin : "yams-daemon";
+
+        // Use execlp to search PATH (or direct path if overridden) for yams-daemon
+        // Pass socket and optional config arguments
         if (!configPath.empty() && std::filesystem::exists(configPath)) {
-            execlp("yams-daemon", "yams-daemon", "--socket", socketPath.c_str(), "--config",
-                   configPath.c_str(), nullptr);
+            execlp(exe, exe, "--socket", socketPath.c_str(), "--config", configPath.c_str(),
+                   nullptr);
         } else {
             // No config file, just pass socket
-            execlp("yams-daemon", "yams-daemon", "--socket", socketPath.c_str(), nullptr);
+            execlp(exe, exe, "--socket", socketPath.c_str(), nullptr);
         }
 
         // If we get here, exec failed
@@ -865,6 +1703,12 @@ bool CircuitBreaker::shouldTransitionToHalfOpen() const {
     auto now = std::chrono::steady_clock::now();
     auto timeSinceOpen = std::chrono::duration_cast<std::chrono::seconds>(now - openedAt_);
     return timeSinceOpen >= config_.openTimeout;
+}
+
+void DaemonClient::setStreamingEnabled(bool enabled) {
+    if (pImpl) {
+        pImpl->config_.enableChunkedResponses = enabled;
+    }
 }
 
 } // namespace yams::daemon

@@ -1,0 +1,13 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  // Force CMake Tools to use our presets and stop passing a bogus -C init cache
+  "cmake.configurePreset": "yams-debug",
+  "cmake.buildPreset": "build-yams-debug",
+  "cmake.testPreset": "test-yams-debug",
+  "cmake.configureInitCache": [],
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "cmake.buildEnvironment": {
+    "CTEST_OUTPUT_ON_FAILURE": "1"
+  }
+}

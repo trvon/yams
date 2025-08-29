@@ -43,6 +43,9 @@ class YamsConan(ConanFile):
         self.requires("openssl/3.2.0")
         self.requires("libcurl/8.10.1")
         self.requires("protobuf/3.21.12")
+        
+        # Compat
+        self.requires('tl-expected/1.1.0')
 
         # Note: PDFium is not available in Conan Center
         # When enable_pdf=True, CMake will fall back to FetchContent

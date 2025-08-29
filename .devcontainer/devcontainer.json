@@ -18,13 +18,16 @@
         "ms-vscode.cpptools",
         "ms-vscode.cmake-tools",
         "twxs.cmake",
-        "ms-azuretools.vscode-docker"
+            "ms-azuretools.vscode-docker",
+            "xaver.clang-format",
+            "notskm.clang-tidy"
       ]
     }
   },
   "remoteUser": "vscode",
   "postCreateCommand": "bash /usr/local/share/yams/postCreate.sh",
   "mounts": [
-    "source=/var/lib/docker,target=/var/lib/docker,type=volume"
+  // Use a named volume for Docker-in-Docker storage; source must be a volume name, not a path
+  "source=docker-data,target=/var/lib/docker,type=volume"
   ]
 }

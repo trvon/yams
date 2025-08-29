@@ -278,8 +278,8 @@ cd "$PROJECT_ROOT"
 
 # Set up default paths
 if [[ -z "$BUILD_DIR" ]]; then
-    # Look for common build directories
-    for candidate in "build/conan-release/build/Release" "build" "cmake-build-release" "cmake-build-debug"; do
+    # Look for common build directories (prefer new yams-* presets)
+    for candidate in "build/yams-release" "build/yams-debug" "build" "cmake-build-release" "cmake-build-debug"; do
         if [[ -d "$candidate" ]]; then
             BUILD_DIR="$candidate"
             break

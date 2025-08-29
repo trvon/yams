@@ -6,11 +6,13 @@
 #include <ostream>
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/response_of.hpp>
 
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 
 namespace yams::daemon {
 
@@ -18,10 +20,17 @@ struct ClientConfig {
     std::filesystem::path socketPath; // Empty = auto-detect based on runtime environment
     std::filesystem::path dataDir;    // Optional: pass data dir to daemon on auto-start
     std::chrono::milliseconds connectTimeout{1000};
-    std::chrono::milliseconds requestTimeout{5000};
+    std::chrono::milliseconds headerTimeout{30000}; // 30s timeout for receiving headers
+    std::chrono::milliseconds bodyTimeout{60000};   // 60s timeout for receiving response body
+    std::chrono::milliseconds requestTimeout{5000}; // Legacy timeout (for non-chunked operations)
     size_t maxRetries = 3;
     bool autoStart = true;
     bool enableCircuitBreaker = true;
+    bool enableChunkedResponses = true; // Enable processing of chunked responses (default: true)
+    size_t maxChunkSize = 256 * 1024;   // 256KB max chunk size
+    bool progressiveOutput = true;      // Render results as they arrive (default: true)
+    bool singleUseConnections = true;   // Close client connection after each request
+    bool disableStreamingForLargeQueries = false; // Always use streaming, even for large queries
 };
 
 class DaemonClient {
@@ -40,6 +49,11 @@ public:
     void disconnect();
     bool isConnected() const;
 
+    // Set custom timeouts
+    void setHeaderTimeout(std::chrono::milliseconds timeout);
+
+    void setBodyTimeout(std::chrono::milliseconds timeout);
+
     // High-level request methods
     Result<SearchResponse> search(const SearchRequest& req);
     Result<AddResponse> add(const AddRequest& req);
@@ -49,6 +63,8 @@ public:
         return call<GetChunkRequest>(req);
     }
     Result<SuccessResponse> getEnd(const GetEndRequest& req) { return call<GetEndRequest>(req); }
+    Result<ListResponse> list(const ListRequest& req);
+    Result<GrepResponse> grep(const GrepRequest& req);
 
     // High-level streaming helpers
     Result<void> getToStdout(const GetInitRequest& req) {
@@ -91,8 +107,14 @@ public:
             GetEndRequest ereq{ir.transferId};
             (void)call<GetEndRequest>(ereq);
         }
+        if (config_.singleUseConnections) {
+            disconnect();
+        }
         return Result<void>();
     }
+
+    // Streaming grep helper method
+    Result<GrepResponse> streamingGrep(const GrepRequest& req);
 
     Result<void> getToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
         if (auto c = connect(); !c)
@@ -138,6 +160,9 @@ public:
             GetEndRequest ereq{ir.transferId};
             (void)call<GetEndRequest>(ereq);
         }
+        if (config_.singleUseConnections) {
+            disconnect();
+        }
         return Result<void>();
     }
     Result<SuccessResponse> remove(const DeleteRequest& req);
@@ -152,6 +177,100 @@ public:
     Result<SuccessResponse> unloadModel(const UnloadModelRequest& req);
     Result<ModelStatusResponse> getModelStatus(const ModelStatusRequest& req);
 
+    // Chunked response handling
+    struct ChunkedResponseHandler {
+        // Called when header is received
+        virtual void onHeaderReceived(const Response&) {}
+
+        // Called for each chunk
+        virtual bool onChunkReceived(const Response&, bool) { return true; }
+
+        // Called on error
+        virtual void onError(const Error&) {}
+
+        // Called when completed
+        virtual void onComplete() {}
+
+        virtual ~ChunkedResponseHandler() = default;
+    };
+
+    // Streaming response handlers
+    // Streaming search with progressive output
+    class StreamingSearchHandler : public ChunkedResponseHandler {
+    public:
+        explicit StreamingSearchHandler(bool pathsOnly = false, size_t limit = 0)
+            : pathsOnly_(pathsOnly), limit_(limit), count_(0) {}
+
+        void onHeaderReceived(const Response& headerResponse) override;
+        bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override;
+        void onError(const Error& error) override;
+        void onComplete() override;
+
+        // Get accumulated results
+        Result<SearchResponse> getResults() const;
+
+    private:
+        bool pathsOnly_ = false;
+        size_t limit_ = 0;
+        size_t count_ = 0;
+        std::vector<SearchResult> results_;
+        std::optional<Error> error_;
+        std::chrono::milliseconds elapsed_{0};
+        size_t totalCount_ = 0;
+    };
+
+    // Streaming response handlers for list command
+    class StreamingListHandler : public ChunkedResponseHandler {
+    public:
+        explicit StreamingListHandler(bool pathsOnly = false, size_t limit = 0)
+            : pathsOnly_(pathsOnly), limit_(limit), count_(0) {}
+        void onHeaderReceived(const Response& headerResponse) override;
+        bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override;
+        void onError(const Error& error) override;
+        void onComplete() override;
+
+        // Get accumulated results
+        Result<ListResponse> getResults() const;
+
+    private:
+        bool pathsOnly_ = false;
+        size_t limit_ = 0;
+        size_t count_ = 0;
+        std::vector<ListEntry> items_;
+        std::optional<Error> error_;
+        uint64_t totalCount_ = 0;
+    };
+
+    // Streaming response handler for grep
+    class StreamingGrepHandler : public ChunkedResponseHandler {
+    public:
+        explicit StreamingGrepHandler(bool pathsOnly = false, size_t perFileMax = 0)
+            : pathsOnly_(pathsOnly), perFileMax_(perFileMax) {}
+
+        void onHeaderReceived(const Response& headerResponse) override;
+        bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override;
+        void onError(const Error& error) override;
+        void onComplete() override;
+
+        Result<GrepResponse> getResults() const;
+
+    private:
+        bool pathsOnly_ = false;
+        size_t perFileMax_ = 0; // If non-zero, stop after N matches per file
+        std::vector<GrepMatch> matches_;
+        std::optional<Error> error_;
+        size_t totalMatches_ = 0;
+        size_t filesSearched_ = 0;
+        // Track counts per file to enforce perFileMax_
+        std::unordered_map<std::string, size_t> perFileCount_;
+    };
+
+    // Streaming search helper method
+    Result<SearchResponse> streamingSearch(const SearchRequest& req);
+
+    // Streaming list helper method
+    Result<ListResponse> streamingList(const ListRequest& req);
+
     // Public method to allow generic request sending by helpers
     Result<Response> executeRequest(const Request& req);
 
@@ -164,19 +283,42 @@ public:
     // Start daemon if not running
     static Result<void> startDaemon(const ClientConfig& config = {});
 
+    // Helper method to set environment variables for timeouts
+    static void setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
+                                  std::chrono::milliseconds bodyTimeout);
+
     // Path resolution helper (matches daemon's path resolution)
     static std::filesystem::path resolveSocketPath();
+
+    // Set whether to use streaming for all operations
+    void setStreamingEnabled(bool enabled);
 
 private:
     // Internal implementation
     class Impl;
     std::unique_ptr<Impl> pImpl;
+    ClientConfig config_;
 
     // Generic request sending
     Result<Response> sendRequest(const Request& req);
 
+    // Send request with chunked response handling
+    Result<void> sendRequestStreaming(const Request& req,
+                                      std::shared_ptr<ChunkedResponseHandler> handler);
+
     // Auto-start daemon if configured and not running
     Result<void> autoStartDaemonIfNeeded();
+
+    // Helper method to read framed data with timeout
+    Result<std::vector<uint8_t>> readFramedData(int socketFd, std::chrono::milliseconds timeout,
+                                                size_t size);
+
+    // Helper method to read frame header with proper timeout
+    Result<MessageFramer::FrameHeader> readFrameHeader(int socketFd);
+
+    // Helper method to read full frame with proper timeout
+    Result<std::vector<uint8_t>> readFullFrame(int socketFd,
+                                               const MessageFramer::FrameHeader& header);
 };
 
 // Generic typed call helper using ResponseOf trait
@@ -194,6 +336,21 @@ template <class Req> Result<ResponseOfT<Req>> DaemonClient::call(const Req& req)
                       std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
                       std::is_same<Req, GetStatsRequest>>,
                   "Req must be a valid daemon Request alternative");
+
+    // Prefer streaming path for streaming-capable requests when enabled
+    if constexpr (std::is_same_v<Req, SearchRequest>) {
+        if (config_.enableChunkedResponses) {
+            return streamingSearch(req);
+        }
+    } else if constexpr (std::is_same_v<Req, ListRequest>) {
+        if (config_.enableChunkedResponses) {
+            return streamingList(req);
+        }
+    } else if constexpr (std::is_same_v<Req, GrepRequest>) {
+        if (config_.enableChunkedResponses) {
+            return streamingGrep(req);
+        }
+    }
 
     auto r = sendRequest(Request{req});
     if (!r)

@@ -50,8 +50,8 @@ set_target_properties(yams_compression PROPERTIES
 )
 
 # Link Tracy if profiling is enabled
-if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
-    target_link_libraries(yams_compression PRIVATE Tracy::TracyClient)
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    target_link_libraries(yams_compression PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()
 
 # Create alias

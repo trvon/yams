@@ -257,6 +257,7 @@ Response RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
         serviceReq.literalText = req.literalText;
         serviceReq.showHash = req.showHash;
         serviceReq.pathsOnly = req.pathsOnly;
+        serviceReq.jsonOutput = req.jsonOutput;
         serviceReq.showLineNumbers = req.showLineNumbers;
         serviceReq.beforeContext = req.beforeContext;
         serviceReq.afterContext = req.afterContext;
@@ -298,6 +299,10 @@ Response RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
             response.results.push_back(std::move(resultItem));
         }
 
+        // Ensure results are sorted by score (descending) for stable ranking
+        std::stable_sort(
+            response.results.begin(), response.results.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
         return response;
 
     } catch (const std::exception& e) {
@@ -981,54 +986,6 @@ Response RequestDispatcher::handleListRequest(const ListRequest& req) {
     }
 }
 
-// OLD LIST IMPLEMENTATION - REMOVED
-#if 0
-            if (req.recent) {
-                std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
-                    return a.indexedTime > b.indexedTime;
-                });
-            }
-
-            // Apply limit after sorting
-            if (docs.size() > req.limit) {
-                docs.resize(req.limit);
-            }
-
-            // Update the result with our modified docs
-            docsResult = std::move(docs);
-        }
-
-        if (!docsResult) {
-            return ErrorResponse{docsResult.error().code, docsResult.error().message};
-        }
-
-        const auto& docs = docsResult.value();
-
-        // Convert to ListResponse format
-        ListResponse response;
-        response.items.reserve(docs.size());
-
-        for (const auto& doc : docs) {
-            ListEntry entry;
-            entry.hash = doc.sha256Hash;
-            entry.path = doc.filePath;
-            entry.name = doc.fileName;
-            entry.size = static_cast<uint64_t>(doc.fileSize);
-
-            response.items.push_back(std::move(entry));
-        }
-
-        response.totalCount = docs.size();
-
-        return response;
-
-    } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                           std::string("List request failed: ") + e.what()};
-    }
-}
-#endif
-
 Response RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
     try {
         // Use DocumentService for business logic
@@ -1520,178 +1477,76 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
     }
 }
 
-// DELETE THIS BLOCK - OLD GREP IMPLEMENTATION
-#if 0
-        if (req.path.empty()) {
-            // Search all indexed documents using wildcard pattern
-            auto allDocsResult = metadataRepo->findDocumentsByPath("*");
-            if (!allDocsResult) {
-                return ErrorResponse{allDocsResult.error().code, allDocsResult.error().message};
-            }
-            docsToSearch = allDocsResult.value();
-        } else {
-            // Search specific file/path pattern
-            auto docResult = metadataRepo->findDocumentsByPath(req.path);
-            if (!docResult) {
-                return ErrorResponse{docResult.error().code, docResult.error().message};
-            }
-            docsToSearch = docResult.value();
-        }
-
-        // Filter by include patterns
-        if (!req.includePatterns.empty()) {
-            docsToSearch.erase(
-                std::remove_if(docsToSearch.begin(), docsToSearch.end(),
-                    [this, &req](const metadata::DocumentInfo& doc) {
-                        return !matchesAnyPattern(doc.fileName, req.includePatterns);
-                    }),
-                docsToSearch.end());
-        }
-
-        // Create regex pattern
-        std::regex pattern;
-        try {
-            std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-            if (req.caseInsensitive) {
-                flags |= std::regex_constants::icase;
-            }
-            
-            std::string regexPattern = req.literalText ? escapeRegex(req.pattern) : req.pattern;
-            if (req.wholeWord) {
-                regexPattern = "\\b" + regexPattern + "\\b";
-            }
-            
-            pattern = std::regex(regexPattern, flags);
-        } catch (const std::regex_error& e) {
-            return ErrorResponse{ErrorCode::InvalidArgument, 
-                               std::string("Invalid regex pattern: ") + e.what()};
-        }
-
-        // Get content store for reading file contents
-        auto contentStore = serviceManager_->getContentStore();
-        if (!contentStore) {
-            return ErrorResponse{ErrorCode::NotInitialized, "Content store not available"};
-        }
-
-        // Search through each document
-        for (const auto& doc : docsToSearch) {
-            filesSearched++;
-            
-            // Get file content
-            auto contentResult = contentStore->retrieveBytes(doc.sha256Hash);
-            if (!contentResult) {
-                continue; // Skip files we can't read
-            }
-
-            auto bytes = contentResult.value();
-            std::string content(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            std::istringstream stream(content);
-            std::string line;
-            size_t lineNumber = 1;
-            std::vector<std::string> contextBuffer;
-            size_t matchesInFile = 0;
-
-            while (std::getline(stream, line)) {
-                // Maintain context buffer if needed
-                if (req.beforeContext > 0) {
-                    contextBuffer.push_back(line);
-                    if (contextBuffer.size() > static_cast<size_t>(req.beforeContext)) {
-                        contextBuffer.erase(contextBuffer.begin());
-                    }
-                }
-
-                bool lineMatches = std::regex_search(line, pattern);
-                if (req.invertMatch) {
-                    lineMatches = !lineMatches;
-                }
-
-                if (lineMatches) {
-                    matchesInFile++;
-                    totalMatches++;
-
-                    if (!req.countOnly && !req.filesOnly && !req.filesWithoutMatch) {
-                        GrepMatch match;
-                        match.file = doc.filePath;
-                        match.lineNumber = lineNumber;
-                        match.line = line;
-
-                        // Add context before
-                        if (req.beforeContext > 0 && contextBuffer.size() > 1) {
-                            match.contextBefore.assign(contextBuffer.begin(), contextBuffer.end() - 1);
-                        }
-
-                        // Read ahead for context after
-                        if (req.afterContext > 0) {
-                            std::vector<std::string> afterLines;
-                            size_t currentPos = stream.tellg();
-                            for (size_t i = 0; i < static_cast<size_t>(req.afterContext); ++i) {
-                                std::string afterLine;
-                                if (std::getline(stream, afterLine)) {
-                                    afterLines.push_back(afterLine);
-                                } else {
-                                    break;
-                                }
-                            }
-                            match.contextAfter = afterLines;
-                            stream.seekg(currentPos); // Reset position
-                        }
-
-                        matches.push_back(match);
-                    }
-
-                    if (req.maxMatches > 0 && totalMatches >= req.maxMatches) {
-                        break;
-                    }
-                }
-
-                lineNumber++;
-            }
-
-            // Handle files-only output
-            if (req.filesOnly && matchesInFile > 0) {
-                GrepMatch match;
-                match.file = doc.filePath;
-                match.lineNumber = 0;
-                matches.push_back(match);
-            }
-
-            // Handle files-without-match output
-            if (req.filesWithoutMatch && matchesInFile == 0) {
-                GrepMatch match;
-                match.file = doc.filePath;
-                match.lineNumber = 0;
-                matches.push_back(match);
-            }
-
-            if (req.maxMatches > 0 && totalMatches >= req.maxMatches) {
-                break;
-            }
-        }
-
-        response.matches = matches;
-        response.totalMatches = totalMatches;
-        response.filesSearched = filesSearched;
-
-        return response;
-#endif
-
 Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
     try {
-        // Daemon-side download is disabled by default for security.
-        // Use MCP/CLI to perform downloads locally, then optionally index the result.
-        // To enable daemon downloads in the future, configure daemon.download policy
-        // (allowlist, schemes, checksum, store_only, sandbox) and set enable=true.
+        // Determine if daemon-side download is enabled.
+        // Primary switch is intended to be a policy flag (daemon.download.enable=true).
+        // As a safe test override, honor YAMS_ENABLE_DAEMON_DOWNLOAD=1.
+        const bool envEnabled = []() {
+            if (const char* v = std::getenv("YAMS_ENABLE_DAEMON_DOWNLOAD")) {
+                return std::string(v) == "1" || std::string(v) == "true";
+            }
+            return false;
+        }();
 
+        // If policy is not wired through ServiceManager/daemon config yet, the env flag
+        // allows tests to exercise the DownloadService path safely.
+        const bool policyEnabled = envEnabled;
+
+        if (!policyEnabled) {
+            DownloadResponse response;
+            response.url = req.url;
+            response.success = false;
+            response.error =
+                "Daemon download is disabled. Perform download locally (MCP/CLI) and index, or "
+                "enable daemon.download policy (enable=true, allowed_hosts, allowed_schemes, "
+                "require_checksum, store_only, sandbox).";
+            if (!req.quiet) {
+                spdlog::info("Download request received; responding with policy reminder (daemon "
+                             "downloads disabled by default).");
+            }
+            return response;
+        }
+
+        // Execute via app::services::DownloadService
+        auto appContext = serviceManager_->getAppContext();
+        auto downloadService = app::services::makeDownloadService(appContext);
+        if (!downloadService) {
+            return ErrorResponse{ErrorCode::NotInitialized,
+                                 "Download service not available in daemon"};
+        }
+
+        // Map daemon DownloadRequest -> app::services::DownloadServiceRequest
+        app::services::DownloadServiceRequest sreq;
+        sreq.url = req.url;
+        // Defaults chosen to be safe; follow redirects and store into CAS only.
+        sreq.followRedirects = true;
+        sreq.storeOnly = true;
+        // Honor reasonable defaults for chunk size, concurrency, timeout
+        // (DownloadService has internal defaults; we set conservative overrides)
+        sreq.concurrency = 4;
+        sreq.chunkSizeBytes = 8'388'608; // 8MB
+        sreq.timeout = std::chrono::milliseconds(60'000);
+        sreq.resume = true;
+
+        // Execute download
+        auto sres = downloadService->download(sreq);
+        if (!sres) {
+            return ErrorResponse{sres.error().code, sres.error().message};
+        }
+
+        const auto& ok = sres.value();
+
+        // Build daemon DownloadResponse
         DownloadResponse response;
-        response.url = req.url;
-        response.success = false;
-        response.error = "Daemon download is disabled. Perform download locally (MCP/CLI) and "
-                         "index, or enable daemon.download policy (enable=true, allowed_hosts, "
-                         "allowed_schemes, require_checksum, store_only, sandbox).";
+        response.url = ok.url;
+        response.hash = ok.hash;
+        response.localPath = ok.storedPath.string();
+        response.size = static_cast<size_t>(ok.sizeBytes);
+        response.success = ok.success;
 
-        if (!req.quiet) {
-            spdlog::info("Download request received; responding with policy reminder (daemon "
-                         "downloads disabled by default).");
+        if (!response.success) {
+            response.error = "Download failed";
         }
 
         return response;

@@ -47,7 +47,7 @@ public:
 
         auto it = models_.find(model_id);
         if (it == models_.end()) {
-            return Error{ErrorCode::NotFound, std::format("Model {} not found", model_id)};
+            return Error{ErrorCode::NotFound, yams::format("Model {} not found", model_id)};
         }
 
         // Remove from indices
@@ -67,7 +67,7 @@ public:
 
     Result<void> discoverModels(const std::string& directory) {
         if (!fs::exists(directory)) {
-            return Error{ErrorCode::NotFound, std::format("Directory {} not found", directory)};
+            return Error{ErrorCode::NotFound, yams::format("Directory {} not found", directory)};
         }
 
         size_t discovered = 0;
@@ -98,7 +98,7 @@ public:
 
         auto it = models_.find(model_id);
         if (it == models_.end()) {
-            return Error{ErrorCode::NotFound, std::format("Model {} not found", model_id)};
+            return Error{ErrorCode::NotFound, yams::format("Model {} not found", model_id)};
         }
 
         return it->second;
@@ -132,7 +132,7 @@ public:
             auto dim_it = dimension_index_.find(dimension);
             if (dim_it == dimension_index_.end() || dim_it->second.empty()) {
                 return Error{ErrorCode::NotFound,
-                             std::format("No models found for dimension {}", dimension)};
+                             yams::format("No models found for dimension {}", dimension)};
             }
 
             // Return first available model
@@ -148,7 +148,7 @@ public:
         }
 
         return Error{ErrorCode::NotFound,
-                     std::format("No default model for dimension {}", dimension)};
+                     yams::format("No default model for dimension {}", dimension)};
     }
 
     std::vector<ModelInfo> getAllModels() const {
@@ -182,7 +182,7 @@ public:
         auto candidates = candidates_result.value();
         if (candidates.empty()) {
             return Error{ErrorCode::NotFound,
-                         std::format("No models for dimension {}", required_dimension)};
+                         yams::format("No models for dimension {}", required_dimension)};
         }
 
         // Filter by requirements
@@ -420,7 +420,7 @@ Result<ModelInfo> parseModelMetadata(const std::string& model_path) {
         info.version = "1.0.0";
     }
 
-    info.model_id = std::format("{}_{}", info.name, info.version);
+    info.model_id = yams::format("{}_{}", info.name, info.version);
 
     // Default values (would be parsed from model metadata in real implementation)
     info.embedding_dimension = 384; // Default for all-MiniLM-L6-v2

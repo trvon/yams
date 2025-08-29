@@ -172,7 +172,7 @@ public:
         auto it = loaders_.find(format);
         if (it == loaders_.end()) {
             return Error{ErrorCode::NotSupported,
-                         std::format("Unsupported model format: {}", format)};
+                         yams::format("Unsupported model format: {}", format)};
         }
 
         stats_.total_loads++;
@@ -255,7 +255,7 @@ public:
             return Result<std::string>(std::string("TFLite"));
 
         return Error{ErrorCode::NotSupported,
-                     std::format("Unknown model format for extension: {}", ext)};
+                     yams::format("Unknown model format for extension: {}", ext)};
     }
 
     std::vector<std::string> getSupportedFormats() const {
@@ -352,7 +352,7 @@ Result<void> optimizeONNXModel(const std::string& input_path, const std::string&
         fs::copy_file(input_path, output_path, fs::copy_options::overwrite_existing);
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError,
-                     std::format("Failed to optimize model: {}", e.what())};
+                     yams::format("Failed to optimize model: {}", e.what())};
     }
 
     spdlog::info("Optimized model saved to: {}", output_path);
@@ -372,7 +372,7 @@ Result<void> quantizeModel(const std::string& input_path, const std::string& out
         spdlog::info("Quantized model ({}) saved to: {}", quantization_type, output_path);
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError,
-                     std::format("Failed to quantize model: {}", e.what())};
+                     yams::format("Failed to quantize model: {}", e.what())};
     }
 
     return Result<void>();

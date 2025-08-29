@@ -20,6 +20,11 @@
 // Frame marking
 #define YAMS_FRAME_MARK() FrameMark
 #define YAMS_FRAME_MARK_NAMED(name) FrameMarkNamed(name)
+#define YAMS_FRAME_MARK_START(name) FrameMarkStart(name)
+#define YAMS_FRAME_MARK_END(name) FrameMarkEnd(name)
+
+// Thread naming
+#define YAMS_SET_THREAD_NAME(name) tracy::SetThreadName(name)
 
 // Memory tracking
 #define YAMS_ALLOC(ptr, size) TracyAlloc(ptr, size)
@@ -62,6 +67,11 @@
 
 #define YAMS_FRAME_MARK()
 #define YAMS_FRAME_MARK_NAMED(name)
+#define YAMS_FRAME_MARK_START(name)
+#define YAMS_FRAME_MARK_END(name)
+
+// Thread naming
+#define YAMS_SET_THREAD_NAME(name)
 
 #define YAMS_ALLOC(ptr, size)
 #define YAMS_FREE(ptr)

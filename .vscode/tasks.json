@@ -1,0 +1,117 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j",
+			"problemMatcher": []
+		},
+		{
+			"label": "conan: install (Debug)",
+			"type": "shell",
+			"command": "conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing",
+			"problemMatcher": []
+		},
+		{
+			"label": "cmake: configure (Debug)",
+			"type": "shell",
+			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON",
+			"problemMatcher": []
+		},
+		{
+			"label": "build+test (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j",
+			"problemMatcher": []
+		},
+		{
+			"label": "conan: install (Release)",
+			"type": "shell",
+			"command": "conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing",
+			"problemMatcher": []
+		},
+		{
+			"label": "cmake: configure (Release)",
+			"type": "shell",
+			"command": "cmake --preset yams-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON",
+			"problemMatcher": []
+		},
+		{
+			"label": "build+test (Release)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-release -j && ctest --preset yams-release --output-on-failure -j",
+			"problemMatcher": []
+		},
+		{
+			"label": "cmake: configure (Debug)",
+			"type": "shell",
+			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "cmake: configure (Debug)",
+			"type": "shell",
+			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "cmake: configure (Debug)",
+			"type": "shell",
+			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build+test (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j"
+		},
+		{
+			"label": "cmake: configure (Debug)",
+			"type": "shell",
+			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		}
+	]
+}

@@ -22,7 +22,6 @@ Testing/
 install_manifest*.txt
 
 # IDE files
-.vscode/
 .idea/
 *.code-workspace
 .vs/

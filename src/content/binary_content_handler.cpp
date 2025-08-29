@@ -5,6 +5,7 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
+#include <yams/common/format.h>
 #include <yams/content/binary_content_handler.h>
 #include <yams/detection/file_type_detector.h>
 
@@ -28,11 +29,11 @@ Result<void> BinaryContentHandler::validate(const std::filesystem::path& path) c
         const auto fileSize = std::filesystem::file_size(path);
         if (fileSize > maxAnalysisSize()) {
             return Error{ErrorCode::InvalidArgument,
-                         std::format("Binary file too large: {} bytes (max: {})", fileSize,
-                                     maxAnalysisSize())};
+                         yams::fmt_format("Binary file too large: {} bytes (max: {})", fileSize,
+                                          maxAnalysisSize())};
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        return Error{ErrorCode::DatabaseError, std::format("Filesystem error: {}", e.what())};
+        return Error{ErrorCode::DatabaseError, yams::fmt_format("Filesystem error: {}", e.what())};
     }
 
     return Result<void>{};
@@ -54,7 +55,7 @@ Result<ContentResult> BinaryContentHandler::process(const std::filesystem::path&
         if (!file) {
             ++failedProcessing_;
             return Error{ErrorCode::FileNotFound,
-                         std::format("Cannot open file: {}", path.string())};
+                         yams::fmt_format("Cannot open file: {}", path.string())};
         }
 
         const auto size = file.tellg();
@@ -91,7 +92,8 @@ Result<ContentResult> BinaryContentHandler::process(const std::filesystem::path&
 
     } catch (const std::exception& e) {
         ++failedProcessing_;
-        return Error{ErrorCode::DatabaseError, std::format("File processing error: {}", e.what())};
+        return Error{ErrorCode::DatabaseError,
+                     yams::fmt_format("File processing error: {}", e.what())};
     }
 }
 
@@ -175,7 +177,7 @@ std::string BinaryContentHandler::calculateHash(std::span<const std::byte> data)
     std::hash<std::string_view> hasher;
     std::string_view view{reinterpret_cast<const char*>(data.data()), data.size()};
     auto hashValue = hasher(view);
-    return std::format("{:016x}", hashValue);
+    return yams::fmt_format("{:016x}", hashValue);
 }
 
 std::vector<std::string> BinaryContentHandler::extractStrings(std::span<const std::byte> data,
@@ -373,7 +375,7 @@ void BinaryContentHandler::extractFileMetadata(const std::filesystem::path& path
         auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
             lastWrite - std::filesystem::file_time_type::clock::now() +
             std::chrono::system_clock::now());
-        result.metadata["last_modified"] = std::format("{:%Y-%m-%d %H:%M:%S}", sctp);
+        result.metadata["last_modified"] = yams::fmt_format("{:%Y-%m-%d %H:%M:%S}", sctp);
 
     } catch (const std::filesystem::filesystem_error& e) {
         spdlog::warn("Failed to extract file metadata for {}: {}", path.string(), e.what());

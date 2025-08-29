@@ -1,4 +1,7 @@
-# Detection unit tests
+# Detection unit tests (stabilization: allow disabling via option)
+option(YAMS_ENABLE_DETECTION_UNIT_TESTS "Enable detection unit tests" ON)
+
+if(YAMS_ENABLE_DETECTION_UNIT_TESTS)
 add_executable(detection_tests
     file_type_detector_test.cpp
     file_type_graceful_fallback_test.cpp
@@ -26,5 +29,8 @@ gtest_discover_tests(detection_tests
     PROPERTIES
         LABELS "unit"
         TIMEOUT 30
+    DISCOVERY_TIMEOUT 20
+    ENVIRONMENT "YAMS_TEST_NONINTERACTIVE=1"
     DISCOVERY_MODE PRE_TEST
 )
+endif()

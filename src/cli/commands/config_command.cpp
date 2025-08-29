@@ -156,6 +156,20 @@ public:
             }
         });
 
+        // Update subcommand (add new v2 keys additively)
+        auto* updateCmd = cmd->add_subcommand(
+            "update", "Add newly introduced v2 keys without overwriting existing values");
+        updateCmd->add_option("--config-path", configPath_, "Path to config file");
+        updateCmd->add_flag("--no-backup", noBackup_, "Skip creating backup");
+        updateCmd->add_flag("--dry-run", dryRun_, "Show changes without writing");
+        updateCmd->callback([this]() {
+            auto result = executeUpdate();
+            if (!result) {
+                spdlog::error("Config update failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
         // Check subcommand to verify if migration is needed
         auto* checkCmd = cmd->add_subcommand("check", "Check if config needs migration");
         checkCmd->add_option("--config-path", configPath_, "Path to config file");
@@ -182,6 +196,7 @@ private:
     std::string embeddingModel_;
     std::string embeddingPreset_;
     bool noBackup_ = false;
+    bool dryRun_ = false;
 
     fs::path getConfigPath() const {
         if (!configPath_.empty()) {
@@ -806,6 +821,19 @@ private:
 
             if (!needsResult.value()) {
                 std::cout << "✓ Configuration is already at version 2\n";
+                // Still perform additive update of any newly introduced v2 keys
+                auto added = migrator.updateV2SchemaAdditive(configPath, !noBackup_, false);
+                if (!added) {
+                    return Error{added.error()};
+                }
+                if (added.value().empty()) {
+                    std::cout << "  No new keys to add\n";
+                } else {
+                    std::cout << "  Added " << added.value().size() << " new key(s):\n";
+                    for (const auto& k : added.value()) {
+                        std::cout << "    - " << k << "\n";
+                    }
+                }
                 return Result<void>();
             }
 
@@ -849,6 +877,58 @@ private:
             std::cout << "  • Experimental features section\n";
             std::cout << "  • Performance tuning options\n";
             std::cout << "\nEdit " << configPath << " to customize these settings.\n";
+
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeUpdate() {
+        try {
+            auto configPath = getConfigPath();
+            config::ConfigMigrator migrator;
+
+            if (!fs::exists(configPath)) {
+                std::cout << "✗ No configuration file found at: " << configPath << "\n";
+                std::cout << "  Run 'yams config migrate' to create a v2 config\n";
+                return Error{ErrorCode::FileNotFound, "Config file not found"};
+            }
+
+            auto versionResult = migrator.getConfigVersion(configPath);
+            if (!versionResult) {
+                std::cout << "⚠ Cannot determine config version; attempting additive update for v2 "
+                             "keys\n";
+            } else if (versionResult.value().major < 2) {
+                std::cout << "⚠ Config is v1; run 'yams config migrate' first\n";
+                return Error{ErrorCode::InvalidData, "Config is not v2"};
+            }
+
+            auto added = migrator.updateV2SchemaAdditive(configPath, !noBackup_, dryRun_);
+            if (!added) {
+                return Error{added.error()};
+            }
+
+            if (added.value().empty()) {
+                if (dryRun_) {
+                    std::cout << "No changes (up-to-date)\n";
+                } else {
+                    std::cout << "✓ Configuration already has all known v2 keys\n";
+                }
+            } else {
+                if (dryRun_) {
+                    std::cout << "Would add " << added.value().size() << " key(s):\n";
+                } else {
+                    std::cout << "✓ Added " << added.value().size() << " key(s):\n";
+                }
+                for (const auto& k : added.value()) {
+                    std::cout << "  - " << k << "\n";
+                }
+                if (!dryRun_ && !noBackup_) {
+                    std::cout << "  Backup created with .backup.* extension\n";
+                }
+            }
 
             return Result<void>();
 

@@ -24,7 +24,15 @@ target_link_libraries(yams_daemon_client
         spdlog::spdlog
 )
 
+# tl-expected is header-only; link to whichever target exists to propagate include dirs
+if(TARGET tl-expected::tl-expected)
+    target_link_libraries(yams_daemon_client PUBLIC tl-expected::tl-expected)
+elseif(TARGET tl::expected)
+    target_link_libraries(yams_daemon_client PUBLIC tl::expected)
+endif()
+
 target_compile_features(yams_daemon_client PUBLIC cxx_std_20)
+set_target_properties(yams_daemon_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Create alias for daemon client
 add_library(yams::daemon_client ALIAS yams_daemon_client)
@@ -35,8 +43,9 @@ add_library(yams::daemon_client ALIAS yams_daemon_client)
 add_library(yams_daemon_ipc STATIC
     ipc/async_socket.cpp
     ipc/async_ipc_server.cpp
-    ipc/connection_pool.cpp
     ipc/request_handler.cpp
+    ipc/streaming_processor.cpp
+    ipc/connection_fsm.cpp
     ipc/retrieval_session.cpp
     ipc/thread_pool.cpp
 )
@@ -65,10 +74,36 @@ target_link_libraries(yams_daemon_ipc
         spdlog::spdlog
 )
 
+# tl-expected is header-only; link interface target to propagate include dirs
+if(TARGET tl-expected::tl-expected)
+    target_link_libraries(yams_daemon_ipc PUBLIC tl-expected::tl-expected)
+elseif(TARGET tl::expected)
+    target_link_libraries(yams_daemon_ipc PUBLIC tl::expected)
+endif()
+
 target_compile_features(yams_daemon_ipc PUBLIC cxx_std_20)
+set_target_properties(yams_daemon_ipc PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Create alias for daemon ipc
 add_library(yams::daemon_ipc ALIAS yams_daemon_ipc)
+
+# Platform-specific async I/O defines for the IPC library (to match implementation)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(LIBURING liburing)
+        if(LIBURING_FOUND)
+            target_compile_definitions(yams_daemon_ipc PRIVATE HAVE_IO_URING=1)
+            target_link_libraries(yams_daemon_ipc PRIVATE ${LIBURING_LIBRARIES})
+            target_include_directories(yams_daemon_ipc PRIVATE ${LIBURING_INCLUDE_DIRS})
+            message(STATUS "io_uring support enabled for yams_daemon_ipc")
+        else()
+            message(STATUS "yams_daemon_ipc: liburing not found, using select/epoll fallback")
+        endif()
+    endif()
+elseif(APPLE)
+    target_compile_definitions(yams_daemon_ipc PRIVATE HAVE_KQUEUE=1)
+endif()
 
 # ============================================================================
 # Main Daemon Library
@@ -108,6 +143,13 @@ target_link_libraries(yams_daemon
         # Removed: onnxruntime::onnxruntime (moved to plugin)
 )
 
+# tl-expected is header-only; link interface target so tl headers are visible during yams_daemon compile
+if(TARGET tl-expected::tl-expected)
+    target_link_libraries(yams_daemon PUBLIC tl-expected::tl-expected)
+elseif(TARGET tl::expected)
+    target_link_libraries(yams_daemon PUBLIC tl::expected)
+endif()
+
 # Note: ONNX plugin is now loaded dynamically at runtime, not linked statically
 
 # Platform-specific async I/O dependencies
@@ -133,6 +175,7 @@ elseif(APPLE)
 endif()
 
 target_compile_features(yams_daemon PUBLIC cxx_std_20)
+set_target_properties(yams_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Daemon executable
 add_executable(yams-daemon
@@ -221,4 +264,20 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
 else()
     message(STATUS "ONNX Runtime not found or disabled - ONNX plugin will not be built")
     message(STATUS "  Embedding features will use mock provider")
+endif()
+
+# Link profiling where appropriate when profiling is enabled
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    if(TARGET yams_daemon_client)
+        target_link_libraries(yams_daemon_client PRIVATE $<BUILD_INTERFACE:yams_profiling>)
+    endif()
+    if(TARGET yams_daemon_ipc)
+        target_link_libraries(yams_daemon_ipc PRIVATE $<BUILD_INTERFACE:yams_profiling>)
+    endif()
+    if(TARGET yams_daemon)
+        target_link_libraries(yams_daemon PRIVATE $<BUILD_INTERFACE:yams_profiling>)
+    endif()
+    if(TARGET yams-daemon)
+        target_link_libraries(yams-daemon PRIVATE $<BUILD_INTERFACE:yams_profiling>)
+    endif()
 endif()

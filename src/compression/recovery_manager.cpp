@@ -1,10 +1,21 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
 #include <future>
+#include <mutex>
+#include <optional>
 #include <queue>
 #include <random>
+#include <span>
+#include <sstream>
+#include <string>
 #include <thread>
+#include <typeinfo>
+#include <vector>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/recovery_manager.h>
 

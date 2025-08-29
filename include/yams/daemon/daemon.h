@@ -2,6 +2,7 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/ipc/async_ipc_server.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
 
 #include <atomic>
@@ -15,7 +16,6 @@
 namespace yams::daemon {
 
 // Forward declarations for components
-class AsyncIpcServer;
 class LifecycleComponent;
 class ServiceManager;
 class RequestDispatcher;
@@ -88,7 +88,7 @@ private:
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::unique_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
-    std::unique_ptr<AsyncIpcServer> ipcServer_;
+    std::unique_ptr<SimpleAsyncIpcServer> ipcServer_;
 
     // Threading and state
     std::atomic<bool> running_{false};

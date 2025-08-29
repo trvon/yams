@@ -28,6 +28,6 @@ target_include_directories(yams_config
 target_compile_features(yams_config PUBLIC cxx_std_20)
 
 # Link Tracy if profiling is enabled
-if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
-    target_link_libraries(yams_config PRIVATE Tracy::TracyClient)
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    target_link_libraries(yams_config PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()

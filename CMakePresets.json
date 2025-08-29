@@ -1,11 +1,10 @@
 {
-  "version": 3,
+  "version": 4,
   "cmakeMinimumRequired": {
     "major": 3,
     "minor": 20,
     "patch": 0
   },
-
   "configurePresets": [
     {
       "name": "base",
@@ -14,240 +13,39 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
-
     {
-      "name": "ninja-debug",
-      "displayName": "Ninja Debug",
-      "description": "Configure with Ninja generator (Debug)",
+      "name": "yams-debug",
+      "displayName": "YAMS Debug (Conan + Ninja)",
+      "description": "Conan toolchain + Ninja, single-config Debug",
       "inherits": "base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/build/${presetName}/build/Debug/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "YAMS_USE_CONAN": "OFF"
-      }
-    },
-    {
-      "name": "ninja-release",
-      "displayName": "Ninja Release",
-      "description": "Configure with Ninja generator (Release)",
-      "inherits": "base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "YAMS_USE_CONAN": "OFF"
-      }
-    },
-
-    {
-      "name": "make-debug",
-      "displayName": "Unix Makefiles Debug",
-      "description": "Configure with Unix Makefiles generator (Debug)",
-      "inherits": "base",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "YAMS_USE_CONAN": "OFF"
-      }
-    },
-    {
-      "name": "make-release",
-      "displayName": "Unix Makefiles Release",
-      "description": "Configure with Unix Makefiles generator (Release)",
-      "inherits": "base",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "YAMS_USE_CONAN": "OFF"
-      }
-    },
-
-    {
-      "name": "conan-ninja-debug",
-      "displayName": "Conan + Ninja Debug",
-      "description": "Use Conan toolchain (expects conan_toolchain.cmake in this preset's build dir)",
-      "inherits": "base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
         "YAMS_USE_CONAN": "ON"
       }
     },
     {
-      "name": "conan-ninja-release",
-      "displayName": "Conan + Ninja Release",
-      "description": "Use Conan toolchain (expects conan_toolchain.cmake in this preset's build dir)",
+      "name": "yams-release",
+      "displayName": "YAMS Release (Conan + Ninja)",
+      "description": "Conan toolchain + Ninja, single-config Release",
       "inherits": "base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/build/${presetName}/build/Release/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
         "YAMS_USE_CONAN": "ON"
-      }
-    },
-    {
-      "name": "conan-make-debug",
-      "displayName": "Conan + Make Debug",
-      "description": "Use Conan toolchain (expects conan_toolchain.cmake in this preset's build dir)",
-      "inherits": "base",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
-        "YAMS_USE_CONAN": "ON"
-      }
-    },
-    {
-      "name": "conan-make-release",
-      "displayName": "Conan + Make Release",
-      "description": "Use Conan toolchain (expects conan_toolchain.cmake in this preset's build dir)",
-      "inherits": "base",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
-        "YAMS_USE_CONAN": "ON"
-      }
-    },
-
-    {
-      "name": "conan-debug-coverage",
-      "displayName": "Conan Debug with Coverage",
-      "description": "Debug build with code coverage enabled",
-      "inherits": "base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/${presetName}/conan_toolchain.cmake",
-        "YAMS_USE_CONAN": "ON",
-        "YAMS_ENABLE_COVERAGE": "ON",
-        "CMAKE_CXX_FLAGS": "-O0 -g --coverage",
-        "CMAKE_C_FLAGS": "-O0 -g --coverage"
       }
     }
   ],
-
   "buildPresets": [
-    {
-      "name": "build-ninja-debug",
-      "configurePreset": "ninja-debug"
-    },
-    {
-      "name": "build-ninja-release",
-      "configurePreset": "ninja-release"
-    },
-    {
-      "name": "build-make-debug",
-      "configurePreset": "make-debug"
-    },
-    {
-      "name": "build-make-release",
-      "configurePreset": "make-release"
-    },
-
-    {
-      "name": "build-conan-ninja-debug",
-      "configurePreset": "conan-ninja-debug"
-    },
-    {
-      "name": "build-conan-ninja-release",
-      "configurePreset": "conan-ninja-release"
-    },
-    {
-      "name": "build-conan-make-debug",
-      "configurePreset": "conan-make-debug"
-    },
-    {
-      "name": "build-conan-make-release",
-      "configurePreset": "conan-make-release"
-    },
-    {
-      "name": "build-conan-debug-coverage",
-      "configurePreset": "conan-debug-coverage",
-      "displayName": "Build with Coverage",
-      "description": "Build with code coverage instrumentation"
-    }
+    { "name": "yams-debug",   "configurePreset": "yams-debug" },
+    { "name": "yams-release", "configurePreset": "yams-release" }
   ],
-
   "testPresets": [
-    {
-      "name": "test-ninja-debug",
-      "configurePreset": "ninja-debug",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-ninja-release",
-      "configurePreset": "ninja-release",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-make-debug",
-      "configurePreset": "make-debug",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-make-release",
-      "configurePreset": "make-release",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-
-    {
-      "name": "test-conan-ninja-debug",
-      "configurePreset": "conan-ninja-debug",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-conan-ninja-release",
-      "configurePreset": "conan-ninja-release",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-conan-make-debug",
-      "configurePreset": "conan-make-debug",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-conan-make-release",
-      "configurePreset": "conan-make-release",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "test-conan-debug-coverage",
-      "configurePreset": "conan-debug-coverage",
-      "displayName": "Test with Coverage",
-      "description": "Run tests and generate coverage",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error",
-        "stopOnFailure": false
-      }
-    }
+    { "name": "yams-debug",   "configurePreset": "yams-debug",   "output": { "outputOnFailure": true } },
+    { "name": "yams-release", "configurePreset": "yams-release", "output": { "outputOnFailure": true } }
   ]
 }

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include <yams/version.hpp>
 
 namespace yams::daemon::test {
 
@@ -117,7 +118,7 @@ TEST_F(IpcClientTest, GenericCallStatus) {
     auto& status = result.value();
     EXPECT_TRUE(status.running);
     EXPECT_GE(status.uptimeSeconds, 0);
-    EXPECT_EQ(status.version, "0.4.0");
+    EXPECT_EQ(status.version, YAMS_VERSION_STRING);
 }
 
 // Test generic call() with SearchRequest
@@ -151,6 +152,8 @@ TEST_F(IpcClientTest, GenericCallGet) {
     GetRequest req;
     // Use a valid hex hash that doesn't exist (64 hex chars)
     req.hash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    // Ensure we're not resolving by name; force hash lookup path
+    req.byName = false;
 
     auto result = client.call(req);
 

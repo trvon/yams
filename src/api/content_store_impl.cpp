@@ -399,9 +399,27 @@ public:
 
     // Check if content exists
     Result<bool> exists(const std::string& hash) const override {
-        // Check for manifest
-        auto manifestHash = hash + ".manifest";
-        return storage_->exists(manifestHash);
+        // First check for manifest (chunked content)
+        // Any errors here are treated as "not found" to keep exists() lenient.
+        if (auto manifestRes = storage_->exists(hash + ".manifest"); manifestRes) {
+            if (manifestRes.value()) {
+                return true;
+            }
+        }
+
+        // Fallback: check for direct object (small unchunked items)
+        auto objectRes = storage_->exists(hash);
+        if (!objectRes) {
+            // Treat invalid input as "not found" rather than surfacing an error.
+            // This matches the typical semantics of an existence check and
+            // avoids failing callers that probe with non-canonical ids.
+            if (objectRes.error().code == ErrorCode::InvalidArgument) {
+                return false;
+            }
+            // For other error conditions, propagate the error.
+            return objectRes.error();
+        }
+        return objectRes.value();
     }
 
     // Remove content

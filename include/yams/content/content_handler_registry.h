@@ -1,7 +1,6 @@
 #pragma once
 
 #include <concepts>
-#include <format>
 #include <memory>
 #include <ranges>
 #include <shared_mutex>
@@ -11,6 +10,16 @@
 #include <vector>
 #include <yams/content/content_handler.h>
 #include <yams/detection/file_type_detector.h>
+
+#include <array>
+#if YAMS_HAS_STD_FORMAT
+#include <format>
+#else
+#include <fmt/format.h>
+namespace std {
+using ::fmt::format;
+} // namespace std
+#endif
 
 namespace yams::content {
 

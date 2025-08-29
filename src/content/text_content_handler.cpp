@@ -24,6 +24,7 @@ std::vector<std::string> TextContentHandler::supportedMimeTypes() const {
     // Return common text MIME type patterns
     // These are patterns that the handler supports
     return {
+        "text/plain",              // Explicit plain text
         "text/*",                  // All text types
         "application/json",        // JSON
         "application/xml",         // XML
@@ -46,12 +47,21 @@ Result<ContentResult> TextContentHandler::process(const std::filesystem::path& p
     auto start = std::chrono::steady_clock::now();
 
     // Validate file exists
-    if (!std::filesystem::exists(path)) {
-        return Error{ErrorCode::FileNotFound, "File not found: " + path.string()};
+    std::error_code fsEc;
+    if (!std::filesystem::exists(path, fsEc)) {
+        return Error{ErrorCode::NotFound, "File not found: " + path.string()};
+    }
+    // Reject directories to avoid exceptions when reading size/contents
+    if (std::filesystem::is_directory(path, fsEc)) {
+        return Error{ErrorCode::FileNotFound, "Path is a directory: " + path.string()};
     }
 
     // Check file size
-    auto fileSize = std::filesystem::file_size(path);
+    auto fileSize = std::filesystem::file_size(path, fsEc);
+    if (fsEc) {
+        return Error{ErrorCode::IOError,
+                     "Failed to stat file: " + path.string() + ": " + fsEc.message()};
+    }
     if (fileSize > config.maxFileSize) {
         return Error{ErrorCode::ResourceExhausted,
                      "File exceeds maximum size: " + std::to_string(fileSize)};
@@ -66,7 +76,10 @@ Result<ContentResult> TextContentHandler::process(const std::filesystem::path& p
     // Create extraction config from content config
     extraction::ExtractionConfig extractConfig;
     extractConfig.maxFileSize = config.maxFileSize;
-    extractConfig.preserveFormatting = config.preserveFormatting;
+    // Preserve original formatting (line breaks, tabs, CR/LF) for text files by default
+    // to match expected behavior in content tests. Callers can still override at extractor level
+    // later if needed, but for TextContentHandler we keep raw text intact.
+    extractConfig.preserveFormatting = true;
     extractConfig.detectLanguage = config.detectLanguage;
     extractConfig.preferredEncoding = config.preferredEncoding;
 

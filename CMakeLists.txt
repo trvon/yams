@@ -101,29 +101,27 @@ endif()
 
 ## Kept above in unified C++20 configuration
 
-# Tracy profiler integration for Debug builds
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    find_package(tracy QUIET)
-    if(tracy_FOUND)
-        message(STATUS "Tracy profiler enabled for Debug build")
-        set(YAMS_ENABLE_PROFILING ON)
-        add_compile_definitions(TRACY_ENABLE)
-        # Add required flags for better profiling on macOS/Linux
-        if(UNIX)
-            add_compile_options(-g -fno-omit-frame-pointer)
-            if(APPLE)
-                add_link_options(-rdynamic)
-            endif()
-        endif()
-        # Tracy requires compiling TracyClient.cpp into the project
-        # The Tracy::TracyClient target should handle this, but we may need to add it explicitly
-        # This is handled by linking to Tracy::TracyClient in each library
-    else()
-        message(STATUS "Tracy profiler not found - profiling disabled")
-        set(YAMS_ENABLE_PROFILING OFF)
-    endif()
+# Tracy profiler integration (Debug or tests via generator expressions)
+add_library(yams_profiling INTERFACE)
+
+find_package(tracy QUIET)
+
+if(tracy_FOUND)
+    # Enable profiling target properties only for Debug or when tests are built
+    set(YAMS_ENABLE_PROFILING ON)
+    target_compile_definitions(yams_profiling INTERFACE
+        $<$<OR:$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>:TRACY_ENABLE;TRACY_ON_DEMAND>
+    )
+    target_link_libraries(yams_profiling INTERFACE
+        $<$<OR:$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>:Tracy::TracyClient>
+    )
+    target_compile_options(yams_profiling INTERFACE
+        $<$<AND:$<OR:$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>,$<BOOL:${UNIX}>>:-g -fno-omit-frame-pointer>
+    )
+    message(STATUS "Tracy profiler available; enabled for Debug or tests")
 else()
     set(YAMS_ENABLE_PROFILING OFF)
+    message(STATUS "Tracy profiler not found - profiling disabled")
 endif()
 
 # Check for std::format availability (C++20 project; allow fmt fallback)
@@ -703,6 +701,7 @@ if(YAMS_USE_CONAN)
     find_package(Protobuf REQUIRED)
     find_package(OpenSSL REQUIRED)
     find_package(onnxruntime REQUIRED)
+    find_package(tl-expected REQUIRED)
     # fmt for std::format fallback
     if(NOT YAMS_HAS_STD_FORMAT)
         find_package(fmt REQUIRED)
@@ -1102,7 +1101,7 @@ if(YAMS_ENABLE_PDF)
                 set(YAMS_ENABLE_PDF OFF)
                 return()
             endif()
-            
+
             # Additional verification for library file
             if(APPLE)
                 if(NOT EXISTS "${pdfium_SOURCE_DIR}/lib/libpdfium.dylib")
@@ -1119,7 +1118,7 @@ if(YAMS_ENABLE_PDF)
                         ERROR_QUIET
                     )
                     message(STATUS "PDFium library info: ${DYLIB_INFO}")
-                    
+
                     # Check if the architecture matches what we expect
                     if(CMAKE_OSX_ARCHITECTURES MATCHES "arm64" AND NOT DYLIB_INFO MATCHES "arm64")
                         message(WARNING "PDFium library architecture mismatch - expected arm64")
@@ -1415,7 +1414,7 @@ if(UNIX AND NOT APPLE)
             OUTPUT_STRIP_TRAILING_WHITESPACE
         )
     endif()
-    
+
     # DEB packaging for Debian/Ubuntu
     if(LSB_RELEASE_ID MATCHES "Debian|Ubuntu")
         set(CPACK_GENERATOR "DEB;TGZ")
@@ -1425,7 +1424,7 @@ if(UNIX AND NOT APPLE)
         set(CPACK_DEBIAN_PACKAGE_DEPENDS "libssl3, libstdc++6, libgcc-s1, zlib1g, libzstd1, liblzma5, libsqlite3-0")
         set(CPACK_DEBIAN_PACKAGE_SUGGESTS "libmagic1")
         set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/trvon/yams")
-    # RPM packaging for RedHat/Fedora/CentOS
+        # RPM packaging for RedHat/Fedora/CentOS
     elseif(LSB_RELEASE_ID MATCHES "RedHat|Fedora|CentOS|Rocky|AlmaLinux")
         set(CPACK_GENERATOR "RPM;TGZ")
         set(CPACK_RPM_PACKAGE_GROUP "Applications/System")
@@ -1437,7 +1436,7 @@ if(UNIX AND NOT APPLE)
         # Generic Linux packaging
         set(CPACK_GENERATOR "TGZ;STGZ")
     endif()
-    
+
     # AppImage support
     option(YAMS_BUILD_APPIMAGE "Build AppImage package" OFF)
     if(YAMS_BUILD_APPIMAGE)
@@ -1557,90 +1556,86 @@ endif()
 # Code Quality Targets
 # =============================================================================
 
-# Find cppcheck for static analysis
+# Find cppcheck for static analysis (always define targets; degrade gracefully if missing)
 find_program(CPPCHECK_PATH cppcheck)
+set(QUALITY_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/check-quality.sh")
 
 if(CPPCHECK_PATH)
     message(STATUS "Found cppcheck: ${CPPCHECK_PATH}")
-    
-    # Quality check script path
-    set(QUALITY_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/check-quality.sh")
-    
-    if(EXISTS ${QUALITY_SCRIPT})
-        # Quick quality check (essential checks only)
-        add_custom_target(quality-quick
-            COMMAND ${QUALITY_SCRIPT} --profile quick --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Running quick code quality analysis"
-        )
-        
-        # Normal quality check (standard checks)
-        add_custom_target(quality
-            COMMAND ${QUALITY_SCRIPT} --profile normal --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Running standard code quality analysis"
-        )
-        
-        # Strict quality check (all checks, warnings as errors)
-        add_custom_target(quality-strict
-            COMMAND ${QUALITY_SCRIPT} --profile strict --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Running strict code quality analysis"
-        )
-        
-        # CI quality check (optimized for continuous integration)
-        add_custom_target(quality-ci
-            COMMAND ${QUALITY_SCRIPT} --profile ci --format xml 
-                --output ${CMAKE_BINARY_DIR}/quality-reports/ --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Running CI code quality analysis with XML output"
-        )
-        
-        # Quality check with automatic formatting
-        add_custom_target(quality-format
-            COMMAND ${QUALITY_SCRIPT} --profile normal --fix-format --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Running code quality analysis with automatic formatting"
-        )
-        
-        # Git-aware quality check (only modified files)
-        add_custom_target(quality-git
-            COMMAND ${QUALITY_SCRIPT} --profile normal --git --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Running code quality analysis on git-modified files"
-        )
-        
-        # Generate quality baseline
-        add_custom_target(quality-baseline
-            COMMAND ${QUALITY_SCRIPT} --profile normal --generate-baseline 
-                --output ${CMAKE_BINARY_DIR}/quality-reports/ --build-dir ${CMAKE_BINARY_DIR}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Generating code quality baseline"
-        )
-        
-        # Create quality reports directory
-        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/quality-reports)
-        
-        message(STATUS "Code quality targets enabled:")
-        message(STATUS "  quality-quick    - Quick essential checks")
-        message(STATUS "  quality          - Standard quality analysis")  
-        message(STATUS "  quality-strict   - Strict analysis (warnings as errors)")
-        message(STATUS "  quality-ci       - CI-optimized with XML output")
-        message(STATUS "  quality-format   - Analysis with auto-formatting")
-        message(STATUS "  quality-git      - Analysis of git-modified files only")
-        message(STATUS "  quality-baseline - Generate quality baseline")
-    else()
-        message(WARNING "Quality script not found: ${QUALITY_SCRIPT}")
-    endif()
-    
-    # Add quality checks to development workflow targets
-    if(TARGET format-code)
-        add_dependencies(quality format-code)
-    endif()
-    
 else()
-    message(STATUS "cppcheck not found - quality targets disabled")
-    message(STATUS "Install with: brew install cppcheck (macOS) or apt-get install cppcheck (Linux)")
+    message(STATUS "cppcheck not found - quality targets will print an error at build time")
+endif()
+
+if(EXISTS ${QUALITY_SCRIPT})
+    message(STATUS "Quality script found: ${QUALITY_SCRIPT}")
+else()
+    message(STATUS "Quality script not found at ${QUALITY_SCRIPT} - quality targets will print an error at build time")
+endif()
+
+# Ensure output directory exists for CI reports
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/quality-reports)
+
+# Quick quality check (essential checks only)
+add_custom_target(quality-quick
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile quick --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality-quick: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running quick code quality analysis"
+)
+
+# Normal quality check (standard checks)
+add_custom_target(quality
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile normal --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running standard code quality analysis"
+)
+
+# Strict quality check (all checks, warnings as errors)
+add_custom_target(quality-strict
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile strict --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality-strict: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running strict code quality analysis"
+)
+
+# CI quality check (optimized for continuous integration)
+add_custom_target(quality-ci
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile ci --format xml --output \"${CMAKE_BINARY_DIR}/quality-reports/\" --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality-ci: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running CI code quality analysis with XML output"
+)
+
+# Quality check with automatic formatting
+add_custom_target(quality-format
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile normal --fix-format --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality-format: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running code quality analysis with automatic formatting"
+)
+
+# Git-aware quality check (only modified files)
+add_custom_target(quality-git
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile normal --git --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality-git: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running code quality analysis on git-modified files"
+)
+
+# Generate quality baseline
+add_custom_target(quality-baseline
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile normal --generate-baseline --output \"${CMAKE_BINARY_DIR}/quality-reports/\" --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for quality-baseline: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Generating code quality baseline"
+)
+
+message(STATUS "Code quality targets configured:")
+message(STATUS "  quality-quick    - Quick essential checks")
+message(STATUS "  quality          - Standard quality analysis")
+message(STATUS "  quality-strict   - Strict analysis (warnings as errors)")
+message(STATUS "  quality-ci       - CI-optimized with XML output")
+message(STATUS "  quality-format   - Analysis with auto-formatting")
+message(STATUS "  quality-git      - Analysis of git-modified files only")
+message(STATUS "  quality-baseline - Generate quality baseline")
+
+# Add quality checks to development workflow targets (only if format-code exists)
+if(TARGET format-code)
+    add_dependencies(quality format-code)
 endif()
 
 # Find clang-format for code formatting
@@ -1651,47 +1646,45 @@ if(CLANG_FORMAT_PATH AND EXISTS "${CMAKE_SOURCE_DIR}/scripts/format-code.sh")
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Formatting code with clang-format"
     )
-    
+
     add_custom_target(format-check
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/format-code.sh --check
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Checking code formatting"
     )
-    
+
     message(STATUS "Code formatting targets enabled:")
     message(STATUS "  format-code  - Format all C++ files")
     message(STATUS "  format-check - Check if formatting is needed")
 endif()
 
-# Combined development targets
-if(CPPCHECK_PATH AND EXISTS ${QUALITY_SCRIPT})
-    # Full development check: format + quality + tests
-    add_custom_target(dev-check
-        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target all
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --parallel
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Running full development checks (build + test + quality)"
-    )
-    
-    if(TARGET format-code)
-        add_dependencies(dev-check format-code)
-    endif()
-    
-    if(TARGET quality)
-        add_dependencies(dev-check quality)
-    endif()
-    
-    # Pre-commit hook target
-    add_custom_target(pre-commit
-        COMMAND ${QUALITY_SCRIPT} --profile normal --git --fix-format --build-dir ${CMAKE_BINARY_DIR}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Running pre-commit quality checks and formatting"
-    )
-    
-    message(STATUS "Development workflow targets:")
-    message(STATUS "  dev-check   - Full development check (build + test + quality)")
-    message(STATUS "  pre-commit  - Pre-commit checks (git files only, with formatting)")
+# Combined development targets (always defined; fail gracefully if prerequisites are missing)
+add_custom_target(dev-check
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target all
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --parallel
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile normal --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for dev-check: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running full development checks (build + test + quality)"
+)
+
+if(TARGET format-code)
+    add_dependencies(dev-check format-code)
 endif()
+
+if(TARGET quality)
+    add_dependencies(dev-check quality)
+endif()
+
+# Pre-commit hook target (always defined; fail gracefully if prerequisites are missing)
+add_custom_target(pre-commit
+    COMMAND /bin/sh -c "[ -x \"${QUALITY_SCRIPT}\" ] && [ -x \"${CPPCHECK_PATH}\" ] && \"${QUALITY_SCRIPT}\" --profile normal --git --fix-format --build-dir \"${CMAKE_BINARY_DIR}\" || { echo \"Missing prerequisites for pre-commit: cppcheck='${CPPCHECK_PATH}', script='${QUALITY_SCRIPT}'. Install cppcheck and ensure the script exists and is executable.\"; exit 1; }"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running pre-commit quality checks and formatting"
+)
+
+message(STATUS "Development workflow targets:")
+message(STATUS "  dev-check   - Full development check (build + test + quality)")
+message(STATUS "  pre-commit  - Pre-commit checks (git files only, with formatting)")
 
 # CPack configuration
 set(CPACK_PACKAGE_VENDOR "YAMS Project")

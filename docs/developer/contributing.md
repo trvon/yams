@@ -17,24 +17,24 @@ Thank you for your interest in contributing to YAMS. This guide defines how to p
 Release:
 ```bash
 conan profile detect --force
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
-cmake --preset conan-release
-cmake --build --preset conan-release -j
-ctest --output-on-failure --test-dir build/conan-release/build/Release -j
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+cmake --preset yams-release
+cmake --build --preset build-yams-release -j
+ctest --preset test-yams-release --output-on-failure -j
 ```
 
 Debug:
 ```bash
-conan install . --output-folder=build/conan-debug -s build_type=Debug --build=missing
-cmake --preset conan-debug
-cmake --build --preset conan-debug -j
-ctest --output-on-failure --test-dir build/conan-debug/build/Debug -j
+conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
+cmake --preset yams-debug
+cmake --build --preset yams-debug -j
+ctest --preset test-yams-debug --output-on-failure -j
 ```
 
 Optional (sanitizers in Debug):
 ```bash
-cmake --preset conan-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
-cmake --build --preset conan-debug -j
+cmake --preset yams-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
+cmake --build --preset yams-debug -j
 ```
 
 ## Commit messages

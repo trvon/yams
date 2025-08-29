@@ -122,10 +122,10 @@ pip install conan
 conan profile detect --force
 
 # Build with Conan (recommended - this is what creates the release binaries)
-conan install . --output-folder=build/conan-release -s build_type=Release --build=missing
-cmake --preset conan-release
-cmake --build --preset conan-release
-sudo cmake --install build/conan-release/build/Release
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+cmake --preset yams-release
+cmake --build --preset build-yams-release
+sudo cmake --install build/yams-release
 ```
 
 ## Quick start

@@ -19,6 +19,8 @@ target_link_libraries(indexing_service_test
 )
 
 gtest_discover_tests(indexing_service_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 90
     PROPERTIES
         LABELS "unit;services;indexing"
         TIMEOUT 120
@@ -41,6 +43,8 @@ target_link_libraries(document_service_test
 )
 
 gtest_discover_tests(document_service_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 90
     PROPERTIES
         LABELS "unit;services;document"
         TIMEOUT 120
@@ -63,6 +67,8 @@ target_link_libraries(search_service_test
 )
 
 gtest_discover_tests(search_service_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 90
     PROPERTIES
         LABELS "unit;services;search"
         TIMEOUT 120
@@ -85,6 +91,8 @@ target_link_libraries(grep_service_test
 )
 
 gtest_discover_tests(grep_service_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 90
     PROPERTIES
         LABELS "unit;services;grep"
         TIMEOUT 120

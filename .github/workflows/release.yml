@@ -20,37 +20,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Note: Validation (tests + benchmarks) runs only on linux-self-hosted
-        # Other platforms do optimized release builds only
-        include:
-          - os: linux-self-hosted
-            runs_on: '["self-hosted", "Linux", "X64"]'
-            packaging: tgz
-            cmake_args: ""
-            suffix: linux-x86_64
-            hosted: false
-            build_packages: true
-          - os: macos-self-hosted-arm64
-            runs_on: '["self-hosted", "macOS", "ARM64"]'
-            packaging: zip
-            cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
-            suffix: macos-arm64
-            hosted: false
-          - os: macos-hosted-x64
-            runs_on: '"macos-13"' # GitHub hosted Intel runner
-            packaging: zip
-            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
-            suffix: macos-x86_64
-            hosted: true
-          - os: windows-hosted-x64
-            runs_on: '"windows-2022"'
-            packaging: zip
-            cmake_args: ""
-            suffix: windows-x86_64
-            hosted: true
+         # Note: Validation (tests + benchmarks) runs only on linux-hosted
+         # Other platforms do optimized release builds only
+         include:
+           - os: linux-hosted
+             runs_on: "ubuntu-latest"
+             packaging: tgz
+             cmake_args: ""
+             suffix: linux-x86_64
+             hosted: true
+             build_packages: true
+           - os: macos-hosted-arm64
+             runs_on: "macos-14"
+             packaging: zip
+             cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
+             suffix: macos-arm64
+             hosted: true
+             build_packages: true
+           - os: macos-hosted-x64
+             runs_on: "macos-13" # GitHub hosted Intel runner
+             packaging: zip
+             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
+             suffix: macos-x86_64
+             hosted: true
+           - os: windows-hosted-x64
+             runs_on: "windows-2022"
+             packaging: zip
+             cmake_args: ""
+             suffix: windows-x86_64
+             hosted: true
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     env:
-      BUILD_DIR: build/conan-release/build/Release
+      BUILD_DIR: build/yams-release
       STAGE_DIR: stage
 
     steps:
@@ -60,7 +61,18 @@ jobs:
           # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
 
-      - name: Download CI benchmark artifacts (if available)
+      - name: Download CI benchmark artifacts (-yams, if available)
+        if: github.event_name == 'workflow_run'
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: ci.yml
+          workflow_conclusion: success
+          name: benchmark-results-${{ matrix.os }}-yams
+          path: ci-artifacts/benchmarks
+          if_no_artifact_found: warn
+
+      - name: Download CI benchmark artifacts (legacy -conan, fallback)
         if: github.event_name == 'workflow_run'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
@@ -72,7 +84,7 @@ jobs:
           if_no_artifact_found: warn
 
       - name: Download CI coverage (if available)
-        if: github.event_name == 'workflow_run' && matrix.os == 'linux-self-hosted'
+        if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
@@ -87,10 +99,10 @@ jobs:
         continue-on-error: true
         with:
           path: ~/.conan2/p
-          key: conan-release-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: yams-release-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
           restore-keys: |
-            conan-release-${{ runner.os }}-${{ matrix.suffix }}-
-            conan-${{ runner.os }}-
+            yams-release-${{ runner.os }}-${{ matrix.suffix }}-
+            yams-${{ runner.os }}-
 
       - name: Extract version from tag
         id: v
@@ -181,40 +193,38 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
-      # Linux self-hosted only: Validation build (tests + benchmarks)
-      - name: Configure with Conan (Validation Build) [Linux self-hosted only]
-        if: ${{ matrix.os == 'linux-self-hosted' }}
+      # Linux hosted only: Validation build (tests + benchmarks)
+      - name: Configure with Conan (Validation Build) [Linux hosted only]
+        if: ${{ matrix.os == 'linux-hosted' }}
         continue-on-error: true
         shell: bash
         run: |
           echo "Phase 1: Validation build with tests and benchmarks on Linux"
           # Clean any existing build directory and presets to avoid duplicate preset issues
-          rm -rf build/conan-validation
+          rm -rf build/yams-release
           rm -f CMakeUserPresets.json
           conan install . \
-            --output-folder=build/conan-validation \
+            --output-folder=build/yams-release \
             -s build_type=Release \
             -o build_tests=True \
             -o build_benchmarks=True \
             --build=missing
-          cmake --preset conan-release \
+          cmake --preset yams-release \
             -DYAMS_BUILD_TESTS=ON \
             -DYAMS_BUILD_BENCHMARKS=ON \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             ${{ matrix.cmake_args}}
 
-      - name: Build and Test (Validation) [Linux self-hosted only]
-        if: ${{ matrix.os == 'linux-self-hosted' }}
+      - name: Build and Test (Validation) [Linux hosted only]
+        if: ${{ matrix.os == 'linux-hosted' }}
         continue-on-error: true
         shell: bash
         run: |
           echo "Building with tests and benchmarks for validation..."
-          cmake --build --preset conan-release --parallel
+          cmake --build --preset yams-release --parallel
           echo "Running tests..."
-          cd build/conan-validation
           # Skip slow model loading tests in CI to prevent timeouts
-          YAMS_SKIP_SLOW_TESTS=1 ctest --preset conan-release --output-on-failure --timeout 300 || true
-          cd "$GITHUB_WORKSPACE"
+          YAMS_SKIP_SLOW_TESTS=1 ctest --preset test-yams-release --output-on-failure --timeout 300 || true
           echo "Validation complete, now building optimized release..."
 
       # Release build for ALL targets
@@ -224,26 +234,26 @@ jobs:
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
           # Clean any existing build directory and presets to avoid duplicate preset issues
-          rm -rf build/conan-release
+          rm -rf build/yams-release
           rm -f CMakeUserPresets.json
           conan install . \
-            --output-folder=build/conan-release \
+            --output-folder=build/yams-release \
             -s build_type=Release \
             --build=missing
-          cmake --preset conan-release \
+          cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args}}
-          cmake --build --preset conan-release --parallel
-          echo "BUILD_DIR=build/conan-release/build/Release" >> $GITHUB_ENV
+          cmake --build --preset yams-release --parallel
+          echo "BUILD_DIR=build/yams-release" >> $GITHUB_ENV
 
       - name: Configure and Build Release (Optimized) [Windows]
         if: ${{ startsWith(matrix.os, 'windows') }}
         shell: pwsh
         run: |
           Write-Host "Optimized release build for ${{ matrix.suffix }}"
-          Remove-Item -Recurse -Force build\conan-release -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build\yams-release -ErrorAction SilentlyContinue
           Remove-Item -Force CMakeUserPresets.json -ErrorAction SilentlyContinue
 
           # Ensure Conan is available (pipx first, fallback to pip), and update PATH
@@ -264,27 +274,27 @@ jobs:
           conan --version
 
           conan install . `
-            --output-folder=build/conan-release `
+            --output-folder=build/yams-release `
             -s build_type=Release `
             --build=missing
 
-          cmake --preset conan-release `
+          cmake --preset yams-release `
             -DYAMS_BUILD_PROFILE=release `
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" `
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\${{ env.STAGE_DIR }}" `
             ${{ matrix.cmake_args }}
 
-          cmake --build --preset conan-release --parallel
+          cmake --build --preset build-yams-release --parallel
 
-          "BUILD_DIR=build/conan-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          "BUILD_DIR=build/yams-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: Collect benchmark results
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
-          # Collect from validation build (if Linux self-hosted ran validation)
-          if [ -f "build/conan-validation/bench_results.json" ]; then
-            cp build/conan-validation/bench_results.json "$BUILD_DIR/bench_results/"
+          # Collect from validation build (if Linux hosted ran validation)
+          if [ -f "build/yams-release/bench_results.json" ]; then
+            cp build/yams-release/bench_results.json "$BUILD_DIR/bench_results/"
             echo "Collected benchmark results from validation build"
           fi
           # Also check CI artifacts if available
@@ -298,8 +308,8 @@ jobs:
           # Ensure BUILD_DIR is properly set
           if [ ! -d "$BUILD_DIR" ]; then
             echo "BUILD_DIR not found at $BUILD_DIR, checking for alternative..."
-            if [ -d "build/conan-release/build/Release" ]; then
-              BUILD_DIR="build/conan-release/build/Release"
+            if [ -d "build/yams-release" ]; then
+              BUILD_DIR="build/yams-release"
               echo "Using BUILD_DIR: $BUILD_DIR"
               echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
             fi
@@ -326,14 +336,14 @@ jobs:
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             coverage_pct=$(python3 <<'PY' 2>/dev/null || echo 'N/A'
-          import xml.etree.ElementTree as ET
-          try:
-              root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
-              line_rate = float(root.get('line-rate', 0))
-              print(f"{line_rate * 100:.1f}%")
-          except Exception:
-              print('N/A')
-          PY
+              import xml.etree.ElementTree as ET
+              try:
+                  root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
+                  line_rate = float(root.get('line-rate', 0))
+                  print(f"{line_rate * 100:.1f}%")
+              except Exception:
+                  print('N/A')
+              PY
             )
             echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
@@ -349,23 +359,23 @@ jobs:
             for json_file in "$BUILD_DIR/bench_results"/*.json; do
               if [ -f "$json_file" ]; then
                 python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
-          import json, sys
-          try:
-              path = sys.argv[1]
-              with open(path) as f:
-                  data = json.load(f)
-                  if 'benchmarks' in data:
-                      for bench in data['benchmarks']:
-                          name = bench.get('name', 'Unknown')
-                          real_time = bench.get('real_time', 0.0)
-                          cpu_time = bench.get('cpu_time', 0.0)
-                          bytes_per_sec = bench.get('bytes_per_second', 0.0)
-                          items_per_sec = bench.get('items_per_second', 0.0)
-                          memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
-                          print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
-          except Exception:
-              pass
-          PY
+                  import json, sys
+                  try:
+                      path = sys.argv[1]
+                      with open(path) as f:
+                          data = json.load(f)
+                          if 'benchmarks' in data:
+                              for bench in data['benchmarks']:
+                                  name = bench.get('name', 'Unknown')
+                                  real_time = bench.get('real_time', 0.0)
+                                  cpu_time = bench.get('cpu_time', 0.0)
+                                  bytes_per_sec = bench.get('bytes_per_second', 0.0)
+                                  items_per_sec = bench.get('items_per_second', 0.0)
+                                  memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
+                                  print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
+                  except Exception:
+                      pass
+                  PY
               fi
             done
             echo "" >> "$SUMMARY_FILE"
@@ -376,7 +386,6 @@ jobs:
 
       - name: Package
         if: ${{ !startsWith(matrix.os, 'windows') }}
-
         shell: bash
         run: |
           cd "$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}"
@@ -395,7 +404,6 @@ jobs:
 
       - name: Package (Windows)
         if: ${{ startsWith(matrix.os, 'windows') }}
-
         shell: pwsh
         run: |
           $stage = "${{ github.workspace }}\${{ env.STAGE_DIR }}"
@@ -408,7 +416,7 @@ jobs:
           Write-Host "Created asset: $out"
 
       - name: Build Linux packages (DEB/RPM)
-        if: matrix.build_packages == true && matrix.os == 'linux-self-hosted'
+        if: matrix.build_packages == true && matrix.os == 'linux-hosted'
         shell: bash
         run: |
           cd "$BUILD_DIR"
@@ -481,7 +489,8 @@ jobs:
         with:
           name: release-${{ matrix.suffix }}
           path: |
-            ${{ env.ASSET_PATH }}
+            yams-*.tar.gz
+            yams-*.zip
             ${{ env.BUILD_DIR }}/release_summary.md
             ${{ env.BUILD_DIR }}/bench_results/*.json
             yams-*.deb

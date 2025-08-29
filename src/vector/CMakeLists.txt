@@ -66,7 +66,7 @@ if(YAMS_ENABLE_ONNX)
     if(NOT TARGET onnxruntime::onnxruntime)
         find_package(onnxruntime QUIET)
     endif()
-    
+
     if(NOT TARGET onnxruntime::onnxruntime)
         message(WARNING "ONNX Runtime requested but not found. Embedding features will use mock/daemon provider only.")
         set(YAMS_ENABLE_ONNX OFF)
@@ -86,6 +86,13 @@ target_link_libraries(yams_vector
         spdlog::spdlog
         sqlite3                 # Direct SQLite access
 )
+
+# Link fmt only if provided (fallback when std::format is unavailable)
+if(DEFINED YAMS_HAS_STD_FORMAT AND NOT YAMS_HAS_STD_FORMAT)
+    if(TARGET fmt::fmt)
+        target_link_libraries(yams_vector PRIVATE fmt::fmt)
+    endif()
+endif()
 
 # Link daemon client if available (avoids circular dependency)
 if(TARGET yams::daemon_client)
@@ -115,7 +122,7 @@ if(YAMS_ENABLE_ONNX AND TARGET onnxruntime::onnxruntime)
 endif()
 
 # Create sqlite-vec.h manually since we're compiling as SQLITE_CORE
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/sqlite-vec.h 
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/sqlite-vec.h
 "#ifndef SQLITE_VEC_H
 #define SQLITE_VEC_H
 
@@ -147,14 +154,14 @@ target_include_directories(yams_vector
 )
 
 # Link Tracy if profiling is enabled
-if(YAMS_ENABLE_PROFILING AND TARGET Tracy::TracyClient)
-    target_link_libraries(yams_vector PRIVATE Tracy::TracyClient)
+if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
+    target_link_libraries(yams_vector PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()
 
 # TODO: Find and link LanceDB package
 # find_package(LanceDB REQUIRED)
 # find_package(Arrow REQUIRED)
-# 
+#
 # target_link_libraries(yams_vector
 #     PRIVATE
 #         LanceDB::lancedb

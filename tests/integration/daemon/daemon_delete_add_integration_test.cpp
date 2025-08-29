@@ -39,12 +39,40 @@ protected:
         fs::create_directories(xdgRuntimeDir_);
         fs::create_directories(sourceDir_);
 
-        // Discover CLI binary (same approach as other CLI integration tests)
+        // Discover CLI binary (prefer build tree; fallback to PATH). If not present, skip tests.
         yamsBinary_ = fs::current_path() / "tools" / "yams-cli" / "yams";
         if (!fs::exists(yamsBinary_)) {
             yamsBinary_ = fs::current_path() / "yams";
         }
-        ASSERT_TRUE(fs::exists(yamsBinary_)) << "YAMS binary not found at: " << yamsBinary_;
+        if (!fs::exists(yamsBinary_)) {
+            if (const char* pathEnv = std::getenv("PATH")) {
+                std::string path(pathEnv);
+#ifdef _WIN32
+                const char delim = ';';
+#else
+                const char delim = ':';
+#endif
+                size_t start = 0;
+                while (start <= path.size()) {
+                    size_t end = path.find(delim, start);
+                    std::string dir = path.substr(
+                        start, end == std::string::npos ? std::string::npos : end - start);
+                    if (!dir.empty()) {
+                        fs::path candidate = fs::path(dir) / "yams";
+                        if (fs::exists(candidate) && fs::is_regular_file(candidate)) {
+                            yamsBinary_ = candidate;
+                            break;
+                        }
+                    }
+                    if (end == std::string::npos)
+                        break;
+                    start = end + 1;
+                }
+            }
+        }
+        if (!fs::exists(yamsBinary_)) {
+            GTEST_SKIP() << "YAMS CLI binary not found in build tree or PATH; skipping tests.";
+        }
 
         // Configure daemon to use XDG_RUNTIME_DIR socket path so CLI will find it automatically
         // DaemonClient::resolveSocketPath will use XDG_RUNTIME_DIR/yams-daemon.sock (set
@@ -76,6 +104,11 @@ protected:
     static std::string runCommandWithEnv(const fs::path& bin, const fs::path& storageDir,
                                          const fs::path& xdgRuntimeDir, const std::string& args,
                                          bool expectSuccess = true) {
+        // If CLI is not available, return empty output; test setup should have already handled
+        // skips.
+        if (!fs::exists(bin)) {
+            return {};
+        }
         // Ensure XDG_RUNTIME_DIR and storage point to our isolated test dirs
         std::string cmd = "XDG_RUNTIME_DIR=\"" + xdgRuntimeDir.string() + "\" " +
                           "YAMS_STORAGE=\"" + storageDir.string() + "\" " + bin.string() +

@@ -2,7 +2,12 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <memory>
+#include <span>
+#include <vector>
 #include <yams/compression/compression_monitor.h>
 #include <yams/profiling.h>
 
@@ -10,7 +15,7 @@ namespace yams::compression {
 
 namespace {
 constexpr uint8_t DEFAULT_COMPRESSION_LEVEL = 3;
-constexpr size_t MIN_DICT_SIZE = 1024;
+[[maybe_unused]] constexpr size_t MIN_DICT_SIZE = 1024;
 
 /**
  * @brief Convert Zstandard error to Result error
@@ -288,7 +293,7 @@ Result<size_t> ZstandardStreamCompressor::compress(std::span<const std::byte> in
 }
 
 Result<size_t> ZstandardStreamCompressor::finish(std::span<std::byte> output) {
-    std::span<const std::byte> empty;
+    std::span<const std::byte> empty{};
     return pImpl->compress(empty, output, true);
 }
 

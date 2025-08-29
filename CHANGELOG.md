@@ -5,9 +5,17 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.5.7] - 2025-08-26
+## [v0.5.7] - 2025-08-2
+
+### Known Issues
+- Daemon Pool connection issues for updated streaming commands (search, grep, list)
+  - Search will return with backup, but grep will not
 
 ### Added
+  - Implemented tinyfsm-based state machine for connection lifecycle management
+  - Added per-connection FSM adapter (`yams::ipc::ConnectionFsm`) with clean state transitions
+  - Vendored tinyfsm under `third_party/tinyfsm/` with MIT license compliance
+  - Added comprehensive state machine documentation and integration guide
 - **Groundwork for PBI-006**
   - Shared qualifier parser: inline query qualifiers (lines:, pages:, section:, selector:, name:, ext:, mime:) with quotes and spaces supported.
   - Hybrid search normalization: qualifiers are stripped from scoring text and passed as structured hints to engines.
@@ -17,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lightweight `daemon_first` wrapper in CLI that uses `DaemonClient::call<T>` to preserve daemon-first behavior while commands migrate to pooled execution.
 
 ### Changed
+- **Daemon Client/Server Pipeline Refactor**
+  - **AsyncSocket Simplification**: Replaced complex generation-based tracking with tinyfsm state machine
+    - Removed atomic generation counters and complex mutex operations
+    - Implemented clean state transitions: Disconnected → Connecting → Connected → ReadingHeader → ReadingPayload → WritingHeader → StreamingChunks → Error/Closed
+    - Eliminated race conditions in socket lifecycle management
+    - Reduced memory footprint and improved debuggability
+  - **DaemonClient Pipeline Consolidation**: Unified timeout and request handling
+    - Consolidated timeout configuration (removed scattered env vars + config mixing)
+    - Single `PipelineConfig` struct with clear precedence rules
+    - Streamlined request execution with `execute<T>()` template method
+    - Centralized send_message/receive_message helpers
+    - Improved error context with operation details
+  - **AsyncIpcServer Threading Cleanup**: Simplified thread pool management
+    - Clear separation between IO threads and worker threads
+    - Improved lifecycle management and resource cleanup
+    - Better thread naming and monitoring capabilities
+- Cleaned up build system and devcontainer
 - Hybrid/metadata parity: name/ext/mime qualifiers are honored across engines
   - Hybrid: mapped to `vector::SearchFilter.metadata_filters` and enforced by both vector and keyword paths.
   - Metadata fallback: qualifiers merged into service filters (pathPattern, extension, mimeType) so behavior matches hybrid.
@@ -244,7 +269,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed FilesystemBackend::list() key reconstruction from sharded paths
   - Fixed ManifestManager statistics by moving static counters to member variables
   - Fixed file type detection consistency in CommandIntegrationTest
-  - Fixed heap-use-after-free in IPC server async socket handling
 - **Detection Module**
   - Ensured FileSignature creation uses consistent methods for isBinary and fileType
   - Fixed mismatch between FileSignature fields and classification methods
