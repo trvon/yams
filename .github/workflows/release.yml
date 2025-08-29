@@ -284,12 +284,12 @@ jobs:
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\
-${{ env.STAGE_DIR }}" \
-            ${{ matrix.cmake_args }}
+            ${{ env.STAGE_DIR }}" \
+                        ${{ matrix.cmake_args }}
 
-          cmake --build --preset build-yams-release --parallel
+                      cmake --build --preset build-yams-release --parallel
 
-          "BUILD_DIR=build/yams-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+                      "BUILD_DIR=build/yams-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: Collect benchmark results
         shell: bash
@@ -411,19 +411,19 @@ ${{ env.STAGE_DIR }}" \
         shell: pwsh
         run: |
           $stage = "${{ github.workspace }}\
-${{ env.STAGE_DIR }}"
-          $version = "${{ steps.v.outputs.version }}"
-          $suffix = "${{ matrix.suffix }}"
-          $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
-          if (Test-Path $out) { Remove-Item $out -Force }
-          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
-          "ASSET_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-          Write-Host "Created asset: $out"
+          ${{ env.STAGE_DIR }}"
+                    $version = "${{ steps.v.outputs.version }}"
+                    $suffix = "${{ matrix.suffix }}"
+                    $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
+                    if (Test-Path $out) { Remove-Item $out -Force }
+                    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
+                    "ASSET_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+                    Write-Host "Created asset: $out"
 
-      - name: Build Linux packages (DEB/RPM)
-        if: matrix.build_packages == true && matrix.os == 'linux-hosted'
-        shell: bash
-        run: |
+                - name: Build Linux packages (DEB/RPM)
+                  if: matrix.build_packages == true && matrix.os == 'linux-hosted'
+                  shell: bash
+                  run: |
           cd "$BUILD_DIR"
           VERSION="${{ steps.v.outputs.version }}"
 
