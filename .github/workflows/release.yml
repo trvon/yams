@@ -130,12 +130,13 @@ jobs:
           # Best-effort: global.conf may not exist in repo for hosted macOS
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
-      - name: Setup Conan Profile (hosted macOS)
-        if: ${{ matrix.hosted && matrix.os == 'macos-hosted-x64' }}
+      - name: Setup Conan Profile (hosted Linux/macOS)
+        if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
           conan profile detect --force
-          if [[ "$OSTYPE" == "darwin"* ]]; then
+          if [[ "$OSTYPE" == "darwin"* ]]
+          then
             sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           else
             sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
@@ -187,7 +188,8 @@ jobs:
         if: ${{ matrix.hosted }}
         shell: bash
         run: |
-          if ! conan list "*" 2>/dev/null; then
+          if ! conan list "*" 2>/dev/null;
+          then
             echo "Conan cache appears corrupted, cleaning locks and temp files..."
             conan cache clean --locks --temp 2>/dev/null || true
             echo "Conan cache locks/temp cleaned"
@@ -203,11 +205,11 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          conan install . \
-            --output-folder=build/yams-release \
-            -s build_type=Release \
-            -o build_tests=True \
-            -o build_benchmarks=True \
+          conan install .
+            --output-folder=build/yams-release
+            -s build_type=Release
+            -o build_tests=True
+            -o build_benchmarks=True
             --build=missing
           cmake --preset yams-release \
             -DYAMS_BUILD_TESTS=ON \
@@ -236,9 +238,9 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          conan install . \
-            --output-folder=build/yams-release \
-            -s build_type=Release \
+          conan install .
+            --output-folder=build/yams-release
+            -s build_type=Release
             --build=missing
           cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
@@ -273,15 +275,16 @@ jobs:
           "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           conan --version
 
-          conan install . `
-            --output-folder=build/yams-release `
-            -s build_type=Release `
+          conan install .
+            --output-folder=build/yams-release
+            -s build_type=Release
             --build=missing
 
-          cmake --preset yams-release `
-            -DYAMS_BUILD_PROFILE=release `
-            -DYAMS_VERSION="${{ steps.v.outputs.version }}" `
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\${{ env.STAGE_DIR }}" `
+          cmake --preset yams-release \
+            -DYAMS_BUILD_PROFILE=release \
+            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\
+${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args }}
 
           cmake --build --preset build-yams-release --parallel
@@ -356,7 +359,8 @@ jobs:
             echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |" >> "$SUMMARY_FILE"
             echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
 
-            for json_file in "$BUILD_DIR/bench_results"/*.json; do
+            for json_file in "$BUILD_DIR/bench_results"/*.json;
+            do
               if [ -f "$json_file" ]; then
                 python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
                   import json, sys
@@ -406,7 +410,8 @@ jobs:
         if: ${{ startsWith(matrix.os, 'windows') }}
         shell: pwsh
         run: |
-          $stage = "${{ github.workspace }}\${{ env.STAGE_DIR }}"
+          $stage = "${{ github.workspace }}\
+${{ env.STAGE_DIR }}"
           $version = "${{ steps.v.outputs.version }}"
           $suffix = "${{ matrix.suffix }}"
           $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
@@ -431,7 +436,8 @@ jobs:
           fi
 
           # Generate RPM package
-          if command -v rpmbuild >/dev/null 2>&1; then
+          if command -v rpmbuild >/dev/null 2>&1;
+          then
             cpack -G RPM -D CPACK_PACKAGE_VERSION="${VERSION}"
             RPM_FILE=$(ls *.rpm 2>/dev/null | head -1)
             if [ -n "$RPM_FILE" ]; then
@@ -443,7 +449,8 @@ jobs:
           fi
 
           # Generate AppImage if appimage-builder is available
-          if command -v appimage-builder >/dev/null 2>&1; then
+          if command -v appimage-builder >/dev/null 2>&1;
+          then
             cd "$GITHUB_WORKSPACE"
             cp packaging/appimage/AppImageBuilder.yml .
             export YAMS_VERSION="${VERSION}"
@@ -522,7 +529,7 @@ jobs:
                            -H "Accept: application/vnd.github.v3+json" \
                            -s "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
           # Extract unique platform identifiers from "Build and Release (<platform>)" job names
-          EXPECTED_PLATFORMS=$(echo "$JOBS_JSON" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(Build and Release ([^"]*)\)".*/\1/p' | sed -n 's/Build and Release (\(.*\))/\1/p' | sort -u)
+          EXPECTED_PLATFORMS=$(echo "$JOBS_JSON" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(Build and Release ([^\"]*)\)".*/\1/p' | sed -n 's/Build and Release (\(.*\))/\1/p' | sort -u)
           TOTAL_EXPECTED=$(echo "$EXPECTED_PLATFORMS" | grep -c . || true)
 
           # Count successful artifacts from downloaded files (release-*)
@@ -602,8 +609,8 @@ jobs:
             /^## \[v?[0-9]+\.[0-9]+\.[0-9]+/ {
               # Extract version parts using simpler approach
               version_str = $2
-              gsub(/\[v?/, "", version_str)
-              gsub(/\]/, "", version_str)
+              gsub(/\ \[v?/, "", version_str)
+              gsub(/\ /, "", version_str)
               split(version_str, version_parts, ".")
               version_minor = version_parts[1] "." version_parts[2]
 
@@ -628,7 +635,8 @@ jobs:
         run: |
           mkdir -p assets
           # Collect all release files
-          for dir in release-artifacts/release-*; do
+          for dir in release-artifacts/release-*;
+          do
             if [ -d "$dir" ]; then
               # Move main archive
               mv $dir/*.{tar.gz,zip} assets/ 2>/dev/null || true
@@ -661,7 +669,8 @@ jobs:
           echo "" >> "$COMBINED_NOTES"
 
           # Add summaries from each platform
-          for summary in release-artifacts/release-*/release_summary.md; do
+          for summary in release-artifacts/release-*/release_summary.md;
+          do
             if [ -f "$summary" ]; then
               platform=$(basename $(dirname "$summary") | sed 's/release-//')
               echo "### ✅ $platform" >> "$COMBINED_NOTES"
