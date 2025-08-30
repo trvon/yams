@@ -26,6 +26,18 @@ target_link_libraries(ipc_server_test PRIVATE
 add_test(NAME ipc_server_test COMMAND ipc_server_test)
 set_tests_properties(ipc_server_test PROPERTIES LABELS "daemon;unit")
 
+# Connection FSM tests
+add_executable(connection_fsm_test
+    connection_fsm_test.cpp
+)
+target_link_libraries(connection_fsm_test PRIVATE
+    yams::daemon
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME connection_fsm_test COMMAND connection_fsm_test)
+set_tests_properties(connection_fsm_test PROPERTIES LABELS "daemon;unit")
+
 # IPC client tests
 add_executable(ipc_client_test
     ipc_client_test.cpp
@@ -37,6 +49,30 @@ target_link_libraries(ipc_client_test PRIVATE
 )
 add_test(NAME ipc_client_test COMMAND ipc_client_test)
 set_tests_properties(ipc_client_test PROPERTIES LABELS "daemon;unit")
+
+# Repair scheduling adapter tests
+add_executable(repair_scheduling_adapter_test
+    repair_scheduling_adapter_test.cpp
+)
+target_link_libraries(repair_scheduling_adapter_test PRIVATE
+    yams::daemon
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME repair_scheduling_adapter_test COMMAND repair_scheduling_adapter_test)
+set_tests_properties(repair_scheduling_adapter_test PROPERTIES LABELS "daemon;unit")
+
+# RepairCoordinator basic behavior test (gating/metrics)
+add_executable(repair_coordinator_test
+    repair_coordinator_test.cpp
+)
+target_link_libraries(repair_coordinator_test PRIVATE
+    yams::daemon
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME repair_coordinator_test COMMAND repair_coordinator_test)
+set_tests_properties(repair_coordinator_test PROPERTIES LABELS "daemon;unit")
 
 # Message framing tests
 add_executable(message_framing_test

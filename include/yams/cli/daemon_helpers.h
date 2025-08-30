@@ -134,9 +134,11 @@ public:
             entry_ = std::move(other.entry_);
             client_ = other.client_;
             waited_ = other.waited_;
+            client_id_cached_ = other.client_id_cached_;
             other.pool_ = nullptr;
             other.client_ = nullptr;
             other.waited_ = std::chrono::milliseconds{0};
+            other.client_id_cached_ = static_cast<size_t>(-1);
         }
 
         DaemonClientPool* pool_ = nullptr;
@@ -291,13 +293,12 @@ private:
         }
 
         auto client_cfg = cfg_.client_config;
-        client_cfg.singleUseConnections = false;
         // Nudge timeouts up slightly to handle bursty conditions
-        if (client_cfg.headerTimeout < std::chrono::milliseconds(45000)) {
-            client_cfg.headerTimeout = std::chrono::milliseconds(45000);
+        if (client_cfg.headerTimeout < std::chrono::milliseconds(90000)) {
+            client_cfg.headerTimeout = std::chrono::milliseconds(90000);
         }
-        if (client_cfg.bodyTimeout < std::chrono::milliseconds(120000)) {
-            client_cfg.bodyTimeout = std::chrono::milliseconds(120000);
+        if (client_cfg.bodyTimeout < std::chrono::milliseconds(300000)) {
+            client_cfg.bodyTimeout = std::chrono::milliseconds(300000);
         }
         auto client = std::make_unique<yams::daemon::DaemonClient>(client_cfg);
 
@@ -515,54 +516,91 @@ public:
         auto lease = std::move(lease_res).value();
         const auto client_id = lease.client_id();
 
-        // Instrument request timing
-        auto t0 = std::chrono::steady_clock::now();
-        auto resp = call_pref(lease.operator->(), req);
-        auto t1 = std::chrono::steady_clock::now();
+        // Transient-aware execute with small internal retries to avoid false fallbacks
+        // on brief startup races (metadata repo/content store not yet ready, reconnects, etc.).
+        auto is_transient = [](const Error& e) {
+            if (e.code == ErrorCode::NetworkError)
+                return true;
+            if (e.code == ErrorCode::InvalidState || e.code == ErrorCode::NotInitialized) {
+                // Heuristic match on common readiness messages
+                const std::string& m = e.message;
+                return m.find("not ready") != std::string::npos ||
+                       m.find("not available") != std::string::npos ||
+                       m.find("initializ") != std::string::npos; // initializing/initialization
+            }
+            return false;
+        };
 
-        auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
-        if (pool_->config().verbose) {
-            spdlog::debug("[PooledRequestManager] client={} waited={}ms roundtrip={}ms "
-                          "deadline={}ms",
-                          client_id, lease.waited().count(), call_ms.count(),
-                          pool_->config().client_config.requestTimeout.count());
-        }
+        constexpr int kMaxAttempts = 3;
+        std::chrono::milliseconds backoff{75};
+        Error last_err{ErrorCode::Unknown, "unknown"};
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            auto t0 = std::chrono::steady_clock::now();
+            auto resp = call_pref(lease.operator->(), req);
+            auto t1 = std::chrono::steady_clock::now();
+            auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
 
-        if (!resp) {
-            // If daemon call failed, log and attempt fallback (e.g., local handling)
-            daemon_failures_.fetch_add(1, std::memory_order_relaxed);
-            const bool is_network = (resp.error().code == ErrorCode::NetworkError);
-            spdlog::error(
-                "[PooledRequestManager] Daemon call failed on client {} after {} ms: {}{}.",
-                client_id, call_ms.count(), resp.error().message, is_network ? " (network)" : "");
-            if (is_network) {
+            if (pool_->config().verbose) {
+                spdlog::debug("[PooledRequestManager] client={} waited={}ms roundtrip={}ms "
+                              "deadline={}ms attempt={}",
+                              client_id, lease.waited().count(), call_ms.count(),
+                              pool_->config().client_config.requestTimeout.count(), attempt);
+            }
+
+            if (resp) {
+                return render(resp.value());
+            }
+
+            last_err = resp.error();
+            const bool network = (last_err.code == ErrorCode::NetworkError);
+            spdlog::warn("[PooledRequestManager] Daemon call error on client {} (attempt {}): {}",
+                         client_id, attempt, last_err.message);
+            if (network) {
+                // Force reconnect on next attempt
                 pool_->mark_bad(client_id);
             }
-            // Attempt recovery via fallback
-            try {
-                if (!fallback) {
-                    spdlog::error(
-                        "[PooledRequestManager] No fallback provided; surfacing daemon error");
-                    return resp.error();
-                }
-                auto fb = fallback();
-                if (fb) {
-                    fallbacks_succeeded_.fetch_add(1, std::memory_order_relaxed);
-                    spdlog::info(
-                        "[PooledRequestManager] Recovered from daemon failure via fallback");
-                    return fb; // success via recovery
-                }
-                fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
-                spdlog::error("[PooledRequestManager] Fallback path failed after daemon error: {}",
-                              fb.error().message);
-                return fb; // propagate fallback error
-            } catch (...) {
-                fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
-                return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+
+            if (attempt < kMaxAttempts && is_transient(last_err)) {
+                std::this_thread::sleep_for(backoff);
+                // Exponential backoff up to ~300ms
+                backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
+                continue; // retry
             }
+
+            // Non-transient or exhausted retries -> go to fallback path
+            break;
         }
 
-        return render(resp.value());
+        // If daemon call failed, log and attempt fallback (e.g., local handling)
+        daemon_failures_.fetch_add(1, std::memory_order_relaxed);
+        const bool is_network = (last_err.code == ErrorCode::NetworkError);
+        spdlog::error("[PooledRequestManager] Daemon call failed on client {}: {}{}.", client_id,
+                      last_err.message, is_network ? " (network)" : "");
+
+        if (is_network) {
+            pool_->mark_bad(client_id);
+        }
+
+        try {
+            if (!fallback) {
+                spdlog::error(
+                    "[PooledRequestManager] No fallback provided; surfacing daemon error");
+                return last_err;
+            }
+            auto fb = fallback();
+            if (fb) {
+                fallbacks_succeeded_.fetch_add(1, std::memory_order_relaxed);
+                spdlog::info("[PooledRequestManager] Recovered from daemon failure via fallback");
+                return fb; // success via recovery
+            }
+            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+            spdlog::error("[PooledRequestManager] Fallback path failed after daemon error: {}",
+                          fb.error().message);
+            return fb; // propagate fallback error
+        } catch (...) {
+            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+            return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+        }
     }
 
     DaemonClientPool& pool() { return *pool_; }

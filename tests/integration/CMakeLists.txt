@@ -47,8 +47,30 @@ if(NOT TARGET pooled_request_integration_test)
         GTest::gtest_main
         Threads::Threads
     )
+    # Enable testing-only MCPServer interface for this target
+    target_compile_definitions(pooled_request_integration_test PRIVATE YAMS_TESTING)
     add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)
     set_tests_properties(pooled_request_integration_test PROPERTIES LABELS "daemon;integration")
+endif()
+
+# Boundary IPC tests for pool/daemon/client interactions
+if(NOT TARGET boundary_ipc_pool_tests)
+    add_executable(boundary_ipc_pool_tests
+        daemon/boundary_ipc_pool_tests.cpp
+    )
+    target_link_libraries(boundary_ipc_pool_tests PRIVATE
+        yams_cli
+        yams_api
+        yams_search
+        yams_metadata
+        spdlog::spdlog
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+        Threads::Threads
+    )
+    add_test(NAME boundary_ipc_pool_tests COMMAND boundary_ipc_pool_tests)
+    set_tests_properties(boundary_ipc_pool_tests PROPERTIES LABELS "daemon;integration")
 endif()
 # MCP downloader integration test (header-only MCP tool registry)
 add_executable(mcp_downloader_integration_test
@@ -63,26 +85,7 @@ target_link_libraries(mcp_downloader_integration_test PRIVATE
 add_test(NAME mcp_downloader_integration_test COMMAND mcp_downloader_integration_test)
 
 
-# Pooled streaming reuse test (always build)
-if(NOT TARGET pool_streaming_reuse_test)
-    add_executable(pool_streaming_reuse_test
-        daemon/pool_streaming_reuse_test.cpp
-    )
-    target_link_libraries(pool_streaming_reuse_test PRIVATE
-        yams_mcp
-        yams_cli
-        yams_api
-        yams_search
-        yams_metadata
-        spdlog::spdlog
-        nlohmann_json::nlohmann_json
-        GTest::gtest
-        GTest::gtest_main
-        Threads::Threads
-    )
-    add_test(NAME pool_streaming_reuse_test COMMAND pool_streaming_reuse_test)
-    set_tests_properties(pool_streaming_reuse_test PROPERTIES LABELS "daemon;integration")
-endif()
+
 
 
 # New comprehensive integration tests

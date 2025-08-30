@@ -19,9 +19,15 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+// NOTE: We intentionally do NOT auto-enable kqueue on Apple/BSD by default.
+// The kqueue path is available but must be opt-in via a build flag (YAMS_USE_KQUEUE or
+// HAVE_KQUEUE). This avoids platform-specific instability observed in high-concurrency tests on
+// macOS.
 #if (defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)) && \
-    !defined(HAVE_KQUEUE)
+    (defined(YAMS_USE_KQUEUE) || defined(HAVE_KQUEUE))
+#ifndef HAVE_KQUEUE
 #define HAVE_KQUEUE 1
+#endif
 #endif
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0

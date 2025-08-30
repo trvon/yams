@@ -1268,11 +1268,51 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
     cfg.resume = dreq.resume;
     cfg.storeOnly = dreq.storeOnly;
 
+    // Resolve and ensure staging directory exists to avoid regression
+    try {
+        namespace fs = std::filesystem;
+        auto ensure_dir = [](const fs::path& p) -> bool {
+            if (p.empty())
+                return false;
+            std::error_code ec;
+            fs::create_directories(p, ec);
+            return !ec && fs::exists(p);
+        };
+
+        if (storage.stagingDir.empty()) {
+            // Prefer XDG_STATE_HOME, then HOME, then /tmp
+            fs::path staging;
+            if (const char* xdgState = std::getenv("XDG_STATE_HOME")) {
+                staging = fs::path(xdgState) / "yams" / "staging" / "downloader";
+            } else if (const char* homeEnv = std::getenv("HOME")) {
+                staging =
+                    fs::path(homeEnv) / ".local" / "state" / "yams" / "staging" / "downloader";
+            } else {
+                staging = fs::path("/tmp") / "yams" / "staging" / "downloader";
+            }
+            storage.stagingDir = staging;
+        }
+        if (!ensure_dir(storage.stagingDir)) {
+            return Error{ErrorCode::InternalError, std::string("Failed to create staging dir: ") +
+                                                       storage.stagingDir.string()};
+        }
+
+        // Optionally ensure objectsDir if provided
+        if (!storage.objectsDir.empty()) {
+            (void)ensure_dir(storage.objectsDir);
+        }
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to prepare staging dir: ") + e.what()};
+    }
+
     if (verbose) {
         spdlog::debug("[MCP] download: starting manager (conc={}, chunk={}, timeout_ms={}, "
                       "follow_redirects={}, resume={}, store_only={})",
                       cfg.defaultConcurrency, cfg.defaultChunkSizeBytes, cfg.defaultTimeout.count(),
                       cfg.followRedirects, cfg.resume, cfg.storeOnly);
+        spdlog::debug("[MCP] download: staging_dir='{}' objects_dir='{}'",
+                      storage.stagingDir.string(), storage.objectsDir.string());
     }
     auto manager = yams::downloader::makeDownloadManager(storage, cfg);
     auto dlRes = manager->download(dreq);
@@ -2004,45 +2044,92 @@ json MCPServer::createError(const json& id, int code, const std::string& message
 }
 
 Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
-    // Convert MCP request to daemon request
-    daemon::GetRequest daemon_req;
-    daemon_req.name = req.name;
-    daemon_req.byName = true;
-    daemon_req.raw = req.rawContent;
-    daemon_req.extract = req.extractText;
-
+    // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI robustness
     MCPGetByNameResponse mcp_response;
-    std::optional<Error> execution_error;
 
-    auto render = [&](const daemon::GetResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.hash = resp.hash;
-        mcp_response.name = resp.name;
-        mcp_response.path = resp.path;
-        mcp_response.size = resp.size;
-        mcp_response.mimeType = resp.mimeType;
-        if (resp.hasContent) {
-            mcp_response.content = resp.content;
+    // Prepare pooled client for streaming calls
+    yams::cli::DaemonClientPool::Config pool_config;
+    pool_config.max_clients = 4;
+    pool_config.client_config.requestTimeout = std::chrono::seconds(20);
+    yams::cli::DaemonClientPool pool(pool_config);
+
+    auto clientRes = pool.acquire();
+    if (!clientRes) {
+        return Error{ErrorCode::NetworkError, "Failed to acquire daemon client"};
+    }
+    auto client = std::move(clientRes).value();
+
+    daemon::GetInitRequest init{};
+    init.name = req.name;
+    init.byName = true;
+    // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
+
+    auto initRes = client->getInit(init);
+    if (!initRes) {
+        return initRes.error();
+    }
+    const auto& initVal = initRes.value();
+    // Map GetInitResponse fields and metadata into MCP response
+    mcp_response.size = initVal.totalSize;
+    // Optional metadata keys: hash, path, fileName, mimeType
+    if (auto it = initVal.metadata.find("hash"); it != initVal.metadata.end()) {
+        mcp_response.hash = it->second;
+    }
+    if (auto it = initVal.metadata.find("fileName"); it != initVal.metadata.end()) {
+        mcp_response.name = it->second;
+    }
+    if (auto it = initVal.metadata.find("path"); it != initVal.metadata.end()) {
+        mcp_response.path = it->second;
+    }
+    if (auto it = initVal.metadata.find("mimeType"); it != initVal.metadata.end()) {
+        mcp_response.mimeType = it->second;
+    }
+
+    // Chunked read with cap to avoid huge MCP payloads
+    static constexpr std::size_t CHUNK = 64 * 1024;
+    static constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024; // 1 MiB cap
+    std::string buffer;
+    buffer.reserve(std::min<std::size_t>(MAX_BYTES, static_cast<std::size_t>(initVal.totalSize)));
+
+    std::uint64_t offset = 0;
+    bool truncated = false;
+
+    while (offset < initVal.totalSize) {
+        daemon::GetChunkRequest c{};
+        c.transferId = initVal.transferId;
+        c.offset = offset;
+        c.length =
+            static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
+        auto cRes = client->getChunk(c);
+        if (!cRes) {
+            // Attempt to close the transfer before returning error
+            daemon::GetEndRequest e{};
+            e.transferId = initVal.transferId;
+            (void)client->getEnd(e);
+            return cRes.error();
         }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    auto result = retrieve_req_manager_->execute(daemon_req, fallback, render);
-
-    if (execution_error) {
-        return execution_error.value();
+        const auto& chunk = cRes.value();
+        if (!chunk.data.empty()) {
+            if (buffer.size() + chunk.data.size() <= MAX_BYTES) {
+                buffer.append(chunk.data.data(), chunk.data.size());
+            } else {
+                auto remaining = MAX_BYTES - buffer.size();
+                buffer.append(chunk.data.data(), remaining);
+                truncated = true;
+                offset += chunk.data.size();
+                break;
+            }
+        }
+        offset += chunk.data.size();
     }
 
-    if (!result) {
-        return result.error();
-    }
+    // End transfer regardless
+    daemon::GetEndRequest end{};
+    end.transferId = initVal.transferId;
+    (void)client->getEnd(end);
 
+    mcp_response.content = std::move(buffer);
+    // If truncated, we simply return the capped content; no extra flags in response type.
     return mcp_response;
 }
 
@@ -2089,44 +2176,82 @@ Result<MCPDeleteByNameResponse> MCPServer::handleDeleteByName(const MCPDeleteByN
 }
 
 Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocumentRequest& req) {
-    // Convert MCP request to daemon request
-    daemon::GetRequest daemon_req;
-    daemon_req.hash = req.hash;
-    daemon_req.name = req.name;
-    daemon_req.byName = !req.name.empty();
-    daemon_req.raw = req.rawContent;
-    daemon_req.extract = req.extractText;
-
+    // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI behavior for large content
     MCPCatDocumentResponse mcp_response;
-    std::optional<Error> execution_error;
 
-    auto render = [&](const daemon::GetResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.hash = resp.hash;
-        mcp_response.name = resp.name;
-        mcp_response.size = resp.size;
-        if (resp.hasContent) {
-            mcp_response.content = resp.content;
+    yams::cli::DaemonClientPool::Config pool_config;
+    pool_config.max_clients = 4;
+    pool_config.client_config.requestTimeout = std::chrono::seconds(20);
+    yams::cli::DaemonClientPool pool(pool_config);
+
+    auto clientRes = pool.acquire();
+    if (!clientRes) {
+        return Error{ErrorCode::NetworkError, "Failed to acquire daemon client"};
+    }
+    auto client = std::move(clientRes).value();
+
+    daemon::GetInitRequest init{};
+    init.hash = req.hash;
+    init.name = req.name;
+    init.byName = !req.name.empty();
+    // GetInitRequest no longer supports raw/extract flags; server determines mode
+
+    auto initRes = client->getInit(init);
+    if (!initRes) {
+        return initRes.error();
+    }
+    const auto& initVal = initRes.value();
+    // Map GetInitResponse fields and metadata into MCP response
+    mcp_response.size = initVal.totalSize;
+    if (auto it = initVal.metadata.find("hash"); it != initVal.metadata.end()) {
+        mcp_response.hash = it->second;
+    }
+    if (auto it = initVal.metadata.find("fileName"); it != initVal.metadata.end()) {
+        mcp_response.name = it->second;
+    }
+
+    static constexpr std::size_t CHUNK = 64 * 1024;
+    static constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024; // 1 MiB cap
+    std::string buffer;
+    buffer.reserve(std::min<std::size_t>(MAX_BYTES, static_cast<std::size_t>(initVal.totalSize)));
+
+    std::uint64_t offset = 0;
+    bool truncated = false;
+
+    while (offset < initVal.totalSize) {
+        daemon::GetChunkRequest c{};
+        c.transferId = initVal.transferId;
+        c.offset = offset;
+        c.length =
+            static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
+        auto cRes = client->getChunk(c);
+        if (!cRes) {
+            daemon::GetEndRequest e{};
+            e.transferId = initVal.transferId;
+            (void)client->getEnd(e);
+            return cRes.error();
         }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    auto result = retrieve_req_manager_->execute(daemon_req, fallback, render);
-
-    if (execution_error) {
-        return execution_error.value();
+        const auto& chunk = cRes.value();
+        if (!chunk.data.empty()) {
+            if (buffer.size() + chunk.data.size() <= MAX_BYTES) {
+                buffer.append(chunk.data.data(), chunk.data.size());
+            } else {
+                auto remaining = MAX_BYTES - buffer.size();
+                buffer.append(chunk.data.data(), remaining);
+                truncated = true;
+                offset += chunk.data.size();
+                break;
+            }
+        }
+        offset += chunk.data.size();
     }
 
-    if (!result) {
-        return result.error();
-    }
+    daemon::GetEndRequest end{};
+    end.transferId = initVal.transferId;
+    (void)client->getEnd(end);
 
+    mcp_response.content = std::move(buffer);
+    // If truncated, we simply return the capped content; response type has no truncated flag.
     return mcp_response;
 }
 

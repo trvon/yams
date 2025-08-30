@@ -1,4 +1,5 @@
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/fsm_helpers.h>
 #include <yams/daemon/ipc/message_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
 
@@ -41,6 +42,20 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
             // Read as much as is available (up to 4096), do not block for exact size
             std::array<uint8_t, 4096> buf{};
             spdlog::debug("About to co_await socket.async_read");
+            // FSM guard: ensure reads are allowed before attempting to read from the socket
+            try {
+                fsm_helpers::require_can_read(fsm, "handle_connection:before_async_read");
+            } catch (const std::exception& ex) {
+                spdlog::error("FSM read guard failed before async_read: {}", ex.what());
+                // Attempt to recover the FSM to a readable state for persistent connections
+                fsm.on_response_complete(config_.close_after_response);
+                if (config_.close_after_response) {
+                    socket.close();
+                    break;
+                }
+                // In persistent mode, continue loop to try reading next request
+                continue;
+            }
             auto read_bytes = co_await socket.async_read(buf.data(), buf.size());
             spdlog::debug("socket.async_read returned with result={}", read_bytes.has_value());
             if (!read_bytes) {
@@ -55,6 +70,13 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
             if (read_bytes.value() == 0) {
                 // Transient zero-byte read can occur with non-blocking IO; peek for real EOF
                 std::array<uint8_t, 1> peek{};
+                // FSM guard: verify reads are still allowed before a follow-up peek
+                try {
+                    fsm_helpers::require_can_read(fsm, "handle_connection:before_peek_read");
+                } catch (const std::exception& ex) {
+                    spdlog::error("FSM read guard failed before peek read: {}", ex.what());
+                    break;
+                }
                 auto try_peek = co_await socket.async_read(peek.data(), peek.size());
                 if (!try_peek) {
                     spdlog::debug("Zero-byte read followed by error: {}", try_peek.error().message);
@@ -96,6 +118,11 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
             if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
                 spdlog::error("Invalid frame received");
                 co_await send_error(socket, ErrorCode::InvalidArgument, "Invalid frame format");
+                // Ensure FSM returns to a readable state for persistent connections
+                fsm.on_response_complete(config_.close_after_response);
+                if (config_.close_after_response) {
+                    socket.close();
+                }
                 break;
             }
 
@@ -103,6 +130,11 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                 spdlog::error("Frame too large");
                 co_await send_error(socket, ErrorCode::InvalidArgument,
                                     "Frame exceeds maximum size");
+                // Ensure FSM returns to a readable state for persistent connections
+                fsm.on_response_complete(config_.close_after_response);
+                if (config_.close_after_response) {
+                    socket.close();
+                }
                 break;
             }
 
@@ -111,6 +143,15 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                 auto frame_result = reader.get_frame();
                 if (!frame_result) {
                     spdlog::error("Failed to get frame: {}", frame_result.error().message);
+                    co_await send_error(socket, ErrorCode::SerializationError,
+                                        "Failed to get frame");
+                    // Reset FSM so we can read the next request on persistent connections
+                    fsm.on_response_complete(config_.close_after_response);
+                    if (config_.close_after_response) {
+                        socket.close();
+                        should_exit = true;
+                        break;
+                    }
                     continue;
                 }
 
@@ -120,6 +161,13 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                     spdlog::error("Failed to parse frame: {}", message_result.error().message);
                     co_await send_error(socket, ErrorCode::SerializationError,
                                         "Failed to parse message");
+                    // Reset FSM to allow next read on persistent connections
+                    fsm.on_response_complete(config_.close_after_response);
+                    if (config_.close_after_response) {
+                        socket.close();
+                        should_exit = true;
+                        break;
+                    }
                     continue;
                 }
 
@@ -136,6 +184,13 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                     spdlog::error("Received non-request message");
                     co_await send_error(socket, ErrorCode::InvalidArgument,
                                         "Expected request message");
+                    // Reset FSM to allow next read on persistent connections
+                    fsm.on_response_complete(config_.close_after_response);
+                    if (config_.close_after_response) {
+                        socket.close();
+                        should_exit = true;
+                        break;
+                    }
                     continue;
                 }
 
@@ -156,6 +211,20 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                     }
                     should_exit = true;
                     break;
+                }
+
+                // Defensive: ensure FSM is ready to read the next request on persistent
+                // connections. If the processor didn't drive on_response_complete() for any
+                // reason, normalize state back to Connected.
+                if (!config_.close_after_response) {
+                    auto s = fsm.state();
+                    if (s != ConnectionFsm::State::Connected &&
+                        s != ConnectionFsm::State::ReadingHeader) {
+                        spdlog::debug(
+                            "Post-response FSM state was {} — forcing Connected for persistence",
+                            ConnectionFsm::to_string(s));
+                        fsm.on_response_complete(false);
+                    }
                 }
             }
             if (should_exit)
@@ -457,6 +526,18 @@ Task<Result<void>> RequestHandler::handle_streaming_request(AsyncSocket<AsyncIOC
                     finfo.payload_size = 0; // header-only
                     fsm->on_header_parsed(finfo);
                 }
+                // Validate FSM can transition to writing before streaming
+                if (fsm) {
+                    try {
+                        fsm_helpers::require_can_write(*fsm,
+                                                       "handle_streaming_request:enter_streaming");
+                    } catch (const std::exception& ex) {
+                        spdlog::error("FSM write guard failed before streaming (request_id={}): {}",
+                                      request_id, ex.what());
+                        co_return Error{ErrorCode::InternalError,
+                                        std::string{"Invalid state for streaming: "} + ex.what()};
+                    }
+                }
                 auto stream_result = co_await stream_chunks(socket, request, request_id, proc, fsm);
 
                 auto duration = std::chrono::steady_clock::now() - start_time;
@@ -499,6 +580,17 @@ Task<Result<void>> RequestHandler::handle_streaming_request(AsyncSocket<AsyncIOC
         response_msg.payload = response;
 
         // Send a single non-chunked frame for complete responses
+        if (fsm) {
+            try {
+                fsm_helpers::require_can_write(*fsm, "handle_streaming_request:write_complete");
+            } catch (const std::exception& ex) {
+                spdlog::error(
+                    "FSM write guard failed before complete response write (request_id={}): {}",
+                    request_id, ex.what());
+                co_return Error{ErrorCode::InternalError,
+                                std::string{"Invalid state before complete write: "} + ex.what()};
+            }
+        }
         spdlog::debug(
             "handle_streaming_request: writing complete response (non-chunked) for request_id={}",
             request_id);
@@ -509,8 +601,21 @@ Task<Result<void>> RequestHandler::handle_streaming_request(AsyncSocket<AsyncIOC
             co_return write_result.error();
         }
 
+        // Signal FSM that response has completed; transition to Connected for persistence
+        if (fsm) {
+            fsm->on_response_complete(config_.close_after_response);
+            spdlog::info("non-streaming response complete: close_after_response={} fsm_state={} "
+                         "request_id={}",
+                         config_.close_after_response, ConnectionFsm::to_string(fsm->state()),
+                         request_id);
+        }
         if (config_.close_after_response) {
+            spdlog::info("closing socket after non-streaming response (request_id={} fd={})",
+                         request_id, socket.get_fd());
             socket.close();
+        } else {
+            spdlog::info("keeping socket open after non-streaming response (request_id={} fd={})",
+                         request_id, socket.get_fd());
         }
 
         auto duration = std::chrono::steady_clock::now() - start_time;
@@ -581,21 +686,38 @@ Task<Result<void>> RequestHandler::write_chunk_frame(AsyncSocket<AsyncIOContext>
 
     auto& frame = frame_result.value();
     stats_.bytes_sent += frame.size();
-    // Best-effort debug: inspect header flags
-    if (frame.size() >= sizeof(MessageFramer::FrameHeader)) {
-        auto info = framer_.get_frame_info(frame);
-        if (info) {
-            const auto& v = info.value();
-            spdlog::debug("write_chunk_frame: header_only={} chunked={} last={} size={}B",
-                          v.is_header_only, v.is_chunked, v.is_last_chunk,
-                          static_cast<uint32_t>(frame.size()));
+
+    // Extract header info for logging and to split header/payload writes
+    const std::size_t headerSize = sizeof(MessageFramer::FrameHeader);
+    MessageFramer::FrameHeader hdr{};
+    if (frame.size() >= headerSize) {
+        std::memcpy(&hdr, frame.data(), headerSize);
+        hdr.from_network();
+        spdlog::debug(
+            "write_chunk_frame: header_only={} chunked={} last={} payload_size={}B frame={}B",
+            hdr.is_header_only(), hdr.is_chunked(), hdr.is_last_chunk(), hdr.payload_size,
+            static_cast<uint32_t>(frame.size()));
+    }
+
+    // 1) Send header first (unblocks client waiting on chunk header)
+    {
+        std::span<const uint8_t> header{frame.data(), headerSize};
+        auto r = co_await socket.async_write_all(header);
+        if (!r) {
+            const auto& msg = r.error().message;
+            if (msg.find("Connection reset by peer") != std::string::npos ||
+                msg.find("Broken pipe") != std::string::npos ||
+                msg.find("EPIPE") != std::string::npos ||
+                msg.find("ECONNRESET") != std::string::npos) {
+                spdlog::debug("Client closed during chunk header write: {}", msg);
+            }
+            co_return r.error();
         }
     }
 
-    // Stream the chunk in smaller pieces
+    // 2) Stream payload in chunks
     const std::size_t kWriteChunk = std::max<std::size_t>(4096, config_.chunk_size);
-    std::size_t offset = 0;
-
+    std::size_t offset = headerSize;
     while (offset < frame.size()) {
         std::size_t to_write = std::min<std::size_t>(kWriteChunk, frame.size() - offset);
         std::span<const uint8_t> chunk{frame.data() + offset, to_write};
@@ -607,17 +729,18 @@ Task<Result<void>> RequestHandler::write_chunk_frame(AsyncSocket<AsyncIOContext>
                 msg.find("Broken pipe") != std::string::npos ||
                 msg.find("EPIPE") != std::string::npos ||
                 msg.find("ECONNRESET") != std::string::npos) {
-                spdlog::debug("Client closed during chunk write: {}", msg);
+                spdlog::debug("Client closed during chunk payload write: {}", msg);
             }
             co_return r.error();
         }
 
         offset += to_write;
-
-        // Small pause to prevent CPU spinning on zero-byte writes
         if (to_write == 0) {
             using namespace std::chrono_literals;
             std::this_thread::sleep_for(1ms);
+        } else if (config_.chunk_flush_delay_ms > 0) {
+            using namespace std::chrono_literals;
+            std::this_thread::sleep_for(std::chrono::milliseconds(config_.chunk_flush_delay_ms));
         }
     }
 
@@ -683,6 +806,17 @@ Task<Result<void>> RequestHandler::stream_chunks(AsyncSocket<AsyncIOContext>& so
         headerResponse = SuccessResponse{"Streaming response"};
     }
 
+    // FSM guard before header write
+    if (fsm) {
+        try {
+            fsm_helpers::require_can_write(*fsm, "stream_chunks:write_header");
+        } catch (const std::exception& ex) {
+            spdlog::error("FSM write guard failed before header (request_id={}): {}", request_id,
+                          ex.what());
+            co_return Error{ErrorCode::InternalError,
+                            std::string{"Invalid state before streaming header: "} + ex.what()};
+        }
+    }
     // Send header frame
     auto header_result = co_await write_header(socket, headerResponse, request_id, true);
     if (!header_result) {
@@ -699,9 +833,40 @@ Task<Result<void>> RequestHandler::stream_chunks(AsyncSocket<AsyncIOContext>& so
     size_t chunk_count = 0;
 
     while (!last_chunk_received) {
+        spdlog::debug("stream_chunks: preparing chunk #{} (request_id={})", chunk_count + 1,
+                      request_id);
         auto chunk_result = co_await processor->next_chunk();
         last_chunk_received = chunk_result.is_last_chunk;
 
+        // Inspect chunk payload for common types to aid troubleshooting
+        size_t item_count = 0;
+        int msg_type = static_cast<int>(getMessageType(chunk_result.data));
+        std::visit(
+            [&](auto const& resp) {
+                using T = std::decay_t<decltype(resp)>;
+                if constexpr (std::is_same_v<T, SearchResponse>) {
+                    item_count = resp.results.size();
+                } else if constexpr (std::is_same_v<T, ListResponse>) {
+                    item_count = resp.items.size();
+                } else if constexpr (std::is_same_v<T, GrepResponse>) {
+                    item_count = resp.matches.size();
+                }
+            },
+            chunk_result.data);
+        spdlog::debug("stream_chunks: chunk #{} type={} items={} last={} (request_id={})",
+                      chunk_count + 1, msg_type, item_count, last_chunk_received, request_id);
+
+        // FSM guard before chunk write
+        if (fsm) {
+            try {
+                fsm_helpers::require_can_write(*fsm, "stream_chunks:write_chunk");
+            } catch (const std::exception& ex) {
+                spdlog::error("FSM write guard failed before chunk (request_id={}): {}", request_id,
+                              ex.what());
+                co_return Error{ErrorCode::InternalError,
+                                std::string{"Invalid state before streaming chunk: "} + ex.what()};
+            }
+        }
         // Send chunk
         auto write_result =
             co_await write_chunk(socket, chunk_result.data, request_id, last_chunk_received, true);
@@ -709,19 +874,37 @@ Task<Result<void>> RequestHandler::stream_chunks(AsyncSocket<AsyncIOContext>& so
             co_return write_result.error();
         }
         if (fsm) {
-            // Notify FSM; if this was the last chunk, transition towards Closing
-            fsm->on_stream_next(last_chunk_received);
+            // Notify FSM; continue streaming or complete response
+            if (last_chunk_received) {
+                fsm->on_response_complete(config_.close_after_response);
+                spdlog::info("streaming complete: close_after_response={} fsm_state={} chunks={} "
+                             "request_id={}",
+                             config_.close_after_response, ConnectionFsm::to_string(fsm->state()),
+                             chunk_count + 1, request_id);
+            } else {
+                fsm->on_stream_next(false);
+            }
         }
 
         chunk_count++;
     }
 
+    // Note: Do not send any extra frames after the last chunk. An unsolicited
+    // header-only frame here can remain unread by clients (who stop reading
+    // immediately after completing a stream) and will poison the next request's
+    // response boundary on persistent connections, resulting in header timeouts.
+
     spdlog::debug("Sent {} chunks for streaming response (request_id={})", chunk_count, request_id);
     if (config_.close_after_response) {
+        spdlog::info("closing socket after streaming response (request_id={} fd={})", request_id,
+                     socket.get_fd());
         socket.close();
-    }
-    if (fsm) {
-        fsm->on_close_request();
+        if (fsm) {
+            fsm->on_close_request();
+        }
+    } else {
+        spdlog::info("keeping socket open after streaming response (request_id={} fd={})",
+                     request_id, socket.get_fd());
     }
     co_return Result<void>();
 }

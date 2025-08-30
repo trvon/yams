@@ -19,6 +19,7 @@ namespace yams::daemon {
 class LifecycleComponent;
 class ServiceManager;
 class RequestDispatcher;
+class RepairCoordinator;
 
 struct DaemonConfig {
     std::filesystem::path dataDir;
@@ -40,6 +41,10 @@ struct DaemonConfig {
     bool enableAutoRepair = true;
     size_t autoRepairBatchSize = 32;
     size_t maxPendingRepairs = 1000;
+
+    // Streaming keepalive configuration
+    std::chrono::milliseconds heartbeatInterval{500}; // default 500ms
+    std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
 
     // Daemon-side download policy scaffolding (disabled by default until sandboxed)
     struct DownloadPolicy {
@@ -89,6 +94,7 @@ private:
     std::unique_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
     std::unique_ptr<SimpleAsyncIpcServer> ipcServer_;
+    std::unique_ptr<RepairCoordinator> repairCoordinator_;
 
     // Threading and state
     std::atomic<bool> running_{false};

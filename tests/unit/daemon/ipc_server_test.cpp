@@ -503,4 +503,67 @@ TEST_F(IpcServerTest, InvalidProtocol) {
     close(clientFd);
 }
 
+// Regression: client disconnects mid-write should not crash the server (awaiter lifetime + cancel
+// path)
+TEST_F(IpcServerTest, ClientDisconnectDuringWrite_NoCrash) {
+    server_ = std::make_unique<SimpleAsyncIpcServer>(serverConfig_);
+
+    // Handler crafts a large response to ensure the server performs async writes with backpressure
+    server_->set_handler([](const Request& req) -> Response {
+        return std::visit(
+            [](auto&& r) -> Response {
+                using T = std::decay_t<decltype(r)>;
+                // On PingRequest, respond with a very large SearchResponse to trigger chunked write
+                if constexpr (std::is_same_v<T, PingRequest>) {
+                    SearchResponse res;
+                    res.totalCount = 1;
+                    SearchResult result;
+                    result.id = "big";
+                    result.path = "/big";
+                    result.title = "BigPayload";
+                    // ~1MB payload
+                    result.snippet.assign(1024 * 1024, 'X');
+                    result.score = 0.5;
+                    res.results.push_back(std::move(result));
+                    return res;
+                }
+                return ErrorResponse{ErrorCode::NotImplemented, "Not implemented"};
+            },
+            req);
+    });
+
+    ASSERT_TRUE(server_->start());
+    std::this_thread::sleep_for(50ms);
+
+    // Client sends a Ping and immediately closes without reading the response
+    int fd = createClientSocket();
+    ASSERT_GT(fd, 0);
+    Message msg;
+    msg.version = PROTOCOL_VERSION;
+    msg.requestId = 321;
+    msg.payload = PingRequest{};
+    ASSERT_TRUE(sendFramedMessage(fd, msg));
+    // Close right away to force server write errors/cancellation
+    close(fd);
+
+    // Give server a moment to process cancellation without crashing
+    std::this_thread::sleep_for(200ms);
+
+    // Sanity: server should still be responsive to new clients
+    int fd2 = createClientSocket();
+    ASSERT_GT(fd2, 0);
+    Message ping;
+    ping.version = PROTOCOL_VERSION;
+    ping.requestId = 999;
+    ping.payload = PingRequest{};
+    ASSERT_TRUE(sendFramedMessage(fd2, ping));
+    auto resp = receiveFramedMessage(fd2);
+    close(fd2);
+    ASSERT_TRUE(resp);
+    auto& response = resp.value();
+    EXPECT_EQ(response.requestId, 999);
+
+    server_->stop();
+}
+
 } // namespace yams::daemon::test

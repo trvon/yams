@@ -304,9 +304,11 @@ void ConnectionFsm::transition(State next) noexcept {
             case S::ReadingPayload:
                 return (next == S::WritingHeader || next == S::Closing || next == S::Error);
             case S::WritingHeader:
-                return (next == S::StreamingChunks || next == S::Closing || next == S::Error);
+                return (next == S::StreamingChunks || next == S::Closing || next == S::Connected ||
+                        next == S::Error);
             case S::StreamingChunks:
-                return (next == S::StreamingChunks || next == S::Closing || next == S::Error);
+                return (next == S::StreamingChunks || next == S::Closing || next == S::Connected ||
+                        next == S::Error);
             case S::Closing:
                 return (next == S::Closed || next == S::Error);
             case S::Closed:
@@ -328,6 +330,35 @@ void ConnectionFsm::transition(State next) noexcept {
         impl->metrics.transitions++;
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_transitions", static_cast<int64_t>(impl->metrics.transitions));
+            // Also expose a simple gauge for current state id for observability
+#if __has_include(<yams/profiling.h>)
+            YAMS_PLOT("daemon_connection_state",
+                      static_cast<int64_t>([s = state_]() constexpr -> int {
+                          switch (s) {
+                              case State::Disconnected:
+                                  return 0;
+                              case State::Accepting:
+                                  return 1;
+                              case State::Connected:
+                                  return 2;
+                              case State::ReadingHeader:
+                                  return 3;
+                              case State::ReadingPayload:
+                                  return 4;
+                              case State::WritingHeader:
+                                  return 5;
+                              case State::StreamingChunks:
+                                  return 6;
+                              case State::Closing:
+                                  return 7;
+                              case State::Closed:
+                                  return 8;
+                              case State::Error:
+                                  return 9;
+                          }
+                          return -1;
+                      }()));
+#endif
         }
         if (impl->cfg.enable_snapshots) {
             SnapshotEntry e{
@@ -504,6 +535,22 @@ void ConnectionFsm::on_close_request() {
             break;
         default:
             transition(State::Closing);
+            break;
+    }
+}
+
+void ConnectionFsm::on_response_complete(bool close_after) {
+    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+        impl->last_event = close_after ? "response_complete_close" : "response_complete_keep";
+    // If we are streaming or just wrote a header/payload and persistent connection is desired,
+    // transition back to Connected to allow the next request. Otherwise go to Closing.
+    switch (state_) {
+        case State::WritingHeader:
+        case State::StreamingChunks:
+            transition(close_after ? State::Closing : State::Connected);
+            break;
+        default:
+            transition(close_after ? State::Closing : State::Connected);
             break;
     }
 }

@@ -3,6 +3,7 @@
 #include <thread>
 #include <unistd.h> // For getuid(), geteuid(), getpid()
 #include <yams/daemon/components/LifecycleComponent.h>
+#include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
@@ -20,6 +21,25 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     }
     if (config_.logFile.empty()) {
         config_.logFile = resolveSystemPath(PathType::LogFile);
+    }
+
+    // Initialize logging sink early so all subsequent logs go to file
+    try {
+        auto existing = spdlog::get("daemon");
+        if (!existing) {
+            auto logger = spdlog::basic_logger_mt("daemon", config_.logFile.string(), true);
+            spdlog::set_default_logger(logger);
+            spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+            spdlog::set_level(spdlog::level::debug);
+        } else {
+            spdlog::set_default_logger(existing);
+            spdlog::set_level(spdlog::level::debug);
+        }
+    } catch (const std::exception& e) {
+        // Fall back to default stderr logger if file cannot be created
+        spdlog::warn("Failed to initialize file logger ({}), continuing with default logger",
+                     e.what());
+        spdlog::set_level(spdlog::level::debug);
     }
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
@@ -75,6 +95,24 @@ Result<void> YamsDaemon::start() {
     }
     state_.readiness.ipcServerReady = true;
 
+    // Start feature-flagged repair coordinator (idle-only)
+    if (config_.enableAutoRepair) {
+        RepairCoordinator::Config rcfg;
+        rcfg.enable = true;
+        rcfg.dataDir = config_.dataDir;
+        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+        rcfg.tickMs = 2000;
+        // Safe lambda: only dereference ipcServer_ while daemon is running; we stop
+        // the coordinator before tearing down ipcServer_ in stop().
+        auto activeFn = [this]() -> size_t {
+            auto* s = ipcServer_.get();
+            return s ? s->get_stats().active_connections : 0;
+        };
+        repairCoordinator_ =
+            std::make_unique<RepairCoordinator>(serviceManager_.get(), &state_, activeFn, rcfg);
+        repairCoordinator_->start();
+    }
+
     daemonThread_ = std::jthread([this](std::stop_token token) { run(token); });
 
     spdlog::info("YAMS daemon started successfully.");
@@ -93,6 +131,12 @@ Result<void> YamsDaemon::stop() {
 
     if (daemonThread_.joinable()) {
         daemonThread_.join();
+    }
+
+    // Stop background coordinator before tearing down IPC/services it references
+    if (repairCoordinator_) {
+        repairCoordinator_->stop();
+        repairCoordinator_.reset();
     }
 
     if (ipcServer_) {

@@ -1174,6 +1174,20 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         response.additionalStats["deduplicated_bytes"] =
             std::to_string(storeStats.deduplicatedBytes);
 
+        // Expose RepairCoordinator metrics for observability
+        response.additionalStats["repair_idle_ticks"] =
+            std::to_string(state_->stats.repairIdleTicks.load());
+        response.additionalStats["repair_busy_ticks"] =
+            std::to_string(state_->stats.repairBusyTicks.load());
+        response.additionalStats["repair_batches_attempted"] =
+            std::to_string(state_->stats.repairBatchesAttempted.load());
+        response.additionalStats["repair_embeddings_generated"] =
+            std::to_string(state_->stats.repairEmbeddingsGenerated.load());
+        response.additionalStats["repair_embeddings_skipped"] =
+            std::to_string(state_->stats.repairEmbeddingsSkipped.load());
+        response.additionalStats["repair_failed_operations"] =
+            std::to_string(state_->stats.repairFailedOperations.load());
+
         // Calculate block metrics (informational only)
         double blockToDocRatio =
             response.totalDocuments > 0

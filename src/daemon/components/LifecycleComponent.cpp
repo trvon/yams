@@ -1,8 +1,8 @@
 #include <spdlog/spdlog.h>
 #include <csignal>
-#include <fstream>
 #include <unistd.h>
 #include <sys/file.h>
+#include <sys/wait.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
 
@@ -21,9 +21,30 @@ LifecycleComponent::~LifecycleComponent() {
 
 Result<void> LifecycleComponent::initialize() {
     if (isAnotherInstanceRunning()) {
-        return Error{ErrorCode::InvalidState,
-                     "Another daemon instance is already running, check PID file: " +
-                         pidFile_.string()};
+        // If aggressive mode is enabled, try to terminate the other process and continue.
+        if (aggressiveModeEnabled()) {
+            spdlog::warn("Another daemon instance detected. Aggressive mode enabled, attempting to "
+                         "terminate it.");
+            pid_t pid{};
+            if (readPidFromFile(pid) && pid > 0) {
+                if (auto term = terminateProcess(pid); !term) {
+                    return term; // propagate error
+                }
+            } else {
+                spdlog::warn(
+                    "Could not read PID from file '{}', will attempt to remove stale file.",
+                    pidFile_.string());
+            }
+
+            // Remove PID file if present (stale or after termination)
+            if (auto rm = removePidFile(); !rm) {
+                return rm;
+            }
+        } else {
+            return Error{ErrorCode::InvalidState,
+                         "Another daemon instance is already running, check PID file: " +
+                             pidFile_.string()};
+        }
     }
 
     if (auto result = createPidFile(); !result) {
@@ -157,6 +178,74 @@ void LifecycleComponent::handleSignal(int signal) {
         default:
             break;
     }
+}
+
+bool LifecycleComponent::readPidFromFile(pid_t& outPid) const {
+    outPid = 0;
+    if (!std::filesystem::exists(pidFile_)) {
+        return false;
+    }
+    int fd = open(pidFile_.c_str(), O_RDONLY);
+    if (fd == -1) {
+        return false;
+    }
+    char pid_buf[32] = {0};
+    ssize_t n = read(fd, pid_buf, sizeof(pid_buf) - 1);
+    close(fd);
+    if (n <= 0) {
+        return false;
+    }
+    outPid = static_cast<pid_t>(atoi(pid_buf));
+    return outPid > 0;
+}
+
+Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
+    // Try graceful shutdown first
+    if (kill(pid, SIGTERM) == -1) {
+        if (errno == ESRCH) {
+            return Result<void>(); // already gone
+        }
+        spdlog::warn("Failed to send SIGTERM to PID {}: {}", pid, strerror(errno));
+    }
+    // Wait up to ~2 seconds for process to exit
+    constexpr int max_attempts = 20;
+    for (int i = 0; i < max_attempts; ++i) {
+        if (kill(pid, 0) == -1 && errno == ESRCH) {
+            return Result<void>(); // exited
+        }
+        usleep(100 * 1000); // 100ms
+    }
+    spdlog::warn("Process {} did not exit after SIGTERM, sending SIGKILL.", pid);
+    if (kill(pid, SIGKILL) == -1) {
+        if (errno == ESRCH) {
+            return Result<void>();
+        }
+        return Error{ErrorCode::InvalidState,
+                     std::string("Failed to SIGKILL PID: ") + strerror(errno)};
+    }
+    // Wait briefly to ensure it is gone
+    for (int i = 0; i < 10; ++i) {
+        if (kill(pid, 0) == -1 && errno == ESRCH) {
+            return Result<void>();
+        }
+        usleep(50 * 1000);
+    }
+    return Result<void>();
+}
+
+bool LifecycleComponent::aggressiveModeEnabled() {
+    // TODO: Make this configurable via config file/CLI flag and default to "safe" mode.
+    // For now, aggressive mode is the default to ensure tests don't pile up daemons.
+    const char* env = std::getenv("YAMS_DAEMON_KILL_OTHERS");
+    if (!env || env[0] == '\0') {
+        return true; // default ON
+    }
+    // Explicit opt-out when set to "0" or "false" (case-insensitive)
+    if ((env[0] == '0' && env[1] == '\0') || strcasecmp(env, "false") == 0 ||
+        strcasecmp(env, "off") == 0 || strcasecmp(env, "no") == 0) {
+        return false;
+    }
+    return true;
 }
 
 } // namespace yams::daemon

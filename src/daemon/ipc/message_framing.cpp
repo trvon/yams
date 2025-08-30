@@ -363,7 +363,13 @@ Result<std::vector<uint8_t>> FrameReader::get_frame() {
         return Error{ErrorCode::InvalidState, "No complete frame available"};
     }
 
-    auto frame = std::move(buffer_);
+    // Safely transfer ownership of the buffered frame without leaving the
+    // internal vector in an ambiguous moved-from state prior to reset().
+    // Swap ensures buffer_ becomes empty immediately, preventing any chance of
+    // double-free with certain standard library behaviors when combined with
+    // subsequent reset()/clear operations and later reallocations.
+    std::vector<uint8_t> frame;
+    frame.swap(buffer_);
     reset();
     return frame;
 }

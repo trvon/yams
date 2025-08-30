@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -27,9 +28,15 @@ public:
 
     [[nodiscard]] bool supports_streaming(const Request& request) const override;
 
-    [[nodiscard]] Task<ResponseChunk> next_chunk() override;
+    [[nodiscard]] Task<RequestProcessor::ResponseChunk> next_chunk() override;
 
 private:
+    // Lazy compute: store request to compute on first next_chunk() to allow
+    // header to be written immediately by RequestHandler before heavy work
+    // (critical for Grep to avoid header-timeouts in clients/pools).
+    std::optional<Request> pending_request_;
+    bool heartbeat_sent_{false};
+
     struct SearchState {
         std::vector<SearchResult> results;
         std::size_t totalCount{0};

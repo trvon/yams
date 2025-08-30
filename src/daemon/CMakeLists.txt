@@ -88,6 +88,8 @@ set_target_properties(yams_daemon_ipc PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(yams::daemon_ipc ALIAS yams_daemon_ipc)
 
 # Platform-specific async I/O defines for the IPC library (to match implementation)
+option(YAMS_USE_KQUEUE "Use kqueue backend for async IO on Apple/BSD" OFF)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig)
     if(PKG_CONFIG_FOUND)
@@ -102,7 +104,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         endif()
     endif()
 elseif(APPLE)
-    target_compile_definitions(yams_daemon_ipc PRIVATE HAVE_KQUEUE=1)
+    if(YAMS_USE_KQUEUE)
+        target_compile_definitions(yams_daemon_ipc PRIVATE HAVE_KQUEUE=1)
+        message(STATUS "kqueue support enabled for async I/O (yams_daemon_ipc)")
+    else()
+        message(STATUS "kqueue disabled (YAMS_USE_KQUEUE=OFF); using select()-based backend for yams_daemon_ipc")
+    endif()
 endif()
 
 # ============================================================================
@@ -113,6 +120,7 @@ add_library(yams_daemon STATIC
     components/RequestDispatcher.cpp
     components/LifecycleComponent.cpp
     components/ServiceManager.cpp
+    components/RepairCoordinator.cpp
     resource/mock_model_provider.cpp
     resource/plugin_loader.cpp
 )
@@ -169,9 +177,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         endif()
     endif()
 elseif(APPLE)
-    # macOS uses kqueue, which is built-in
-    target_compile_definitions(yams_daemon PRIVATE HAVE_KQUEUE=1)
-    message(STATUS "kqueue support enabled for async I/O (macOS)")
+    if(YAMS_USE_KQUEUE)
+        # macOS uses kqueue when explicitly enabled
+        target_compile_definitions(yams_daemon PRIVATE HAVE_KQUEUE=1)
+        message(STATUS "kqueue support enabled for async I/O (yams_daemon)")
+    else()
+        message(STATUS "kqueue disabled (YAMS_USE_KQUEUE=OFF); using select()-based backend for yams_daemon")
+    endif()
 endif()
 
 target_compile_features(yams_daemon PUBLIC cxx_std_20)

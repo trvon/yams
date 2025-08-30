@@ -245,6 +245,12 @@ public:
     explicit FrameReader(size_t max_frame_size = 16 * 1024 * 1024)
         : max_frame_size_(max_frame_size) {}
 
+    // Non-copyable and non-movable to avoid accidental duplication across coroutine frames
+    FrameReader(const FrameReader&) = delete;
+    FrameReader& operator=(const FrameReader&) = delete;
+    FrameReader(FrameReader&&) = delete;
+    FrameReader& operator=(FrameReader&&) = delete;
+
     // Add data to buffer
     void append(std::span<const uint8_t> data) {
         buffer_.insert(buffer_.end(), data.begin(), data.end());

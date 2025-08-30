@@ -19,6 +19,7 @@ class YamsConan(ConanFile):
         "build_benchmarks": [True, False],
         "enable_pdf": [True, False],
         "enable_tui": [True, False],  # Separate TUI from CLI
+        "enable_onnx": [True, False],  # Gate ONNX Runtime and its transitive graph
     }
     default_options = {
         "build_cli": True,
@@ -27,6 +28,7 @@ class YamsConan(ConanFile):
         "build_benchmarks": False,
         "enable_pdf": True,  # PDF support enabled by default (uses FetchContent since PDFium not in Conan Center)
         "enable_tui": False,  # TUI disabled by default to reduce dependencies
+        "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
     }
 
     generators = "CMakeDeps"  # CMakeToolchain is handled in generate()
@@ -58,8 +60,9 @@ class YamsConan(ConanFile):
 
         # MCP server no longer requires Drogon or Boost
 
-        # ONNX Runtime for embeddings and LLM inference
-        self.requires("onnxruntime/1.18.1")
+        # ONNX Runtime for embeddings and LLM inference (optional)
+        if self.options.enable_onnx:
+            self.requires("onnxruntime/1.18.1")
 
     def build_requirements(self):
         if self.options.build_tests:
@@ -105,6 +108,7 @@ class YamsConan(ConanFile):
         tc.variables["YAMS_BUILD_BENCHMARKS"] = "ON" if self.options.build_benchmarks else "OFF"
         tc.variables["YAMS_ENABLE_PDF"] = "ON" if self.options.enable_pdf else "OFF"
         tc.variables["YAMS_ENABLE_TUI"] = "ON" if self.options.enable_tui else "OFF"
+        tc.variables["YAMS_ENABLE_ONNX"] = "ON" if self.options.enable_onnx else "OFF"
         tc.generate()
 
     def build(self):

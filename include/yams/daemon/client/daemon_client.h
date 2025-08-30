@@ -65,6 +65,8 @@ public:
     Result<SuccessResponse> getEnd(const GetEndRequest& req) { return call<GetEndRequest>(req); }
     Result<ListResponse> list(const ListRequest& req);
     Result<GrepResponse> grep(const GrepRequest& req);
+    // Streaming path for AddDocument (header-first, final-only chunk)
+    Result<AddDocumentResponse> streamingAddDocument(const AddDocumentRequest& req);
 
     // High-level streaming helpers
     Result<void> getToStdout(const GetInitRequest& req) {
@@ -115,6 +117,13 @@ public:
 
     // Streaming grep helper method
     Result<GrepResponse> streamingGrep(const GrepRequest& req);
+
+    // Streaming get helpers (init/header-only + chunk loop)
+    Result<void> streamingGetToStdout(const GetInitRequest& req) { return getToStdout(req); }
+    Result<void> streamingGetToFile(const GetInitRequest& req,
+                                    const std::filesystem::path& outputPath) {
+        return getToFile(req, outputPath);
+    }
 
     Result<void> getToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
         if (auto c = connect(); !c)
@@ -316,6 +325,10 @@ private:
     // Helper method to read frame header with proper timeout
     Result<MessageFramer::FrameHeader> readFrameHeader(int socketFd);
 
+    // Helper method to read frame header with a specific timeout (used for chunk headers)
+    Result<MessageFramer::FrameHeader>
+    readFrameHeaderWithTimeout(int socketFd, std::chrono::milliseconds timeout);
+
     // Helper method to read full frame with proper timeout
     Result<std::vector<uint8_t>> readFullFrame(int socketFd,
                                                const MessageFramer::FrameHeader& header);
@@ -349,6 +362,10 @@ template <class Req> Result<ResponseOfT<Req>> DaemonClient::call(const Req& req)
     } else if constexpr (std::is_same_v<Req, GrepRequest>) {
         if (config_.enableChunkedResponses) {
             return streamingGrep(req);
+        }
+    } else if constexpr (std::is_same_v<Req, AddDocumentRequest>) {
+        if (config_.enableChunkedResponses) {
+            return streamingAddDocument(req);
         }
     }
 

@@ -5,6 +5,39 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.9] - 2025-08-29
+
+### Added
+- Daemon Repair Coordinator (FSM-driven) enabled by default when daemon is running
+  - Performs idle-only embedding repair using existing repair utilities
+  - New daemon repair metrics in StateComponent:
+    - repairIdleTicks, repairBusyTicks, repairBatchesAttempted,
+      repairEmbeddingsGenerated, repairEmbeddingsSkipped, repairFailedOperations
+- IPC streaming persistence
+  - Removed unsolicited end-of-stream heartbeat frame that could poison next response
+  - Fixed message framing hang under certain pooled flows; reduced over-eager retries
+- MCP server alignment with pooled client API
+  - Corrected DaemonClientPool::acquire() usage (Result<Lease> → Lease)
+
+### Known Issues
+- Pooled reuse immediately after a streaming response can intermittently see
+  "Connection closed by daemon" on follow-up unary calls (e.g., list/ping).
+### Changed
+- Coordinator ownership/lifecycle: now a YamsDaemon member started in start() and stopped before
+  IPC/services teardown in stop() for safe shutdown
+
+### Fixed
+- Regressions in CLI / MCP tooling
+- AddressSanitizer heap-use-after-free in IPC tests caused by coordinator thread outliving
+  daemon members; resolved by proper ownership and shutdown ordering
+  - Readiness flags and lightweight observability counters for repair gating
+- IPC/Streaming & Pooling
+  - Connection FSM guardrails with legal transitions for streaming and normalization
+  - Header-first streaming responses with chunked transfer; persistent sockets supported
+  - Client: pre-header reconnect-once (timeout/EOF/reset) and inter-chunk inactivity deadlines
+  - Time-to-first-byte (TTFB) metric and response timing hooks
+  - Streaming enabled for search, list, grep, and add document paths
+
 ## [v0.5.8] - 2025-08-29
 
 ### Fixed

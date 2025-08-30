@@ -73,7 +73,7 @@ class AsyncIOContext;
 // Non-templated awaiter base so AsyncIOContext pImpl can operate type-erased
 // ============================================================================
 
-struct SocketAwaiterBase {
+struct SocketAwaiterBase : public std::enable_shared_from_this<SocketAwaiterBase> {
     std::atomic<ssize_t> result{0};
     std::atomic<int> error_code{0};
     std::atomic<bool> cancelled{false};
@@ -164,9 +164,6 @@ public:
     struct AwaiterBase : public SocketAwaiterBase {
         AsyncSocket<IOContextT>* socket;
         uint64_t generation_snapshot{0};
-        // Weak reference to the base awaiter (set by factory) to avoid
-        // enable_shared_from_this multiple-inheritance pitfalls
-        std::weak_ptr<SocketAwaiterBase> self_base_weak;
 
         explicit AwaiterBase(AsyncSocket<IOContextT>* s) : socket(s) {}
         ~AwaiterBase() override = default;
@@ -373,8 +370,6 @@ typename AsyncSocket<IOContextT>::template AwaiterHolder<
     typename AsyncSocket<IOContextT>::ReadAwaiter>
 AsyncSocket<IOContextT>::async_read(void* buffer, size_t size) {
     auto awaiter = std::make_shared<ReadAwaiter>(this, buffer, size);
-    // Seed base weak_ptr for safe type-erased handoff
-    awaiter->self_base_weak = std::static_pointer_cast<SocketAwaiterBase>(awaiter);
     return AwaiterHolder<ReadAwaiter>(awaiter);
 }
 
@@ -384,8 +379,6 @@ typename AsyncSocket<IOContextT>::template AwaiterHolder<
     typename AsyncSocket<IOContextT>::WriteAwaiter>
 AsyncSocket<IOContextT>::async_write(const void* buffer, size_t size) {
     auto awaiter = std::make_shared<WriteAwaiter>(this, buffer, size);
-    // Seed base weak_ptr for safe type-erased handoff
-    awaiter->self_base_weak = std::static_pointer_cast<SocketAwaiterBase>(awaiter);
     return AwaiterHolder<WriteAwaiter>(awaiter);
 }
 
@@ -482,8 +475,13 @@ bool AsyncSocket<IOContextT>::ReadAwaiter::await_ready() noexcept {
 template <typename IOContextT>
 requires IsIOContext<IOContextT>
 void AsyncSocket<IOContextT>::ReadAwaiter::await_suspend(std::coroutine_handle<> h) {
-    // Recover a shared_ptr to the base from the pre-seeded weak_ptr
-    auto shared_self = this->self_base_weak.lock();
+    // Obtain a strong reference to this awaiter via shared_from_this()
+    std::shared_ptr<SocketAwaiterBase> shared_self;
+    try {
+        shared_self = this->shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
+        shared_self.reset();
+    }
     if (this->socket->fd_ >= 0) {
         this->socket->context_->submit_read_erased(this->socket->get_fd(), buffer, size, h,
                                                    shared_self, this->socket->generation_.load());
@@ -536,8 +534,13 @@ bool AsyncSocket<IOContextT>::WriteAwaiter::await_ready() noexcept {
 template <typename IOContextT>
 requires IsIOContext<IOContextT>
 void AsyncSocket<IOContextT>::WriteAwaiter::await_suspend(std::coroutine_handle<> h) {
-    // Recover a shared_ptr to the base from the pre-seeded weak_ptr
-    auto shared_self = this->self_base_weak.lock();
+    // Obtain a strong reference to this awaiter via shared_from_this()
+    std::shared_ptr<SocketAwaiterBase> shared_self;
+    try {
+        shared_self = this->shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
+        shared_self.reset();
+    }
     if (this->socket->fd_ >= 0) {
         this->socket->context_->submit_write_erased(this->socket->get_fd(), buffer, size, h,
                                                     shared_self, this->socket->generation_.load());

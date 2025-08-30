@@ -53,7 +53,8 @@ Result<ContentResult> PdfContentHandler::process(const std::filesystem::path& pa
     // Extract text and metadata
     auto extractResult = extractor->extract(path, extractConfig);
     if (!extractResult) {
-        return Error{ErrorCode::InternalError,
+        // Propagate underlying error code (tests expect InvalidData for corrupted/empty)
+        return Error{extractResult.error().code,
                      "PDF extraction failed: " + extractResult.error().message};
     }
 
@@ -64,6 +65,15 @@ Result<ContentResult> PdfContentHandler::process(const std::filesystem::path& pa
     auto end = std::chrono::steady_clock::now();
     result.processingTimeMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    // Add file size and processing time to metadata for observability
+    try {
+        const auto fileSize = std::filesystem::file_size(path);
+        result.metadata["file_size"] = std::to_string(fileSize);
+    } catch (...) {
+        // ignore file size errors
+    }
+    result.metadata["processing_time_ms"] = std::to_string(result.processingTimeMs);
 
     spdlog::debug("PdfContentHandler processed {} in {}ms", path.string(), result.processingTimeMs);
 
@@ -97,7 +107,7 @@ Result<ContentResult> PdfContentHandler::processBuffer(std::span<const std::byte
     // Extract from buffer
     auto extractResult = extractor->extractFromBuffer(data, extractConfig);
     if (!extractResult) {
-        return Error{ErrorCode::InternalError,
+        return Error{extractResult.error().code,
                      "PDF extraction from buffer failed: " + extractResult.error().message};
     }
 
@@ -116,6 +126,8 @@ Result<ContentResult> PdfContentHandler::processBuffer(std::span<const std::byte
     result.processingTimeMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
+    // Add timing to metadata for buffer case as well
+    result.metadata["processing_time_ms"] = std::to_string(result.processingTimeMs);
     return result;
 }
 

@@ -29,53 +29,25 @@ YAMS provides comprehensive versioning through content-addressed storage. Every 
 
 ### Package Managers
 
-**Docker:**
-```bash
-docker run --rm -it ghcr.io/trvon/yams:latest --version
-```
-
-**Linux Packages:**
-
-```bash
-# DEB (Debian/Ubuntu)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-amd64.deb -o yams.deb
-sudo dpkg -i yams.deb
-sudo apt-get install -f  # Fix any dependency issues
-
-# RPM (Fedora/RedHat/CentOS)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.rpm -o yams.rpm
-sudo dnf install ./yams.rpm
-
-# AppImage (Universal Linux - no installation required)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.AppImage -o yams
-chmod +x yams
-./yams --version
-```
-
 **Homebrew (coming soon):**
 ```bash
 brew tap trvon/yams && brew install yams
 ```
 
-### Binary Downloads
+### Build
 
-For systems where packages aren't available:
+- Dependencies
 
 ```bash
-# Linux x86_64
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-linux-x86_64.tar.gz | tar xz
-sudo mv bin/yams /usr/local/bin/
+# macOS
+brew install openssl@3 protobuf sqlite3 ncurses
+export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
-# macOS ARM64 (Apple Silicon)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-arm64.zip -o yams.zip
-unzip yams.zip && sudo mv bin/yams /usr/local/bin/
-
-# macOS x86_64 (Intel)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip
-unzip yams.zip && sudo mv bin/yams /usr/local/bin/
+# Linux
+apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
 ```
 
-### Build
+- Compiling
 
 ```bash
 # Install Conan
@@ -89,6 +61,7 @@ conan install . --output-folder=build/yams-release -s build_type=Release --build
 cmake --preset yams-release
 cmake --build --preset yams-release
 sudo cmake --install build/yams-release
+sudo ldconfig
 ```
 
 **Requirements:**
@@ -103,23 +76,15 @@ sudo cmake --install build/yams-release
 | Option | Default | Description |
 |--------|---------|-------------|
 | `YAMS_USE_CONAN` | OFF | Use Conan package manager |
-| `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
-| `YAMS_BUILD_MCP_SERVER` | ON | MCP server (requires Boost) |
+| `YAMS_BUILD_CLI` | ON | CLI with optional TUI browser |
+| `YAMS_BUILD_MCP_SERVER` | ON | MCP server |
 | `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
 | `YAMS_BUILD_BENCHMARKS` | OFF | Performance benchmarks |
-| `YAMS_ENABLE_PDF` | ON | PDF text extraction support |
+| `YAMS_ENABLE_PDF` | ON | PDF text extraction support (may download PDFium via FetchContent) |
+| `YAMS_ENABLE_TUI` | OFF | Enables TUI browser (adds ncurses via Conan; ImTUI via FetchContent) |
+| `YAMS_ENABLE_ONNX` | ON | Enables ONNX Runtime features (pulls onnxruntime; may pull Boost transitively) |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 
-### Dependencies
-
-```bash
-# macOS
-brew install openssl@3 protobuf sqlite3 ncurses
-export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
-
-# Linux
-apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
-```
 
 ## Setup
 

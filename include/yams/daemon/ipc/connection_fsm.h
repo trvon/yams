@@ -66,6 +66,10 @@ public:
     void on_timeout(Operation op);
     void on_error(int err);
     void on_close_request();
+    // Called by server after a full response (non-streaming or end of streaming) has been sent.
+    // If close_after is true, transitions toward Closing; otherwise returns to Connected so
+    // another request can be read on the same persistent connection.
+    void on_response_complete(bool close_after);
 
     // State validation helpers
     bool can_read() const noexcept {

@@ -37,6 +37,20 @@ Content-addressed storage with deduplication and semantic search.
 - [MCP Server](mcp_websocket_transport.md) - AI agent integration
 - [REST API](api/README.md) - HTTP interface
 
+## Build Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `YAMS_USE_CONAN` | OFF | Use Conan package manager |
+| `YAMS_BUILD_CLI` | ON | CLI with optional TUI browser |
+| `YAMS_BUILD_MCP_SERVER` | ON | MCP server |
+| `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
+| `YAMS_BUILD_BENCHMARKS` | OFF | Performance benchmarks |
+| `YAMS_ENABLE_PDF` | ON | PDF text extraction support (may download PDFium via FetchContent) |
+| `YAMS_ENABLE_TUI` | OFF | Enables TUI browser (adds ncurses via Conan; ImTUI via FetchContent) |
+| `YAMS_ENABLE_ONNX` | ON | Enables ONNX Runtime features (pulls onnxruntime; may pull Boost transitively) |
+| `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
+
 ## Resources
 
 - [GitHub](https://github.com/trvon/yams) - Source code

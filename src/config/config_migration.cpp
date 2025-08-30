@@ -147,7 +147,12 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2A
               {"reconnect_backoff_max_ms", "5000"},
               {"reconnect_backoff_jitter_pct", "0.2"},
               {"circuit_breaker_error_threshold", "5"},
-              {"circuit_breaker_reset_ms", "10000"}}}};
+              {"circuit_breaker_reset_ms", "10000"}}},
+            {"repair",
+             {{"enable_online_repair", "false"},
+              {"max_repair_concurrency", "1"},
+              {"repair_backoff_ms", "250"},
+              {"max_retries", "3"}}}};
 }
 
 std::vector<MigrationEntry> ConfigMigrator::getV1ToV2MigrationMap() {
@@ -478,6 +483,12 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"fallback_to_local", "true"},
               {"max_retries", "3"},
               {"batch_size", "32"}}},
+
+            {"repair",
+             {{"enable_online_repair", "false"},
+              {"max_repair_concurrency", "1"},
+              {"repair_backoff_ms", "250"},
+              {"max_retries", "3"}}},
 
             {"migrations",
              {{"auto_migrate", "true"},

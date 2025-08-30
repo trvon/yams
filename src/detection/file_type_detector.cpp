@@ -207,37 +207,57 @@ public:
     Result<FileSignature> detectWithPatterns(std::span<const std::byte> data) {
         std::lock_guard<std::mutex> lock(patternsMutex);
 
-        FileSignature bestMatch;
-        float bestConfidence = 0.0f;
+        auto match_pass = [&](bool exclude_generic) -> std::optional<FileSignature> {
+            FileSignature bestMatch;
+            float bestConfidence = 0.0f;
 
-        for (const auto& pattern : patterns) {
-            // Check if we have enough data for this pattern
-            if (data.size() < pattern.offset + pattern.pattern.size()) {
-                continue;
-            }
+            for (const auto& pattern : patterns) {
+                // Optionally exclude overly generic patterns (like debug/octet-stream)
+                if (exclude_generic) {
+                    if (pattern.mimeType == "application/octet-stream" ||
+                        pattern.fileType == "debug" || pattern.fileType == "binary") {
+                        continue;
+                    }
+                }
 
-            // Compare pattern at specified offset
-            bool matches = true;
-            for (size_t i = 0; i < pattern.pattern.size(); ++i) {
-                if (data[pattern.offset + i] != pattern.pattern[i]) {
-                    matches = false;
-                    break;
+                // Check if we have enough data for this pattern
+                if (data.size() < pattern.offset + pattern.pattern.size()) {
+                    continue;
+                }
+
+                // Compare pattern at specified offset
+                bool matches = true;
+                for (size_t i = 0; i < pattern.pattern.size(); ++i) {
+                    if (data[pattern.offset + i] != pattern.pattern[i]) {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if (matches && pattern.confidence > bestConfidence) {
+                    bestMatch.mimeType = pattern.mimeType;
+                    bestMatch.fileType = pattern.fileType;
+                    bestMatch.description = pattern.description;
+                    bestMatch.magicNumber = pattern.patternHex;
+                    bestMatch.confidence = pattern.confidence;
+                    bestMatch.isBinary = true;
+                    bestConfidence = pattern.confidence;
                 }
             }
 
-            if (matches && pattern.confidence > bestConfidence) {
-                bestMatch.mimeType = pattern.mimeType;
-                bestMatch.fileType = pattern.fileType;
-                bestMatch.description = pattern.description;
-                bestMatch.magicNumber = pattern.patternHex;
-                bestMatch.confidence = pattern.confidence;
-                bestMatch.isBinary = true;
-                bestConfidence = pattern.confidence;
+            if (bestConfidence > 0.0f) {
+                return bestMatch;
             }
-        }
+            return std::nullopt;
+        };
 
-        if (bestConfidence > 0) {
-            return bestMatch;
+        // First try matching with generic patterns excluded to prefer specific signatures
+        if (auto res = match_pass(true)) {
+            return *res;
+        }
+        // Fallback to full pass including generic patterns
+        if (auto res = match_pass(false)) {
+            return *res;
         }
 
         return Error{ErrorCode::NotFound, "No matching pattern found"};
@@ -254,7 +274,21 @@ FileTypeDetector& FileTypeDetector::instance() {
 }
 
 Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) {
+    // Reset internal state to ensure clean initialization between runs/tests
     pImpl->config = config;
+    {
+        // Clear pattern database and classification maps
+        std::lock_guard<std::mutex> lock_patterns(pImpl->patternsMutex);
+        pImpl->patterns.clear();
+        pImpl->mimeToFileType.clear();
+        pImpl->mimeToIsBinary.clear();
+    }
+    {
+        // Clear cache to avoid stale detections carrying over between configurations
+        std::lock_guard<std::mutex> lock_cache(pImpl->cacheMutex);
+        pImpl->cache.clear();
+        pImpl->cacheStats = {};
+    }
     pImpl->cacheStats.maxSize = config.cacheSize;
 
     // Initialize libmagic if requested
@@ -267,6 +301,7 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
 
     // Load built-in patterns
     if (config.useBuiltinPatterns) {
+        // Load built-in patterns into a fresh vector
         pImpl->patterns = getDefaultPatterns();
         // Debug: Loaded built-in file patterns
 
@@ -457,8 +492,13 @@ Result<FileSignature> FileTypeDetector::detectFromBuffer(std::span<const std::by
     if (pImpl->config.useLibMagic && pImpl->magicCookie) {
         auto magicResult = pImpl->detectWithLibMagic(data);
         if (magicResult) {
-            result = magicResult.value();
-            detected = true;
+            // Treat overly generic MIME types from libmagic as provisional only
+            const auto& m = magicResult.value().mimeType;
+            bool isGeneric = (m == "application/octet-stream");
+            if (!isGeneric) {
+                result = magicResult.value();
+                detected = true;
+            }
         }
     }
 #endif

@@ -48,6 +48,14 @@ struct DaemonStats {
     std::chrono::steady_clock::time_point startTime;
     std::atomic<uint64_t> requestsProcessed{0};
     std::atomic<uint64_t> activeConnections{0};
+
+    // Background repair metrics (idle-only coordinator)
+    std::atomic<uint64_t> repairIdleTicks{0};
+    std::atomic<uint64_t> repairBusyTicks{0};
+    std::atomic<uint64_t> repairBatchesAttempted{0};
+    std::atomic<uint64_t> repairEmbeddingsGenerated{0};
+    std::atomic<uint64_t> repairEmbeddingsSkipped{0};
+    std::atomic<uint64_t> repairFailedOperations{0};
 };
 
 /**
