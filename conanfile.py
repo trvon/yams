@@ -4,10 +4,10 @@ from conan.tools.build import check_min_cppstd
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.5.1"
-    license = "MIT"
+    version = "0.6.0"
+    license = "APACHE 2.0"
     author = "YAMS Contributors"
-    url = "https://github.com/your-org/yams"
+    url = "https://github.com/trvon/yams"
     description = "Yet Another Memory System - Persistent memory for LLMs"
     topics = ("storage", "content-addressed", "deduplication", "search")
 
@@ -45,7 +45,7 @@ class YamsConan(ConanFile):
         self.requires("openssl/3.2.0")
         self.requires("libcurl/8.10.1")
         self.requires("protobuf/3.21.12")
-        
+
         # Compat
         self.requires('tl-expected/1.1.0')
 

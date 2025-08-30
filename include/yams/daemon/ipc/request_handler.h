@@ -196,8 +196,12 @@ private:
     [[nodiscard]] Task<std::vector<Response>> collect_limited_chunks(const Request& request,
                                                                      size_t max_chunks = 10);
 
+    // Send an error response. If request_id is provided, the error will be correlated
+    // with that request; otherwise 0 indicates an out-of-band error and callers should
+    // generally close the connection to avoid desynchronization in persistent mode.
     [[nodiscard]] Task<Result<void>> send_error(AsyncSocket<AsyncIOContext>& socket, ErrorCode code,
-                                                const std::string& message);
+                                                const std::string& message,
+                                                uint64_t request_id = 0);
 
     std::shared_ptr<RequestProcessor> processor_;
     MessageFramer framer_;

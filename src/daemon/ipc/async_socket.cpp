@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <cassert>
 #include <coroutine>
 
 #include <algorithm>
@@ -10,12 +11,11 @@
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
-#include <map>
 #include <mutex>
+#include <queue>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
-#include <unordered_set>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -90,6 +90,20 @@ public:
         std::lock_guard lock(mutex_);
         socket_generations_[fd] = generation;
         return Result<void>();
+    }
+
+    // Enqueue a functor for execution on the IO thread and wake the loop
+    void post(std::function<void()> fn) {
+        if (!fn)
+            return;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            post_queue_.push(std::move(fn));
+        }
+        if (wake_pipe_[1] >= 0) {
+            char byte = 1;
+            [[maybe_unused]] ssize_t n = write(wake_pipe_[1], &byte, 1);
+        }
     }
 
     void cancel_pending_operations(int fd) {
@@ -170,6 +184,7 @@ public:
             return;
 
         PendingOp op;
+        op.op_id = next_op_id_();
         op.handle = h;
         op.awaiter_shared = awaiter;
         op.fd = fd;
@@ -179,8 +194,9 @@ public:
         op.type = OpType::Read;
         op.generation = generation;
 
-        spdlog::debug("AsyncIOContext(kqueue): submitting read op handle={:p} awaiter={:p} (fd={})",
-                      static_cast<void*>(h.address()), static_cast<void*>(awaiter.get()), fd);
+        spdlog::debug(
+            "AsyncIOContext(kqueue): submit READ op#{}, handle={:p}, awaiter={:p}, fd={}, size={}",
+            op.op_id, static_cast<void*>(h.address()), static_cast<void*>(awaiter.get()), fd, size);
 
         {
             std::lock_guard lock(mutex_);
@@ -212,6 +228,7 @@ public:
             return;
 
         PendingOp op;
+        op.op_id = next_op_id_();
         op.handle = h;
         op.awaiter_shared = awaiter;
         op.fd = fd;
@@ -222,8 +239,8 @@ public:
         op.generation = generation;
 
         spdlog::debug(
-            "AsyncIOContext(kqueue): submitting write op handle={:p} awaiter={:p} (fd={})",
-            static_cast<void*>(h.address()), static_cast<void*>(awaiter.get()), fd);
+            "AsyncIOContext(kqueue): submit WRITE op#{}, handle={:p}, awaiter={:p}, fd={}, size={}",
+            op.op_id, static_cast<void*>(h.address()), static_cast<void*>(awaiter.get()), fd, size);
 
         {
             std::lock_guard lock(mutex_);
@@ -242,8 +259,28 @@ public:
         struct timespec timeout = {0, 100000000}; // 100ms
 
         for (;;) {
-            // First, drain any queued cancellations to ensure we don't resume from foreign threads
+            // First, run posted functors then drain any queued cancellations to ensure we don't
+            // resume from foreign threads
             {
+                // Run posted functors on IO thread
+                for (;;) {
+                    std::function<void()> fn;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (post_queue_.empty())
+                            break;
+                        fn = std::move(post_queue_.front());
+                        post_queue_.pop();
+                    }
+                    try {
+                        if (fn)
+                            fn();
+                    } catch (const std::exception& e) {
+                        spdlog::warn("AsyncIOContext(kqueue): exception in post(): {}", e.what());
+                    } catch (...) {
+                        spdlog::warn("AsyncIOContext(kqueue): unknown exception in post()");
+                    }
+                }
                 std::deque<PendingOp> to_cancel;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -306,16 +343,34 @@ public:
             for (int i = 0; i < nev; ++i) {
                 int fd = static_cast<int>(events[i].ident);
 
-                spdlog::debug(
-                    "AsyncIOContext(kqueue): processing event fd={}, filter={}, flags=0x{:x}", fd,
-                    events[i].filter, events[i].flags);
+                spdlog::debug("AsyncIOContext(kqueue): event fd={}, filter={}, flags=0x{:x}", fd,
+                              events[i].filter, events[i].flags);
 
                 // Wake pipe has priority; handle it regardless of registration
                 if (fd == wake_pipe_[0]) {
                     char buffer[8];
                     while (read(wake_pipe_[0], buffer, sizeof(buffer)) > 0) {
                     }
-                    // After wake, also drain any new cancellations
+                    // After wake, first run any posts then also drain any new cancellations
+                    for (;;) {
+                        std::function<void()> fn;
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            if (post_queue_.empty())
+                                break;
+                            fn = std::move(post_queue_.front());
+                            post_queue_.pop();
+                        }
+                        try {
+                            if (fn)
+                                fn();
+                        } catch (const std::exception& e) {
+                            spdlog::warn("AsyncIOContext(kqueue): exception in post(): {}",
+                                         e.what());
+                        } catch (...) {
+                            spdlog::warn("AsyncIOContext(kqueue): unknown exception in post()");
+                        }
+                    }
                     std::deque<PendingOp> to_cancel;
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -392,9 +447,9 @@ public:
                         if (op_it != dq.end()) {
                             op = std::move(*op_it);
                             dq.erase(op_it);
-                            spdlog::debug("AsyncIOContext(kqueue): extracted op for fd={}, "
-                                          "filter={}, pending_ops_remaining={}",
-                                          fd, events[i].filter, dq.size());
+                            spdlog::debug("AsyncIOContext(kqueue): extracted op#{} for fd={}, "
+                                          "filter={}, left={}",
+                                          op.op_id, fd, events[i].filter, dq.size());
                             if (!op.handle && !op.awaiter_shared) {
                                 spdlog::debug(
                                     "AsyncIOContext(kqueue): extracted empty op for fd={}", fd);
@@ -424,17 +479,24 @@ public:
 
                 // Safety check: ensure we have valid awaiter and handle
                 if (!op.awaiter_shared || !op.handle) {
-                    spdlog::debug("AsyncIOContext(kqueue): op missing awaiter or handle (fd={})",
-                                  fd);
+                    spdlog::debug("AsyncIOContext(kqueue): op#{} missing awaiter or handle (fd={})",
+                                  op.op_id, fd);
+                    continue;
+                }
+                // Invariant: handle should not be completed at extraction time; guard defensively
+                if (!op.handle || op.handle.done()) {
+                    spdlog::debug("AsyncIOContext(kqueue): op#{} has null/done handle at "
+                                  "extraction, skipping (fd={})",
+                                  op.op_id, fd);
                     continue;
                 }
 
                 // Validate that the event filter matches the operation type
                 if ((events[i].filter == EVFILT_READ && op.type != OpType::Read) ||
                     (events[i].filter == EVFILT_WRITE && op.type != OpType::Write)) {
-                    spdlog::debug("AsyncIOContext(kqueue): filter/op type mismatch (fd={}, "
-                                  "filter={}, op_type={})",
-                                  fd, events[i].filter, static_cast<int>(op.type));
+                    spdlog::debug("AsyncIOContext(kqueue): filter/op type mismatch for op#{} "
+                                  "(fd={}, filter={}, op_type={})",
+                                  op.op_id, fd, events[i].filter, static_cast<int>(op.type));
                     continue;
                 }
 
@@ -460,8 +522,8 @@ public:
                     continue;
                 }
 
-                spdlog::debug("AsyncIOContext(kqueue): processing op (fd={}, type={})", fd,
-                              static_cast<int>(op.type));
+                spdlog::debug("AsyncIOContext(kqueue): processing op#{} (fd={}, type={})", op.op_id,
+                              fd, static_cast<int>(op.type));
 
                 // Final safety check: ensure socket is still valid
                 {
@@ -475,14 +537,15 @@ public:
 
                 // Defensive guard: if write op has empty data or zero size, cancel safely
                 if (op.type == OpType::Write && (op.data.empty() || op.size == 0)) {
-                    spdlog::debug("AsyncIOContext(kqueue): write op has no data (fd={}, size={})",
-                                  fd, op.size);
+                    spdlog::debug(
+                        "AsyncIOContext(kqueue): write op#{} has no data (fd={}, size={})",
+                        op.op_id, fd, op.size);
                     awaiter_shared->result.store(-1, std::memory_order_release);
                     awaiter_shared->error_code.store(EPIPE, std::memory_order_release);
                     awaiter_shared->cancelled.store(true, std::memory_order_release);
                     bool resume_scheduled =
                         awaiter_shared->scheduled.exchange(true, std::memory_order_acq_rel);
-                    if (!resume_scheduled && !handle.done()) {
+                    if (!resume_scheduled && handle && !handle.done()) {
                         op.awaiter_shared.reset();
                         op.handle = nullptr;
                         handle.resume();
@@ -526,15 +589,15 @@ public:
 
                 // Check if operation is stale/cancelled before doing I/O
                 if (!is_valid) {
-                    spdlog::debug("AsyncIOContext(kqueue): stale op (fd={}, gen={})", fd,
-                                  op_generation);
+                    spdlog::debug("AsyncIOContext(kqueue): stale op#{} (fd={}, gen={})", op.op_id,
+                                  fd, op_generation);
                     cancel_operation(op);
                     continue;
                 }
 
                 if (handle.done() || awaiter_shared->cancelled.load()) {
-                    spdlog::debug("AsyncIOContext(kqueue): cancelled op (fd={}, gen={})", fd,
-                                  op_generation);
+                    spdlog::debug("AsyncIOContext(kqueue): cancelled/done op#{} (fd={}, gen={})",
+                                  op.op_id, fd, op_generation);
                     continue;
                 }
 
@@ -582,9 +645,9 @@ public:
                 if (io_result < 0) {
                     // If not actually ready, requeue and re-register event (EV_ONESHOT)
                     if (io_errno == EAGAIN || io_errno == EWOULDBLOCK) {
-                        spdlog::debug("AsyncIOContext(kqueue): EAGAIN/EWOULDBLOCK, requeue op "
+                        spdlog::debug("AsyncIOContext(kqueue): EAGAIN/EWOULDBLOCK, requeue op#{} "
                                       "(fd={}, type={})",
-                                      fd, static_cast<int>(op.type));
+                                      op.op_id, fd, static_cast<int>(op.type));
                         {
                             std::lock_guard<std::mutex> lock(mutex_);
                             // Put it back at the front to retry soon
@@ -624,12 +687,14 @@ public:
                 size_t refs = awaiter_shared.use_count();
                 if (refs <= 1) {
                     spdlog::debug(
-                        "AsyncIOContext(kqueue): awaiter use_count={} before resume (fd={})", refs,
-                        fd);
+                        "AsyncIOContext(kqueue): awaiter use_count={} before resume op#{} (fd={})",
+                        refs, op.op_id, fd);
                 }
                 auto keep_alive = awaiter_shared;
                 bool resume_scheduled =
                     awaiter_shared->scheduled.exchange(true, std::memory_order_acq_rel);
+                // Invariant: should not already be scheduled here
+                assert(!resume_scheduled);
                 if (!resume_scheduled && !awaiter_shared->cancelled.load()) {
                     awaiter_shared->alive.store(false, std::memory_order_release);
                     auto local_handle = handle;
@@ -647,9 +712,9 @@ public:
                                       fd);
                     }
                 } else {
-                    spdlog::debug(
-                        "AsyncIOContext(kqueue): skip resume (done/cancelled/scheduled) for fd {}",
-                        fd);
+                    spdlog::debug("AsyncIOContext(kqueue): skip resume (done/cancelled/scheduled) "
+                                  "for op#{} fd {}",
+                                  op.op_id, fd);
                 }
             } // for events
         } // while
@@ -675,6 +740,7 @@ private:
         std::coroutine_handle<> handle{};
         std::shared_ptr<yams::daemon::SocketAwaiterBase> awaiter_shared{};
         int fd{-1};
+        uint64_t op_id{0};
         std::vector<uint8_t> read_buffer;
         void* external_buffer{nullptr};
         std::vector<uint8_t> data;
@@ -682,6 +748,9 @@ private:
         OpType type{OpType::Read};
         uint64_t generation{0};
     };
+
+    // Unique id generator for ops (debug tracing)
+    uint64_t next_op_id_() { return ++op_seq_; }
 
     // Shared helpers to reduce duplication in submit_* paths
     void enqueue_cancel_(int fd, size_t size, OpType type, uint64_t generation,
@@ -758,7 +827,7 @@ private:
 
     void cancel_operation(PendingOp& op) {
         auto awaiter = op.awaiter_shared;
-        spdlog::debug("AsyncIOContext(kqueue): cancelling op (fd={}, type={})", op.fd,
+        spdlog::debug("AsyncIOContext(kqueue): cancelling op#{} (fd={}, type={})", op.op_id, op.fd,
                       static_cast<int>(op.type));
 
         if (!awaiter || !op.handle)
@@ -831,9 +900,11 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<int, std::deque<PendingOp>> pending_ops_;
     std::unordered_map<int, uint64_t> socket_generations_;
+    std::queue<std::function<void()>> post_queue_;
     std::deque<PendingOp> cancel_queue_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> draining_{false};
+    std::atomic<uint64_t> op_seq_{0};
 };
 
 #else
@@ -859,6 +930,19 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         socket_generations_[fd] = generation;
         return Result<void>();
+    }
+
+    void post(std::function<void()> fn) {
+        if (!fn)
+            return;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            post_queue_.push(std::move(fn));
+        }
+        if (wake_pipe_[1] >= 0) {
+            char byte = 1;
+            [[maybe_unused]] ssize_t n = write(wake_pipe_[1], &byte, 1);
+        }
     }
 
     void cancel_pending_operations(int fd) {
@@ -953,6 +1037,7 @@ public:
         }
 
         PendingOp op;
+        op.op_id = next_op_id_();
         op.handle = h;
         op.awaiter_shared = awaiter;
         op.fd = fd;
@@ -1026,6 +1111,7 @@ public:
         }
 
         PendingOp op;
+        op.op_id = next_op_id_();
         op.handle = h;
         op.awaiter_shared = awaiter;
         op.fd = fd;
@@ -1048,8 +1134,26 @@ public:
 
     void run() {
         for (;;) {
-            // Drain queued cancellations
+            // Run posted functors then drain queued cancellations
             {
+                for (;;) {
+                    std::function<void()> fn;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (post_queue_.empty())
+                            break;
+                        fn = std::move(post_queue_.front());
+                        post_queue_.pop();
+                    }
+                    try {
+                        if (fn)
+                            fn();
+                    } catch (const std::exception& e) {
+                        spdlog::warn("AsyncIOContext(select): exception in post(): {}", e.what());
+                    } catch (...) {
+                        spdlog::warn("AsyncIOContext(select): unknown exception in post()");
+                    }
+                }
                 std::deque<PendingOp> to_cancel;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -1146,6 +1250,25 @@ public:
                 char buffer[8];
                 while (read(wake_pipe_[0], buffer, sizeof(buffer)) > 0) {
                 }
+                // Run posts after wake
+                for (;;) {
+                    std::function<void()> fn;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (post_queue_.empty())
+                            break;
+                        fn = std::move(post_queue_.front());
+                        post_queue_.pop();
+                    }
+                    try {
+                        if (fn)
+                            fn();
+                    } catch (const std::exception& e) {
+                        spdlog::warn("AsyncIOContext(select): exception in post(): {}", e.what());
+                    } catch (...) {
+                        spdlog::warn("AsyncIOContext(select): unknown exception in post()");
+                    }
+                }
                 std::deque<PendingOp> to_cancel;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -1198,6 +1321,17 @@ public:
 
                 if (!op.awaiter_shared || !op.handle)
                     continue;
+                // Single-resume guard: if this awaiter was already scheduled elsewhere (e.g.,
+                // cancellation path), do not touch the coroutine handle to avoid UAF.
+                if (op.awaiter_shared->scheduled.load(std::memory_order_acquire)) {
+                    spdlog::debug(
+                        "AsyncIOContext(select): skipping already scheduled op#{} (fd={})",
+                        op.op_id, fd);
+                    continue;
+                }
+                // Defensive: avoid probing a potentially destroyed frame. If the awaiter wasn't
+                // scheduled, the coroutine must still be suspended and the handle is valid.
+                // Therefore we do not call handle.done() here.
 
                 // Validate registration
                 bool is_valid = false;
@@ -1275,9 +1409,10 @@ public:
                 // Resume safely
                 bool resume_scheduled =
                     awaiter_shared->scheduled.exchange(true, std::memory_order_acq_rel);
-                if (!resume_scheduled && !awaiter_shared->cancelled.load() && !op.handle.done()) {
+                auto local_handle = op.handle;
+                assert(!resume_scheduled);
+                if (!resume_scheduled && !awaiter_shared->cancelled.load() && local_handle) {
                     awaiter_shared->alive.store(false, std::memory_order_release);
-                    auto local_handle = op.handle;
                     try {
                         local_handle.resume();
                     } catch (...) {
@@ -1307,6 +1442,7 @@ private:
         std::coroutine_handle<> handle{};
         std::shared_ptr<yams::daemon::SocketAwaiterBase> awaiter_shared{};
         int fd{-1};
+        uint64_t op_id{0};
         std::vector<uint8_t> read_buffer;
         void* external_buffer{nullptr};
         std::vector<uint8_t> data;
@@ -1349,11 +1485,16 @@ private:
         }
 
         try {
+            // Clear shared references before resuming to minimize lifetime races
             op.awaiter_shared.reset();
             op.handle = nullptr;
-            if (local_handle)
+            // Avoid probing handle.done() here; the frame may be invalidated in rare races.
+            // We rely on the scheduled/alive guards above. Resume unconditionally if present.
+            if (local_handle) {
                 local_handle.resume();
+            }
         } catch (...) {
+            // Swallow exceptions to keep IO loop robust during shutdown/cancel paths
         }
     }
 
@@ -1361,9 +1502,14 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<int, std::deque<PendingOp>> pending_ops_;
     std::unordered_map<int, uint64_t> socket_generations_;
+    std::queue<std::function<void()>> post_queue_;
     std::deque<PendingOp> cancel_queue_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> draining_{false};
+    std::atomic<uint64_t> op_seq_{0};
+
+    // Unique id generator for ops (debug tracing)
+    uint64_t next_op_id_() { return ++op_seq_; }
 };
 #endif
 
@@ -1410,6 +1556,10 @@ void AsyncIOContext::submit_write_erased(int fd, const void* buffer, size_t size
                                          std::shared_ptr<SocketAwaiterBase> awaiter,
                                          uint64_t generation) {
     pImpl->submit_write_erased(fd, buffer, size, h, awaiter, generation);
+}
+
+void AsyncIOContext::post(std::function<void()> fn) {
+    pImpl->post(std::move(fn));
 }
 
 // (No explicit template instantiations needed; header-only templates forward to erased API.)

@@ -45,6 +45,20 @@ public:
 
     State state() const noexcept { return state_; }
 
+    // Liveness helpers: treat any state prior to Closed as alive; Closing is still alive until
+    // socket teardown completes. Error is considered not-alive for new operations.
+    bool alive() const noexcept {
+        switch (state_) {
+            case State::Closed:
+                return false;
+            case State::Error:
+                return false;
+            default:
+                return true;
+        }
+    }
+    bool is_closing() const noexcept { return state_ == State::Closing; }
+
     // Optional runtime configuration (kept simple to avoid heavy headers)
     // Milliseconds-based timeouts to avoid std::chrono in the public header.
     void set_header_timeout_ms(uint32_t ms) noexcept;

@@ -12,14 +12,7 @@
 #include <yams/detection/file_type_detector.h>
 
 #include <array>
-#if YAMS_HAS_STD_FORMAT
-#include <format>
-#else
-#include <fmt/format.h>
-namespace std {
-using ::fmt::format;
-} // namespace std
-#endif
+#include <yams/common/format.h>
 
 namespace yams::content {
 
@@ -163,13 +156,13 @@ public:
             auto handler = std::invoke(std::forward<FactoryFunc>(factory));
             if (!handler) {
                 return Error{ErrorCode::InvalidArgument,
-                             std::format("Factory for {} returned null handler", name)};
+                             yams::fmt_format("Factory for {} returned null handler", name)};
             }
 
             return registerHandler(std::move(handler));
         } catch (const std::exception& e) {
             return Error{ErrorCode::InternalError,
-                         std::format("Failed to create handler {}: {}", name, e.what())};
+                         yams::fmt_format("Failed to create handler {}: {}", name, e.what())};
         }
     }
 
@@ -194,14 +187,14 @@ public:
             auto handler = std::invoke(std::forward<FactoryFunc>(factory), std::move(config));
             if (!handler) {
                 return Error{ErrorCode::InvalidArgument,
-                             std::format("Factory for {} returned null handler", name)};
+                             yams::fmt_format("Factory for {} returned null handler", name)};
             }
 
             return registerHandler(std::move(handler));
         } catch (const std::exception& e) {
             return Error{
                 ErrorCode::InternalError,
-                std::format("Failed to create handler {} with config: {}", name, e.what())};
+                yams::fmt_format("Failed to create handler {} with config: {}", name, e.what())};
         }
     }
 

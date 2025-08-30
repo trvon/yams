@@ -1,5 +1,5 @@
 #include <yams/daemon/ipc/message_framing.h>
-#include <yams/daemon/ipc/message_serializer.h>
+#include <yams/daemon/ipc/proto_serializer.h>
 
 #include <spdlog/spdlog.h>
 #include <cstring>
@@ -204,8 +204,7 @@ Result<Message> MessageFramer::parse_frame(const std::vector<uint8_t>& frame) {
 
 Result<std::vector<uint8_t>> MessageFramer::serialize_message(const Message& message) {
     try {
-        MessageSerializer serializer;
-        return serializer.serialize(message);
+        return ProtoSerializer::encode_payload(message);
     } catch (const std::exception& e) {
         return Error{ErrorCode::SerializationError,
                      std::string("Failed to serialize message: ") + e.what()};
@@ -214,8 +213,7 @@ Result<std::vector<uint8_t>> MessageFramer::serialize_message(const Message& mes
 
 Result<Message> MessageFramer::deserialize_message(const std::vector<uint8_t>& data) {
     try {
-        MessageSerializer serializer;
-        return serializer.deserialize(data);
+        return ProtoSerializer::decode_payload(data);
     } catch (const std::exception& e) {
         return Error{ErrorCode::SerializationError,
                      std::string("Failed to deserialize message: ") + e.what()};

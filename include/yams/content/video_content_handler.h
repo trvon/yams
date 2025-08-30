@@ -10,8 +10,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <yams/common/format.h>
 #include <yams/content/content_handler.h>
-#include <yams/core/format.h>
 #include <yams/detection/file_type_detector.h>
 
 namespace yams::content {
@@ -223,9 +223,9 @@ struct ExtendedVideoMetadata : public VideoMetadata {
             return *title;
         }
         if (author && title) {
-            return std::format("{} - {}", *author, *title);
+            return yams::fmt_format("{} - {}", *author, *title);
         }
-        return std::format("{}x{} {}s", width, height, static_cast<int>(durationSeconds));
+        return yams::fmt_format("{}x{} {}s", width, height, static_cast<int>(durationSeconds));
     }
 
     [[nodiscard]] double getAspectRatio() const noexcept {
@@ -439,10 +439,15 @@ private:
     template <typename... Args>
     [[nodiscard]] std::string formatError(std::string_view operation,
                                           const std::filesystem::path& path,
-                                          std::format_string<Args...> fmt, Args&&... args) const {
-        auto details = std::format(fmt, std::forward<Args>(args)...);
-        return std::format("Video processing failed: {} for '{}' - {}", operation, path.string(),
-                           details);
+#if defined(__cpp_lib_format) && (__cpp_lib_format >= 201907)
+                                          std::format_string<Args...> fmt,
+#else
+                                          fmt::format_string<Args...> fmt,
+#endif
+                                          Args&&... args) const {
+        auto details = yams::fmt_format(fmt, std::forward<Args>(args)...);
+        return yams::fmt_format("Video processing failed: {} for '{}' - {}", operation,
+                                path.string(), details);
     }
 
     /**

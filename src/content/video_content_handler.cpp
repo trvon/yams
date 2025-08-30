@@ -9,6 +9,8 @@
 #include <string>
 #include <unordered_set>
 #include <yams/content/video_content_handler.h>
+// Ensure formatting uses unified wrapper
+#include <yams/common/format.h>
 
 namespace yams::content {
 
@@ -113,8 +115,8 @@ std::optional<ExtendedVideoMetadata> analyzeAVIHeader(const std::filesystem::pat
 // Command-line fallback using system tools
 std::optional<ExtendedVideoMetadata> extractUsingFFProbe(const std::filesystem::path& path) {
 #ifdef YAMS_HAVE_FFPROBE
-    std::string cmd =
-        std::format("ffprobe -v quiet -show_format -show_streams -of json \"{}\"", path.string());
+    std::string cmd = yams::fmt_format(
+        "ffprobe -v quiet -show_format -show_streams -of json \"{}\"", path.string());
 
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
         char buffer[4096];
@@ -160,7 +162,7 @@ std::optional<ExtendedVideoMetadata> extractUsingFFProbe(const std::filesystem::
 #endif
 
 #ifdef YAMS_HAVE_MEDIAINFO
-    std::string cmd = std::format("mediainfo --Output=JSON \"{}\"", path.string());
+    std::string cmd = yams::fmt_format("mediainfo --Output=JSON \"{}\"", path.string());
 
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
         char buffer[4096];
@@ -308,7 +310,7 @@ Result<ContentResult> VideoContentHandler::process(const std::filesystem::path& 
         updateStats(false, processingTime, 0);
 
         return Error{ErrorCode::InternalError,
-                     std::format("Video processing failed: {}", e.what())};
+                     yams::fmt_format("Video processing failed: {}", e.what())};
     }
 }
 
@@ -331,8 +333,9 @@ Result<void> VideoContentHandler::validate(const std::filesystem::path& path) co
 
     const auto fileSize = std::filesystem::file_size(path);
     if (fileSize > videoConfig_.maxFileSize) {
-        return Error{ErrorCode::ResourceExhausted,
-                     std::format("File too large: {} > {}", fileSize, videoConfig_.maxFileSize)};
+        return Error{
+            ErrorCode::ResourceExhausted,
+            yams::fmt_format("File too large: {} > {}", fileSize, videoConfig_.maxFileSize)};
     }
 
     if (fileSize == 0) {

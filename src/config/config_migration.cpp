@@ -13,13 +13,13 @@ namespace fs = std::filesystem;
 
 Result<bool> ConfigMigrator::needsMigration(const fs::path& configPath) {
     if (!fs::exists(configPath)) {
-        // No config exists, create v2
-        return true;
+        // No config exists, do not migrate (fresh install should show welcome/init)
+        return false;
     }
 
     auto versionResult = getConfigVersion(configPath);
     if (!versionResult) {
-        // Can't determine version, assume v1
+        // Can't determine version, assume v1 -> needs migration
         return true;
     }
 

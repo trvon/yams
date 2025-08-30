@@ -11,7 +11,6 @@
 #include <cerrno>
 #include <chrono>
 #include <concepts>
-#include <coroutine>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -20,7 +19,6 @@
 #include <stop_token>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -241,24 +239,92 @@ private:
 
         class TemplateProcessorWrapper : public RequestProcessor {
         public:
-            TemplateProcessorWrapper(ProcessorT& processor, ThreadPool* pool)
-                : processor_(processor), pool_(pool) {}
+            TemplateProcessorWrapper(ProcessorT& processor, ThreadPool* pool, AsyncIOContext& io)
+                : processor_(processor), pool_(pool), io_(io) {}
 
             Task<Response> process(const Request& request) override {
-                // Delegate to provided processor; support either .process(req) or callable(req)
-                if constexpr (requires(ProcessorT p, const Request& r) { p.process(r); }) {
-                    co_return co_await processor_.process(request);
-                } else {
-                    co_return co_await processor_(request);
-                }
+                // Build a compute function and shared state
+                auto compute = [this, request]() mutable -> Response {
+                    if constexpr (requires(ProcessorT p, const Request& r) { p.process(r); }) {
+                        auto t = processor_.process(request);
+                        return t.get();
+                    } else {
+                        auto t = processor_(request);
+                        return t.get();
+                    }
+                };
+
+                struct PoolAwaiter {
+                    ThreadPool* pool;
+                    AsyncIOContext& io;
+                    std::function<Response()> fn;
+                    std::shared_ptr<Response> result = std::make_shared<Response>();
+                    std::shared_ptr<std::exception_ptr> error =
+                        std::make_shared<std::exception_ptr>();
+
+                    // Liveness and single-resume state: avoid resuming a destroyed coroutine
+                    struct State {
+                        std::atomic<bool> scheduled{false};
+                        std::weak_ptr<void> life;
+                    };
+                    std::shared_ptr<void> life_token = std::make_shared<int>(0);
+                    std::shared_ptr<State> state = std::make_shared<State>();
+
+                    PoolAwaiter(ThreadPool* p, AsyncIOContext& i, std::function<Response()> f)
+                        : pool(p), io(i), fn(std::move(f)) {
+                        state->life = life_token;
+                    }
+
+                    bool await_ready() const noexcept { return false; }
+                    void await_suspend(std::coroutine_handle<> h) {
+                        auto fn_local = fn; // copy callable
+                        auto res = result;
+                        auto err = error;
+                        auto st = state;
+                        std::weak_ptr<void> wk = st->life; // observe awaiter lifetime
+                        AsyncIOContext* io_ptr = &io;
+                        pool->enqueue_detached([fn_local = std::move(fn_local), res, err, io_ptr,
+                                                st, wk, h]() mutable {
+                            try {
+                                *res = std::move(fn_local());
+                            } catch (...) {
+                                *err = std::current_exception();
+                            }
+                            io_ptr->post([res, err, st, wk, h]() mutable {
+                                // Skip if the awaiting coroutine frame was destroyed
+                                if (wk.expired())
+                                    return;
+                                bool already =
+                                    st->scheduled.exchange(true, std::memory_order_acq_rel);
+                                if (!already) {
+                                    if (h)
+                                        h.resume();
+                                }
+                            });
+                        });
+                    }
+                    Response await_resume() {
+                        // Mark awaiter as no longer alive for any late posts
+                        life_token.reset();
+                        if (error && *error) {
+                            std::rethrow_exception(*error);
+                        }
+                        return std::move(*result);
+                    }
+                } awaiter{pool_, io_, std::move(compute)};
+
+                Response resp = co_await awaiter;
+                co_return resp;
             }
 
         private:
             ProcessorT& processor_;
             ThreadPool* pool_;
+            AsyncIOContext& io_;
         };
 
-        auto base = std::make_shared<TemplateProcessorWrapper>(processor_, thread_pool_.get());
+        auto base = std::make_shared<TemplateProcessorWrapper>(processor_, thread_pool_.get(),
+                                                               *io_context_);
         if (config_.enable_streaming) {
             request_handler_->set_processor(
                 std::make_shared<StreamingRequestProcessor>(base, rh_cfg));
@@ -345,6 +411,7 @@ private:
                       stats_.active_connections.load(), stats_.total_connections.load());
         YAMS_ZONE_SCOPED_N("HandleClient");
         try {
+            // Drive a per-connection FSM as the authoritative state source
             co_await request_handler_->handle_connection(std::move(socket), token);
         } catch (const std::exception& e) {
             spdlog::error("Client handler exception: {}", e.what());
@@ -522,9 +589,23 @@ void AsyncIpcServer<ProcessorT>::set_socket_nonblocking() {
 template <typename ProcessorT>
 requires IsRequestProcessor<ProcessorT>
 void AsyncIpcServer<ProcessorT>::start_threads() {
-    io_thread_ = std::jthread([this](std::stop_token token) {
+    // Capture context by shared_ptr to avoid dereferencing 'this' from the IO thread
+    auto ctx = io_context_;
+    io_thread_ = std::jthread([ctx](std::stop_token token) {
         YAMS_SET_THREAD_NAME("yams-io");
-        run_io_loop(token);
+        try {
+            while (!token.stop_requested()) {
+                {
+                    YAMS_ZONE_SCOPED_N("IOContext::run");
+                    if (ctx)
+                        ctx->run();
+                }
+                if (token.stop_requested())
+                    break;
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("IO thread crashed: {}", e.what());
+        }
     });
     accept_thread_ = std::jthread([this](std::stop_token token) {
         YAMS_SET_THREAD_NAME("yams-accept");

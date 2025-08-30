@@ -96,14 +96,9 @@ protected:
         }
 
         // Parse header to get payload size
-        MessageFramer::FrameHeader networkHeader;
-        std::memcpy(&networkHeader, headerData.data(), sizeof(MessageFramer::FrameHeader));
-
         MessageFramer::FrameHeader header;
-        header.magic = ntohl(networkHeader.magic);
-        header.version = ntohl(networkHeader.version);
-        header.payload_size = ntohl(networkHeader.payload_size);
-        header.checksum = ntohl(networkHeader.checksum);
+        std::memcpy(&header, headerData.data(), sizeof(MessageFramer::FrameHeader));
+        header.from_network();
 
         // Read payload
         std::vector<uint8_t> payload(header.payload_size);

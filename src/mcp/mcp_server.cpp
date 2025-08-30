@@ -206,7 +206,14 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize the daemon client pool configuration (new DaemonClientPool)
     yams::cli::DaemonClientPool::Config pool_config;
     pool_config.max_clients = 10; // Cap clients to the daemon
-    pool_config.client_config.requestTimeout = std::chrono::seconds(5);
+    // MCP: prefer unary (non-streaming) responses to avoid partial stream handling issues
+    pool_config.client_config.enableChunkedResponses = false;
+    // Keep connections pooled for efficiency
+    pool_config.client_config.singleUseConnections = false;
+    // Be conservative with timeouts for MCP tools
+    pool_config.client_config.requestTimeout = std::chrono::seconds(10);
+    pool_config.client_config.headerTimeout = std::chrono::seconds(5);
+    pool_config.client_config.bodyTimeout = std::chrono::seconds(60);
     pool_config.idle_timeout = std::chrono::minutes(1);
 
     // Construct pooled request managers; internal DaemonClientPool handles clients
@@ -1844,7 +1851,7 @@ void MCPServer::initializeToolRegistry() {
         "post-index the artifact.");
 
     toolRegistry_->registerTool<MCPStoreDocumentRequest, MCPStoreDocumentResponse>(
-        "store", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
+        "add", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
         json{{"type", "object"},
              {"properties",
               {{"path", {{"type", "string"}, {"description", "File path to store"}}},
@@ -1903,7 +1910,8 @@ void MCPServer::initializeToolRegistry() {
         "Get storage statistics including deduplication savings and file type breakdown");
 
     toolRegistry_->registerTool<MCPAddDirectoryRequest, MCPAddDirectoryResponse>(
-        "add", [this](const MCPAddDirectoryRequest& req) { return handleAddDirectory(req); },
+        "add_directory",
+        [this](const MCPAddDirectoryRequest& req) { return handleAddDirectory(req); },
         json{{"type", "object"},
              {"properties",
               {{"directory_path", {{"type", "string"}, {"description", "Directory path to index"}}},

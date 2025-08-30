@@ -1,0 +1,385 @@
+syntax = "proto3";
+
+package yams.daemon.ipc;
+
+// NOTE: Transport/framing (CRC, chunk flags) stays outside protobuf. We include request_id
+// here to ease removal of the legacy IPC protocol header.
+
+// COMMON TYPES
+message KvPair { string key = 1; string value = 2; }
+message StringList { repeated string values = 1; }
+
+// REQUESTS
+message PingRequest { uint64 timestamp_ns = 1; }
+
+message SearchRequest {
+  string query = 1;
+  uint32 limit = 2;
+  bool fuzzy = 3;
+  bool literal_text = 4;
+  double similarity = 5;
+  int64 timeout_ms = 6;
+  string search_type = 7;
+  bool paths_only = 8;
+  bool show_hash = 9;
+  bool verbose = 10;
+  bool json_output = 11;
+  bool show_line_numbers = 12;
+  int32 after_context = 13;
+  int32 before_context = 14;
+  int32 context = 15;
+  string hash_query = 16;
+}
+
+message AddRequest {
+  string path = 1;
+  repeated string tags = 2;
+  repeated KvPair metadata = 3;
+  bool recursive = 4;
+  string include_pattern = 5;
+}
+
+message GetRequest {
+  string hash = 1;
+  string name = 2;
+  bool by_name = 3;
+  string file_type = 4;
+  string mime_type = 5;
+  string extension = 6;
+  bool binary_only = 7;
+  bool text_only = 8;
+  string created_after = 9;
+  string created_before = 10;
+  string modified_after = 11;
+  string modified_before = 12;
+  string indexed_after = 13;
+  string indexed_before = 14;
+  bool latest = 15;
+  bool oldest = 16;
+  string output_path = 17;
+  bool metadata_only = 18;
+  uint64 max_bytes = 19;
+  uint32 chunk_size = 20;
+  bool raw = 21;
+  bool extract = 22;
+  bool show_graph = 23;
+  int32 graph_depth = 24;
+  bool verbose = 25;
+}
+
+message GetInitRequest {
+  string hash = 1;
+  string name = 2;
+  bool by_name = 3;
+  bool metadata_only = 4;
+  uint64 max_bytes = 5;
+  uint32 chunk_size = 6;
+}
+
+message GetChunkRequest {
+  uint64 transfer_id = 1;
+  uint64 offset = 2;
+  uint32 length = 3;
+}
+
+message GetEndRequest { uint64 transfer_id = 1; }
+
+message DeleteRequest {
+  string hash = 1;
+  string name = 2;
+  repeated string names = 3;
+  string pattern = 4;
+  string directory = 5;
+  bool purge = 6;
+  bool force = 7;
+  bool dry_run = 8;
+  bool keep_refs = 9;
+  bool recursive = 10;
+  bool verbose = 11;
+}
+
+message ListRequest {
+  uint32 limit = 1;
+  int32 offset = 2;
+  int32 recent_count = 3;
+  bool recent = 4;
+  string format = 5;
+  string sort_by = 6;
+  bool reverse = 7;
+  bool verbose = 8;
+  bool show_snippets = 9;
+  bool show_metadata = 10;
+  bool show_tags = 11;
+  bool group_by_session = 12;
+  int32 snippet_length = 13;
+  bool no_snippets = 14;
+  string file_type = 15;
+  string mime_type = 16;
+  string extensions = 17;
+  bool binary_only = 18;
+  bool text_only = 19;
+  string created_after = 20;
+  string created_before = 21;
+  string modified_after = 22;
+  string modified_before = 23;
+  string indexed_after = 24;
+  string indexed_before = 25;
+  bool show_changes = 26;
+  string since_time = 27;
+  bool show_diff_tags = 28;
+  bool show_deleted = 29;
+  string change_window = 30;
+  repeated string tags = 31;
+  string filter_tags = 32;
+  bool match_all_tags = 33;
+  string name_pattern = 34;
+  bool paths_only = 35;
+}
+
+message ShutdownRequest { bool graceful = 1; int64 timeout_s = 2; }
+message StatusRequest { bool detailed = 1; }
+
+message GenerateEmbeddingRequest { string text = 1; string model_name = 2; bool normalize = 3; }
+message BatchEmbeddingRequest {
+  repeated string texts = 1;
+  string model_name = 2;
+  bool normalize = 3;
+  uint32 batch_size = 4;
+}
+message LoadModelRequest { string model_name = 1; bool preload = 2; }
+message UnloadModelRequest { string model_name = 1; bool force = 2; }
+message ModelStatusRequest { string model_name = 1; bool detailed = 2; }
+
+message AddDocumentRequest {
+  string path = 1;
+  string content = 2;
+  string name = 3;
+  repeated string tags = 4;
+  repeated KvPair metadata = 5;
+  bool recursive = 6;
+  bool include_hidden = 7;
+  repeated string include_patterns = 8;
+  repeated string exclude_patterns = 9;
+  string collection = 10;
+  string snapshot_id = 11;
+  string snapshot_label = 12;
+  string mime_type = 13;
+  bool disable_auto_mime = 14;
+  bool no_embeddings = 15;
+}
+
+message GrepRequest {
+  string pattern = 1;
+  string path = 2;
+  repeated string paths = 3;
+  bool case_insensitive = 4;
+  bool invert_match = 5;
+  int32 context_lines = 6;
+  uint64 max_matches = 7;
+  repeated string include_patterns = 8;
+  bool recursive = 9;
+  bool whole_word = 10;
+  bool show_line_numbers = 11;
+  bool show_filename = 12;
+  bool no_filename = 13;
+  bool count_only = 14;
+  bool files_only = 15;
+  bool files_without_match = 16;
+  bool paths_only = 17;
+  bool literal_text = 18;
+  bool regex_only = 19;
+  uint64 semantic_limit = 20;
+  repeated string filter_tags = 21;
+  bool match_all_tags = 22;
+  string color_mode = 23;
+  int32 before_context = 24;
+  int32 after_context = 25;
+}
+
+message UpdateDocumentRequest {
+  string hash = 1;
+  string name = 2;
+  string new_content = 3;
+  repeated string add_tags = 4;
+  repeated string remove_tags = 5;
+  repeated KvPair metadata = 6;
+}
+
+message DownloadRequest {
+  string url = 1;
+  string output_path = 2;
+  repeated string tags = 3;
+  repeated KvPair metadata = 4;
+  bool quiet = 5;
+}
+
+message GetStatsRequest {
+  bool detailed = 1;
+  bool include_cache = 2;
+  bool show_file_types = 3;
+  bool show_compression = 4;
+  bool show_duplicates = 5;
+  bool show_dedup = 6;
+  bool show_performance = 7;
+  bool include_health = 8;
+}
+
+// RESPONSES
+message SuccessResponse { string message = 1; }
+message ErrorResponse { uint32 code = 1; string message = 2; }
+message PongResponse { uint64 server_time_ns = 1; int64 round_trip_ms = 2; }
+
+message SearchResult {
+  string id = 1;
+  string path = 2;
+  string title = 3;
+  string snippet = 4;
+  double score = 5;
+  repeated KvPair metadata = 6;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  uint64 total_count = 2;
+  int64 elapsed_ms = 3;
+}
+
+message AddResponse {
+  string hash = 1;
+  uint64 bytes_stored = 2;
+  uint64 bytes_deduped = 3;
+  double dedup_ratio = 4;
+}
+
+message GetResponse {
+  string hash = 1;
+  string name = 2;
+  string path = 3;
+  string content = 4; // for small responses
+  repeated KvPair metadata = 5;
+}
+
+message GetInitResponse {
+  uint64 transfer_id = 1;
+  uint64 total_size = 2;
+  uint32 chunk_size = 3;
+  repeated KvPair metadata = 4;
+}
+
+message GetChunkResponse { bytes data = 1; uint64 bytes_remaining = 2; }
+
+message ListEntry {
+  string hash = 1;
+  string path = 2;
+  string name = 3;
+  string file_name = 4;
+  uint64 size = 5;
+  string mime_type = 6;
+  string file_type = 7;
+  string extension = 8;
+  int64 created = 9;
+  int64 modified = 10;
+  int64 indexed = 11;
+  string snippet = 12;
+  string language = 13;
+  string extraction_method = 14;
+  repeated string tags = 15;
+  repeated KvPair metadata = 16;
+  string change_type = 17;
+  int64 change_time = 18;
+  double relevance_score = 19;
+  string match_reason = 20;
+}
+
+message ListResponse { repeated ListEntry items = 1; uint64 total_count = 2; }
+
+message StatusResponse {
+  string state = 1; // textual summary; details TBD
+}
+
+message EmbeddingResponse {
+  repeated float embedding = 1;
+  uint64 dimensions = 2;
+  string model_used = 3;
+  uint32 processing_time_ms = 4;
+}
+
+message BatchEmbeddingResponse {
+  repeated EmbeddingResponse embeddings = 1;
+  uint64 dimensions = 2;
+  string model_used = 3;
+  uint32 processing_time_ms = 4;
+  uint64 success_count = 5;
+  uint64 failure_count = 6;
+}
+
+message ModelLoadResponse { bool loaded = 1; string message = 2; }
+message ModelStatusResponse { string model_name = 1; string status = 2; }
+message AddDocumentResponse { string hash = 1; string message = 2; }
+message GrepResponse { repeated string lines = 1; }
+message UpdateDocumentResponse { bool updated = 1; }
+// Extended to match legacy ipc_protocol parity
+message DownloadResponse {
+  string url = 1;
+  string path = 2;
+  string hash = 3;
+  uint64 size = 4;
+  bool success = 5;
+  string error = 6;
+}
+message GetStatsResponse { string json = 1; }
+message DeleteResponse { bool success = 1; uint64 count = 2; }
+
+// ENVELOPE
+message Envelope {
+  uint32 version = 1;
+  uint64 request_id = 2;
+  string session_id = 3;
+  string client_version = 4;
+  oneof payload {
+    // Requests
+    PingRequest ping_request = 10;
+    SearchRequest search_request = 11;
+    AddRequest add_request = 12;
+    GetRequest get_request = 13;
+    GetInitRequest get_init_request = 14;
+    GetChunkRequest get_chunk_request = 15;
+    GetEndRequest get_end_request = 16;
+    DeleteRequest delete_request = 17;
+    ListRequest list_request = 18;
+    ShutdownRequest shutdown_request = 19;
+    StatusRequest status_request = 20;
+    GenerateEmbeddingRequest generate_embedding_request = 21;
+    BatchEmbeddingRequest batch_embedding_request = 22;
+    LoadModelRequest load_model_request = 23;
+    UnloadModelRequest unload_model_request = 24;
+    ModelStatusRequest model_status_request = 25;
+    AddDocumentRequest add_document_request = 26;
+    GrepRequest grep_request = 27;
+    UpdateDocumentRequest update_document_request = 28;
+    DownloadRequest download_request = 29;
+    GetStatsRequest get_stats_request = 30;
+
+    // Responses
+    SuccessResponse success_response = 100;
+    ErrorResponse error = 101;
+    PongResponse pong_response = 102;
+    SearchResponse search_response = 103;
+    AddResponse add_response = 104;
+    GetResponse get_response = 105;
+    GetInitResponse get_init_response = 106;
+    GetChunkResponse get_chunk_response = 107;
+    StatusResponse status_response = 108;
+    EmbeddingResponse embedding_response = 109;
+    BatchEmbeddingResponse batch_embedding_response = 110;
+    ModelLoadResponse model_load_response = 111;
+    ModelStatusResponse model_status_response = 112;
+    ListResponse list_response = 113;
+    AddDocumentResponse add_document_response = 114;
+    GrepResponse grep_response = 115;
+    UpdateDocumentResponse update_document_response = 116;
+    GetStatsResponse get_stats_response = 117;
+    DownloadResponse download_response = 118;
+    DeleteResponse delete_response = 119;
+  }
+}

@@ -6,6 +6,7 @@ add_executable(daemon_test
 )
 target_link_libraries(daemon_test PRIVATE
     yams::daemon
+    yams::daemon_client
     GTest::gtest
     GTest::gtest_main
 )

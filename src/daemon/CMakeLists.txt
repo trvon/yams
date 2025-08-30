@@ -5,8 +5,8 @@ add_library(yams_daemon_client STATIC
     client/daemon_client.cpp
     client/circuit_breaker.cpp
     ipc/ipc_protocol.cpp
-    ipc/message_serializer.cpp
     ipc/message_framing.cpp
+    ipc/message_serializer.cpp
 )
 
 target_include_directories(yams_daemon_client
@@ -110,6 +110,150 @@ elseif(APPLE)
     else()
         message(STATUS "kqueue disabled (YAMS_USE_KQUEUE=OFF); using select()-based backend for yams_daemon_ipc")
     endif()
+endif()
+
+# =========================================================================
+# Optional: Protobuf payload support for IPC (generated + serializer)
+# =========================================================================
+if(Protobuf_FOUND)
+    message(STATUS "IPC: Protobuf FOUND - enabling protobuf payload support")
+
+    set(YAMS_IPC_PROTO_DIR ${CMAKE_SOURCE_DIR}/include)
+    set(YAMS_IPC_PROTO_REL yams/daemon/ipc/proto/ipc_envelope.proto)
+    set(YAMS_IPC_PROTO ${YAMS_IPC_PROTO_DIR}/${YAMS_IPC_PROTO_REL})
+    set(YAMS_IPC_PROTO_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    file(MAKE_DIRECTORY ${YAMS_IPC_PROTO_OUTDIR})
+
+    set(YAMS_IPC_PROTO_GEN_SRCS
+        ${YAMS_IPC_PROTO_OUTDIR}/yams/daemon/ipc/proto/ipc_envelope.pb.cc
+        ${YAMS_IPC_PROTO_OUTDIR}/yams/daemon/ipc/proto/ipc_envelope.pb.h)
+
+    # Prefer Conan/CMake imported protoc targets; fallback to variables or system protoc with a warning.
+    set(YAMS_PROTOC_EXECUTABLE "")
+    set(YAMS_PROTOC_GENEX "")
+
+    # Prefer Conan package folder variables from CMakeDeps (config-aware)
+    if(NOT YAMS_PROTOC_EXECUTABLE)
+        if(DEFINED protobuf_PACKAGE_FOLDER_DEBUG)
+            set(_PROTOC_CAND ${protobuf_PACKAGE_FOLDER_DEBUG}/bin/protoc)
+            if(EXISTS ${_PROTOC_CAND})
+                set(YAMS_PROTOC_EXECUTABLE ${_PROTOC_CAND})
+                message(STATUS "IPC: Using Conan protoc (Debug) -> ${YAMS_PROTOC_EXECUTABLE}")
+            endif()
+            unset(_PROTOC_CAND)
+        endif()
+        if(NOT YAMS_PROTOC_EXECUTABLE AND DEFINED protobuf_PACKAGE_FOLDER)
+            set(_PROTOC_CAND ${protobuf_PACKAGE_FOLDER}/bin/protoc)
+            if(EXISTS ${_PROTOC_CAND})
+                set(YAMS_PROTOC_EXECUTABLE ${_PROTOC_CAND})
+                message(STATUS "IPC: Using Conan protoc -> ${YAMS_PROTOC_EXECUTABLE}")
+            endif()
+            unset(_PROTOC_CAND)
+        endif()
+        if(NOT YAMS_PROTOC_EXECUTABLE AND DEFINED protobuf_PACKAGE_FOLDER_RELEASE)
+            set(_PROTOC_CAND ${protobuf_PACKAGE_FOLDER_RELEASE}/bin/protoc)
+            if(EXISTS ${_PROTOC_CAND})
+                set(YAMS_PROTOC_EXECUTABLE ${_PROTOC_CAND})
+                message(STATUS "IPC: Using Conan protoc (Release) -> ${YAMS_PROTOC_EXECUTABLE}")
+            endif()
+            unset(_PROTOC_CAND)
+        endif()
+    endif()
+
+    # Try deriving protoc path from Conan include dir first
+    if(NOT YAMS_PROTOC_EXECUTABLE)
+        get_target_property(_PB_IFACES protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
+        if(_PB_IFACES)
+            foreach(_idir IN LISTS _PB_IFACES)
+                if(_idir MATCHES ".*/\\.conan2/.*/p/include$")
+                    get_filename_component(_pkgroot ${_idir} DIRECTORY)
+                    set(_protoc ${_pkgroot}/bin/protoc)
+                    if(EXISTS ${_protoc})
+                        set(YAMS_PROTOC_EXECUTABLE ${_protoc})
+                        message(STATUS "IPC: Using Conan protoc from package -> ${YAMS_PROTOC_EXECUTABLE}")
+                        break()
+                    endif()
+                endif()
+            endforeach()
+        endif()
+        unset(_PB_IFACES)
+    endif()
+
+    if(NOT YAMS_PROTOC_EXECUTABLE)
+        if(TARGET protobuf::conan_protoc)
+            set(YAMS_PROTOC_GENEX $<TARGET_FILE:protobuf::conan_protoc>)
+            message(STATUS "IPC: Using Conan protoc target 'protobuf::conan_protoc'")
+        elseif(TARGET protobuf::protoc)
+            set(YAMS_PROTOC_GENEX $<TARGET_FILE:protobuf::protoc>)
+            message(STATUS "IPC: Using protoc target 'protobuf::protoc'")
+        elseif(DEFINED PROTOBUF_PROTOC_EXECUTABLE AND PROTOBUF_PROTOC_EXECUTABLE)
+            set(YAMS_PROTOC_EXECUTABLE ${PROTOBUF_PROTOC_EXECUTABLE})
+            message(STATUS "IPC: Using PROTOBUF_PROTOC_EXECUTABLE -> ${YAMS_PROTOC_EXECUTABLE}")
+        elseif(DEFINED Protobuf_PROTOC_EXECUTABLE AND Protobuf_PROTOC_EXECUTABLE)
+            set(YAMS_PROTOC_EXECUTABLE ${Protobuf_PROTOC_EXECUTABLE})
+            message(STATUS "IPC: Using Protobuf_PROTOC_EXECUTABLE -> ${YAMS_PROTOC_EXECUTABLE}")
+        else()
+            find_program(_PROTOC_EXE NAMES protoc)
+            if(_PROTOC_EXE)
+                set(YAMS_PROTOC_EXECUTABLE ${_PROTOC_EXE})
+                if(NOT YAMS_PROTOC_EXECUTABLE MATCHES ".*/\\.conan2/.*/p/bin/protoc$")
+                    message(WARNING "IPC: Falling back to system protoc at ${YAMS_PROTOC_EXECUTABLE}. Ensure it matches the protobuf headers (3.21.12).")
+                endif()
+            else()
+                message(FATAL_ERROR "IPC: protoc not found. Install protobuf compiler or provide it via Conan.")
+            endif()
+            unset(_PROTOC_EXE)
+        endif()
+    endif()
+
+    add_custom_command(
+        OUTPUT ${YAMS_IPC_PROTO_GEN_SRCS}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${YAMS_IPC_PROTO_OUTDIR}
+        COMMAND $<$<BOOL:${YAMS_PROTOC_GENEX}>:${YAMS_PROTOC_GENEX}>$<$<NOT:$<BOOL:${YAMS_PROTOC_GENEX}>>:${YAMS_PROTOC_EXECUTABLE}>
+                --proto_path=${YAMS_IPC_PROTO_DIR}
+                --cpp_out=${YAMS_IPC_PROTO_OUTDIR}
+                ${YAMS_IPC_PROTO_REL}
+        DEPENDS ${YAMS_IPC_PROTO}
+        VERBATIM
+        COMMENT "Generating IPC protobuf sources"
+    )
+
+    add_library(yams_ipc_proto STATIC
+        ipc/proto_serializer.cpp
+        ${YAMS_IPC_PROTO_GEN_SRCS}
+    )
+
+    target_include_directories(yams_ipc_proto
+        PUBLIC
+            $<BUILD_INTERFACE:${YAMS_IPC_PROTO_OUTDIR}>
+            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+
+    target_link_libraries(yams_ipc_proto
+        PUBLIC
+            yams::core
+            protobuf::libprotobuf
+        PRIVATE
+            spdlog::spdlog
+    )
+
+    target_compile_features(yams_ipc_proto PUBLIC cxx_std_20)
+    set_target_properties(yams_ipc_proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+    # Install and export so dependents in export set are satisfied
+    install(TARGETS yams_ipc_proto
+        EXPORT YamsTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+
+    # Link into client and ipc libs so protobuf payloads are available
+    target_link_libraries(yams_daemon_client PRIVATE yams_ipc_proto)
+    target_link_libraries(yams_daemon_ipc PRIVATE yams_ipc_proto)
+else()
+    message(STATUS "IPC: Protobuf NOT found - protobuf payload support disabled")
 endif()
 
 # ============================================================================

@@ -1,6 +1,5 @@
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/fsm_helpers.h>
-#include <yams/daemon/ipc/message_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
 
 #include <spdlog/spdlog.h>
@@ -92,21 +91,31 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                 stats_.bytes_received += feed_result.consumed;
                 if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
                     spdlog::error("Invalid frame received (after peek)");
-                    co_await send_error(socket, ErrorCode::InvalidArgument, "Invalid frame format");
+                    // Fatal framing error: close to avoid poisoning persistent streams
+                    (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                                              "Invalid frame format");
+                    socket.close();
                     break;
                 }
                 if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
                     spdlog::error("Frame too large (after peek)");
-                    co_await send_error(socket, ErrorCode::InvalidArgument,
-                                        "Frame exceeds maximum size");
+                    (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                                              "Frame exceeds maximum size");
+                    socket.close();
                     break;
                 }
                 // After handling peeked byte(s), continue loop to read more normally
                 continue;
             }
 
-            // Drive FSM readable event
-            fsm.on_readable(static_cast<size_t>(read_bytes.value()));
+            // Drive FSM readable event only if the FSM is still alive
+            if (fsm.alive()) {
+                fsm.on_readable(static_cast<size_t>(read_bytes.value()));
+            } else {
+                spdlog::debug("FSM not alive during read; closing connection");
+                socket.close();
+                break;
+            }
 
             // Feed data to frame reader
             spdlog::debug("Feeding {} bytes to frame reader", read_bytes.value());
@@ -117,24 +126,18 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
 
             if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
                 spdlog::error("Invalid frame received");
-                co_await send_error(socket, ErrorCode::InvalidArgument, "Invalid frame format");
-                // Ensure FSM returns to a readable state for persistent connections
-                fsm.on_response_complete(config_.close_after_response);
-                if (config_.close_after_response) {
-                    socket.close();
-                }
+                // Fatal framing error: close to avoid poisoning persistent streams
+                (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                                          "Invalid frame format");
+                socket.close();
                 break;
             }
 
             if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
                 spdlog::error("Frame too large");
-                co_await send_error(socket, ErrorCode::InvalidArgument,
-                                    "Frame exceeds maximum size");
-                // Ensure FSM returns to a readable state for persistent connections
-                fsm.on_response_complete(config_.close_after_response);
-                if (config_.close_after_response) {
-                    socket.close();
-                }
+                (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                                          "Frame exceeds maximum size");
+                socket.close();
                 break;
             }
 
@@ -143,55 +146,43 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                 auto frame_result = reader.get_frame();
                 if (!frame_result) {
                     spdlog::error("Failed to get frame: {}", frame_result.error().message);
-                    co_await send_error(socket, ErrorCode::SerializationError,
-                                        "Failed to get frame");
-                    // Reset FSM so we can read the next request on persistent connections
-                    fsm.on_response_complete(config_.close_after_response);
-                    if (config_.close_after_response) {
-                        socket.close();
-                        should_exit = true;
-                        break;
-                    }
-                    continue;
+                    (void)co_await send_error(socket, ErrorCode::SerializationError,
+                                              "Failed to get frame");
+                    socket.close();
+                    should_exit = true;
+                    break;
                 }
 
                 // Parse the frame
                 auto message_result = framer_.parse_frame(frame_result.value());
                 if (!message_result) {
                     spdlog::error("Failed to parse frame: {}", message_result.error().message);
-                    co_await send_error(socket, ErrorCode::SerializationError,
-                                        "Failed to parse message");
-                    // Reset FSM to allow next read on persistent connections
-                    fsm.on_response_complete(config_.close_after_response);
-                    if (config_.close_after_response) {
-                        socket.close();
-                        should_exit = true;
-                        break;
-                    }
-                    continue;
+                    (void)co_await send_error(socket, ErrorCode::SerializationError,
+                                              "Failed to parse message");
+                    socket.close();
+                    should_exit = true;
+                    break;
                 }
-
-                // Inform FSM that a request header/body has been parsed
-                ConnectionFsm::FrameInfo finfo{};
-                finfo.payload_size = 0; // unknown at this level
-                fsm.on_header_parsed(finfo);
-                fsm.on_body_parsed();
 
                 // Extract request from message
                 const auto& message = message_result.value();
                 auto* request_ptr = std::get_if<Request>(&message.payload);
                 if (!request_ptr) {
                     spdlog::error("Received non-request message");
-                    co_await send_error(socket, ErrorCode::InvalidArgument,
-                                        "Expected request message");
-                    // Reset FSM to allow next read on persistent connections
-                    fsm.on_response_complete(config_.close_after_response);
-                    if (config_.close_after_response) {
-                        socket.close();
-                        should_exit = true;
-                        break;
-                    }
-                    continue;
+                    // Correlate error with the observed message requestId and close
+                    (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                                              "Expected request message", message.requestId);
+                    socket.close();
+                    should_exit = true;
+                    break;
+                }
+
+                // Inform FSM that a valid request header/body has been parsed
+                if (fsm.alive()) {
+                    ConnectionFsm::FrameInfo finfo{};
+                    finfo.payload_size = 0; // unknown at this level
+                    fsm.on_header_parsed(finfo);
+                    fsm.on_body_parsed();
                 }
 
                 // Handle the request with correlation id
@@ -223,7 +214,9 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                         spdlog::debug(
                             "Post-response FSM state was {} — forcing Connected for persistence",
                             ConnectionFsm::to_string(s));
-                        fsm.on_response_complete(false);
+                        if (fsm.alive()) {
+                            fsm.on_response_complete(false);
+                        }
                     }
                 }
             }
@@ -232,7 +225,9 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
         }
 
         // Close out FSM lifecycle
-        fsm.on_close_request();
+        if (fsm.alive()) {
+            fsm.on_close_request();
+        }
         spdlog::debug("Connection handler exiting normally");
     } catch (const std::exception& e) {
         spdlog::error("RequestHandler::handle_connection unhandled exception: {}", e.what());
@@ -570,6 +565,8 @@ Task<Result<void>> RequestHandler::handle_streaming_request(AsyncSocket<AsyncIOC
         }
 
         // We have a complete response, write header first
+        spdlog::debug("handle_streaming_request: complete response type={} (request_id={})",
+                      static_cast<int>(getMessageType(response_opt.value())), request_id);
         auto& response = response_opt.value();
 
         // Create message envelope for response (preserve requestId for correlation)
@@ -591,9 +588,10 @@ Task<Result<void>> RequestHandler::handle_streaming_request(AsyncSocket<AsyncIOC
                                 std::string{"Invalid state before complete write: "} + ex.what()};
             }
         }
-        spdlog::debug(
-            "handle_streaming_request: writing complete response (non-chunked) for request_id={}",
-            request_id);
+        spdlog::debug("handle_streaming_request: writing complete response (non-chunked) for "
+                      "request_id={} type={}",
+                      request_id,
+                      static_cast<int>(getMessageType(std::get<Response>(response_msg.payload))));
         auto write_result = co_await write_message(socket, response_msg);
         if (!write_result) {
             spdlog::debug("handle_streaming_request: write_message failed for request_id={} msg={}",
@@ -910,13 +908,13 @@ Task<Result<void>> RequestHandler::stream_chunks(AsyncSocket<AsyncIOContext>& so
 }
 
 Task<Result<void>> RequestHandler::send_error(AsyncSocket<AsyncIOContext>& socket, ErrorCode code,
-                                              const std::string& message) {
+                                              const std::string& message, uint64_t request_id) {
     ErrorResponse error{code, message};
 
     // Create message envelope
     Message error_msg;
     error_msg.version = PROTOCOL_VERSION;
-    error_msg.requestId = 0;
+    error_msg.requestId = request_id;
     error_msg.timestamp = std::chrono::steady_clock::now();
     error_msg.payload = Response{error};
 

@@ -1,6 +1,5 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/message_framing.h>
-#include <yams/daemon/ipc/message_serializer.h>
 
 #include <spdlog/spdlog.h>
 
