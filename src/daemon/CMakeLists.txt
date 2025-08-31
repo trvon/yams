@@ -329,12 +329,10 @@ endif()
 # ============================================================================
 add_library(yams_daemon STATIC
     daemon.cpp
-    unix_ipc_server.cpp
     components/RequestDispatcher.cpp
     components/LifecycleComponent.cpp
     components/ServiceManager.cpp
     components/RepairCoordinator.cpp
-    components/DaemonFSM.cpp
     resource/mock_model_provider.cpp
     resource/plugin_loader.cpp
 )

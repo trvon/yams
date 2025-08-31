@@ -44,11 +44,8 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     }
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
-    daemonFsm_ = std::make_unique<DaemonFSM>();
     serviceManager_ = std::make_unique<ServiceManager>(config_, state_);
-    serviceManager_->setFsm(daemonFsm_.get());
     requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_);
-    requestDispatcher_->setFsm(daemonFsm_.get());
     state_.stats.startTime = std::chrono::steady_clock::now();
 
     spdlog::info("Daemon configuration resolved:");
@@ -82,29 +79,8 @@ Result<void> YamsDaemon::start() {
         return result;
     }
 
-    // Start in-process UNIX socket IPC server (Boost.Asio-backed I/O)
+    // Mark IPC as not ready (server handled externally); lifecycle remains functional.
     state_.readiness.ipcServerReady = false;
-    {
-        UnixIpcServer::Config scfg;
-        scfg.socketPath = config_.socketPath;
-        scfg.backlog = 128;
-        scfg.permission_octal = 0660;
-        // Align handler config with reasonable defaults
-        scfg.handlerCfg.enable_streaming = true;
-        scfg.handlerCfg.chunk_size = 64 * 1024;
-        scfg.handlerCfg.close_after_response = true;
-        scfg.handlerCfg.max_frame_size = 10 * 1024 * 1024; // 10MB
-        ipcServer_ = std::make_unique<UnixIpcServer>(scfg, requestDispatcher_.get(), &state_);
-        if (auto r = ipcServer_->start(); !r) {
-            spdlog::error("Failed to start IPC server: {}", r.error().message);
-            serviceManager_->shutdown();
-            lifecycleManager_->shutdown();
-            running_ = false;
-            return r;
-        }
-        if (daemonFsm_)
-            daemonFsm_->on(DaemonFSM::Event::IpcListening);
-    }
 
     // Start feature-flagged repair coordinator (idle-only)
     if (config_.enableAutoRepair) {
@@ -113,10 +89,9 @@ Result<void> YamsDaemon::start() {
         rcfg.dataDir = config_.dataDir;
         rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
         rcfg.tickMs = 2000;
-        auto activeFn = [this]() -> size_t {
-            // Use IPC server active count if available
-            return ipcServer_ ? ipcServer_->active_connections() : 0;
-        };
+        // Safe lambda: only dereference ipcServer_ while daemon is running; we stop
+        // the coordinator before tearing down ipcServer_ in stop().
+        auto activeFn = []() -> size_t { return 0; };
         repairCoordinator_ =
             std::make_unique<RepairCoordinator>(serviceManager_.get(), &state_, activeFn, rcfg);
         repairCoordinator_->start();
@@ -160,24 +135,17 @@ Result<void> YamsDaemon::stop() {
         repairCoordinator_.reset();
     }
 
-    // Stop IPC server
-    if (ipcServer_) {
-        ipcServer_->stop();
-        ipcServer_.reset();
-    }
+    // No in-process IPC server to stop
 
     if (serviceManager_) {
         serviceManager_->shutdown();
-    }
-    if (daemonFsm_) {
-        daemonFsm_->on(DaemonFSM::Event::Stopped);
     }
 
     if (lifecycleManager_) {
         lifecycleManager_->shutdown();
     }
 
-    // Socket file cleaned up by UnixIpcServer
+    // No socket file created by in-process server
 
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();

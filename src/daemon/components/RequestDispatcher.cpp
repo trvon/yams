@@ -98,11 +98,9 @@ double getCpuUsage() {
     return 0.0;
 }
 
-#include <yams/daemon/components/DaemonFSM.h>
-
 RequestDispatcher::RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager,
                                      StateComponent* state)
-    : daemon_(daemon), serviceManager_(serviceManager), state_(state), fsm_(nullptr) {}
+    : daemon_(daemon), serviceManager_(serviceManager), state_(state) {}
 
 RequestDispatcher::~RequestDispatcher() = default;
 
@@ -113,12 +111,6 @@ Response RequestDispatcher::dispatch(const Request& req) {
                           !std::holds_alternative<PingRequest>(req);
 
     if (needs_services) {
-        if (fsm_) {
-            // Require at least QueryReady for service-dependent requests
-            if (!fsm_->isAtLeast(DaemonFSM::State::QueryReady)) {
-                return ErrorResponse{ErrorCode::InvalidState, "Daemon not ready for queries"};
-            }
-        }
         if (!state_->readiness.metadataRepoReady.load()) {
             return ErrorResponse{ErrorCode::InvalidState,
                                  "Metadata repository not ready. Please try again shortly."};
@@ -183,7 +175,7 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
     // Overall readiness (backward compatibility)
     res.ready = state_->readiness.fullyReady();
 
-    // Detailed readiness states from legacy component
+    // Detailed readiness states
     res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
     res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
     res.readinessStates["database"] = state_->readiness.databaseReady.load();
@@ -204,25 +196,8 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
         res.initProgress["model_provider"] = state_->readiness.modelLoadProgress.load();
     }
 
-    // Merge FSM readiness/progress and overall status if available
-    if (fsm_) {
-        // Overall status from FSM
-        res.overallStatus = fsm_->overallStatus();
-        // Merge readiness states (do not remove existing keys)
-        auto rmap = fsm_->readinessMap();
-        for (const auto& [k, v] : rmap) {
-            if (!res.readinessStates.count(k))
-                res.readinessStates[k] = v;
-        }
-        // Merge progress
-        auto pmap = fsm_->progressMap();
-        for (const auto& [k, v] : pmap) {
-            if (!res.initProgress.count(k))
-                res.initProgress[k] = static_cast<uint8_t>(v);
-        }
-    } else {
-        res.overallStatus = state_->readiness.overallStatus();
-    }
+    // Overall status
+    res.overallStatus = state_->readiness.overallStatus();
 
     // Add model information if available from service manager
     if (serviceManager_ && serviceManager_->getModelProvider()) {

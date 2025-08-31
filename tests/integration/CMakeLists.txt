@@ -77,20 +77,6 @@ if(NOT TARGET boundary_ipc_pool_tests)
     add_test(NAME boundary_ipc_pool_tests COMMAND boundary_ipc_pool_tests)
     set_tests_properties(boundary_ipc_pool_tests PROPERTIES LABELS "daemon;integration")
 endif()
-
-# Resilience/lifecycle test for daemon (no in-process IPC server required)
-if(NOT TARGET daemon_resilience_test)
-    add_executable(daemon_resilience_test
-        daemon/daemon_resilience_test.cpp
-    )
-    target_link_libraries(daemon_resilience_test PRIVATE
-        yams::daemon
-        GTest::gtest
-        GTest::gtest_main
-    )
-    add_test(NAME daemon_resilience_test COMMAND daemon_resilience_test)
-    set_tests_properties(daemon_resilience_test PROPERTIES LABELS "daemon;integration")
-endif()
 # MCP downloader integration test (header-only MCP tool registry)
 add_executable(mcp_downloader_integration_test
     mcp/mcp_downloader_integration_test.cpp

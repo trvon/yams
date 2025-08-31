@@ -1,10 +1,8 @@
 #pragma once
 
 #include <yams/core/types.h>
-#include <yams/daemon/components/DaemonFSM.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
-#include <yams/daemon/unix_ipc_server.h>
 
 #include <atomic>
 #include <chrono>
@@ -91,9 +89,8 @@ public:
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::unique_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
-    std::unique_ptr<UnixIpcServer> ipcServer_;
+    // IPC server removed during Boost.Asio migration; acceptance loop handled elsewhere
     std::unique_ptr<RepairCoordinator> repairCoordinator_;
-    std::unique_ptr<DaemonFSM> daemonFsm_;
 
     // Threading and state
     std::atomic<bool> running_{false};

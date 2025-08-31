@@ -1,7 +1,6 @@
 # YAMS — Yet Another Memory System
 
-[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)  [![Discord Shield](https://discord.com/api/guilds/1409271333610721477/widget.png?style=shield)](https://discord.gg/BQDUUE2KZe)
-
+[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)
 **Note**: Pre‑1.0 releases (v0.x) are not considered stable. Expect breaking changes until v1.0.
 
 Persistent memory for LLMs and applications. Content‑addressed storage with deduplication, compression, semantic search, and full‑text indexing.
@@ -14,7 +13,6 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 - Search: full‑text (SQLite FTS5) + semantic (vector)
 - Crash safety: WAL
 - Fast and portable CLI + MCP server
-
 
 <div class="hero-cta">
   <h2>Managed hosting coming soon</h2>
@@ -54,10 +52,15 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>
 
+- [Discord](https://discord.gg/Jee5ux2Y3e)
+
+## Versioning
+
+YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
 ## Install
 
-### Docker
+### Docker (simplest)
 
 ```bash
 docker run --rm -it ghcr.io/trvon/yams:latest --version
@@ -140,10 +143,6 @@ yams search "hello" --json
 # retrieve
 yams list --format minimal --limit 1 | xargs yams get
 ```
-
-## Versioning
-
-YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
 ## Docs
 
