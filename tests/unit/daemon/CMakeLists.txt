@@ -205,6 +205,23 @@ endif()
 add_test(NAME response_of_test COMMAND response_of_test)
 set_tests_properties(response_of_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
+# Daemon FSM tests
+add_executable(daemon_fsm_test
+    daemon_fsm_test.cpp
+)
+target_link_libraries(daemon_fsm_test PRIVATE
+    yams::daemon
+    GTest::gtest
+    GTest::gtest_main
+)
+if(TARGET gtest::gtest)
+    target_include_directories(daemon_fsm_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(daemon_fsm_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+add_test(NAME daemon_fsm_test COMMAND daemon_fsm_test)
+set_tests_properties(daemon_fsm_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
+
 # Download protocol tests
 add_executable(download_protocol_test
     download_protocol_test.cpp

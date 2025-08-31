@@ -30,6 +30,7 @@ namespace yams::daemon {
 class PluginLoader;
 class IModelProvider;
 class RetrievalSessionManager;
+class DaemonFSM;
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -38,6 +39,7 @@ class ServiceManager : public IComponent {
 public:
     ServiceManager(const DaemonConfig& config, StateComponent& state);
     ~ServiceManager() override;
+    void setFsm(DaemonFSM* fsm) { fsm_ = fsm; }
 
     // IComponent interface
     const char* getName() const override { return "ServiceManager"; }
@@ -70,6 +72,7 @@ private:
 
     const DaemonConfig& config_;
     StateComponent& state_;
+    DaemonFSM* fsm_{nullptr};
     std::jthread initThread_;
 
     // All the services managed by this component

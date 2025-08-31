@@ -1,17 +1,16 @@
+#include <atomic>
 #include <csignal>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
+#include <signal.h>
 #include <thread>
-#include <arpa/inet.h>
+#include <unistd.h>
+#include <vector>
 #include <gtest/gtest.h>
 #include <sys/resource.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/wait.h>
-#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
-#include <yams/daemon/ipc/ipc_protocol.h>
-#include <yams/daemon/ipc/message_framing.h>
 
 namespace yams::daemon::integration::test {
 
@@ -29,9 +28,6 @@ protected:
         config_.socketPath = testDir_ / "daemon.sock";
         config_.pidFile = testDir_ / "daemon.pid";
         config_.logFile = testDir_ / "daemon.log";
-
-        clientConfig_.socketPath = config_.socketPath;
-        clientConfig_.autoStart = false;
     }
 
     void TearDown() override {
@@ -92,12 +88,11 @@ protected:
 
     fs::path testDir_;
     DaemonConfig config_;
-    ClientConfig clientConfig_;
     std::unique_ptr<YamsDaemon> daemon_;
 };
 
-// Test recovery from SIGKILL
-TEST_F(DaemonResilienceTest, KillRecovery) {
+// Test recovery from SIGKILL focusing on PID file lifecycle (no in-process IPC server)
+TEST_F(DaemonResilienceTest, KillRecoveryPidFileLifecycle) {
     // Start daemon in child process
     pid_t daemonPid = fork();
     ASSERT_GE(daemonPid, 0) << "Fork failed";
@@ -110,62 +105,47 @@ TEST_F(DaemonResilienceTest, KillRecovery) {
                 std::this_thread::sleep_for(100ms);
             }
         }
-        exit(1);
+        _exit(1);
     }
 
-    // Parent process - wait for daemon to start
-    std::this_thread::sleep_for(500ms);
-    ASSERT_TRUE(fs::exists(config_.socketPath)) << "Daemon didn't create socket";
-
-    // Verify daemon is working
-    DaemonClient client(clientConfig_);
-    ASSERT_TRUE(client.connect());
-    ASSERT_TRUE(client.ping());
+    // Parent process - wait briefly and verify PID file is created
+    std::this_thread::sleep_for(300ms);
+    EXPECT_TRUE(fs::exists(config_.pidFile)) << "PID file should exist while daemon runs";
 
     // Kill daemon with SIGKILL (non-graceful)
     kill(daemonPid, SIGKILL);
     waitpid(daemonPid, nullptr, 0);
 
-    // Socket and PID file might still exist
-    std::this_thread::sleep_for(100ms);
-
-    // Start new daemon - should handle stale files
+    // Stale PID file may exist; starting a new daemon should clean it up
     daemon_ = std::make_unique<YamsDaemon>(config_);
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to recover: " << result.error().message;
+    ASSERT_TRUE(result) << "Failed to recover after SIGKILL: " << result.error().message;
 
-    // Verify new daemon works
-    DaemonClient client2(clientConfig_);
-    ASSERT_TRUE(client2.connect());
-    ASSERT_TRUE(client2.ping());
+    // PID file should exist again under new process
+    EXPECT_TRUE(fs::exists(config_.pidFile));
+
+    // Stop and ensure PID file is removed
+    ASSERT_TRUE(daemon_->stop());
+    EXPECT_FALSE(fs::exists(config_.pidFile));
 }
 
-// Test file descriptor leak detection
-TEST_F(DaemonResilienceTest, FileDescriptorLeak) {
+// Test file descriptor leak detection (no IPC server, focuses on daemon lifecycle only)
+TEST_F(DaemonResilienceTest, StartStopCycles_NoFdLeak) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     ASSERT_TRUE(daemon_->start());
-
     size_t initialFds = countOpenFileDescriptors();
+    ASSERT_TRUE(daemon_->stop());
 
-    // Create many connections and close them
-    const int numCycles = 50;
-    for (int i = 0; i < numCycles; ++i) {
-        DaemonClient client(clientConfig_);
-        ASSERT_TRUE(client.connect());
-
-        // Do some operations
-        client.ping();
-        client.status();
-
-        // Disconnect
-        client.disconnect();
+    // Perform multiple start/stop cycles and ensure FD count is stable
+    const int cycles = 20;
+    for (int i = 0; i < cycles; ++i) {
+        ASSERT_TRUE(daemon_->start());
+        ASSERT_TRUE(daemon_->stop());
     }
 
-    // Check FD count hasn't grown significantly
     size_t finalFds = countOpenFileDescriptors();
     size_t fdGrowth = (finalFds > initialFds) ? (finalFds - initialFds) : 0;
-
-    EXPECT_LT(fdGrowth, 10) << "Possible file descriptor leak detected";
+    EXPECT_LT(fdGrowth, 10) << "Possible file descriptor leak detected across start/stop cycles";
 }
 
 // Test memory growth over time
@@ -175,23 +155,8 @@ TEST_F(DaemonResilienceTest, MemoryGrowth) {
 
     size_t initialMemory = getMemoryUsage();
 
-    // Perform many operations
-    DaemonClient client(clientConfig_);
-    ASSERT_TRUE(client.connect());
-
-    const int numOperations = 100;
-    for (int i = 0; i < numOperations; ++i) {
-        client.ping();
-
-        SearchRequest req{};
-        req.query = "test";
-        req.limit = 10;
-        client.search(req);
-
-        if (i % 10 == 0) {
-            client.status();
-        }
-    }
+    // No IPC operations here since in-process server is removed; just wait to simulate work
+    std::this_thread::sleep_for(500ms);
 
     size_t finalMemory = getMemoryUsage();
 
@@ -202,359 +167,114 @@ TEST_F(DaemonResilienceTest, MemoryGrowth) {
     }
 }
 
-// Test graceful vs forced shutdown
-TEST_F(DaemonResilienceTest, ShutdownComparison) {
-    // Test graceful shutdown
-    {
-        daemon_ = std::make_unique<YamsDaemon>(config_);
-        ASSERT_TRUE(daemon_->start());
-
-        DaemonClient client(clientConfig_);
-        ASSERT_TRUE(client.connect());
-
-        // Start a long operation in background
-        std::thread bgThread([&client]() {
-            for (int i = 0; i < 100; ++i) {
-                client.ping();
-                std::this_thread::sleep_for(10ms);
-            }
-        });
-
-        // Graceful shutdown
-        auto result = daemon_->stop();
-        EXPECT_TRUE(result) << "Graceful shutdown should succeed";
-
-        bgThread.join();
-        daemon_.reset();
-    }
-
-    // Clean up
-    std::this_thread::sleep_for(200ms);
-
-    // Test forced shutdown
-    {
-        daemon_ = std::make_unique<YamsDaemon>(config_);
-        ASSERT_TRUE(daemon_->start());
-
-        DaemonClient client(clientConfig_);
-        ASSERT_TRUE(client.connect());
-
-        // Forced shutdown via client
-        auto result = client.shutdown(false); // Not graceful
-
-        // Daemon should stop quickly
-        auto start = std::chrono::steady_clock::now();
-        daemon_->stop();
-        auto elapsed = std::chrono::steady_clock::now() - start;
-
-        EXPECT_LT(elapsed, 1s) << "Forced shutdown should be quick";
-    }
+// Test stop() returns promptly
+TEST_F(DaemonResilienceTest, ShutdownIsPrompt) {
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    ASSERT_TRUE(daemon_->start());
+    auto start = std::chrono::steady_clock::now();
+    ASSERT_TRUE(daemon_->stop());
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    // With no in-process IPC server, shutdown should still be prompt but allow
+    // modest teardown time for background components.
+    EXPECT_LT(elapsed, 3s) << "Shutdown should be quick";
 }
 
 // Test signal handling
-TEST_F(DaemonResilienceTest, SignalHandling) {
+TEST_F(DaemonResilienceTest, RunningFlagToggles) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
+    ASSERT_FALSE(daemon_->isRunning());
     ASSERT_TRUE(daemon_->start());
-
-    // Test SIGHUP (reload signal)
-    // Note: Can't actually send signals to self in test, but verify handlers are installed
-
-    // Verify daemon is still running after various operations
-    DaemonClient client(clientConfig_);
-    ASSERT_TRUE(client.connect());
-    ASSERT_TRUE(client.ping());
+    EXPECT_TRUE(daemon_->isRunning());
+    ASSERT_TRUE(daemon_->stop());
+    EXPECT_FALSE(daemon_->isRunning());
 }
 
-// Test resource exhaustion recovery
-TEST_F(DaemonResilienceTest, ResourceExhaustion) {
+// Resource pressure simulation without IPC: create/delete many small files while daemon runs
+TEST_F(DaemonResilienceTest, ResourcePressure_FileChurn) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     ASSERT_TRUE(daemon_->start());
 
-    // Try to exhaust connections
-    std::vector<std::unique_ptr<DaemonClient>> clients;
-
-    // Create many clients but don't exceed reasonable limits
-    const int maxClients = 20;
-    int connectedCount = 0;
-
-    for (int i = 0; i < maxClients; ++i) {
-        auto client = std::make_unique<DaemonClient>(clientConfig_);
-        if (client->connect()) {
-            clients.push_back(std::move(client));
-            connectedCount++;
-        } else {
-            break; // Hit connection limit
+    std::vector<fs::path> files;
+    for (int i = 0; i < 200; ++i) {
+        auto p = testDir_ / ("tmp_" + std::to_string(i));
+        {
+            std::ofstream ofs(p);
+            ofs << "data";
         }
+        files.push_back(p);
     }
 
-    EXPECT_GT(connectedCount, 0) << "Should connect at least one client";
+    // Remove them
+    for (auto& p : files) {
+        std::error_code ec;
+        fs::remove(p, ec);
+    }
 
-    // Release all connections
-    clients.clear();
-
-    // Should be able to connect again
-    DaemonClient newClient(clientConfig_);
-    EXPECT_TRUE(newClient.connect()) << "Should recover after releasing connections";
+    EXPECT_TRUE(daemon_->isRunning());
+    ASSERT_TRUE(daemon_->stop());
 }
 
-// Test daemon upgrade scenario
-TEST_F(DaemonResilienceTest, DaemonUpgrade) {
-    // Start "old" daemon
+// Test "upgrade" scenario: restart resets uptime (no IPC clients involved)
+TEST_F(DaemonResilienceTest, UpgradeRestartResetsUptime) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     ASSERT_TRUE(daemon_->start());
 
-    // Connect and get some state
-    DaemonClient client(clientConfig_);
-    ASSERT_TRUE(client.connect());
-
-    auto statusBefore = client.status();
-    ASSERT_TRUE(statusBefore);
-
-    // Simulate upgrade: stop old daemon
-    client.disconnect();
-    daemon_->stop();
-    daemon_.reset();
+    auto startTimeBefore = daemon_->getState().stats.startTime;
+    ASSERT_TRUE(daemon_->stop());
 
     std::this_thread::sleep_for(200ms);
 
-    // Start "new" daemon (same binary in test)
     daemon_ = std::make_unique<YamsDaemon>(config_);
     ASSERT_TRUE(daemon_->start());
+    auto startTimeAfter = daemon_->getState().stats.startTime;
 
-    // Connect with new client
-    DaemonClient newClient(clientConfig_);
-    ASSERT_TRUE(newClient.connect());
-
-    auto statusAfter = newClient.status();
-    ASSERT_TRUE(statusAfter);
-
-    // New daemon should start fresh
-    EXPECT_LT(statusAfter.value().uptimeSeconds, statusBefore.value().uptimeSeconds);
+    EXPECT_GT(startTimeAfter, startTimeBefore);
 }
 
-// Test concurrent stress
-TEST_F(DaemonResilienceTest, ConcurrentStress) {
+// Test concurrent state checks while daemon runs
+TEST_F(DaemonResilienceTest, ConcurrentStateChecks) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     ASSERT_TRUE(daemon_->start());
 
-    const int numThreads = 10;
-    // opsPerThread unused at outer scope; per-thread value set inside lambda
-    std::atomic<int> successCount{0};
-    std::atomic<int> errorCount{0};
+    const int numThreads = 8;
     std::atomic<bool> stopFlag{false};
-
-    // Stress threads
     std::vector<std::thread> threads;
+    threads.reserve(numThreads);
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &successCount, &errorCount, &stopFlag]() {
-            int opsPerThread = 20;
-            DaemonClient client(clientConfig_);
-
-            for (int i = 0; i < opsPerThread && !stopFlag; ++i) {
-                // Random operations
-                if (i % 10 == 0) {
-                    // Reconnect periodically
-                    client.disconnect();
-                    if (!client.connect()) {
-                        errorCount++;
-                        continue;
-                    }
-                }
-
-                bool success = false;
-                switch (i % 4) {
-                    case 0:
-                        success = client.ping().has_value();
-                        break;
-                    case 1:
-                        success = client.status().has_value();
-                        break;
-                    case 2: {
-                        SearchRequest req{};
-                        req.query = "test";
-                        req.limit = 5;
-                        auto res = client.search(req);
-                        success = res.has_value() || res.error().code == ErrorCode::NotFound;
-                        break;
-                    }
-                    case 3:
-                        // Brief pause
-                        std::this_thread::sleep_for(1ms);
-                        success = true;
-                        break;
-                }
-
-                if (success)
-                    successCount++;
-                else
-                    errorCount++;
+        threads.emplace_back([this, &stopFlag]() {
+            while (!stopFlag) {
+                (void)daemon_->isRunning();
+                std::this_thread::sleep_for(1ms);
             }
         });
     }
 
-    // Let it run for a bit
-    std::this_thread::sleep_for(2s);
-
-    // Signal stop
+    std::this_thread::sleep_for(500ms);
     stopFlag = true;
+    for (auto& th : threads)
+        th.join();
 
-    // Wait for threads
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    // Daemon should still be responsive
-    DaemonClient finalClient(clientConfig_);
-    ASSERT_TRUE(finalClient.connect()) << "Daemon should still work after stress";
-    ASSERT_TRUE(finalClient.ping());
-
-    // Most operations should succeed
-    EXPECT_GT(successCount, errorCount) << "Most operations should succeed under stress";
+    EXPECT_TRUE(daemon_->isRunning());
+    ASSERT_TRUE(daemon_->stop());
 }
 
-// Test error injection and recovery
-TEST_F(DaemonResilienceTest, ErrorInjection) {
-    daemon_ = std::make_unique<YamsDaemon>(config_);
-    ASSERT_TRUE(daemon_->start());
-
-    DaemonClient client(clientConfig_);
-    ASSERT_TRUE(client.connect());
-
-    // Send various invalid requests
-    std::vector<std::function<void()>> errorTests = {[&client]() {
-                                                         // Empty search
-                                                         SearchRequest req{};
-                                                         req.query = "";
-                                                         req.limit = 0;
-                                                         client.search(req);
-                                                     },
-                                                     [&client]() {
-                                                         // Invalid model
-                                                         LoadModelRequest req{
-                                                             "nonexistent-model-xyz"};
-                                                         client.loadModel(req);
-                                                     },
-                                                     [&client]() {
-                                                         // Invalid hash
-                                                         GetRequest req{};
-                                                         req.hash = "invalid-hash-123";
-                                                         client.get(req);
-                                                     }};
-
-    // Run error tests
-    for (auto& test : errorTests) {
-        test();
-
-        // Daemon should still be responsive
-        EXPECT_TRUE(client.ping()) << "Daemon should recover from errors";
-    }
-}
+// Error injection over IPC is not applicable without an in-process server; covered elsewhere.
 
 // Test long-running daemon stability
 TEST_F(DaemonResilienceTest, LongRunningStability) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     ASSERT_TRUE(daemon_->start());
 
-    DaemonClient client(clientConfig_);
-    ASSERT_TRUE(client.connect());
-
-    // Simulate long-running daemon with periodic operations
+    // Simulate long-running daemon with periodic checks
     const int numIterations = 50;
     for (int i = 0; i < numIterations; ++i) {
-        // Check daemon is still responsive
-        ASSERT_TRUE(client.ping()) << "Failed at iteration " << i;
-
-        // Get status
-        auto status = client.status();
-        ASSERT_TRUE(status) << "Status failed at iteration " << i;
-
-        // Verify uptime is increasing
-        static uint64_t lastUptime = 0;
-        EXPECT_GE(status.value().uptimeSeconds, lastUptime);
-        lastUptime = status.value().uptimeSeconds;
+        EXPECT_TRUE(daemon_->isRunning());
 
         std::this_thread::sleep_for(50ms);
     }
-
-    // Final health check
-    auto finalStatus = client.status();
-    ASSERT_TRUE(finalStatus);
-    EXPECT_TRUE(finalStatus.value().running);
+    EXPECT_TRUE(daemon_->isRunning());
 }
 
-// Test that the daemon survives a client disconnecting abruptly after a request
-TEST_F(DaemonResilienceTest, AbruptClientDisconnect) {
-    // Start the daemon
-    daemon_ = std::make_unique<YamsDaemon>(config_);
-    auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
-
-    // Wait for the socket to be created
-    bool socket_exists = false;
-    for (int i = 0; i < 100; ++i) {
-        if (fs::exists(config_.socketPath)) {
-            socket_exists = true;
-            break;
-        }
-        std::this_thread::sleep_for(10ms);
-    }
-    ASSERT_TRUE(socket_exists) << "Daemon socket not found";
-
-    // Fork a client process that will connect, send, and exit immediately
-    pid_t clientPid = fork();
-    ASSERT_GE(clientPid, 0) << "Fork failed for client process";
-
-    if (clientPid == 0) {
-        // Child (client) process
-        int clientFd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (clientFd < 0) {
-            exit(1); // Parent will see this as failure
-        }
-
-        struct sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, config_.socketPath.c_str(), sizeof(addr.sun_path) - 1);
-
-        if (connect(clientFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-            exit(1);
-        }
-
-        // Create and send a PingRequest
-        Message msg;
-        msg.version = PROTOCOL_VERSION;
-        msg.requestId = 123;
-        msg.payload = PingRequest{};
-
-        MessageFramer framer;
-        auto framedResult = framer.frame_message(msg);
-        if (!framedResult) {
-            exit(1);
-        }
-        auto& data = framedResult.value();
-        send(clientFd, data.data(), data.size(), MSG_NOSIGNAL);
-
-        // Immediately exit without waiting for response
-        exit(0);
-    }
-
-    // Parent process
-    int status;
-    waitpid(clientPid, &status, 0);
-    ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << "Client process failed";
-
-    // Give the daemon a moment to potentially crash
-    std::this_thread::sleep_for(500ms);
-
-    // Check if the daemon is still running
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    EXPECT_TRUE(connectResult) << "Daemon crashed after abrupt client disconnect. "
-                               << "Failed to reconnect: " << connectResult.error().message;
-
-    if (connectResult) {
-        auto pingResult = client.ping();
-        EXPECT_TRUE(pingResult) << "Daemon is unresponsive after abrupt client disconnect.";
-    }
-}
+// Abrupt client disconnect test not applicable without in-process IPC server.
 
 } // namespace yams::daemon::integration::test

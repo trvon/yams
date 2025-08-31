@@ -1,12 +1,9 @@
-[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)
-
+[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)  [![Discord Shield](https://discord.com/api/guilds/1409271333610721477/widget.png?style=shield)](https://discord.gg/BQDUUE2KZe)
 # YAMS - Yet Another Memory System
 
 Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
 
 My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming. I added additional prompts for [research](docs/prompts/PROMPT-research-mcp.md) with MCP usage. **These prompts are subject to change with experimentation**
-
-- [Discord](https://discord.gg/Jee5ux2Y3e)
 
 ## Features
 
@@ -16,10 +13,6 @@ My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/
 - **Search** - Full-text (SQLite FTS5) and semantic (vector embeddings)
 - **Crash Recovery** - Write-ahead logging for durability
 - **High Performance** - 100MB/s+ throughput, thread-safe
-
-## Versioning
-
-YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
 ## Installation
 
@@ -99,6 +92,11 @@ yams init --non-interactive
 # Print resulting config (secrets masked)
 yams init --non-interactive --print
 ```
+
+## Versioning
+
+YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
+
 
 ### Troubleshooting
 If you see:

@@ -21,10 +21,13 @@ class IContentStore;
 
 namespace yams::daemon {
 
+class DaemonFSM;
+
 class RequestDispatcher {
 public:
     RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager, StateComponent* state);
     ~RequestDispatcher();
+    void setFsm(DaemonFSM* fsm) { fsm_ = fsm; }
 
     Response dispatch(const Request& req);
 
@@ -87,6 +90,7 @@ private:
     YamsDaemon* daemon_;
     ServiceManager* serviceManager_;
     StateComponent* state_;
+    DaemonFSM* fsm_;
 };
 
 } // namespace yams::daemon

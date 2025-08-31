@@ -1,13 +1,18 @@
 #include <spdlog/spdlog.h>
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
-#include <thread>
-#include <yams/api/content_store_builder.h>
-#include <yams/daemon/components/ServiceManager.h>
+
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_loader.h>
+
+#include <spdlog/spdlog.h>
+#include <fstream>
+
+#include <yams/api/content_store_builder.h>
+#include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/plugin_loader.h>
+
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -18,6 +23,8 @@
 #include <yams/search/search_executor.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_index_manager.h>
+
+#include <yams/daemon/components/ServiceManager.h>
 
 namespace yams::daemon {
 
@@ -183,6 +190,8 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
             if (pluginsLoaded > 0) {
                 spdlog::info("Successfully loaded {} plugin(s)", pluginsLoaded);
                 state_.readiness.pluginsReady = true;
+                if (fsm_)
+                    fsm_->on(DaemonFSM::Event::PluginsReady);
             }
         } catch (const std::exception& e) {
             spdlog::warn("Plugin loading failed: {}", e.what());
@@ -199,6 +208,8 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
             if (modelProvider_) {
                 spdlog::info("Initialized {} model provider", modelProvider_->getProviderName());
                 state_.readiness.modelProviderReady = true;
+                if (fsm_)
+                    fsm_->on(DaemonFSM::Event::ModelProviderReady);
             }
         } catch (const std::exception& e) {
             spdlog::warn("Model provider initialization failed: {} - features disabled", e.what());
@@ -231,6 +242,8 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
                 const_cast<std::unique_ptr<yams::api::IContentStore>&>(storeRes.value());
             contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
             state_.readiness.contentStoreReady = true;
+            if (fsm_)
+                fsm_->on(DaemonFSM::Event::ContentStoreReady);
             spdlog::info("Content store initialized successfully");
         }
 
@@ -244,6 +257,8 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
             return Error{dbRes.error()};
         }
         state_.readiness.databaseReady = true;
+        if (fsm_)
+            fsm_->on(DaemonFSM::Event::DatabaseReady);
         spdlog::info("Database opened successfully");
 
         metadata::MigrationManager mm(*database_);
@@ -258,9 +273,13 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
         }
         metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
         state_.readiness.metadataRepoReady = true;
+        if (fsm_)
+            fsm_->on(DaemonFSM::Event::MetadataRepoReady);
         spdlog::info("Metadata repository initialized successfully");
 
         searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
+        if (fsm_)
+            fsm_->on(DaemonFSM::Event::SearchEngineReady);
         retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
 
         // Initialize Vector Database and Index Manager
@@ -282,6 +301,8 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
                 auto vectorDbPath = config_.dataDir / "vectors.db";
                 if (std::filesystem::exists(vectorDbPath)) {
                     state_.readiness.vectorIndexReady = true;
+                    if (fsm_)
+                        fsm_->on(DaemonFSM::Event::VectorIndexReady);
                     // TODO: Get actual count from vectors.db
                     spdlog::info("VectorIndexManager initialized (vectors.db found at {})",
                                  vectorDbPath.string());

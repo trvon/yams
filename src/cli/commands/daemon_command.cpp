@@ -268,7 +268,56 @@ private:
                 std::exit(1);
             }
 
-            spdlog::info("YAMS daemon started successfully");
+            // Live spinner: poll status until Ready (or timeout)
+            using namespace std::chrono_literals;
+            daemon::DaemonClient client;
+            std::string spinner = "|/-\\";
+            size_t idx = 0;
+            const auto timeout = 45s;
+            auto start = std::chrono::steady_clock::now();
+
+            // Try to connect repeatedly while waiting for the socket to appear
+            while (std::chrono::steady_clock::now() - start < timeout) {
+                auto connectRes = client.connect();
+                if (!connectRes) {
+                    std::this_thread::sleep_for(200ms);
+                    continue;
+                }
+                break;
+            }
+
+            while (std::chrono::steady_clock::now() - start < timeout) {
+                auto statusRes = client.status();
+                if (statusRes) {
+                    const auto& s = statusRes.value();
+                    // Determine readiness
+                    bool ready = s.ready || (s.overallStatus == "Ready");
+                    // Compose a short status line with readiness/progress
+                    std::ostringstream oss;
+                    oss << "[" << spinner[idx % spinner.size()] << "] "
+                        << (s.overallStatus.empty() ? (s.ready ? "Ready" : "Initializing")
+                                                    : s.overallStatus)
+                        << "  ";
+                    size_t shown = 0;
+                    for (const auto& kv : s.readinessStates) {
+                        if (shown++ >= 4)
+                            break; // keep it compact
+                        oss << kv.first << ": " << (kv.second ? "ok" : "…");
+                        auto it = s.initProgress.find(kv.first);
+                        if (it != s.initProgress.end())
+                            oss << " (" << (int)it->second << "%)";
+                        oss << "  ";
+                    }
+                    std::cout << "\r" << oss.str() << std::flush;
+                    if (ready) {
+                        std::cout << "\n";
+                        spdlog::info("YAMS daemon started successfully");
+                        break;
+                    }
+                }
+                idx++;
+                std::this_thread::sleep_for(200ms);
+            }
         }
     }
 
