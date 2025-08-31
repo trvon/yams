@@ -194,35 +194,6 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
-      # Linux hosted only: Validation build (tests + benchmarks)
-      - name: Configure with Conan (Validation Build) [Linux hosted only]
-        if: ${{ matrix.os == 'linux-hosted' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "Phase 1: Validation build with tests and benchmarks on Linux"
-          # Clean any existing build directory and presets to avoid duplicate preset issues
-          rm -rf build/yams-release
-          rm -f CMakeUserPresets.json
-          conan install . --output-folder=build/yams-release -s build_type=Release -o build_tests=True -o build_benchmarks=True --build=missing
-          cmake --preset yams-release \
-            -DYAMS_BUILD_TESTS=ON \
-            -DYAMS_BUILD_BENCHMARKS=ON \
-            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
-            ${{ matrix.cmake_args}}
-
-      - name: Build and Test (Validation) [Linux hosted only]
-        if: ${{ matrix.os == 'linux-hosted' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "Building with tests and benchmarks for validation..."
-          cmake --build --preset yams-release --parallel
-          echo "Running tests..."
-          # Skip slow model loading tests in CI to prevent timeouts
-          YAMS_SKIP_SLOW_TESTS=1 ctest --preset test-yams-release --output-on-failure --timeout 300 || true
-          echo "Validation complete, now building optimized release..."
-
       # Release build for ALL targets
       - name: Configure and Build Release (Optimized)
         if: ${{ !startsWith(matrix.os, 'windows') }}

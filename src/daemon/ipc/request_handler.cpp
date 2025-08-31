@@ -157,8 +157,24 @@ Task<void> RequestHandler::handle_connection(AsyncSocket<AsyncIOContext> socket,
                 auto message_result = framer_.parse_frame(frame_result.value());
                 if (!message_result) {
                     spdlog::error("Failed to parse frame: {}", message_result.error().message);
-                    (void)co_await send_error(socket, ErrorCode::SerializationError,
-                                              "Failed to parse message");
+                    // Map parse/serialization errors to ErrorResponse at server boundary.
+                    // Try to recover request_id from header for correlation; if unavailable, use 0.
+                    uint64_t correlated_id = 0;
+                    if (frame_result &&
+                        frame_result.value().size() >= sizeof(MessageFramer::FrameHeader)) {
+                        MessageFramer::FrameHeader hdr{};
+                        std::memcpy(&hdr, frame_result.value().data(), sizeof(hdr));
+                        hdr.from_network();
+                        // Only accept valid header for correlation
+                        if (hdr.is_valid()) {
+                            // request_id lives in payload; we cannot extract it without a
+                            // successful decode. Keep 0 here but still send a shaped ErrorResponse
+                            // so clients don't hang.
+                            correlated_id = 0;
+                        }
+                    }
+                    (void)co_await send_error(socket, message_result.error().code,
+                                              message_result.error().message, correlated_id);
                     socket.close();
                     should_exit = true;
                     break;

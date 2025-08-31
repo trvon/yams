@@ -122,9 +122,8 @@ TEST_F(DaemonTest, StartStop) {
     // PID file should exist
     EXPECT_TRUE(fs::exists(config_.pidFile));
 
-    // Socket should exist
-    std::this_thread::sleep_for(100ms); // Give it time to create socket
-    EXPECT_TRUE(fs::exists(config_.socketPath));
+    // Note: No in-process IPC acceptor anymore; socket file is owned by external server.
+    // Do not assert socket path existence here.
 
     // Stop daemon
     result = daemon_->stop();
