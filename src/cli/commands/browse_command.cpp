@@ -1477,18 +1477,13 @@ public:
 
         actions.showHelp = [](tui::BrowseState& s) { s.showHelp = true; };
 
-        // Add hex command support
-        if (state.commandBuffer == "hex") {
-            if (viewerOpen) {
-                viewerHexMode = !viewerHexMode;
-                LoadViewerContent();
-                state.statusMessage = viewerHexMode ? "Hex mode enabled" : "Text mode enabled";
-            } else {
-                state.statusMessage = "Open a document first (press Enter)";
-            }
-        } else if (state.commandBuffer == "open") {
+        actions.openPager = [this](tui::BrowseState&) -> bool {
             OpenInExternalPager();
-        } else if (cmdParser.execute(state.commandBuffer, state, exitRequested, actions)) {
+            return true; // OpenInExternalPager handles errors internally via state.statusMessage
+        };
+
+        // Use unified command parser for all commands
+        if (cmdParser.execute(state.commandBuffer, state, exitRequested, actions)) {
             if (exitRequested) {
                 shouldExit = true;
             }
