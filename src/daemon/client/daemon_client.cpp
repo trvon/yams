@@ -381,20 +381,38 @@ Result<StatusResponse> DaemonClient::status() {
     StatusRequest req;
     req.detailed = true;
 
+    // Transient-aware retry loop for early startup/socket closure races
+    Error lastErr{ErrorCode::NetworkError, "Uninitialized"};
+    for (int attempt = 0; attempt < 5; ++attempt) {
     auto response = sendRequest(req);
-    if (!response) {
-        return Error{response.error().code, response.error().message};
-    }
+        if (response) {
+            if (auto* res = std::get_if<StatusResponse>(&response.value())) {
+                return *res;
+            }
+            if (auto* er = std::get_if<ErrorResponse>(&response.value())) {
+                return Error{er->code, er->message};
+            }
+            return Error{ErrorCode::InvalidData, "Unexpected response type"};
+        }
 
-    if (auto* res = std::get_if<StatusResponse>(&response.value())) {
-        return *res;
+        lastErr = response.error();
+        const std::string& msg = lastErr.message;
+        bool transient = (lastErr.code == ErrorCode::NetworkError) &&
+                         (msg.find("Connection closed") != std::string::npos ||
+                          msg.find("Connection reset") != std::string::npos ||
+                          msg.find("ECONNRESET") != std::string::npos ||
+                          msg.find("EPIPE") != std::string::npos ||
+                          msg.find("Broken pipe") != std::string::npos ||
+                          msg.find("read header failed") != std::string::npos ||
+                          msg.find("read payload failed") != std::string::npos ||
+                          msg.find("Read failed") != std::string::npos);
+        if (!transient) {
+            return lastErr;
+        }
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
     }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
-    }
-
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    return lastErr;
 }
 
 Result<Response> DaemonClient::executeRequest(const Request& req) {
@@ -1223,17 +1241,53 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         }
 
         // Allow overriding daemon path for development via YAMS_DAEMON_BIN
-        const char* daemonBin = std::getenv("YAMS_DAEMON_BIN");
-        const char* exe = daemonBin && *daemonBin ? daemonBin : "yams-daemon";
+        std::string exePath;
+        if (const char* daemonBin = std::getenv("YAMS_DAEMON_BIN"); daemonBin && *daemonBin) {
+            exePath = daemonBin;
+        } else {
+            // Try to auto-detect relative to this process path
+            // On Linux, read /proc/self/exe
+            std::error_code ec;
+            std::filesystem::path selfExe;
+#ifndef _WIN32
+            char buf[4096];
+            ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                selfExe = std::filesystem::path(buf);
+            }
+#endif
+            if (!selfExe.empty()) {
+                auto cliDir = selfExe.parent_path();
+                // Common build-tree locations
+                std::vector<std::filesystem::path> candidates = {
+                    cliDir / "yams-daemon",
+                    cliDir.parent_path() / "yams-daemon",
+                    cliDir.parent_path() / "daemon" / "yams-daemon",
+                    cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
+                    cliDir.parent_path().parent_path() / "yams-daemon"
+                };
+                for (const auto& p : candidates) {
+                    if (std::filesystem::exists(p)) {
+                        exePath = p.string();
+                        break;
+                    }
+                }
+            }
+            if (exePath.empty()) {
+                // Fall back to PATH lookup
+                exePath = "yams-daemon";
+            }
+        }
 
         // Use execlp to search PATH (or direct path if overridden) for yams-daemon
         // Pass socket and optional config arguments
-        if (!configPath.empty() && std::filesystem::exists(configPath)) {
-            execlp(exe, exe, "--socket", socketPath.c_str(), "--config", configPath.c_str(),
-                   nullptr);
+     if (!configPath.empty() && std::filesystem::exists(configPath)) {
+         execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+             configPath.c_str(), nullptr);
         } else {
             // No config file, just pass socket
-            execlp(exe, exe, "--socket", socketPath.c_str(), nullptr);
+         execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
         }
 
         // If we get here, exec failed
@@ -1243,37 +1297,30 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         exit(1);
     }
 
-    // Parent process - wait for daemon to start (poll for socket up to 5s)
-    const auto start = std::chrono::steady_clock::now();
-    const auto timeout = std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() - start < timeout) {
-        if (isDaemonRunning(socketPath)) {
-            spdlog::info("Daemon started successfully");
-            return Result<void>();
+    // Parent process: do not enforce a hard readiness timeout here.
+    // Perform a brief best-effort check for the socket, then return success so
+    // the caller (CLI) can show a live spinner and poll detailed status.
+    // Optional override via env: YAMS_STARTUP_SOCKET_WAIT_MS (default ~500ms)
+    int wait_ms = 500;
+    if (const char* env = std::getenv("YAMS_STARTUP_SOCKET_WAIT_MS")) {
+        try {
+            wait_ms = std::max(0, std::stoi(env));
+        } catch (...) {
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-
-    // Build log path for error message - daemon logs to XDG_STATE_HOME or ~/.local/state
-    std::filesystem::path logPath;
-
-    // First check XDG_STATE_HOME
-    auto xdgState = std::getenv("XDG_STATE_HOME");
-    if (xdgState) {
-        logPath = std::filesystem::path(xdgState) / "yams" / "daemon.log";
-    } else if (auto home = std::getenv("HOME")) {
-        // Default to ~/.local/state/yams/daemon.log
-        logPath = std::filesystem::path(home) / ".local" / "state" / "yams" / "daemon.log";
-    } else if (socketPath.parent_path() == "/var/run") {
-        // System daemon
-        logPath = "/var/log/yams-daemon.log";
-    } else {
-        // Last resort fallback
-        logPath = socketPath.parent_path() / (socketPath.stem().string() + ".log");
+    if (wait_ms > 0) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto timeout = std::chrono::milliseconds(wait_ms);
+        while (std::chrono::steady_clock::now() - start < timeout) {
+            if (isDaemonRunning(socketPath)) {
+                spdlog::info("Daemon process spawned and socket accepting");
+                return Result<void>();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
-
-    return Error{ErrorCode::InternalError, "Daemon failed to start within timeout. Check " +
-                                               logPath.string() + " for details."};
+    spdlog::info("Daemon process spawned; socket not accepting yet (continuing)");
+    return Result<void>();
 #endif
 }
 

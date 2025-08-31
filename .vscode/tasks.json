@@ -127,6 +127,16 @@
 			"label": "build+test (Debug)",
 			"type": "shell",
 			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
+		},
+		{
+			"label": "build (Debug)",
+			"type": "shell",
+			"command": "cmake --build --preset yams-debug -j"
 		}
 	]
 }

@@ -132,6 +132,9 @@ yams::Result<Message> AsioClientPool::roundtrip(const Request& req,
     frame.insert(frame.end(), hdrBuf.begin(), hdrBuf.end());
     frame.insert(frame.end(), payload.begin(), payload.end());
     auto parsed = framer.parse_frame(frame);
+    // Proactively close after each request: server defaults to close_after_response=true,
+    // so sockets are not reusable. Avoid stale-descriptor reuse that triggers ECONNRESET.
+    conn->close();
     if (!parsed)
         return parsed.error();
     return parsed.value();

@@ -38,7 +38,7 @@ jobs:
              hosted: true
              build_packages: true
            - os: macos-hosted-x64
-             runs_on: "macos-13" # GitHub hosted Intel runner
+             runs_on: "macos-12" # Build on Monterey for wider compatibility
              packaging: zip
              cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
              suffix: macos-x86_64

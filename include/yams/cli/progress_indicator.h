@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 namespace yams::cli {
 
@@ -80,6 +81,12 @@ public:
      * @param ms Milliseconds between updates
      */
     void setUpdateInterval(int ms) { updateIntervalMs_ = ms; }
+
+    // Update the displayed message while active
+    void setMessage(const std::string& message) {
+        message_ = message;
+        render();
+    }
 
 private:
     void render();

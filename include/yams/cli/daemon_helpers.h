@@ -518,9 +518,9 @@ public:
 
         // Transient-aware execute with small internal retries to avoid false fallbacks
         // on brief startup races (metadata repo/content store not yet ready, reconnects, etc.).
-        auto is_transient = [](const Error& e) {
+    auto is_transient = [](const Error& e) {
             if (e.code == ErrorCode::NetworkError)
-                return true;
+        return true; // treat ECONNRESET/EPIPE as transient
             if (e.code == ErrorCode::InvalidState || e.code == ErrorCode::NotInitialized) {
                 // Heuristic match on common readiness messages
                 const std::string& m = e.message;
@@ -553,15 +553,28 @@ public:
 
             last_err = resp.error();
             const bool network = (last_err.code == ErrorCode::NetworkError);
-            spdlog::warn("[PooledRequestManager] Daemon call error on client {} (attempt {}): {}",
-                         client_id, attempt, last_err.message);
+            // Downgrade noisy peer-closure errors to debug, keep others at warn
+            const bool is_reset = (last_err.message.find("Connection reset") != std::string::npos ||
+                                   last_err.message.find("Broken pipe") != std::string::npos ||
+                                   last_err.message.find("EPIPE") != std::string::npos ||
+                                   last_err.message.find("ECONNRESET") != std::string::npos);
+            if (is_reset) {
+                spdlog::debug("[PooledRequestManager] client {} attempt {}: {}", client_id,
+                              attempt, last_err.message);
+            } else {
+                spdlog::warn(
+                    "[PooledRequestManager] Daemon call error on client {} (attempt {}): {}",
+                    client_id, attempt, last_err.message);
+            }
             if (network) {
                 // Force reconnect on next attempt
                 pool_->mark_bad(client_id);
             }
 
             if (attempt < kMaxAttempts && is_transient(last_err)) {
-                std::this_thread::sleep_for(backoff);
+                // Add tiny jitter to avoid thundering herd
+                auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
+                std::this_thread::sleep_for(backoff + jitter);
                 // Exponential backoff up to ~300ms
                 backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
                 continue; // retry

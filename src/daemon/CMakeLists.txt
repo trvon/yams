@@ -287,6 +287,7 @@ if(Protobuf_FOUND)
     )
 
     add_library(yams_ipc_proto STATIC
+        ipc/ipc_protocol.cpp
         ipc/proto_serializer.cpp
         ${YAMS_IPC_PROTO_GEN_SRCS}
     )

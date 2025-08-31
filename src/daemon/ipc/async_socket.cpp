@@ -45,8 +45,8 @@ public:
     Result<void> register_socket(int fd, uint64_t generation) {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
-            auto desc = std::make_unique<boost::asio::posix::stream_descriptor>(io_, fd);
-            descriptors_[fd] = std::move(desc);
+            auto desc = std::make_shared<boost::asio::posix::stream_descriptor>(io_, fd);
+            descriptors_[fd] = desc;
             socket_generations_[fd] = generation;
             return Result<void>();
         } catch (const std::exception& e) {
@@ -56,12 +56,12 @@ public:
     }
 
     Result<void> unregister_socket(int fd) {
-        std::unique_ptr<boost::asio::posix::stream_descriptor> desc;
+        std::shared_ptr<boost::asio::posix::stream_descriptor> desc;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = descriptors_.find(fd);
             if (it != descriptors_.end()) {
-                desc = std::move(it->second);
+                desc = it->second; // keep shared ownership during cancel/drain
                 descriptors_.erase(it);
             }
             socket_generations_.erase(fd);
@@ -69,7 +69,9 @@ public:
         if (desc) {
             boost::system::error_code ec;
             desc->cancel(ec);
-            desc->release(); // underlying fd closed elsewhere by owner
+            // Release native handle so owner (::close) remains the single closer
+            desc->release();
+            // desc shared_ptr will destroy object after pending handlers complete
         }
         return Result<void>();
     }
@@ -118,9 +120,8 @@ public:
                     safe_resume_(awaiter, h);
                     return;
                 }
-                // keep a shared ownership for the duration of async op
-                desc_shared = std::shared_ptr<boost::asio::posix::stream_descriptor>(
-                    it->second.get(), [](boost::asio::posix::stream_descriptor*) {});
+                // keep shared ownership for the duration of async op
+                desc_shared = it->second;
             }
 
             auto buf = boost::asio::mutable_buffer(buffer, size);
@@ -168,8 +169,7 @@ public:
                     safe_resume_(awaiter, h);
                     return;
                 }
-                desc_shared = std::shared_ptr<boost::asio::posix::stream_descriptor>(
-                    it->second.get(), [](boost::asio::posix::stream_descriptor*) {});
+                desc_shared = it->second;
             }
 
             auto buf = boost::asio::const_buffer(buffer, size);
@@ -233,7 +233,7 @@ private:
     boost::asio::io_context io_;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
     std::mutex mutex_;
-    std::unordered_map<int, std::unique_ptr<boost::asio::posix::stream_descriptor>> descriptors_;
+    std::unordered_map<int, std::shared_ptr<boost::asio::posix::stream_descriptor>> descriptors_;
     std::unordered_map<int, uint64_t> socket_generations_;
 };
 } // namespace yams::daemon

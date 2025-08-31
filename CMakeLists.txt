@@ -594,18 +594,26 @@ message(STATUS "OpenSSL crypto library: ${OPENSSL_CRYPTO_LIBRARY}")
 find_package(ZLIB REQUIRED)
 message(STATUS "Found ZLIB: ${ZLIB_VERSION_STRING}")
 
-# libcurl (HTTP client)
-find_package(CURL REQUIRED)
-message(STATUS "Found libcurl: ${CURL_VERSION_STRING}")
-if(NOT TARGET CURL::libcurl)
-    message(FATAL_ERROR "CURL::libcurl target not found after find_package(CURL)")
-endif()
+# libcurl (HTTP client) - optional in non-Conan builds to ease local setup
+set(YAMS_REQUIRE_CURL "ON" CACHE BOOL "Require libcurl for HTTP features (set OFF to skip)" )
+if(YAMS_USE_CONAN OR YAMS_REQUIRE_CURL)
+    find_package(CURL REQUIRED)
+    message(STATUS "Found libcurl: ${CURL_VERSION_STRING}")
+    if(NOT TARGET CURL::libcurl)
+        message(FATAL_ERROR "CURL::libcurl target not found after find_package(CURL)")
+    endif()
 
-# Provide a stable interface target for downloader code
-add_library(yams_curl INTERFACE)
-target_link_libraries(yams_curl INTERFACE CURL::libcurl)
-add_library(yams::curl ALIAS yams_curl)
-install(TARGETS yams_curl EXPORT YamsTargets)
+    # Provide a stable interface target for downloader code
+    add_library(yams_curl INTERFACE)
+    target_link_libraries(yams_curl INTERFACE CURL::libcurl)
+    add_library(yams::curl ALIAS yams_curl)
+    install(TARGETS yams_curl EXPORT YamsTargets)
+else()
+    message(WARNING "libcurl not found or disabled (YAMS_REQUIRE_CURL=OFF). Downloader features will be unavailable.")
+    # Create a dummy interface to satisfy targets depending on yams::curl when HTTP is unused
+    add_library(yams_curl INTERFACE)
+    add_library(yams::curl ALIAS yams_curl)
+endif()
 
 # Threads (required for websocketpp)
 find_package(Threads REQUIRED)
