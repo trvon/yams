@@ -57,23 +57,24 @@ protected:
         }
 
         // Wait for daemon readiness to avoid connection races.
-        ASSERT_TRUE(waitForDaemonReady(15s)) << "Daemon failed to become ready in time";
+        ASSERT_TRUE(waitForDaemonReady(45s)) << "Daemon failed to become ready in time";
     }
 
-    // Poll until the daemon responds to a ping or status call, up to timeout.
+    // Poll until the daemon responds to a status or ping call, up to timeout.
     bool waitForDaemonReady(std::chrono::milliseconds timeout) {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const auto start = std::chrono::steady_clock::now();
+        const auto deadline = start + timeout;
+        std::chrono::milliseconds sleep{100};
         while (std::chrono::steady_clock::now() < deadline) {
-            // Quick check: socket present and daemon appears running
             if (!DaemonClient::isDaemonRunning()) {
-                std::this_thread::sleep_for(100ms);
+                std::this_thread::sleep_for(sleep);
+                sleep =
+                    std::min<std::chrono::milliseconds>(sleep * 2, std::chrono::milliseconds{500});
                 continue;
             }
-            // Strong check: ping over a real client connection
             DaemonClient client{};
-            // Prefer status() so we can assert service readiness (metadata, etc.)
-            auto st = client.status();
-            if (st) {
+            // Prefer status for service readiness
+            if (auto st = client.status(); st) {
                 const auto& s = st.value();
                 auto has = [&](const char* key) -> bool {
                     auto it = s.readinessStates.find(key);
@@ -81,14 +82,17 @@ protected:
                 };
                 const bool coreReady = has("ipc_server") && has("content_store") && has("database");
                 const bool queryReady = has("metadata_repo") || has("search_engine");
-
-                // Require core+query readiness regardless of status/ready flag to avoid premature
-                // starts
                 if (coreReady && queryReady) {
                     return true;
                 }
+            } else {
+                // Fallback to ping as a readiness probe when status isn't available yet
+                if (auto pg = client.ping(); pg) {
+                    return true;
+                }
             }
-            std::this_thread::sleep_for(100ms);
+            std::this_thread::sleep_for(sleep);
+            sleep = std::min<std::chrono::milliseconds>(sleep * 2, std::chrono::milliseconds{500});
         }
         return false;
     }

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <vector>
 
+#include <yams/cli/asio_client_pool.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
@@ -49,9 +50,10 @@ public:
         try {
             // Try daemon-first for quick status snapshot
             {
-                yams::daemon::StatusRequest dreq;
-                dreq.detailed = true;
-                auto render = [&](const yams::daemon::StatusResponse& s) -> Result<void> {
+                // Prefer new Boost.Asio client pool
+                yams::cli::AsioClientPool pool{};
+                if (auto st = pool.status(); st) {
+                    const auto& s = st.value();
                     if (jsonOutput_) {
                         nlohmann::json j;
                         j["running"] = s.running;
@@ -74,12 +76,7 @@ public:
                                   << " MB, CPU: " << s.cpuUsagePercent << "%\n";
                     }
                     return Result<void>();
-                };
-                auto fallback = [&]() -> Result<void> {
-                    return Error{ErrorCode::NotImplemented, "local"};
-                };
-                if (auto d = daemon_first(dreq, fallback, render); d)
-                    return Result<void>();
+                }
             }
             // Ensure storage is initialized (will detect existing storage)
             auto ensured = cli_->ensureStorageInitialized();

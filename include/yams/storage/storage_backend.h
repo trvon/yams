@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 #include <yams/core/types.h>
@@ -14,22 +15,39 @@ namespace yams::storage {
 
 /**
  * Storage backend configuration
+ * Note: keep fields unique; this header is widely included.
  */
 struct BackendConfig {
+    // Backend selection and addressing
     std::string type = "filesystem"; // filesystem, s3, http, ftp
-    std::string url;                 // URL for remote backends (e.g., s3://bucket/prefix)
-    std::filesystem::path localPath; // Path for local filesystem backend
+    std::string url;                 // Remote URL (e.g., s3://bucket/prefix)
+    std::filesystem::path localPath; // Local base path for filesystem backend
 
-    // Credential configuration
+    // Credentials and headers (for remote backends)
     std::unordered_map<std::string, std::string> credentials;
 
-    // Cache configuration for remote backends
-    size_t cacheSize = 256 * 1024 * 1024; // 256MB default cache
-    size_t cacheTTL = 3600;               // 1 hour TTL
+    // Client-side cache for remote reads
+    size_t cacheSize = 256 * 1024 * 1024; // 256MB
+    size_t cacheTTL = 3600;               // 1 hour (seconds)
 
     // Performance tuning
-    size_t maxConcurrentOps = 10;
-    size_t requestTimeout = 30; // seconds
+    size_t maxConcurrentOps = 10; // Max in-flight operations
+    size_t requestTimeout = 30;   // Per-request timeout (seconds)
+
+    // Retry policy (exponential backoff with jitter)
+    int maxRetries = 3;    // Attempts for transient failures
+    int baseRetryMs = 100; // Base backoff delay
+    int jitterMs = 50;     // Random jitter range
+
+    // Range GET support
+    bool enableRangeGets = true;
+
+    // S3-specific options (scaffold/placeholder)
+    std::string region;
+    bool usePathStyle = false;
+    std::string checksumAlgorithm;
+    std::string sseKmsKeyId;
+    std::string storageClass;
 };
 
 /**
@@ -188,6 +206,12 @@ public:
      */
     static void registerBackend(const std::string& type,
                                 std::function<std::unique_ptr<IStorageBackend>()> factory);
+
+    template <typename Backend,
+              typename = std::enable_if_t<std::is_base_of_v<IStorageBackend, Backend>>>
+    static void registerBackendType(const std::string& type) {
+        registerBackend(type, []() { return std::make_unique<Backend>(); });
+    }
 };
 
 } // namespace yams::storage

@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 
 #include <chrono>
+#include <concepts>
 #include <filesystem>
 #include <map>
 #include <optional>

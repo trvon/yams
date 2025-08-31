@@ -1,5 +1,14 @@
 include(GoogleTest)
 
+# Global test options for stabilization
+option(YAMS_BUILD_LEGACY_INTEGRATION_TESTS "Build legacy integration tests" OFF)
+option(YAMS_ENABLE_BENCHMARKS "Enable benchmarks in CTest" OFF)
+option(YAMS_ENABLE_NEW_INTEGRATION_TESTS "Enable new integration tests" ON)
+
+# Reasonable default discovery and test timeouts
+set(YAMS_CTEST_DISCOVERY_TIMEOUT "30" CACHE STRING "Default GTest discovery timeout (s)")
+set(YAMS_CTEST_DEFAULT_TEST_TIMEOUT "60" CACHE STRING "Default per-test timeout (s)")
+
 # Test utilities library
 add_library(test_utils INTERFACE)
 target_include_directories(test_utils INTERFACE
@@ -14,6 +23,8 @@ target_link_libraries(test_utils INTERFACE
 
 # Enable better test discovery
 set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+set_property(GLOBAL PROPERTY CTEST_TARGETS_ADDED 1)
+set(ENV{CTEST_OUTPUT_ON_FAILURE} 1)
 
 # Unit tests
 add_subdirectory(unit)
@@ -32,7 +43,7 @@ if(YAMS_BUILD_STRESS_TESTS)
 endif()
 
 # Performance benchmarks
-if(YAMS_BUILD_BENCHMARKS)
+if(YAMS_BUILD_BENCHMARKS AND YAMS_ENABLE_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
 

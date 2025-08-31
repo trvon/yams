@@ -14,6 +14,8 @@ add_library(yams_storage_engine
     compressed_storage_engine.cpp
     storage_backend_factory.cpp
     url_backend.cpp
+    s3_signer.cpp
+    object_storage_plugin_loader.cpp
     ${PLATFORM_SOURCES}
 )
 
@@ -25,7 +27,8 @@ target_link_libraries(yams_storage_engine
     PRIVATE
         spdlog::spdlog
         Threads::Threads
-        CURL::libcurl  # For URL backend
+        CURL::libcurl
+        $<$<PLATFORM_ID:Linux>:dl>
 )
 
 target_include_directories(yams_storage_engine

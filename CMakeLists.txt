@@ -702,6 +702,95 @@ if(YAMS_USE_CONAN)
     find_package(OpenSSL REQUIRED)
     find_package(onnxruntime REQUIRED)
     find_package(tl-expected REQUIRED)
+    # Boost headers (for Asio) are provided by Conan; import targets to expose include dirs
+    find_package(Boost REQUIRED)
+    # Provide a stable interface target to propagate Boost headers (Asio is header-only)
+    if(NOT TARGET yams_boost_headers)
+        add_library(yams_boost_headers INTERFACE)
+        # Prefer modern Boost CMake targets from Conan
+        if(TARGET Boost::headers)
+            target_link_libraries(yams_boost_headers INTERFACE Boost::headers)
+            get_target_property(_boost_inc_dirs Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
+            if(_boost_inc_dirs)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_inc_dirs})
+            endif()
+            # Some Conan configs store include dirs in INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+            get_target_property(_boost_sys_inc_dirs Boost::headers INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
+            if(_boost_sys_inc_dirs)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_sys_inc_dirs})
+            endif()
+        elseif(TARGET Boost::boost)
+            target_link_libraries(yams_boost_headers INTERFACE Boost::boost)
+            get_target_property(_boost_inc_dirs2 Boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+            if(_boost_inc_dirs2)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_inc_dirs2})
+            endif()
+            get_target_property(_boost_sys_inc_dirs2 Boost::boost INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
+            if(_boost_sys_inc_dirs2)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_sys_inc_dirs2})
+            endif()
+        elseif(TARGET boost::boost)
+            target_link_libraries(yams_boost_headers INTERFACE boost::boost)
+            get_target_property(_boost_inc_dirs3 boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+            if(_boost_inc_dirs3)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_inc_dirs3})
+            endif()
+            get_target_property(_boost_sys_inc_dirs3 boost::boost INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
+            if(_boost_sys_inc_dirs3)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_sys_inc_dirs3})
+            endif()
+        endif()
+        # Some Conan profiles expose Boost include dirs on the internal aggregate target
+        if(TARGET boost::_libboost)
+            # Ensure we link and propagate include directories from the monolithic Boost target
+            target_link_libraries(yams_boost_headers INTERFACE boost::_libboost)
+            get_target_property(_boost_inc_dirs4 boost::_libboost INTERFACE_INCLUDE_DIRECTORIES)
+            if(_boost_inc_dirs4)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_inc_dirs4})
+            endif()
+            get_target_property(_boost_sys_inc_dirs4 boost::_libboost INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
+            if(_boost_sys_inc_dirs4)
+                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_sys_inc_dirs4})
+            endif()
+        endif()
+        # Fallback to Boost_INCLUDE_DIRS variable if present
+        if(Boost_INCLUDE_DIRS)
+            target_include_directories(yams_boost_headers SYSTEM INTERFACE ${Boost_INCLUDE_DIRS})
+        endif()
+
+        # Hard fallback for Conan CMakeDeps profiles that don't populate INTERFACE include dirs:
+        # inject Conan package include roots discovered from boost_PACKAGE_FOLDER_<CONFIG> variables.
+        set(_yams_boost_pkg_roots)
+        foreach(_cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            if(DEFINED boost_PACKAGE_FOLDER_${_cfg})
+                list(APPEND _yams_boost_pkg_roots "${boost_PACKAGE_FOLDER_${_cfg}}")
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES _yams_boost_pkg_roots)
+
+        set(_yams_boost_include_candidates)
+        foreach(_pkg IN LISTS _yams_boost_pkg_roots)
+            if(EXISTS "${_pkg}/include/boost/version.hpp")
+                list(APPEND _yams_boost_include_candidates "${_pkg}/include")
+            elseif(EXISTS "${_pkg}/include/boost/asio.hpp")
+                list(APPEND _yams_boost_include_candidates "${_pkg}/include")
+            elseif(EXISTS "${_pkg}/include/boost/asio/local/stream_protocol.hpp")
+                list(APPEND _yams_boost_include_candidates "${_pkg}/include")
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES _yams_boost_include_candidates)
+
+        if(_yams_boost_include_candidates)
+            target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_yams_boost_include_candidates})
+            message(STATUS "yams_boost_headers: injected Boost include dirs from Conan package: ${_yams_boost_include_candidates}")
+        else()
+            message(STATUS "yams_boost_headers: no Conan Boost include fallback injected (targets/variables likely provided includes)")
+        endif()
+    endif()
+    # Ensure the interface target is part of the export set when installing
+    if(TARGET yams_boost_headers)
+        install(TARGETS yams_boost_headers EXPORT YamsTargets)
+    endif()
     # fmt for std::format fallback
     if(NOT YAMS_HAS_STD_FORMAT)
         find_package(fmt REQUIRED)
@@ -790,30 +879,46 @@ if(NOT YAMS_USE_CONAN)
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
 
-    # Boost for MCP server (Beast/ASIO for WebSocket support)
-    if(YAMS_BUILD_MCP_SERVER)
-        message(STATUS "Fetching Boost headers for MCP server")
-        FetchContent_Declare(
-            Boost
-            URL https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz
-            URL_HASH SHA256=2e64e5d79a738d0fa6fb546c6e5c2bd28f88d268a2a080546f74e5ff98f29d0e
-            DOWNLOAD_EXTRACT_TIMESTAMP ON
-        )
-        FetchContent_MakeAvailable(Boost)
+    # Boost headers are needed for Asio-based CLI/MCP clients
+    message(STATUS "Fetching Boost headers (required for Asio)")
+    FetchContent_Declare(
+        Boost
+        URL https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz
+        URL_HASH SHA256=2e64e5d79a738d0fa6fb546c6e5c2bd28f88d268a2a080546f74e5ff98f29d0e
+        DOWNLOAD_EXTRACT_TIMESTAMP ON
+    )
+    FetchContent_MakeAvailable(Boost)
 
-        # Boost automatically creates boost_headers target, just need to make it available
-        # The Boost::headers alias should already exist from the Boost CMake configuration
-        if(NOT TARGET Boost::headers)
-            # Only create alias if it doesn't exist
-            if(TARGET boost_headers)
-                add_library(Boost::headers ALIAS boost_headers)
-            else()
-                # Fallback: create our own interface library
-                add_library(yams_boost_headers INTERFACE)
-                target_include_directories(yams_boost_headers SYSTEM INTERFACE ${boost_SOURCE_DIR})
-                add_library(Boost::headers ALIAS yams_boost_headers)
-            endif()
+    # Boost automatically creates boost_headers target, just need to make it available
+    # The Boost::headers alias should already exist from the Boost CMake configuration
+    if(NOT TARGET Boost::headers)
+        # Only create alias if it doesn't exist
+        if(TARGET boost_headers)
+            add_library(Boost::headers ALIAS boost_headers)
+        else()
+            # Fallback: create our own interface library
+            add_library(yams_boost_headers INTERFACE)
+            target_include_directories(yams_boost_headers SYSTEM INTERFACE ${boost_SOURCE_DIR})
+            add_library(Boost::headers ALIAS yams_boost_headers)
         endif()
+    endif()
+
+    # Provide a stable interface target to propagate Boost headers (Asio is header-only)
+    if(NOT TARGET yams_boost_headers)
+        add_library(yams_boost_headers INTERFACE)
+    endif()
+    if(TARGET Boost::headers)
+        target_link_libraries(yams_boost_headers INTERFACE Boost::headers)
+        get_target_property(_boost_inc_dirs_nc Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
+        if(_boost_inc_dirs_nc)
+            target_include_directories(yams_boost_headers SYSTEM INTERFACE ${_boost_inc_dirs_nc})
+        else()
+            # Fallback to the fetched source dir
+            target_include_directories(yams_boost_headers SYSTEM INTERFACE ${boost_SOURCE_DIR})
+        endif()
+    else()
+        # As a last resort, include the fetched source dir
+        target_include_directories(yams_boost_headers SYSTEM INTERFACE ${boost_SOURCE_DIR})
     endif()
 endif()
 
@@ -1248,6 +1353,9 @@ add_library(yams::core ALIAS yams_core)
 
 # Add subdirectories
 add_subdirectory(src)
+
+# Plugins
+add_subdirectory(plugins/object_storage_s3)
 
 if(YAMS_BUILD_TESTS)
     enable_testing()

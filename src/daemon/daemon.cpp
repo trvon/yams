@@ -8,7 +8,7 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
-#include <yams/daemon/ipc/async_ipc_server.h>
+// IPC server implementation removed in PBI-007; client uses Boost.Asio path.
 
 namespace yams::daemon {
 
@@ -79,22 +79,8 @@ Result<void> YamsDaemon::start() {
         return result;
     }
 
-    SimpleAsyncIpcServer::Config serverConfig;
-    serverConfig.socket_path = config_.socketPath;
-    serverConfig.worker_threads = config_.workerThreads;
-    ipcServer_ = std::make_unique<SimpleAsyncIpcServer>(serverConfig);
-    ipcServer_->set_handler([this](const Request& req) -> Response {
-        state_.stats.requestsProcessed++;
-        return requestDispatcher_->dispatch(req);
-    });
-
-    if (auto result = ipcServer_->start(); !result) {
-        running_ = false;
-        serviceManager_->shutdown();
-        lifecycleManager_->shutdown();
-        return result;
-    }
-    state_.readiness.ipcServerReady = true;
+    // Mark IPC as not ready (server handled externally); lifecycle remains functional.
+    state_.readiness.ipcServerReady = false;
 
     // Start feature-flagged repair coordinator (idle-only)
     if (config_.enableAutoRepair) {
@@ -105,16 +91,25 @@ Result<void> YamsDaemon::start() {
         rcfg.tickMs = 2000;
         // Safe lambda: only dereference ipcServer_ while daemon is running; we stop
         // the coordinator before tearing down ipcServer_ in stop().
-        auto activeFn = [this]() -> size_t {
-            auto* s = ipcServer_.get();
-            return s ? s->get_stats().active_connections : 0;
-        };
+        auto activeFn = []() -> size_t { return 0; };
         repairCoordinator_ =
             std::make_unique<RepairCoordinator>(serviceManager_.get(), &state_, activeFn, rcfg);
         repairCoordinator_->start();
     }
 
-    daemonThread_ = std::jthread([this](std::stop_token token) { run(token); });
+    // Start lightweight main loop thread; no in-process IPC acceptor
+    daemonThread_ = std::jthread([this](std::stop_token token) {
+        spdlog::debug("Daemon main loop started.");
+        while (!token.stop_requested() && !stopRequested_.load()) {
+            std::unique_lock<std::mutex> lock(stop_mutex_);
+            if (stop_cv_.wait_for(lock, std::chrono::seconds(1),
+                                  [&] { return stopRequested_.load(); })) {
+                break; // Shutdown requested
+            }
+            // Periodic tasks can be added here
+        }
+        spdlog::debug("Daemon main loop exiting.");
+    });
 
     spdlog::info("YAMS daemon started successfully.");
     return Result<void>();
@@ -140,9 +135,7 @@ Result<void> YamsDaemon::stop() {
         repairCoordinator_.reset();
     }
 
-    if (ipcServer_) {
-        ipcServer_->stop();
-    }
+    // No in-process IPC server to stop
 
     if (serviceManager_) {
         serviceManager_->shutdown();
@@ -152,34 +145,25 @@ Result<void> YamsDaemon::stop() {
         lifecycleManager_->shutdown();
     }
 
-    // Clean up socket file
-    if (!config_.socketPath.empty() && std::filesystem::exists(config_.socketPath)) {
-        try {
-            std::filesystem::remove(config_.socketPath);
-            spdlog::debug("Removed socket file: {}", config_.socketPath.string());
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to remove socket file: {}", e.what());
-        }
-    }
+    // No socket file created by in-process server
 
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();
 }
 
-void YamsDaemon::run(std::stop_token stopToken) {
-    spdlog::debug("Daemon main loop started.");
-    while (!stopToken.stop_requested() && !stopRequested_.load()) {
-        std::unique_lock<std::mutex> lock(stop_mutex_);
-        if (stop_cv_.wait_for(lock, std::chrono::seconds(1),
-                              [&] { return stopRequested_.load(); })) {
-            break; // Shutdown requested
-        }
-        // Periodic tasks can be added here
-    }
-    spdlog::debug("Daemon main loop exiting.");
-}
+// run() method removed; loop is inlined in start()
 
 // Path resolution helpers remain static methods of YamsDaemon
+namespace {
+std::filesystem::path getXDGStateHome() {
+    const char* xdgState = std::getenv("XDG_STATE_HOME");
+    if (xdgState)
+        return std::filesystem::path(xdgState);
+    const char* home = std::getenv("HOME");
+    return home ? std::filesystem::path(home) / ".local" / "state" : std::filesystem::path();
+}
+} // namespace
+
 std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
     namespace fs = std::filesystem;
     bool isRoot = (geteuid() == 0);
@@ -233,13 +217,7 @@ std::filesystem::path YamsDaemon::getXDGRuntimeDir() {
     return xdgRuntime ? std::filesystem::path(xdgRuntime) : std::filesystem::path();
 }
 
-std::filesystem::path YamsDaemon::getXDGStateHome() {
-    const char* xdgState = std::getenv("XDG_STATE_HOME");
-    if (xdgState)
-        return std::filesystem::path(xdgState);
-    const char* home = std::getenv("HOME");
-    return home ? std::filesystem::path(home) / ".local" / "state" : std::filesystem::path();
-}
+// getXDGStateHome() moved to anonymous namespace helper above
 
 #ifdef YAMS_TESTING
 // Test accessor implementations delegate to ServiceManager

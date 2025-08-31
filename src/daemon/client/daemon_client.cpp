@@ -1,4 +1,6 @@
+#include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
 #include <spdlog/spdlog.h>
@@ -191,7 +193,6 @@ public:
 
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
-    // Resolve socket path if not specified
     if (pImpl->config_.socketPath.empty()) {
         pImpl->config_.socketPath = resolveSocketPath();
     }
@@ -436,328 +437,26 @@ Result<void> DaemonClient::ping() {
         return Error{err->code, err->message};
     }
 
+    int mt = static_cast<int>(getMessageType(response.value()));
+    spdlog::error("Ping: unexpected response variant (type={})", mt);
     return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
 Result<Response> DaemonClient::sendRequest(const Request& req) {
-    // Helper: only retry idempotent queries (safe to re-send)
-    auto is_idempotent = [](const Request& r) -> bool {
-        return std::holds_alternative<SearchRequest>(r) || std::holds_alternative<ListRequest>(r) ||
-               std::holds_alternative<GrepRequest>(r) || std::holds_alternative<StatusRequest>(r) ||
-               std::holds_alternative<PingRequest>(r);
-    };
-
-    // We'll allow at most one reconnect+retry if the connection is closed before we can read the
-    // response header (common when the server closes an idled socket). This reduces flaky
-    // fallbacks in pooled usage while keeping non-idempotent ops single-shot.
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (!isConnected()) {
-            if (auto result = connect(); !result) {
-                return result.error();
-            }
-        }
-
-        // Check circuit breaker
-        if (pImpl->config_.enableCircuitBreaker) {
-            if (!pImpl->breaker_.shouldAllow()) {
-                return Error{ErrorCode::NetworkError, "Circuit breaker is open"};
-            }
-        }
-
-        // Read environment variables for timeout configuration
-        const char* headerTimeoutEnv = std::getenv("YAMS_HEADER_TIMEOUT");
-        const char* bodyTimeoutEnv = std::getenv("YAMS_BODY_TIMEOUT");
-
-        if (headerTimeoutEnv) {
-            try {
-                pImpl->headerTimeout_ = std::chrono::milliseconds(std::stoi(headerTimeoutEnv));
-            } catch (...) {
-                // Ignore invalid values
-            }
-        }
-
-        if (bodyTimeoutEnv) {
-            try {
-                pImpl->bodyTimeout_ = std::chrono::milliseconds(std::stoi(bodyTimeoutEnv));
-            } catch (...) {
-                // Ignore invalid values
-            }
-        }
-
-        try {
-            // Create message
-            Message msg;
-            msg.version = PROTOCOL_VERSION;
-            msg.requestId =
-                static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-            msg.timestamp = std::chrono::steady_clock::now();
-            msg.payload = req;
-            msg.clientVersion = "yams-client-0.3.4";
-
-            // Use MessageFramer to frame the message with CRC32 checksum
-            MessageFramer framer;
-            auto framedResult = framer.frame_message(msg);
-            if (!framedResult) {
-                pImpl->breaker_.recordFailure();
-                return framedResult.error();
-            }
-
-            auto& framedData = framedResult.value();
-            spdlog::debug("Sending {} bytes to daemon (framed with CRC32)", framedData.size());
-
-            // Send framed message data with timeout
-            size_t totalSent = 0;
-            const auto deadline = std::chrono::steady_clock::now() + pImpl->config_.requestTimeout;
-
-            // Allow a single transparent reconnect+retry on EPIPE/ECONNRESET to handle servers that
-            // close connections after a response while the pool reuses sockets.
-            bool retriedAfterPipe = false;
-            while (totalSent < framedData.size()) {
-                if (std::chrono::steady_clock::now() > deadline) {
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError, "Send timeout"};
-                }
-
-                ssize_t sent = send(pImpl->socketFd_, framedData.data() + totalSent,
-                                    framedData.size() - totalSent, MSG_NOSIGNAL);
-
-                if (sent < 0) {
-                    int err = errno;
-                    if (err == EAGAIN || err == EWOULDBLOCK) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                    // Some platforms may surface errno==0 here when SIGPIPE is suppressed;
-                    // map to a meaningful error (prefer EPIPE, fall back to ECONNRESET).
-                    if (err == 0) {
-#ifdef EPIPE
-                        err = EPIPE;
-#else
-                        err = ECONNRESET;
-#endif
-                    }
-                    // If the peer closed (EPIPE/ECONNRESET), attempt a single reconnect+retry.
-                    if ((err == EPIPE || err == ECONNRESET) && !retriedAfterPipe) {
-                        spdlog::warn(
-                            "[DaemonClient] Send failed with {}. Reconnecting and retrying once...",
-                            strerror(err));
-                        // Reset connection and retry from the beginning.
-                        disconnect();
-                        auto rc = connect();
-                        if (!rc) {
-                            pImpl->breaker_.recordFailure();
-                            return Error{ErrorCode::NetworkError,
-                                         std::string("Reconnect failed after send error: ") +
-                                             rc.error().message};
-                        }
-                        retriedAfterPipe = true;
-                        totalSent = 0;
-                        continue;
-                    }
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError,
-                                 "Send failed: " + std::string(strerror(err))};
-                }
-
-                totalSent += static_cast<size_t>(sent);
-            }
-
-            // Read framed response header first with the header timeout
-            auto headerDeadline = std::chrono::steady_clock::now() + pImpl->headerTimeout_;
-            size_t totalReceived = 0;
-            const size_t headerSize = sizeof(MessageFramer::FrameHeader);
-            std::vector<uint8_t> headerData(headerSize);
-
-            while (totalReceived < headerSize) {
-                if (std::chrono::steady_clock::now() > headerDeadline) {
-                    pImpl->breaker_.recordFailure();
-                    // One-time reconnect+retry when no header bytes were received yet. This matches
-                    // the streaming path and helps stabilize pooled sockets when the server stalls
-                    // or rotates connections pre-header. Only on first attempt to avoid
-                    // duplication.
-                    if (attempt == 0 && totalReceived == 0) {
-                        spdlog::warn("[DaemonClient] Header recv timeout. Reconnecting and "
-                                     "retrying once...");
-                        disconnect();
-                        auto rc = connect();
-                        if (!rc) {
-                            return Error{ErrorCode::NetworkError,
-                                         std::string("Reconnect failed after header timeout: ") +
-                                             rc.error().message};
-                        }
-                        goto retry_send_request_outer;
-                    }
-                    return Error{ErrorCode::NetworkError, "Receive timeout (header)"};
-                }
-
-                ssize_t received = recv(pImpl->socketFd_, headerData.data() + totalReceived,
-                                        headerSize - totalReceived, 0);
-
-                if (received < 0) {
-                    int err = errno;
-                    if (err == EAGAIN || err == EWOULDBLOCK) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                    // Treat connection reset/pipe as remote close
-                    if (err == ECONNRESET || err == EPIPE) {
-                        pImpl->breaker_.recordFailure();
-                        // One-time reconnect+retry even for non-idempotent requests when no header
-                        // bytes have been received yet. This addresses servers that close the
-                        // connection pre-header in pooled mode. We only do this on the first
-                        // attempt to avoid duplicate side effects.
-                        if (attempt == 0) {
-                            spdlog::warn("[DaemonClient] Header recv failed ({}). Reconnecting and "
-                                         "retrying once...",
-                                         strerror(err));
-                            disconnect();
-                            auto rc = connect();
-                            if (!rc) {
-                                return Error{ErrorCode::NetworkError,
-                                             std::string("Reconnect failed after header error: ") +
-                                                 rc.error().message};
-                            }
-                            // restart outer attempt loop
-                            goto retry_send_request_outer;
-                        }
-                        return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
-                    }
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError,
-                                 "Receive failed (header): " + std::string(strerror(err))};
-                } else if (received == 0) {
-                    pImpl->breaker_.recordFailure();
-                    // One-time reconnect+retry even for non-idempotent requests when no header
-                    // bytes were received. Only on first attempt to minimize duplication risk.
-                    if (attempt == 0) {
-                        spdlog::warn(
-                            "[DaemonClient] Header recv EOF. Reconnecting and retrying once...");
-                        disconnect();
-                        auto rc = connect();
-                        if (!rc) {
-                            return Error{ErrorCode::NetworkError,
-                                         std::string("Reconnect failed after header EOF: ") +
-                                             rc.error().message};
-                        }
-                        // restart outer attempt loop
-                        goto retry_send_request_outer;
-                    }
-                    return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
-                }
-
-                totalReceived += static_cast<size_t>(received);
-            }
-
-            // Parse frame header manually since we need just the header info
-            MessageFramer::FrameHeader networkHeader;
-            std::memcpy(&networkHeader, headerData.data(), sizeof(MessageFramer::FrameHeader));
-
-            // Convert from network byte order
-            MessageFramer::FrameHeader parsedHeader;
-            parsedHeader.magic = ntohl(networkHeader.magic);
-            parsedHeader.version = ntohl(networkHeader.version);
-            parsedHeader.payload_size = ntohl(networkHeader.payload_size);
-            parsedHeader.checksum = ntohl(networkHeader.checksum);
-
-            // Validate header
-            if (parsedHeader.magic != MessageFramer::FRAME_MAGIC) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::InvalidData, "Invalid frame magic"};
-            }
-
-            if (parsedHeader.version != MessageFramer::FRAME_VERSION) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::InvalidData, "Invalid frame version"};
-            }
-
-            if (parsedHeader.payload_size > MAX_MESSAGE_SIZE) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::InvalidData, "Response size too large: " +
-                                                         std::to_string(parsedHeader.payload_size)};
-            }
-
-            // Read the response payload with the body timeout
-            auto bodyDeadline = std::chrono::steady_clock::now() + pImpl->bodyTimeout_;
-            std::vector<uint8_t> responseData(parsedHeader.payload_size);
-            totalReceived = 0;
-
-            while (totalReceived < parsedHeader.payload_size) {
-                if (std::chrono::steady_clock::now() > bodyDeadline) {
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError, "Receive timeout (data)"};
-                }
-
-                ssize_t received = recv(pImpl->socketFd_, responseData.data() + totalReceived,
-                                        parsedHeader.payload_size - totalReceived, 0);
-
-                if (received < 0) {
-                    int err = errno;
-                    if (err == EAGAIN || err == EWOULDBLOCK) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                    // Treat connection reset/pipe as remote close
-                    if (err == ECONNRESET || err == EPIPE) {
-                        pImpl->breaker_.recordFailure();
-                        return Error{ErrorCode::NetworkError,
-                                     "Connection closed during data transfer"};
-                    }
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError,
-                                 "Receive failed (data): " + std::string(strerror(err))};
-                } else if (received == 0) {
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
-                }
-
-                totalReceived += static_cast<size_t>(received);
-            }
-
-            spdlog::debug("Received {} bytes from daemon", responseData.size());
-
-            // Build complete frame and parse it
-            std::vector<uint8_t> completeFrame;
-            completeFrame.reserve(headerSize + responseData.size());
-            completeFrame.insert(completeFrame.end(), headerData.begin(), headerData.end());
-            completeFrame.insert(completeFrame.end(), responseData.begin(), responseData.end());
-
-            // Parse and verify the complete frame (includes CRC32 check)
-            auto responseMsg = framer.parse_frame(completeFrame);
-            if (!responseMsg) {
-                pImpl->breaker_.recordFailure();
-                return responseMsg.error();
-            }
-
-            // Verify response ID matches request
-            if (responseMsg.value().requestId != msg.requestId) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::InvalidData, "Response ID mismatch"};
-            }
-
-            // Extract response from message
-            if (!std::holds_alternative<Response>(responseMsg.value().payload)) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::InvalidData, "Expected response, got request"};
-            }
-
-            pImpl->breaker_.recordSuccess();
-            auto out = std::get<Response>(responseMsg.value().payload);
-            if (pImpl->config_.singleUseConnections) {
-                disconnect();
-            }
-            return out;
-        } catch (const std::exception& e) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::InternalError,
-                         "Error sending request: " + std::string(e.what())};
-        }
-
-        // Label target to restart the outer attempt loop (structured via for + goto to avoid code
-        // duplication). Only reached from the header read error path above.
-    retry_send_request_outer:; // no-op; the for-loop will iterate attempt==1 now
+    if (auto rc = connect(); !rc) {
+        return rc.error();
     }
-    // If we exit the loop unexpectedly, surface a generic error
-    return Error{ErrorCode::InternalError, "Unexpected sendRequest retry exit"};
+    disconnect();
+
+    AsioTransportAdapter::Options opts;
+    opts.socketPath = pImpl->config_.socketPath;
+    opts.headerTimeout = pImpl->headerTimeout_;
+    opts.bodyTimeout = pImpl->bodyTimeout_;
+    opts.requestTimeout = pImpl->config_.requestTimeout;
+    auto r = AsioTransportAdapter::send_request(req, opts);
+    if (!r)
+        return r.error();
+    return r.value();
 }
 
 Result<MessageFramer::FrameHeader> DaemonClient::readFrameHeader(int socketFd) {
@@ -1260,305 +959,29 @@ Result<GrepResponse> DaemonClient::streamingGrep(const GrepRequest& req) {
 
 Result<void> DaemonClient::sendRequestStreaming(const Request& req,
                                                 std::shared_ptr<ChunkedResponseHandler> handler) {
-    // Helper: only retry idempotent streaming queries (safe to re-send)
-    auto is_idempotent = [](const Request& r) -> bool {
-        return std::holds_alternative<SearchRequest>(r) || std::holds_alternative<ListRequest>(r) ||
-               std::holds_alternative<GrepRequest>(r);
-    };
-
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (!isConnected()) {
-            if (auto result = connect(); !result) {
-                return result.error();
-            }
-        }
-
-        // Check circuit breaker
-        if (pImpl->config_.enableCircuitBreaker) {
-            if (!pImpl->breaker_.shouldAllow()) {
-                return Error{ErrorCode::NetworkError, "Circuit breaker is open"};
-            }
-        }
-
-        try {
-            // Create message
-            Message msg;
-            msg.version = PROTOCOL_VERSION;
-            msg.requestId =
-                static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-            msg.timestamp = std::chrono::steady_clock::now();
-            msg.payload = req;
-            msg.clientVersion = "yams-client-0.3.4";
-
-            // Use MessageFramer to frame the message with CRC32 checksum
-            MessageFramer framer;
-            auto framedResult = framer.frame_message(msg);
-            if (!framedResult) {
-                pImpl->breaker_.recordFailure();
-                return framedResult.error();
-            }
-
-            auto& framedData = framedResult.value();
-            spdlog::debug("Sending {} bytes to daemon (framed with CRC32)", framedData.size());
-
-            // Send framed message data with timeout
-            const auto t_start = std::chrono::steady_clock::now();
-            size_t totalSent = 0;
-            const auto deadline = std::chrono::steady_clock::now() + pImpl->config_.requestTimeout;
-
-            // Allow a single transparent reconnect+retry on EPIPE/ECONNRESET to handle servers that
-            // close connections after a response while the pool reuses sockets.
-            bool retriedAfterPipe = false;
-            while (totalSent < framedData.size()) {
-                if (std::chrono::steady_clock::now() > deadline) {
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError, "Send timeout"};
-                }
-
-                ssize_t sent = send(pImpl->socketFd_, framedData.data() + totalSent,
-                                    framedData.size() - totalSent, MSG_NOSIGNAL);
-
-                if (sent < 0) {
-                    int err = errno;
-                    if (err == EAGAIN || err == EWOULDBLOCK) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                    // Some platforms may surface errno==0 here when SIGPIPE is suppressed;
-                    // map to a meaningful error (prefer EPIPE, fall back to ECONNRESET).
-                    if (err == 0) {
-#ifdef EPIPE
-                        err = EPIPE;
-#else
-                        err = ECONNRESET;
-#endif
-                    }
-                    // If the peer closed (EPIPE/ECONNRESET), attempt a single reconnect+retry.
-                    if ((err == EPIPE || err == ECONNRESET) && !retriedAfterPipe) {
-                        spdlog::warn(
-                            "[DaemonClient] Send failed with {}. Reconnecting and retrying once...",
-                            strerror(err));
-                        // Reset connection and retry from the beginning.
-                        disconnect();
-                        auto rc = connect();
-                        if (!rc) {
-                            pImpl->breaker_.recordFailure();
-                            Error e{ErrorCode::NetworkError,
-                                    std::string("Reconnect failed after send error: ") +
-                                        rc.error().message};
-                            handler->onError(e);
-                            return e;
-                        }
-                        retriedAfterPipe = true;
-                        totalSent = 0;
-                        continue;
-                    }
-                    pImpl->breaker_.recordFailure();
-                    return Error{ErrorCode::NetworkError,
-                                 "Send failed: " + std::string(strerror(err))};
-                }
-
-                totalSent += static_cast<size_t>(sent);
-            }
-
-            // Read framed response header first
-            auto headerResult = readFrameHeader(pImpl->socketFd_);
-            if (!headerResult) {
-                // One-time reconnect+retry even for non-idempotent requests when no header bytes
-                // were received yet (connection closed/reset pre-header). This mirrors the
-                // non-streaming path to stabilize pooled clients reusing sockets.
-                if (attempt == 0 && headerResult.error().code == ErrorCode::NetworkError) {
-                    spdlog::warn("[DaemonClient] Streaming header recv failed: {}. Reconnecting "
-                                 "and retrying once...",
-                                 headerResult.error().message);
-                    disconnect();
-                    auto rc = connect();
-                    if (!rc) {
-                        handler->onError(headerResult.error());
-                        return headerResult.error();
-                    }
-                    goto retry_streaming_outer;
-                }
-                handler->onError(headerResult.error());
-                return headerResult.error();
-            }
-
-            auto header = headerResult.value();
-            const auto ttfb = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t_start);
-            spdlog::debug("[DaemonClient] TTFB={} ms (requestId={})", ttfb.count(), msg.requestId);
-
-            // If server sent a header-only streaming frame, synthesize an empty header response
-            // and skip reading a (non-existent) payload. Otherwise, read and parse the full frame.
-            Response headerResponse;
-            bool haveParsedHeaderPayload = false;
-            if (header.is_header_only()) {
-                // Synthesize a minimal header aligned with the request type
-                if (std::holds_alternative<SearchRequest>(req)) {
-                    SearchResponse r; // empty; totals will arrive in chunks
-                    headerResponse = r;
-                } else if (std::holds_alternative<ListRequest>(req)) {
-                    ListResponse r;
-                    headerResponse = r;
-                } else if (std::holds_alternative<GrepRequest>(req)) {
-                    GrepResponse r;
-                    headerResponse = r;
-                } else {
-                    // Generic success header for other types
-                    headerResponse = SuccessResponse{"Streaming"};
-                }
-            } else {
-                // Read the complete frame for the header
-                auto frameResult = readFullFrame(pImpl->socketFd_, header);
-                if (!frameResult) {
-                    handler->onError(frameResult.error());
-                    return frameResult.error();
-                }
-
-                // Parse and verify the complete frame
-                auto responseMsgResult = framer.parse_frame(frameResult.value());
-                if (!responseMsgResult) {
-                    pImpl->breaker_.recordFailure();
-                    handler->onError(responseMsgResult.error());
-                    return responseMsgResult.error();
-                }
-                auto& responseMsg = responseMsgResult.value();
-
-                // Verify response ID matches request
-                if (responseMsg.requestId != msg.requestId) {
-                    pImpl->breaker_.recordFailure();
-                    Error err{ErrorCode::InvalidData, "Response ID mismatch"};
-                    handler->onError(err);
-                    return err;
-                }
-
-                // Extract response from message
-                if (!std::holds_alternative<Response>(responseMsg.payload)) {
-                    pImpl->breaker_.recordFailure();
-                    Error err{ErrorCode::InvalidData, "Expected response, got request"};
-                    handler->onError(err);
-                    return err;
-                }
-                headerResponse = std::get<Response>(responseMsg.payload);
-                haveParsedHeaderPayload = true;
-
-                // If error response, report and exit
-                if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
-                    handler->onError(Error{err->code, err->message});
-                    pImpl->breaker_.recordFailure();
-                    return Error{err->code, err->message};
-                }
-            }
-
-            // Process header frame
-            handler->onHeaderReceived(headerResponse);
-
-            // If not chunked or last chunk already, we're done
-            if (!header.is_chunked() || header.is_last_chunk()) {
-                // If we parsed a payload-bearing header, also pass it as the final chunk
-                if (haveParsedHeaderPayload) {
-                    handler->onChunkReceived(headerResponse, true);
-                }
-                handler->onComplete();
-                pImpl->breaker_.recordSuccess();
-                if (pImpl->config_.singleUseConnections) {
-                    disconnect();
-                }
-                return Result<void>();
-            }
-
-            // Process chunks until we get the last one
-            bool lastChunkReceived = false;
-            while (!lastChunkReceived) {
-                // Read next chunk header
-                // Use body-timeout for inter-chunk header reads (inactivity-based at server)
-                auto chunkHeaderResult =
-                    readFrameHeaderWithTimeout(pImpl->socketFd_, pImpl->bodyTimeout_);
-                if (!chunkHeaderResult) {
-                    handler->onError(chunkHeaderResult.error());
-                    return chunkHeaderResult.error();
-                }
-
-                auto chunkHeader = chunkHeaderResult.value();
-
-                // Validate it's a chunk
-                if (!chunkHeader.is_chunked()) {
-                    Error err{ErrorCode::InvalidData, "Expected chunked frame"};
-                    handler->onError(err);
-                    return err;
-                }
-
-                // Check if it's the last chunk
-                lastChunkReceived = chunkHeader.is_last_chunk();
-
-                // Read the complete chunk frame
-                auto chunkFrameResult = readFullFrame(pImpl->socketFd_, chunkHeader);
-                if (!chunkFrameResult) {
-                    handler->onError(chunkFrameResult.error());
-                    return chunkFrameResult.error();
-                }
-
-                // Parse and verify the chunk frame
-                auto chunkResponseMsgResult = framer.parse_frame(chunkFrameResult.value());
-                if (!chunkResponseMsgResult) {
-                    handler->onError(chunkResponseMsgResult.error());
-                    pImpl->breaker_.recordFailure();
-                    return chunkResponseMsgResult.error();
-                }
-                auto& chunkResponseMsg = chunkResponseMsgResult.value();
-
-                // Verify chunk ID matches request
-                if (chunkResponseMsg.requestId != msg.requestId) {
-                    Error err{ErrorCode::InvalidData, "Chunk response ID mismatch"};
-                    handler->onError(err);
-                    pImpl->breaker_.recordFailure();
-                    return err;
-                }
-
-                // Extract chunk response
-                if (!std::holds_alternative<Response>(chunkResponseMsg.payload)) {
-                    Error err{ErrorCode::InvalidData, "Expected response in chunk, got request"};
-                    handler->onError(err);
-                    pImpl->breaker_.recordFailure();
-                    return err;
-                }
-
-                // Process the chunk response
-                auto& chunkResponse = std::get<Response>(chunkResponseMsg.payload);
-
-                // If error in chunk, report and exit
-                if (auto* err = std::get_if<ErrorResponse>(&chunkResponse)) {
-                    handler->onError(Error{err->code, err->message});
-                    pImpl->breaker_.recordFailure();
-                    return Error{err->code, err->message};
-                }
-
-                // Process the chunk with handler
-                if (!handler->onChunkReceived(chunkResponse, lastChunkReceived)) {
-                    break;
-                }
-            }
-
-            // All chunks processed
-            handler->onComplete();
-            pImpl->breaker_.recordSuccess();
-            if (pImpl->config_.singleUseConnections) {
-                disconnect();
-            }
-            return Result<void>();
-
-        } catch (const std::exception& e) {
-            pImpl->breaker_.recordFailure();
-            Error err{ErrorCode::InternalError,
-                      "Error in streaming request: " + std::string(e.what())};
-            handler->onError(err);
-            return err;
-        }
-
-        // Label to restart the outer attempt loop for streaming path
-    retry_streaming_outer:; // try the loop again (attempt==1)
+    if (auto rc = connect(); !rc) {
+        return rc.error();
     }
-    return Error{ErrorCode::InternalError, "Unexpected sendRequestStreaming retry exit"};
+    disconnect();
+
+    AsioTransportAdapter::Options opts;
+    opts.socketPath = pImpl->config_.socketPath;
+    opts.headerTimeout = pImpl->headerTimeout_;
+    opts.bodyTimeout = pImpl->bodyTimeout_;
+    opts.requestTimeout = pImpl->config_.requestTimeout;
+
+    auto onHeader = [handler](const Response& r) { handler->onHeaderReceived(r); };
+    auto onChunk = [handler](const Response& r, bool last) {
+        return handler->onChunkReceived(r, last);
+    };
+    auto onError = [handler](const Error& e) { handler->onError(e); };
+    auto onComplete = [handler]() { handler->onComplete(); };
+
+    auto res = AsioTransportAdapter::send_request_streaming(req, opts, onHeader, onChunk, onError,
+                                                            onComplete);
+    if (!res)
+        return res.error();
+    return Result<void>();
 }
 
 // Streaming AddDocument helper: header-first then final chunk contains full response

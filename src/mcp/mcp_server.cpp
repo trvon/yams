@@ -1,3 +1,4 @@
+#include <yams/cli/asio_client_pool.hpp>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
@@ -251,6 +252,22 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 
     update_req_manager_ = std::make_unique<cli::PooledRequestManager<
         yams::daemon::UpdateDocumentRequest, yams::daemon::UpdateDocumentResponse>>(pool_config);
+
+    // Quick daemon health probe via Asio pool (prefer ping; fallback to status)
+    {
+        yams::cli::AsioClientPool asio_pool{};
+        auto pong = asio_pool.ping();
+        if (pong) {
+            spdlog::info("Daemon reachable via Asio client pool (ping)");
+        } else {
+            auto st = asio_pool.status();
+            if (st) {
+                spdlog::info("Daemon reachable via Asio client pool (status)");
+            } else {
+                spdlog::debug("Asio probe failed: {}", pong ? "" : pong.error().message);
+            }
+        }
+    }
 
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();

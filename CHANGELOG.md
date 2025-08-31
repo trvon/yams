@@ -5,6 +5,17 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.6.0] - 2025-08-29
+
+### Added
+- Protobuf-backed IPC payloads (protobuf-only) with Envelope schema and oneof covering daemon/client requests and responses.
+- MessageFramer uses ProtoSerializer exclusively; transport framing (header, length, CRC, streaming flags, request_id) unchanged.
+- MAX_MESSAGE_SIZE checks in encode/decode; Envelope carries version, request_id, session_id, client_version.
+
+### Changed
+- Migrated client/server payload codec from custom binary to Protocol Buffers; older non-protobuf clients are incompatible after this release.
+- Logging to include message type and request_id at key boundaries (in progress).
+
 ## [v0.5.9] - 2025-08-29
 
 ### Added

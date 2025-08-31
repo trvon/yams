@@ -588,10 +588,12 @@ Task<Result<void>> RequestHandler::handle_streaming_request(AsyncSocket<AsyncIOC
                                 std::string{"Invalid state before complete write: "} + ex.what()};
             }
         }
-        spdlog::debug("handle_streaming_request: writing complete response (non-chunked) for "
-                      "request_id={} type={}",
-                      request_id,
-                      static_cast<int>(getMessageType(std::get<Response>(response_msg.payload))));
+        {
+            int mt = static_cast<int>(getMessageType(std::get<Response>(response_msg.payload)));
+            spdlog::debug("handle_streaming_request: writing complete response (non-chunked) for "
+                          "request_id={} type={}",
+                          request_id, mt);
+        }
         auto write_result = co_await write_message(socket, response_msg);
         if (!write_result) {
             spdlog::debug("handle_streaming_request: write_message failed for request_id={} msg={}",

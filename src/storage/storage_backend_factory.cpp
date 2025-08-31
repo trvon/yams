@@ -1,4 +1,5 @@
 #include <yams/crypto/hasher.h>
+#include <yams/storage/object_storage_plugin_loader.h>
 #include <yams/storage/storage_backend.h>
 
 #include <spdlog/spdlog.h>
@@ -38,6 +39,16 @@ std::unique_ptr<IStorageBackend> StorageBackendFactory::create(const BackendConf
         return backend;
     }
 
+    // Plugin-prefixed type: plugin:<name>
+    if (type.rfind("plugin:", 0) == 0) {
+        std::string name = type.substr(7);
+        if (auto pluginBackend = tryCreatePluginBackendByName(name, config)) {
+            return pluginBackend;
+        }
+        spdlog::error("Requested plugin '{}' not found or failed to initialize", name);
+        return nullptr;
+    }
+
     // Built-in backends
     if (type == "filesystem" || type == "local" || type == "file") {
         auto backend = std::make_unique<FilesystemBackend>();
@@ -48,13 +59,29 @@ std::unique_ptr<IStorageBackend> StorageBackendFactory::create(const BackendConf
         return backend;
     }
 
-    if (type == "s3" || type == "http" || type == "https" || type == "ftp") {
+    if (type == "s3") {
+        if (auto pluginBackend = tryCreateS3PluginBackend(config)) {
+            return pluginBackend;
+        }
         auto backend = std::make_unique<URLBackend>();
         if (auto result = backend->initialize(config); !result) {
             spdlog::error("Failed to initialize URL backend: {}", result.error().message);
             return nullptr;
         }
         return backend;
+    }
+
+    if (type == "http" || type == "https" || type == "ftp") {
+        auto backend = std::make_unique<URLBackend>();
+        if (auto result = backend->initialize(config); !result) {
+            spdlog::error("Failed to initialize URL backend: {}", result.error().message);
+            return nullptr;
+        }
+        return backend;
+    }
+
+    if (auto pluginBackend = tryCreatePluginBackendByName(type, config)) {
+        return pluginBackend;
     }
 
     spdlog::error("Unknown storage backend type: {}", config.type);

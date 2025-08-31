@@ -3,10 +3,9 @@
 # ============================================================================
 add_library(yams_daemon_client STATIC
     client/daemon_client.cpp
-    client/circuit_breaker.cpp
+    client/asio_transport.cpp
     ipc/ipc_protocol.cpp
     ipc/message_framing.cpp
-    ipc/message_serializer.cpp
 )
 
 target_include_directories(yams_daemon_client
@@ -22,6 +21,7 @@ target_link_libraries(yams_daemon_client
         yams::core
     PRIVATE
         spdlog::spdlog
+        yams::daemon_ipc
 )
 
 # tl-expected is header-only; link to whichever target exists to propagate include dirs
@@ -42,7 +42,6 @@ add_library(yams::daemon_client ALIAS yams_daemon_client)
 # ============================================================================
 add_library(yams_daemon_ipc STATIC
     ipc/async_socket.cpp
-    ipc/async_ipc_server.cpp
     ipc/request_handler.cpp
     ipc/streaming_processor.cpp
     ipc/connection_fsm.cpp
@@ -74,6 +73,24 @@ target_link_libraries(yams_daemon_ipc
         spdlog::spdlog
 )
 
+# Ensure Boost.Asio headers are available for implementation without exporting Boost targets
+if(TARGET Boost::headers)
+    get_target_property(_boost_hdrs_inc Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
+    if(_boost_hdrs_inc)
+        target_include_directories(yams_daemon_ipc PRIVATE ${_boost_hdrs_inc})
+    endif()
+elseif(TARGET Boost::boost)
+    get_target_property(_boost_boost_inc Boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+    if(_boost_boost_inc)
+        target_include_directories(yams_daemon_ipc PRIVATE ${_boost_boost_inc})
+    endif()
+elseif(TARGET boost::boost)
+    get_target_property(_boost_boost_lc_inc boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+    if(_boost_boost_lc_inc)
+        target_include_directories(yams_daemon_ipc PRIVATE ${_boost_boost_lc_inc})
+    endif()
+endif()
+
 # tl-expected is header-only; link interface target to propagate include dirs
 if(TARGET tl-expected::tl-expected)
     target_link_libraries(yams_daemon_ipc PUBLIC tl-expected::tl-expected)
@@ -89,6 +106,57 @@ add_library(yams::daemon_ipc ALIAS yams_daemon_ipc)
 
 # Platform-specific async I/O defines for the IPC library (to match implementation)
 option(YAMS_USE_KQUEUE "Use kqueue backend for async IO on Apple/BSD" OFF)
+
+# Default: use Boost.Asio-backed IO context
+option(YAMS_IPC_USE_BOOST_ASIO "Use Boost.Asio backend for AsyncIOContext (default ON)" ON)
+if(YAMS_IPC_USE_BOOST_ASIO)
+    target_compile_definitions(yams_daemon_ipc PRIVATE YAMS_USE_BOOST_ASIO=1)
+    # Ensure Boost headers are visible to this target without creating a link dependency
+    # Prefer Conan-provided include variables if available
+    if(DEFINED Boost_INCLUDE_DIRS)
+        target_include_directories(yams_daemon_ipc PRIVATE ${Boost_INCLUDE_DIRS})
+    elseif(DEFINED boost_INCLUDE_DIRS)
+        target_include_directories(yams_daemon_ipc PRIVATE ${boost_INCLUDE_DIRS})
+    elseif(TARGET Boost::headers)
+        get_target_property(_bh_inc Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
+        if(_bh_inc)
+            target_include_directories(yams_daemon_ipc PRIVATE ${_bh_inc})
+        endif()
+    elseif(TARGET Boost::boost)
+        get_target_property(_bb_inc Boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+        if(_bb_inc)
+            target_include_directories(yams_daemon_ipc PRIVATE ${_bb_inc})
+        endif()
+    elseif(TARGET boost::boost)
+        get_target_property(_blc_inc boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+        if(_blc_inc)
+            target_include_directories(yams_daemon_ipc PRIVATE ${_blc_inc})
+        endif()
+    else()
+        # Fallback: fetch Boost headers locally (header-only) to satisfy Conan builds lacking Boost
+        include(FetchContent)
+        FetchContent_Declare(
+            Boost
+            URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0.tar.xz
+            URL_HASH SHA256=9a2fd4f2e1a16ad8c9f4c5b09d0a717d67868d8ad4dc4d79da808b6b8c97e469
+            DOWNLOAD_EXTRACT_TIMESTAMP ON
+        )
+        FetchContent_MakeAvailable(Boost)
+        if(DEFINED boost_SOURCE_DIR)
+            # Add common boost include roots to cover asio headers
+            target_include_directories(yams_daemon_ipc PRIVATE
+                ${boost_SOURCE_DIR}
+                ${boost_SOURCE_DIR}/libs/headers/include
+                ${boost_SOURCE_DIR}/libs/asio/include
+            )
+        endif()
+    endif()
+    # If project created a yams_boost_headers interface target, use it privately
+    if(TARGET yams_boost_headers)
+        target_link_libraries(yams_daemon_ipc PRIVATE yams_boost_headers)
+    endif()
+    message(STATUS "yams_daemon_ipc: Boost.Asio IO backend enabled (YAMS_USE_BOOST_ASIO)")
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig)

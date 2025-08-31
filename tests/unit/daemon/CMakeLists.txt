@@ -1,6 +1,5 @@
 # Daemon Unit Tests
 
-# Daemon core tests
 add_executable(daemon_test
     daemon_test.cpp
 )
@@ -13,19 +12,27 @@ target_link_libraries(daemon_test PRIVATE
 # Define YAMS_TESTING to enable test API
 target_compile_definitions(daemon_test PRIVATE YAMS_TESTING)
 add_test(NAME daemon_test COMMAND daemon_test)
-set_tests_properties(daemon_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(daemon_test PROPERTIES LABELS "daemon;unit" TIMEOUT 45)
 
-# IPC server tests
-add_executable(ipc_server_test
-    ipc_server_test.cpp
+# Async IO socketpair test (protobuf-only framing over AsyncSocket)
+add_executable(async_io_socketpair_test
+    async_io_socketpair_test.cpp
 )
-target_link_libraries(ipc_server_test PRIVATE
+target_link_libraries(async_io_socketpair_test PRIVATE
     yams::daemon
     GTest::gtest
     GTest::gtest_main
 )
-add_test(NAME ipc_server_test COMMAND ipc_server_test)
-set_tests_properties(ipc_server_test PROPERTIES LABELS "daemon;unit")
+# Ensure GoogleTest include directories are available
+if(TARGET gtest::gtest)
+    target_include_directories(async_io_socketpair_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(async_io_socketpair_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+add_test(NAME async_io_socketpair_test COMMAND async_io_socketpair_test)
+set_tests_properties(async_io_socketpair_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
+
+## Removed legacy IPC server tests (async_ipc_server) during Boost.Asio migration
 
 # Connection FSM tests
 add_executable(connection_fsm_test
@@ -36,6 +43,11 @@ target_link_libraries(connection_fsm_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(connection_fsm_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(connection_fsm_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME connection_fsm_test COMMAND connection_fsm_test)
 set_tests_properties(connection_fsm_test PROPERTIES LABELS "daemon;unit")
 
@@ -48,8 +60,13 @@ target_link_libraries(ipc_client_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(ipc_client_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(ipc_client_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME ipc_client_test COMMAND ipc_client_test)
-set_tests_properties(ipc_client_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(ipc_client_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)
 
 # Repair scheduling adapter tests
 add_executable(repair_scheduling_adapter_test
@@ -60,8 +77,13 @@ target_link_libraries(repair_scheduling_adapter_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(repair_scheduling_adapter_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(repair_scheduling_adapter_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME repair_scheduling_adapter_test COMMAND repair_scheduling_adapter_test)
-set_tests_properties(repair_scheduling_adapter_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(repair_scheduling_adapter_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
 # RepairCoordinator basic behavior test (gating/metrics)
 add_executable(repair_coordinator_test
@@ -72,8 +94,13 @@ target_link_libraries(repair_coordinator_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(repair_coordinator_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(repair_coordinator_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME repair_coordinator_test COMMAND repair_coordinator_test)
-set_tests_properties(repair_coordinator_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(repair_coordinator_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
 # Message framing tests
 add_executable(message_framing_test
@@ -85,8 +112,13 @@ target_link_libraries(message_framing_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(message_framing_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(message_framing_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME message_framing_test COMMAND message_framing_test)
-set_tests_properties(message_framing_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(message_framing_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
 # Resource pool tests
 add_executable(resource_pool_test
@@ -97,8 +129,13 @@ target_link_libraries(resource_pool_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(resource_pool_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(resource_pool_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME resource_pool_test COMMAND resource_pool_test)
-set_tests_properties(resource_pool_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(resource_pool_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
 # Plugin loader tests
 add_executable(plugin_loader_test
@@ -110,8 +147,13 @@ target_link_libraries(plugin_loader_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(plugin_loader_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(plugin_loader_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME plugin_loader_test COMMAND plugin_loader_test)
-set_tests_properties(plugin_loader_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(plugin_loader_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
 # ONNX Model pool tests - only if ONNX plugin is available
 find_package(onnxruntime QUIET)
@@ -128,7 +170,7 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
         GTest::gtest_main
     )
     add_test(NAME onnx_model_pool_test COMMAND onnx_model_pool_test)
-    set_tests_properties(onnx_model_pool_test PROPERTIES LABELS "daemon;unit")
+    set_tests_properties(onnx_model_pool_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)
 
     # ONNX Model Provider tests
     add_executable(onnx_model_provider_test
@@ -141,7 +183,7 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
         GTest::gtest_main
     )
     add_test(NAME onnx_model_provider_test COMMAND onnx_model_provider_test)
-    set_tests_properties(onnx_model_provider_test PROPERTIES LABELS "daemon;unit")
+    set_tests_properties(onnx_model_provider_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)
 else()
     message(STATUS "Skipping ONNX tests - ONNX Runtime not available")
 endif()
@@ -155,8 +197,13 @@ target_link_libraries(response_of_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(response_of_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(response_of_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME response_of_test COMMAND response_of_test)
-set_tests_properties(response_of_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(response_of_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
 
 # Download protocol tests
 add_executable(download_protocol_test
@@ -168,5 +215,10 @@ target_link_libraries(download_protocol_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+if(TARGET gtest::gtest)
+    target_include_directories(download_protocol_test PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+elseif(TARGET GTest::gtest)
+    target_include_directories(download_protocol_test PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 add_test(NAME download_protocol_test COMMAND download_protocol_test)
-set_tests_properties(download_protocol_test PROPERTIES LABELS "daemon;unit")
+set_tests_properties(download_protocol_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)

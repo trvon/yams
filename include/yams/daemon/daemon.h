@@ -2,7 +2,6 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/StateComponent.h>
-#include <yams/daemon/ipc/async_ipc_server.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
 
 #include <atomic>
@@ -12,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+//
 
 namespace yams::daemon {
 
@@ -20,6 +20,7 @@ class LifecycleComponent;
 class ServiceManager;
 class RequestDispatcher;
 class RepairCoordinator;
+// Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
 
 struct DaemonConfig {
     std::filesystem::path dataDir;
@@ -37,7 +38,6 @@ struct DaemonConfig {
     ModelPoolConfig modelPoolConfig;
     std::filesystem::path pluginDir;
     bool autoLoadPlugins = true;
-    std::vector<std::string> enabledPlugins;
     bool enableAutoRepair = true;
     size_t autoRepairBatchSize = 32;
     size_t maxPendingRepairs = 1000;
@@ -46,7 +46,9 @@ struct DaemonConfig {
     std::chrono::milliseconds heartbeatInterval{500}; // default 500ms
     std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
 
-    // Daemon-side download policy scaffolding (disabled by default until sandboxed)
+    // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
+    class AsyncIOContext;
+    template <typename IOContextT> class AsyncSocket;
     struct DownloadPolicy {
         bool enable{false};                               // feature gate
         std::vector<std::string> allowedHosts{};          // exact or wildcard patterns
@@ -82,18 +84,12 @@ public:
     static std::filesystem::path resolveSystemPath(PathType type);
     static bool canWriteToDirectory(const std::filesystem::path& dir);
     static std::filesystem::path getXDGRuntimeDir();
-    static std::filesystem::path getXDGStateHome();
-
-private:
-    void run(std::stop_token stopToken);
-
-    // Core Components
     DaemonConfig config_;
     StateComponent state_;
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::unique_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
-    std::unique_ptr<SimpleAsyncIpcServer> ipcServer_;
+    // IPC server removed during Boost.Asio migration; acceptance loop handled elsewhere
     std::unique_ptr<RepairCoordinator> repairCoordinator_;
 
     // Threading and state

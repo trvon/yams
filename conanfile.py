@@ -49,6 +49,11 @@ class YamsConan(ConanFile):
         # Compat
         self.requires('tl-expected/1.1.0')
 
+        # Boost is required for IPC client pool (Asio)
+        # Use Boost 1.86.0 across builds to ensure consistent Asio headers
+        # Override to unify any transitive Boost requirements (e.g., from onnxruntime)
+        self.requires("boost/1.86.0", override=True)
+
         # Note: PDFium is not available in Conan Center
         # When enable_pdf=True, CMake will fall back to FetchContent
         # to download prebuilt binaries from pdfium-binaries project
@@ -57,8 +62,6 @@ class YamsConan(ConanFile):
         if self.options.enable_tui:
             self.requires("ncurses/6.4")
             # Note: ImTUI is downloaded via FetchContent when TUI is enabled
-
-        # MCP server no longer requires Drogon or Boost
 
         # ONNX Runtime for embeddings and LLM inference (optional)
         if self.options.enable_onnx:

@@ -372,15 +372,6 @@ struct ConfigV2 {
             bool validate_on_acquire = true; // Validate session health
         } resource_pool;
 
-        // Circuit breaker settings
-        struct CircuitBreaker {
-            bool enable = true;
-            size_t failure_threshold = 5;
-            size_t success_threshold = 2;
-            int open_timeout_s = 30;
-            int half_open_timeout_s = 10;
-        } circuit_breaker;
-
         // Embedding client behavior
         struct Client {
             bool use_daemon = true;        // Try daemon first

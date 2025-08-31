@@ -75,3 +75,5 @@ conan.lock
 AGENTS.md
 .yams*
 CMakeUserPresets.json
+CRUSH.md
+OPENCODE.md

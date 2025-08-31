@@ -6,8 +6,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <list>
 #include <mutex>
+#include <optional>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -126,6 +129,70 @@ static size_t readCallback(void* buffer, size_t size, size_t nmemb, void* userp)
 
 class URLBackend::Impl {
 public:
+    std::atomic<bool> healthy{true};
+    std::atomic<uint64_t> errorCount{0};
+    std::string lastError;
+
+    // Retry helpers
+    bool isRetryable(const Error& err) const { return err.code == ErrorCode::NetworkError; }
+
+    void backoff(int attempt) const {
+        int delay = static_cast<int>(config.baseRetryMs) * (1 << attempt);
+        if (config.jitterMs > 0) {
+            static thread_local std::mt19937 rng{std::random_device{}()};
+            std::uniform_int_distribution<int> dist(0, static_cast<int>(config.jitterMs));
+            delay += dist(rng);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    }
+
+    struct HeadResult {
+        long statusCode;
+        std::unordered_map<std::string, std::string> headers;
+    };
+
+    static size_t headerCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
+        auto line = std::string(buffer, size * nitems);
+        auto pos = line.find(':');
+        if (pos != std::string::npos) {
+            auto name = line.substr(0, pos);
+            auto value = line.substr(pos + 1);
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+                value.erase(0, 1);
+            while (!value.empty() && (value.back() == '\r' || value.back() == '\n'))
+                value.pop_back();
+            auto* hdrs = static_cast<HeadResult*>(userdata);
+            hdrs->headers[name] = value;
+        }
+        return size * nitems;
+    }
+
+    Result<HeadResult> performHEADOnce(const std::string& url) {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+            return Result<HeadResult>(Error{ErrorCode::Unknown, "CURL init failed"});
+        HeadResult result;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &result);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.requestTimeout);
+        configureAuth(curl);
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.statusCode);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK) {
+            healthy.store(false);
+            ++errorCount;
+            lastError = curl_easy_strerror(res);
+            return Result<HeadResult>(Error{ErrorCode::NetworkError, lastError});
+        }
+        healthy.store(true);
+        return result;
+    }
+
+    // existing members unchanged...
+public:
     BackendConfig config;
     std::string scheme;
     std::string host;
@@ -207,7 +274,7 @@ public:
         return {};
     }
 
-    Result<std::vector<std::byte>> performGET(const std::string& url) {
+    Result<std::vector<std::byte>> performGETOnce(const std::string& url) {
         CURL* curl = curl_easy_init();
         if (!curl) {
             return Result<std::vector<std::byte>>(
@@ -250,7 +317,7 @@ public:
         return result;
     }
 
-    Result<void> performPUT(const std::string& url, std::span<const std::byte> data) {
+    Result<void> performPUTOnce(const std::string& url, std::span<const std::byte> data) {
         CURL* curl = curl_easy_init();
         if (!curl) {
             return Result<void>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
@@ -284,7 +351,7 @@ public:
         return {};
     }
 
-    Result<void> performDELETE(const std::string& url) {
+    Result<void> performDELETEOnce(const std::string& url) {
         CURL* curl = curl_easy_init();
         if (!curl) {
             return Result<void>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
@@ -311,6 +378,59 @@ public:
         }
 
         return {};
+    }
+
+    // ---- retry wrappers ----
+    Result<std::vector<std::byte>> performGET(const std::string& url) {
+        for (int attempt = 0;; ++attempt) {
+            auto result = performGETOnce(url);
+            if (result) {
+                return result;
+            }
+            if (attempt >= config.maxRetries || !isRetryable(result.error())) {
+                return result;
+            }
+            backoff(attempt);
+        }
+    }
+
+    Result<void> performPUT(const std::string& url, std::span<const std::byte> data) {
+        for (int attempt = 0;; ++attempt) {
+            auto res = performPUTOnce(url, data);
+            if (res) {
+                return res;
+            }
+            if (attempt >= config.maxRetries || !isRetryable(res.error())) {
+                return res;
+            }
+            backoff(attempt);
+        }
+    }
+
+    Result<void> performDELETE(const std::string& url) {
+        for (int attempt = 0;; ++attempt) {
+            auto res = performDELETEOnce(url);
+            if (res) {
+                return res;
+            }
+            if (attempt >= config.maxRetries || !isRetryable(res.error())) {
+                return res;
+            }
+            backoff(attempt);
+        }
+    }
+
+    Result<HeadResult> performHEAD(const std::string& url) {
+        for (int attempt = 0;; ++attempt) {
+            auto res = performHEADOnce(url);
+            if (res) {
+                return res;
+            }
+            if (attempt >= config.maxRetries || !isRetryable(res.error())) {
+                return res;
+            }
+            backoff(attempt);
+        }
     }
 };
 
@@ -373,10 +493,26 @@ Result<std::vector<std::byte>> URLBackend::retrieve(std::string_view key) const 
 }
 
 Result<bool> URLBackend::exists(std::string_view key) const {
-    // For remote backends, we'll do a HEAD request
-    // For now, try to retrieve and check if it succeeds
-    auto result = retrieve(key);
-    return Result<bool>(result.has_value());
+    std::string url = pImpl->buildURL(key);
+    auto headResult = pImpl->performHEAD(url);
+    if (!headResult) {
+        // Convert network errors into false (not found) where appropriate
+        if (headResult.error().code == ErrorCode::ChunkNotFound) {
+            return false;
+        }
+        return Result<bool>(headResult.error());
+    }
+    // 2xx indicates success; 404 not found; others propagate error
+    const auto& hr = headResult.value();
+    long status = hr.statusCode;
+    if (status == 404) {
+        return false;
+    }
+    if (status >= 200 && status < 300) {
+        return true;
+    }
+    return Result<bool>(
+        Error{ErrorCode::NetworkError, "HEAD unexpected status: " + std::to_string(status)});
 }
 
 Result<void> URLBackend::remove(std::string_view key) {

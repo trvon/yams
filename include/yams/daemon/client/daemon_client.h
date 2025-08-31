@@ -22,15 +22,15 @@ struct ClientConfig {
     std::chrono::milliseconds connectTimeout{1000};
     std::chrono::milliseconds headerTimeout{30000}; // 30s timeout for receiving headers
     std::chrono::milliseconds bodyTimeout{60000};   // 60s timeout for receiving response body
-    std::chrono::milliseconds requestTimeout{5000}; // Legacy timeout (for non-chunked operations)
+    std::chrono::milliseconds requestTimeout{5000};
     size_t maxRetries = 3;
     bool autoStart = true;
     bool enableCircuitBreaker = true;
-    bool enableChunkedResponses = true; // Enable processing of chunked responses (default: true)
-    size_t maxChunkSize = 256 * 1024;   // 256KB max chunk size
-    bool progressiveOutput = true;      // Render results as they arrive (default: true)
-    bool singleUseConnections = true;   // Close client connection after each request
-    bool disableStreamingForLargeQueries = false; // Always use streaming, even for large queries
+    bool enableChunkedResponses = true;
+    size_t maxChunkSize = 256 * 1024;
+    bool progressiveOutput = true;
+    bool singleUseConnections = true;
+    bool disableStreamingForLargeQueries = false;
 };
 
 class DaemonClient {

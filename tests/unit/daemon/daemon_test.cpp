@@ -7,7 +7,7 @@
 #include <gtest/gtest.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
-#include <yams/daemon/ipc/message_serializer.h>
+#include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_index_manager.h>
@@ -358,10 +358,10 @@ TEST_F(DaemonTest, HybridSearchSmoke) {
     msg.requestId = 42;
     msg.payload = Request{req};
 
-    auto bytes = MessageSerializer::serialize_bytes(msg);
-    auto parsed =
-        MessageSerializer::deserialize(std::span<const std::byte>(bytes.data(), bytes.size()));
-    ASSERT_TRUE(parsed);
+    auto enc = ProtoSerializer::encode_payload(msg);
+    ASSERT_TRUE(enc) << enc.error().message;
+    auto parsed = ProtoSerializer::decode_payload(enc.value());
+    ASSERT_TRUE(parsed) << parsed.error().message;
 
     // Since we seeded one vector/doc, hybrid should return at least one result
     // We cannot invoke process directly here; instead ensure daemon is running after seeding
@@ -389,10 +389,10 @@ TEST_F(DaemonTest, FallbackSearchWhenHybridUnavailable) {
     msg.requestId = 7;
     msg.payload = Request{req};
 
-    auto bytes = MessageSerializer::serialize_bytes(msg);
-    auto parsed =
-        MessageSerializer::deserialize(std::span<const std::byte>(bytes.data(), bytes.size()));
-    ASSERT_TRUE(parsed);
+    auto enc = ProtoSerializer::encode_payload(msg);
+    ASSERT_TRUE(enc) << enc.error().message;
+    auto parsed = ProtoSerializer::decode_payload(enc.value());
+    ASSERT_TRUE(parsed) << parsed.error().message;
 
     // Minimal assertion: daemon should remain running and fuzzy path should be valid
     EXPECT_TRUE(daemon_->isRunning());
@@ -420,10 +420,10 @@ TEST_F(DaemonTest, StatusResponseSerializationIncludesReady) {
     msg.requestId = 0;
     msg.payload = Response{sr};
 
-    auto bytes = MessageSerializer::serialize_bytes(msg);
-    auto des =
-        MessageSerializer::deserialize(std::span<const std::byte>(bytes.data(), bytes.size()));
-    ASSERT_TRUE(des) << "Failed to deserialize StatusResponse message";
+    auto enc = ProtoSerializer::encode_payload(msg);
+    ASSERT_TRUE(enc) << "Failed to serialize StatusResponse message: " << enc.error().message;
+    auto des = ProtoSerializer::decode_payload(enc.value());
+    ASSERT_TRUE(des) << "Failed to deserialize StatusResponse message: " << des.error().message;
 
     Message out = des.value();
     auto respVariant = std::get<Response>(out.payload);

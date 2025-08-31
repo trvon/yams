@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
-#include <yams/daemon/ipc/message_serializer.h>
 #include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::daemon::test {

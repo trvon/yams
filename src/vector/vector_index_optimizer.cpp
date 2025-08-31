@@ -10,7 +10,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
-#include <fmt/format.h>
+#include <yams/common/format.h>
 #include <yams/vector/vector_index_optimizer.h>
 
 namespace yams::vector {

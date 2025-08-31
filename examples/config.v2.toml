@@ -398,18 +398,6 @@ idle_timeout_s = 300
 # Validate session health before use
 validate_on_acquire = true
 
-[daemon.circuit_breaker]
-# Enable circuit breaker for resilience
-enable = true
-# Number of failures before opening circuit
-failure_threshold = 5
-# Number of successes to close circuit
-success_threshold = 2
-# Time to wait before trying again (seconds)
-open_timeout_s = 30
-# Time to test recovery (seconds)
-half_open_timeout_s = 10
-
 [daemon.client]
 # Use daemon for embedding generation
 use_daemon = true
