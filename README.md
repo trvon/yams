@@ -1,481 +1,122 @@
-[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)
+![CI](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)
 
-# YAMS - Yet Another Memory System
+# YAMS — Yet Another Memory System
 
-Persistent memory for LLMs and applications. Content-addressed storage with deduplication, semantic search, and full-text indexing.
+Persistent memory for LLMs and apps. Content-addressed storage with dedupe, compression, full-text and vector search.
 
-My prompt for CLI usage is [PROMPT.md](docs/PROMPT.md) and [PROMPT-eng.md](docs/PROMPT-eng.md) for programming. I added additional prompts for [research](docs/prompts/PROMPT-research-mcp.md) with MCP usage. **These prompts are subject to change with experimentation**
+- SourceHut: https://sr.ht/~trvon/yams/
+- GitHub mirror: https://github.com/trvon/yams
+- Docs: https://trvon.github.io/yams
 
-- [Discord](https://discord.gg/Jee5ux2Y3e)
+## What it is
 
-## Features
+- SHA-256 content-addressed store with block-level dedupe (Rabin)
+- Full-text search (SQLite FTS5) and semantic search (embeddings)
+- WAL-backed durability, high-throughput I/O, thread-safe
 
-- **Content-Addressed Storage** - SHA-256 based, ensures data integrity
-- **Deduplication** - Block-level with Rabin fingerprinting
-- **Compression** - Zstandard and LZMA with intelligent policies
-- **Search** - Full-text (SQLite FTS5) and semantic (vector embeddings)
-- **Crash Recovery** - Write-ahead logging for durability
-- **High Performance** - 100MB/s+ throughput, thread-safe
+## Install
 
-## Versioning
+Supported: Linux x86_64/ARM64, macOS x86_64/ARM64
 
-YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
-
-## Installation
-
-**Supported platforms:**
-- Linux x86_64, ARM64
-- macOS x86_64 (Intel), ARM64 (Apple Silicon)
-
-### Package Managers
-
-**Homebrew (coming soon):**
-```bash
-brew tap trvon/yams && brew install yams
-```
-
-### Build
-
-- Dependencies
+Build with Conan (recommended):
 
 ```bash
-# macOS
-brew install openssl@3 protobuf sqlite3 ncurses
-export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
-
-# Linux
-apt install libssl-dev libsqlite3-dev protobuf-compiler libncurses-dev
-```
-
-- Compiling
-
-```bash
-# Install Conan
 pip install conan
-
-# One-time: create default Conan profile
 conan profile detect --force
-
-# Build with Conan (recommended - this is what creates the release binaries)
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+conan install . -of build/yams-release -s build_type=Release -b missing
 cmake --preset yams-release
-cmake --build --preset yams-release
-sudo cmake --install build/yams-release
-sudo ldconfig
+cmake --build --preset yams-release -j
+sudo cmake --install build/yams-release && sudo ldconfig
 ```
 
-**Requirements:**
-- C++20 compiler (GCC 11+, Clang 14+, AppleClang 14+)
-- CMake 3.20+
-- Python 3.8+ (for Conan)
+Deps quick refs:
 
-> **Known Issue:** Traditional CMake builds (without Conan) currently have dependency resolution issues. Use Conan builds for reliable compilation.
+- Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler libncurses-dev
+- macOS: openssl@3 protobuf sqlite3 ncurses (export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3))
 
-### Build Options
+Build options (common): `YAMS_BUILD_TESTS=ON|OFF`, `YAMS_BUILD_BENCHMARKS=ON|OFF`, `YAMS_ENABLE_PDF=ON|OFF`, `YAMS_ENABLE_TUI=ON|OFF`, `YAMS_ENABLE_ONNX=ON|OFF`.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `YAMS_USE_CONAN` | OFF | Use Conan package manager |
-| `YAMS_BUILD_CLI` | ON | CLI with optional TUI browser |
-| `YAMS_BUILD_MCP_SERVER` | ON | MCP server |
-| `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
-| `YAMS_BUILD_BENCHMARKS` | OFF | Performance benchmarks |
-| `YAMS_ENABLE_PDF` | ON | PDF text extraction support (may download PDFium via FetchContent) |
-| `YAMS_ENABLE_TUI` | OFF | Enables TUI browser (adds ncurses via Conan; ImTUI via FetchContent) |
-| `YAMS_ENABLE_ONNX` | ON | Enables ONNX Runtime features (pulls onnxruntime; may pull Boost transitively) |
-| `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
+Note: Plain CMake without Conan may miss deps. Prefer Conan builds.
 
-
-## Setup
+## Quick start
 
 ```bash
-# Initialize with XDG defaults (non-interactive)
-yams init --non-interactive
-
-# Optional: custom storage root
 export YAMS_STORAGE="$HOME/.local/share/yams"
 yams init --non-interactive
 
-# Print resulting config (secrets masked)
-yams init --non-interactive --print
-```
+# add
+echo hello | yams add - --tags demo
 
-### Troubleshooting
-If you see:
-```text
-ERROR: The default build profile '/home/trevon/.conan2/profiles/default' doesn't exist.
-You need to create a default profile (type 'conan profile detect' command)
-or specify your own profile with '--profile:build=<myprofile>'
-```
+# search
+yams search hello --limit 5
 
-Fix:
-```bash
-# Create default profile
-conan profile detect --force
-
-# Optional: ensure C++20 in the default profile
-# Linux/macOS (GNU sed):
-sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-# macOS (BSD sed):
-# sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-```
-
-Then re-run:
-```bash
-conan install . \
-  --output-folder=build/yams-release \
-  -s build_type=Release \
-  --build=missing
-
-cmake --preset yams-release
-cmake --build --preset yams-release -j
-```
-
-#### PDF Support Issues
-
-If PDF extraction fails or PDFium download fails:
-
-```bash
-# Disable PDF support temporarily
-cmake -B build -DYAMS_ENABLE_PDF=OFF
-
-# Or explicitly specify a different PDFium version if needed
-# (check https://github.com/bblanchon/pdfium-binaries/releases for available versions)
-```
-
-If you see network errors during PDFium download:
-- Check internet connectivity
-- Corporate firewalls may block GitHub releases
-- Consider using a VPN or different network
-- PDFium binaries are ~20MB per platform
-
-### LLM Integration Guide
-
-YAMS is designed to work seamlessly with Large Language Models through simple, pipeline-friendly commands:
-
-```bash
-# Store conversation context with descriptive name
-echo "User asked about X, I explained Y" | yams add - --name "context-$(date +%Y%m%d).txt"
-
-# Store code snippets with tags
-echo "def function(): return 42" | yams add - --name "helper.py" --tags "python,utils"
-
-# Delete temporary files by pattern
-yams delete --pattern "temp_*.txt" --force
-
-# Delete multiple specific files
-yams delete --names "draft1.md,draft2.md,notes.txt"
-
-# Retrieve documents by name (coming soon)
-# yams get --name "meeting-notes.txt"
-
-# Search with fuzzy matching
-yams search "databse" --fuzzy --similarity 0.8
-
-# List with rich metadata
-yams list --format table --limit 20
-
-# Chain commands for batch operations
-yams list --format minimal | tail -5 | while read hash; do
-  yams get $hash
-done
-
-# Preview deletions before executing
-yams delete --pattern "*.log" --dry-run
-```
-
-#### Best Practices for LLMs
-
-1. **Use stdin for content storage**: Avoids file creation
-   ```bash
-   echo "content to store" | yams add -
-   ```
-
-2. **Use minimal format for piping**: Clean output for processing
-   ```bash
-   yams list --format minimal | head -5
-   ```
-
-3. **Explicit data directory**: Always specify storage location
-   ```bash
-   yams --data-dir /tmp/project-memory add -
-   ```
-
-4. **JSON for structured data**: Parse responses easily
-   ```bash
-   yams stats --format json | jq '.totalObjects'
-   ```
-
-5. **Direct stdout retrieval**: No intermediate files
-   ```bash
-   yams get <hash> | process_somehow
-   ```
-
-## Usage
-
-### MCP Server
-
-Start the MCP server (stdio transport only):
-```bash
-yams serve
-```
-
-### MCP Integration
-
-```json
-{
-  "mcpServers": {
-    "yams": {
-      "command": "/usr/local/bin/yams",
-      "args": ["serve"],
-      "env": {}
-    }
-  }
-}
-```
-
-### CLI Usage
-
-#### Initialize Storage
-```bash
-# One-time setup with defaults
-yams init --non-interactive --no-keygen
-
-# Custom storage location
-yams --data-dir /path/to/storage init --non-interactive
-```
-
-#### Store Documents
-```bash
-# Add a file
-yams add file.txt
-
-# Add from stdin
-echo "content" | yams add -
-cat file.txt | yams add -
-
-# Add multiple files
-find . -name "*.txt" -exec yams add {} \;
-```
-
-#### List Documents
-```bash
-# Table format (default)
-yams list
-
-# JSON output for programmatic use
-yams list --format json
-
-# Just hashes for piping
-yams list --format minimal
-
-# Sort and filter
-yams list --sort size --reverse --limit 10
-yams list --sort date
-```
-
-#### Retrieve Documents
-```bash
-# Output to stdout
-yams get <hash>
-
-# Save to file
-yams get <hash> -o output.txt
-
-# Pipe to other commands
-yams get <hash> | grep pattern
-yams get <hash> | wc -l
-
-# Get first document from list
+# get
 yams list --format minimal --limit 1 | xargs yams get
 ```
 
-#### Browse Documents (TUI)
+## CLI cheat sheet
+
 ```bash
-# Launch ranger-style browser
-yams browse
+# set storage per-run
+yams --data-dir /tmp/yams add -
 
-# Navigation:
-#   j/k or ↑/↓     - Move up/down
-#   h/l or ←/→     - Switch columns
-#   g/G           - Jump to top/bottom
-#   d then D      - Delete document
-#   r             - Refresh
-#   ?             - Help
-#   q or Esc      - Quit
+# list (minimal for pipes)
+yams list --format minimal | head -3
+
+# fuzzy search
+yams search databse --fuzzy --similarity 0.8
+
+# delete preview
+yams delete --pattern "*.log" --dry-run
 ```
 
-#### Search
-yams search "query" --limit 10
-yams search "error" --type "log"
-yams search "call(" --paths-only --literal-text  # treat query as literal text, not regex
+## LLM-friendly patterns
 
-# Retrieve
-yams get <hash>
-yams get <hash> --output file.txt
+```bash
+# cache web content
+curl -s https://example.com | yams add - --tags web,cache --name example.html
 
-# List & Stats
-yams list --recent 20
-yams stats --json  # JSON output for scripts
+# stash code diffs
+git diff | yams add - --tags git,diff,$(date +%Y%m%d)
 
-# Browse (interactive TUI)
-yams browse  # Interactive document browser
+# chain search -> get
+hash=$(yams search "topic" --format minimal | head -1); yams get "$hash"
 ```
 
-### API
+## MCP
+
+```bash
+yams serve  # stdio transport
+```
+
+MCP config (example):
+
+```json
+{
+  "mcpServers": { "yams": { "command": "/usr/local/bin/yams", "args": ["serve"] } }
+}
+```
+
+## API (C++)
+
 ```cpp
 #include <yams/api/content_store.h>
-
 auto store = yams::api::createContentStore(getenv("YAMS_STORAGE"));
-
-// Store
-yams::api::ContentMetadata meta{.tags = {"code", "v1.0"}};
-auto result = store->store("file.txt", meta);
-
-// Search
-auto results = store->search("query", 10);
-
-// Retrieve
-store->retrieve(hash, "output.txt");
+yams::api::ContentMetadata meta{.tags={"code","v1.0"}};
+auto r = store->store("file.txt", meta);
+auto q = store->search("query", 10);
+store->retrieve(hash, "out.txt");
 ```
 
-### Python
-```python
-import subprocess, json
+## Troubleshooting
 
-def yams_store(content, tags=[], type="text"):
-    cmd = ["yams", "store", content]
-    if tags: cmd.extend(["--tags", ",".join(tags)])
-    if type: cmd.extend(["--type", type])
-    return subprocess.run(cmd, capture_output=True, text=True)
-
-def yams_search(query, limit=10):
-    cmd = ["yams", "search", query, "--limit", str(limit)]
-    return subprocess.run(cmd, capture_output=True, text=True)
-```
-
-## LLM Usage Guide
-
-### Quick Start for LLMs
+Conan: create default profile
 
 ```bash
-# Always specify data directory explicitly
-export YAMS_STORAGE="/tmp/yams-data"
-
-# Initialize once (quiet mode)
-yams --data-dir "$YAMS_STORAGE" init --non-interactive --force
-
-# Store content from stdin (most common for LLMs)
-echo "Important information to remember" | yams --data-dir "$YAMS_STORAGE" add --tags "memory"
-
-# Search for content
-yams --data-dir "$YAMS_STORAGE" search "important" --json
-
-# Retrieve specific document
-yams --data-dir "$YAMS_STORAGE" get <hash> --json
-
-# Get storage statistics
-yams --data-dir "$YAMS_STORAGE" stats --json
+conan profile detect --force
 ```
 
-### Common Patterns
-
-```bash
-# Store code changes
-git diff | yams --data-dir "$YAMS_STORAGE" add --tags "git-diff,$(date +%Y%m%d)"
-
-# Store conversation context
-echo "User asked about: $TOPIC" | yams --data-dir "$YAMS_STORAGE" add --tags "context,$TOPIC"
-
-# Store external documentation
-curl -s "$API_DOCS_URL" | yams --data-dir "$YAMS_STORAGE" add --tags "api-docs,external"
-
-# Search and retrieve in one line
-hash=$(yams --data-dir "$YAMS_STORAGE" search "$QUERY" --json | jq -r '.results[0].hash')
-yams --data-dir "$YAMS_STORAGE" get "$hash"
-```
-
-## LLM Integration
-
-### When to Use YAMS
-
-YAMS is ideal for LLMs to maintain persistent memory across sessions:
-
-- **Code Development**: Track changes, store working versions, remember context
-- **Research**: Cache web content, API responses, documentation
-- **Conversation Context**: Store important discussions, decisions, requirements
-- **Knowledge Base**: Build searchable repository of project knowledge
-
-### CLI Usage Examples
-
-#### Development Workflow
-```bash
-# Store current code state before making changes
-git diff | yams add - --tags "pre-refactor,auth-module,$(date +%Y%m%d)"
-
-# Track implementation decisions
-echo "Decided to use JWT tokens with 24h expiry for auth" | yams add - \
-  --tags "decision,auth,architecture"
-
-# Store error context for debugging
-tail -100 app.log | yams add - --tags "error,production,$(date +%Y%m%d-%H%M)"
-
-# Save working implementation
-yams add auth_handler.py --tags "working,auth,v2.1"
-```
-
-#### Research & Documentation
-```bash
-# Store web research
-curl -s https://api.example.com/docs | yams add - \
-  --tags "api-docs,external,example-api" \
-  --source "https://api.example.com/docs"
-
-# Cache fetched content
-echo "$WEB_CONTENT" | yams add - --tags "research,oauth,implementation-guide"
-
-# Store meeting notes
-yams add meeting-notes-2024-01-15.md --tags "meeting,requirements,client"
-```
-
-#### Search Patterns
-```bash
-# Find related code changes
-yams search "authentication" --type "code" --limit 10
-
-# Retrieve specific version
-yams search "working auth" --tags "v2.1"
-
-# Get recent errors
-yams list --recent 20 --tags "error"
-
-# Semantic search for concepts
-yams search "token expiry handling"
-```
-
-### MCP (Model Context Protocol) Integration
-
-MCP provides direct integration with Claude Desktop and other MCP-compatible clients.
-
-### Performance Tuning
-
-**Optimize for large files**:
-```bash
-# Adjust chunk size for better deduplication
-export YAMS_CHUNK_SIZE=64KB  # Default: 16KB
-
-# Increase cache size
-export YAMS_CACHE_SIZE=1GB   # Default: 256MB
-```
-
-**Reduce memory usage**:
-```bash
-# Add a large file (streamed from disk)
-yams add large-file.bin
-
-# Enable compression
-export YAMS_COMPRESSION=zstd  # Options: none, zstd, lzma
-```
+PDF support issues: build with `-DYAMS_ENABLE_PDF=OFF`.
 
 ## License
 

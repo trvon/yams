@@ -19,7 +19,7 @@ info:
   version: 1.0.0
   contact:
     name: YAMS Team
-    url: https://github.com/trvon/yams
+  url: https://sr.ht/~trvon/yams/
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

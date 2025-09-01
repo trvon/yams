@@ -53,7 +53,8 @@ Content-addressed storage with deduplication and semantic search.
 
 ## Resources
 
-- [GitHub](https://github.com/trvon/yams) - Source code
+- [SourceHut](https://sr.ht/~trvon/yams/) - Primary repo
+- [GitHub (mirror)](https://github.com/trvon/yams)
 - [Releases](https://github.com/trvon/yams/releases) - Downloads
 - [Issues](https://github.com/trvon/yams/issues) - Bug reports
 - [Discussions](https://github.com/trvon/yams/discussions) - Community

@@ -156,5 +156,6 @@ Use the left navigation to browse all docs.
 
 ## Links
 
-- GitHub: https://github.com/trvon/yams
+- SourceHut: https://sr.ht/~trvon/yams/
+- GitHub (mirror): https://github.com/trvon/yams
 - License: Apache-2.0
