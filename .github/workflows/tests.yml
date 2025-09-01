@@ -1,0 +1,103 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [ main ] # Or your default branch
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+
+    env:
+      BUILD_DIR: build/yams-debug # Use debug build for tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Ensure tags are available for version derivation if needed
+
+      - name: Install Conan
+        shell: bash
+        run: |
+          pip3 install conan || python3 -m pip install conan || python -m pip install conan
+          conan --version
+          mkdir -p ~/.conan2
+          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+
+      - name: Setup Conan Profile
+        shell: bash
+        run: |
+          conan profile detect --force
+          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          echo "Conan profile configured:" >&2
+          conan profile show >&2
+
+      - name: Clean corrupted Conan cache if needed
+        shell: bash
+        run: |
+          if ! conan list "*" 2>/dev/null;
+          then
+            echo "Conan cache appears corrupted, cleaning locks and temp files..."
+            conan cache clean --locks --temp 2>/dev/null || true
+            echo "Conan cache locks/temp cleaned"
+          fi
+
+      - name: Configure CMake for Debug Build with Tests and Sanitizers
+        shell: bash
+        run: |
+          rm -rf ${{ env.BUILD_DIR }}
+          rm -f CMakeUserPresets.json
+          conan install . --output-folder=${{ env.BUILD_DIR }} -s build_type=Debug --build=missing
+          cmake --preset yams-debug \
+            -DYAMS_BUILD_PROFILE=dev \
+            -DYAMS_BUILD_TESTS=ON \
+            -DYAMS_ENABLE_SANITIZERS=ON \
+            -DYAMS_ENABLE_COVERAGE=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage" # Needed for install step if any
+          echo "BUILD_DIR=${{ env.BUILD_DIR }}" >> $GITHUB_ENV # Ensure BUILD_DIR is available for subsequent steps
+
+      - name: Build Project
+        shell: bash
+        run: |
+          cmake --build --preset yams-debug
+
+      - name: Run Tests
+        shell: bash
+        run: |
+          cd ${{ env.BUILD_DIR }}
+          ctest --output-on-failure -j$(nproc)
+
+      - name: Generate Coverage Report
+        shell: bash
+        run: |
+          # Install gcovr
+          pip3 install gcovr
+
+          # Generate HTML report
+          gcovr --root "$GITHUB_WORKSPACE" \
+                --exclude 'tests/*' \
+                --exclude '_deps/*' \
+                --exclude 'build/*' \
+                --html --html-details \
+                --output "${{ env.BUILD_DIR }}/coverage.html"
+
+          # Generate XML report (for CI tools like Codecov)
+          gcovr --root "$GITHUB_WORKSPACE" \
+                --exclude 'tests/*' \
+                --exclude '_deps/*' \
+                --exclude 'build/*' \
+                --xml --output "${{ env.BUILD_DIR }}/coverage.xml"
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ env.BUILD_DIR }}/coverage.html
+          retention-days: 5
+      - name: Upload Coverage XML
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: ${{ env.BUILD_DIR }}/coverage.xml
+          retention-days: 5

@@ -1,4 +1,4 @@
-![CI](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)
+[![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)   [![](https://dcbadge.limes.pink/api/server/INVITE)](https://discord.gg/jJPfwSv9yC)
 
 # YAMS — Yet Another Memory System
 

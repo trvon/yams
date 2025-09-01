@@ -4,7 +4,7 @@
 		{
 			"label": "build (Debug)",
 			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j",
+			"command": "cmake --build --preset yams-debug",
 			"problemMatcher": []
 		},
 		{
@@ -22,7 +22,7 @@
 		{
 			"label": "build+test (Debug)",
 			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j",
+			"command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure -j",
 			"problemMatcher": []
 		},
 		{
@@ -34,109 +34,13 @@
 		{
 			"label": "cmake: configure (Release)",
 			"type": "shell",
-			"command": "cmake --preset yams-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON",
+			"command": "cmake --preset yams-release",
 			"problemMatcher": []
 		},
 		{
-			"label": "build+test (Release)",
+			"label": "build (Release)",
 			"type": "shell",
-			"command": "cmake --build --preset yams-release -j && ctest --preset yams-release --output-on-failure -j",
-			"problemMatcher": []
-		},
-		{
-			"label": "cmake: configure (Debug)",
-			"type": "shell",
-			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "cmake: configure (Debug)",
-			"type": "shell",
-			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "cmake: configure (Debug)",
-			"type": "shell",
-			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build+test (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j"
-		},
-		{
-			"label": "cmake: configure (Debug)",
-			"type": "shell",
-			"command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build+test (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build+test (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j && ctest --preset yams-debug --output-on-failure -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
-		},
-		{
-			"label": "build (Debug)",
-			"type": "shell",
-			"command": "cmake --build --preset yams-debug -j"
+			"command": "cmake --build --preset yams-release"
 		}
 	]
 }
