@@ -1,4 +1,7 @@
 #include <yams/daemon/client/asio_transport.h>
+#include <yams/daemon/client/global_io_context.h>
+
+#include <span>
 
 #include <spdlog/spdlog.h>
 #include <cstring>
@@ -45,16 +48,19 @@ static Result<int> connect_unix_socket(const std::filesystem::path& p) {
 #endif
 }
 
-Result<Response> AsioTransportAdapter::send_request(const Request& req, const Options& opts) {
-    auto fdres = connect_unix_socket(opts.socketPath);
+AsioTransportAdapter::AsioTransportAdapter(const Options& opts) : opts_(opts) {}
+
+Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
+    fsm_.on_connect(-1); // Placeholder fd
+    auto fdres = connect_unix_socket(opts_.socketPath);
     if (!fdres) {
-        return fdres.error();
+        fsm_.on_error(static_cast<int>(fdres.error().code));
+        co_return fdres.error();
     }
 #ifndef _WIN32
     int fd = fdres.value();
-    AsyncIOContext ioctx;
-
-    std::thread io_thread([&]() { ioctx.run(); });
+    fsm_.on_connect(fd);
+    auto& ioctx = yams::daemon::GlobalIOContext::instance().get_io_context();
 
     DefaultAsyncSocket sock(fd, ioctx);
 
@@ -69,50 +75,46 @@ Result<Response> AsioTransportAdapter::send_request(const Request& req, const Op
     MessageFramer framer;
     auto framed = framer.frame_message(msg);
     if (!framed) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return framed.error();
+        fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+        co_return framed.error();
     }
 
+    fsm_.on_writable(0); // Transition to writing
     auto wres =
-        sock.async_write_all(std::span<const uint8_t>(framed.value().data(), framed.value().size()))
-            .get();
+        co_await sock.async_write_all(std::span<const uint8_t>(framed.value().data(), framed.value().size()));
     if (!wres) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return wres.error();
+        fsm_.on_error(static_cast<int>(wres.error().code));
+        co_return wres.error();
     }
 
+    fsm_.on_readable(0); // Transition to reading
     std::vector<uint8_t> headerBuf(sizeof(MessageFramer::FrameHeader));
-    auto r1 = sock.async_read_exact(headerBuf.size()).get();
+    auto r1 = co_await sock.async_read_exact(headerBuf.size());
     if (!r1) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return r1.error();
+        fsm_.on_error(static_cast<int>(r1.error().code));
+        co_return r1.error();
     }
 
     MessageFramer::FrameHeader netHeader;
     std::memcpy(&netHeader, r1.value().data(), sizeof(MessageFramer::FrameHeader));
     MessageFramer::FrameHeader header = netHeader;
     header.from_network();
+    {
+        ConnectionFsm::FrameInfo info{0u, header.flags, header.payload_size};
+        fsm_.on_header_parsed(info);
+    }
 
     if (!header.is_valid()) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return Error{ErrorCode::InvalidData, "Invalid frame header"};
+        fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+        co_return Error{ErrorCode::InvalidData, "Invalid frame header"};
     }
 
-    auto r2 = sock.async_read_exact(header.payload_size).get();
+    auto r2 = co_await sock.async_read_exact(header.payload_size);
     if (!r2) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return r2.error();
+        fsm_.on_error(static_cast<int>(r2.error().code));
+        co_return r2.error();
     }
+    fsm_.on_body_parsed();
 
     std::vector<uint8_t> complete;
     complete.reserve(sizeof(MessageFramer::FrameHeader) + header.payload_size);
@@ -120,35 +122,38 @@ Result<Response> AsioTransportAdapter::send_request(const Request& req, const Op
     complete.insert(complete.end(), r2.value().begin(), r2.value().end());
 
     auto parsed = framer.parse_frame(complete);
-    ioctx.stop();
-    if (io_thread.joinable())
-        io_thread.join();
 
     if (!parsed) {
-        return parsed.error();
+        fsm_.on_error(static_cast<int>(parsed.error().code));
+        co_return parsed.error();
     }
     if (!std::holds_alternative<Response>(parsed.value().payload)) {
-        return Error{ErrorCode::InvalidData, "Expected response frame"};
+        fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+        co_return Error{ErrorCode::InvalidData, "Expected response frame"};
     }
     auto out = std::get<Response>(parsed.value().payload);
-    return out;
+    fsm_.on_response_complete(true);
+    co_return out;
 #else
-    return fdres.error();
+    fsm_.on_error(ErrorCode::InternalError);
+    co_return fdres.error();
 #endif
 }
 
-Result<void> AsioTransportAdapter::send_request_streaming(
-    const Request& req, const Options& opts, AsioTransportAdapter::HeaderCallback onHeader,
+Task<Result<void>> AsioTransportAdapter::send_request_streaming(
+    const Request& req, AsioTransportAdapter::HeaderCallback onHeader,
     AsioTransportAdapter::ChunkCallback onChunk, AsioTransportAdapter::ErrorCallback onError,
     AsioTransportAdapter::CompleteCallback onComplete) {
-    auto fdres = connect_unix_socket(opts.socketPath);
+    fsm_.on_connect(-1); // Placeholder fd
+    auto fdres = connect_unix_socket(opts_.socketPath);
     if (!fdres) {
-        return fdres.error();
+        fsm_.on_error(static_cast<int>(fdres.error().code));
+        co_return fdres.error();
     }
 #ifndef _WIN32
     int fd = fdres.value();
-    AsyncIOContext ioctx;
-    std::thread io_thread([&]() { ioctx.run(); });
+    fsm_.on_connect(fd);
+    auto& ioctx = yams::daemon::GlobalIOContext::instance().get_io_context();
     DefaultAsyncSocket sock(fd, ioctx);
 
     Message msg;
@@ -162,76 +167,66 @@ Result<void> AsioTransportAdapter::send_request_streaming(
     MessageFramer framer;
     auto framed = framer.frame_message(msg);
     if (!framed) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return framed.error();
+        fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+        co_return framed.error();
     }
 
+    fsm_.on_writable(0);
     auto wres =
-        sock.async_write_all(std::span<const uint8_t>(framed.value().data(), framed.value().size()))
-            .get();
+        co_await sock.async_write_all(std::span<const uint8_t>(framed.value().data(), framed.value().size()));
     if (!wres) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return wres.error();
+        fsm_.on_error(static_cast<int>(wres.error().code));
+        co_return wres.error();
     }
 
+    fsm_.on_readable(0);
     std::vector<uint8_t> headerBuf(sizeof(MessageFramer::FrameHeader));
-    auto r1 = sock.async_read_exact(headerBuf.size()).get();
+    auto r1 = co_await sock.async_read_exact(headerBuf.size());
     if (!r1) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return r1.error();
+        fsm_.on_error(static_cast<int>(r1.error().code));
+        co_return r1.error();
     }
 
     MessageFramer::FrameHeader header;
     std::memcpy(&header, r1.value().data(), sizeof(MessageFramer::FrameHeader));
     header.from_network();
+    {
+        ConnectionFsm::FrameInfo info{0u, header.flags, header.payload_size};
+        fsm_.on_header_parsed(info);
+    }
     if (!header.is_valid()) {
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return Error{ErrorCode::InvalidData, "Invalid frame header"};
+        fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+        co_return Error{ErrorCode::InvalidData, "Invalid frame header"};
     }
 
     Response headerResponse;
     bool haveParsedHeaderPayload = false;
     if (!header.is_header_only()) {
-        auto r2 = sock.async_read_exact(header.payload_size).get();
+        auto r2 = co_await sock.async_read_exact(header.payload_size);
         if (!r2) {
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return r2.error();
+            fsm_.on_error(static_cast<int>(r2.error().code));
+            co_return r2.error();
         }
+        fsm_.on_body_parsed();
         std::vector<uint8_t> complete;
         complete.reserve(sizeof(MessageFramer::FrameHeader) + header.payload_size);
         complete.insert(complete.end(), r1.value().begin(), r1.value().end());
         complete.insert(complete.end(), r2.value().begin(), r2.value().end());
         auto parsed = framer.parse_frame(complete);
         if (!parsed) {
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return parsed.error();
+            fsm_.on_error(static_cast<int>(parsed.error().code));
+            co_return parsed.error();
         }
         if (!std::holds_alternative<Response>(parsed.value().payload)) {
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return Error{ErrorCode::InvalidData, "Expected response"};
+            fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+            co_return Error{ErrorCode::InvalidData, "Expected response"};
         }
         headerResponse = std::get<Response>(parsed.value().payload);
         haveParsedHeaderPayload = true;
         if (auto* er = std::get_if<ErrorResponse>(&headerResponse)) {
             onError(Error{er->code, er->message});
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return Error{er->code, er->message};
+            fsm_.on_error(static_cast<int>(er->code));
+            co_return Error{er->code, er->message};
         }
     } else {
         // Synthesize minimal header based on request type
@@ -255,43 +250,41 @@ Result<void> AsioTransportAdapter::send_request_streaming(
             onChunk(headerResponse, true);
         }
         onComplete();
-        ioctx.stop();
-        if (io_thread.joinable())
-            io_thread.join();
-        return Result<void>();
+        fsm_.on_response_complete(true);
+        co_return Result<void>();
     }
 
+    fsm_.on_stream_next(false);
     bool last = false;
     while (!last) {
         std::vector<uint8_t> chunkHeaderBuf(sizeof(MessageFramer::FrameHeader));
-        auto ch = sock.async_read_exact(chunkHeaderBuf.size()).get();
+        auto ch = co_await sock.async_read_exact(chunkHeaderBuf.size());
         if (!ch) {
             onError(ch.error());
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return ch.error();
+            fsm_.on_error(static_cast<int>(ch.error().code));
+            co_return ch.error();
         }
         MessageFramer::FrameHeader chdr;
         std::memcpy(&chdr, ch.value().data(), sizeof(MessageFramer::FrameHeader));
         chdr.from_network();
+        {
+            ConnectionFsm::FrameInfo info{0u, chdr.flags, chdr.payload_size};
+            fsm_.on_header_parsed(info);
+        }
         if (!chdr.is_valid() || !chdr.is_chunked()) {
             Error e{ErrorCode::InvalidData, "Invalid chunk header"};
             onError(e);
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return e;
+            fsm_.on_error(static_cast<int>(e.code));
+            co_return e;
         }
         last = chdr.is_last_chunk();
-        auto cpl = sock.async_read_exact(chdr.payload_size).get();
+        auto cpl = co_await sock.async_read_exact(chdr.payload_size);
         if (!cpl) {
             onError(cpl.error());
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return cpl.error();
+            fsm_.on_error(static_cast<int>(cpl.error().code));
+            co_return cpl.error();
         }
+        fsm_.on_body_parsed();
         std::vector<uint8_t> complete;
         complete.reserve(sizeof(MessageFramer::FrameHeader) + chdr.payload_size);
         complete.insert(complete.end(), ch.value().begin(), ch.value().end());
@@ -299,32 +292,28 @@ Result<void> AsioTransportAdapter::send_request_streaming(
         auto parsed = framer.parse_frame(complete);
         if (!parsed) {
             onError(parsed.error());
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return parsed.error();
+            fsm_.on_error(static_cast<int>(parsed.error().code));
+            co_return parsed.error();
         }
         if (!std::holds_alternative<Response>(parsed.value().payload)) {
             Error e{ErrorCode::InvalidData, "Expected response in chunk"};
             onError(e);
-            ioctx.stop();
-            if (io_thread.joinable())
-                io_thread.join();
-            return e;
+            fsm_.on_error(static_cast<int>(e.code));
+            co_return e;
         }
         auto resp = std::get<Response>(parsed.value().payload);
         bool cont = onChunk(resp, last);
         if (!cont)
             break;
+        fsm_.on_stream_next(last);
     }
 
     onComplete();
-    ioctx.stop();
-    if (io_thread.joinable())
-        io_thread.join();
-    return Result<void>();
+    fsm_.on_response_complete(true);
+    co_return Result<void>();
 #else
-    return fdres.error();
+    fsm_.on_error(ErrorCode::InternalError);
+    co_return fdres.error();
 #endif
 }
 

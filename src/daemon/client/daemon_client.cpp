@@ -280,119 +280,119 @@ bool DaemonClient::isConnected() const {
     return pImpl->isConnected();
 }
 
-Result<SearchResponse> DaemonClient::search(const SearchRequest& req) {
+Task<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
     // Use streaming search if enabled
     if (pImpl->config_.enableChunkedResponses) {
-        return streamingSearch(req);
+        co_return co_await streamingSearch(req);
     }
 
     // Fall back to traditional request/response
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return Error{response.error().code, response.error().message};
+        co_return Error{response.error().code, response.error().message};
     }
 
     if (auto* res = std::get_if<SearchResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<SearchResponse> DaemonClient::streamingSearch(const SearchRequest& req) {
+Task<Result<SearchResponse>> DaemonClient::streamingSearch(const SearchRequest& req) {
     auto handler = std::make_shared<StreamingSearchHandler>(req.pathsOnly, req.limit);
 
-    auto result = sendRequestStreaming(req, handler);
+    auto result = co_await sendRequestStreaming(req, handler);
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return handler->getResults();
+    co_return handler->getResults();
 }
 
-Result<GetResponse> DaemonClient::get(const GetRequest& req) {
-    auto response = sendRequest(req);
+Task<Result<GetResponse>> DaemonClient::get(const GetRequest& req) {
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return response.error();
+        co_return response.error();
     }
 
     if (auto* res = std::get_if<GetResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<ListResponse> DaemonClient::list(const ListRequest& req) {
+Task<Result<ListResponse>> DaemonClient::list(const ListRequest& req) {
     // Use streaming list if enabled
     if (pImpl->config_.enableChunkedResponses) {
-        return streamingList(req);
+        co_return co_await streamingList(req);
     }
 
     // Fall back to traditional request/response
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return Error{response.error().code, response.error().message};
+        co_return Error{response.error().code, response.error().message};
     }
 
     if (auto* res = std::get_if<ListResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<GrepResponse> DaemonClient::grep(const GrepRequest& req) {
+Task<Result<GrepResponse>> DaemonClient::grep(const GrepRequest& req) {
     // Prefer streaming if enabled
     if (pImpl->config_.enableChunkedResponses) {
-        return streamingGrep(req);
+        co_return co_await streamingGrep(req);
     }
 
     // Fallback to traditional request/response
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return Error{response.error().code, response.error().message};
+        co_return Error{response.error().code, response.error().message};
     }
 
     if (auto* res = std::get_if<GrepResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<StatusResponse> DaemonClient::status() {
+Task<Result<StatusResponse>> DaemonClient::status() {
     StatusRequest req;
     req.detailed = true;
 
     // Transient-aware retry loop for early startup/socket closure races
     Error lastErr{ErrorCode::NetworkError, "Uninitialized"};
     for (int attempt = 0; attempt < 5; ++attempt) {
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
         if (response) {
             if (auto* res = std::get_if<StatusResponse>(&response.value())) {
-                return *res;
+                co_return *res;
             }
             if (auto* er = std::get_if<ErrorResponse>(&response.value())) {
-                return Error{er->code, er->message};
+                co_return Error{er->code, er->message};
             }
-            return Error{ErrorCode::InvalidData, "Unexpected response type"};
+            co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
         }
 
         lastErr = response.error();
@@ -407,74 +407,75 @@ Result<StatusResponse> DaemonClient::status() {
                           msg.find("read payload failed") != std::string::npos ||
                           msg.find("Read failed") != std::string::npos);
         if (!transient) {
-            return lastErr;
+            co_return lastErr;
         }
         using namespace std::chrono_literals;
         std::this_thread::sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
     }
-    return lastErr;
+    co_return lastErr;
 }
 
-Result<Response> DaemonClient::executeRequest(const Request& req) {
-    return sendRequest(req);
+Task<Result<Response>> DaemonClient::executeRequest(const Request& req) {
+    co_return co_await sendRequest(req);
 }
 
-Result<void> DaemonClient::shutdown(bool graceful) {
+Task<Result<void>> DaemonClient::shutdown(bool graceful) {
     ShutdownRequest req;
     req.graceful = graceful;
 
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return Error{response.error().code, response.error().message};
+        co_return Error{response.error().code, response.error().message};
     }
 
     if (std::holds_alternative<SuccessResponse>(response.value())) {
-        return Result<void>();
+        co_return Result<void>();
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<void> DaemonClient::ping() {
+Task<Result<void>> DaemonClient::ping() {
     PingRequest req;
 
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return Error{response.error().code, response.error().message};
+        co_return Error{response.error().code, response.error().message};
     }
 
     if (std::holds_alternative<PongResponse>(response.value())) {
-        return Result<void>();
+        co_return Result<void>();
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
     int mt = static_cast<int>(getMessageType(response.value()));
     spdlog::error("Ping: unexpected response variant (type={})", mt);
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<Response> DaemonClient::sendRequest(const Request& req) {
+Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     if (auto rc = connect(); !rc) {
-        return rc.error();
+        co_return rc.error();
     }
-    disconnect();
+    // Do not disconnect here; the transport adapter manages the connection lifecycle.
 
     AsioTransportAdapter::Options opts;
     opts.socketPath = pImpl->config_.socketPath;
     opts.headerTimeout = pImpl->headerTimeout_;
     opts.bodyTimeout = pImpl->bodyTimeout_;
     opts.requestTimeout = pImpl->config_.requestTimeout;
-    auto r = AsioTransportAdapter::send_request(req, opts);
+    AsioTransportAdapter adapter(opts);
+    auto r = co_await adapter.send_request(req);
     if (!r)
-        return r.error();
-    return r.value();
+        co_return r.error();
+    co_return r.value();
 }
 
 Result<MessageFramer::FrameHeader> DaemonClient::readFrameHeader(int socketFd) {
@@ -867,15 +868,15 @@ void DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
 }
 
 // Streaming list helper method
-Result<ListResponse> DaemonClient::streamingList(const ListRequest& req) {
+Task<Result<ListResponse>> DaemonClient::streamingList(const ListRequest& req) {
     auto handler = std::make_shared<StreamingListHandler>(req.pathsOnly, req.limit);
 
-    auto result = sendRequestStreaming(req, handler);
+    auto result = co_await sendRequestStreaming(req, handler);
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return handler->getResults();
+    co_return handler->getResults();
 }
 
 // Streaming Grep handler methods
@@ -958,7 +959,7 @@ Result<GrepResponse> DaemonClient::StreamingGrepHandler::getResults() const {
 }
 
 // Streaming grep helper method
-Result<GrepResponse> DaemonClient::streamingGrep(const GrepRequest& req) {
+Task<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
     // If pathsOnly or filesOnly/countOnly, we can progressively print in handler
     size_t perFileCap = 0;
     if (req.maxMatches > 0) {
@@ -967,20 +968,20 @@ Result<GrepResponse> DaemonClient::streamingGrep(const GrepRequest& req) {
     auto handler =
         std::make_shared<StreamingGrepHandler>(req.pathsOnly || req.filesOnly, perFileCap);
 
-    auto result = sendRequestStreaming(req, handler);
+    auto result = co_await sendRequestStreaming(req, handler);
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return handler->getResults();
+    co_return handler->getResults();
 }
 
-Result<void> DaemonClient::sendRequestStreaming(const Request& req,
+Task<Result<void>> DaemonClient::sendRequestStreaming(const Request& req,
                                                 std::shared_ptr<ChunkedResponseHandler> handler) {
     if (auto rc = connect(); !rc) {
-        return rc.error();
+        co_return rc.error();
     }
-    disconnect();
+    // Do not disconnect here; the transport adapter manages the connection lifecycle.
 
     AsioTransportAdapter::Options opts;
     opts.socketPath = pImpl->config_.socketPath;
@@ -995,15 +996,16 @@ Result<void> DaemonClient::sendRequestStreaming(const Request& req,
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
 
-    auto res = AsioTransportAdapter::send_request_streaming(req, opts, onHeader, onChunk, onError,
-                                                            onComplete);
+    AsioTransportAdapter adapter(opts);
+    auto res = co_await adapter.send_request_streaming(
+        req, onHeader, onChunk, onError, onComplete);
     if (!res)
-        return res.error();
-    return Result<void>();
+        co_return res.error();
+    co_return Result<void>();
 }
 
 // Streaming AddDocument helper: header-first then final chunk contains full response
-Result<AddDocumentResponse> DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
+Task<Result<AddDocumentResponse>> DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
     struct AddDocHandler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& /*headerResponse*/) override {}
         bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override {
@@ -1029,103 +1031,103 @@ Result<AddDocumentResponse> DaemonClient::streamingAddDocument(const AddDocument
     };
 
     auto handler = std::make_shared<AddDocHandler>();
-    auto result = sendRequestStreaming(req, handler);
+    auto result = co_await sendRequestStreaming(req, handler);
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
     if (handler->error) {
-        return *handler->error;
+        co_return *handler->error;
     }
     if (handler->value) {
-        return *handler->value;
+        co_return *handler->value;
     }
-    return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
+    co_return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
 }
 
-Result<EmbeddingResponse> DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
-    auto response = sendRequest(req);
+Task<Result<EmbeddingResponse>> DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return response.error();
+        co_return response.error();
     }
 
     if (auto* res = std::get_if<EmbeddingResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<BatchEmbeddingResponse>
+Task<Result<BatchEmbeddingResponse>>
 DaemonClient::generateBatchEmbeddings(const BatchEmbeddingRequest& req) {
-    auto response = sendRequest(req);
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return response.error();
+        co_return response.error();
     }
 
     if (auto* res = std::get_if<BatchEmbeddingResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<ModelLoadResponse> DaemonClient::loadModel(const LoadModelRequest& req) {
-    auto response = sendRequest(req);
+Task<Result<ModelLoadResponse>> DaemonClient::loadModel(const LoadModelRequest& req) {
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return response.error();
+        co_return response.error();
     }
 
     if (auto* res = std::get_if<ModelLoadResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<SuccessResponse> DaemonClient::unloadModel(const UnloadModelRequest& req) {
-    auto response = sendRequest(req);
+Task<Result<SuccessResponse>> DaemonClient::unloadModel(const UnloadModelRequest& req) {
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return response.error();
+        co_return response.error();
     }
 
     if (auto* res = std::get_if<SuccessResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Result<ModelStatusResponse> DaemonClient::getModelStatus(const ModelStatusRequest& req) {
-    auto response = sendRequest(req);
+Task<Result<ModelStatusResponse>> DaemonClient::getModelStatus(const ModelStatusRequest& req) {
+    auto response = co_await sendRequest(req);
     if (!response) {
-        return response.error();
+        co_return response.error();
     }
 
     if (auto* res = std::get_if<ModelStatusResponse>(&response.value())) {
-        return *res;
+        co_return *res;
     }
 
     if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        return Error{err->code, err->message};
+        co_return Error{err->code, err->message};
     }
 
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
 std::filesystem::path DaemonClient::resolveSocketPath() {
@@ -1232,12 +1234,14 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             setenv("YAMS_STORAGE", dataDir.c_str(), 1);
         }
 
-        // Determine config file path
+        // Determine config file path (env override > XDG/HOME)
         std::string configPath;
-        if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-            configPath = std::filesystem::path(xdgConfigHome) / "yams" / "config.toml";
+        if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
+            configPath = cfgEnv;
+        } else if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
+            configPath = (std::filesystem::path(xdgConfigHome) / "yams" / "config.toml").string();
         } else if (const char* homeEnv = std::getenv("HOME")) {
-            configPath = std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
+            configPath = (std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml").string();
         }
 
         // Allow overriding daemon path for development via YAMS_DAEMON_BIN
@@ -1281,13 +1285,21 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         }
 
         // Use execlp to search PATH (or direct path if overridden) for yams-daemon
-        // Pass socket and optional config arguments
-     if (!configPath.empty() && std::filesystem::exists(configPath)) {
-         execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-             configPath.c_str(), nullptr);
+        // Pass socket and optional config/log-level arguments
+        const char* ll = std::getenv("YAMS_LOG_LEVEL");
+        bool haveCfg = !configPath.empty() && std::filesystem::exists(configPath);
+        if (haveCfg && ll && *ll) {
+            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+                   configPath.c_str(), "--log-level", ll, nullptr);
+        } else if (haveCfg) {
+            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+                   configPath.c_str(), nullptr);
+        } else if (ll && *ll) {
+            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
+                   "--log-level", ll, nullptr);
         } else {
-            // No config file, just pass socket
-         execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
+            // No config file or log level, just pass socket
+            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
         }
 
         // If we get here, exec failed
@@ -1388,6 +1400,40 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
     if (pImpl) {
         pImpl->config_.enableChunkedResponses = enabled;
     }
+}
+
+Task<Result<AddResponse>> DaemonClient::add(const AddRequest& req) {
+    auto response = co_await sendRequest(req);
+    if (!response) {
+        co_return response.error();
+    }
+
+    if (auto* res = std::get_if<AddResponse>(&response.value())) {
+        co_return *res;
+    }
+
+    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
+        co_return Error{err->code, err->message};
+    }
+
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+}
+
+Task<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
+    auto response = co_await sendRequest(req);
+    if (!response) {
+        co_return response.error();
+    }
+
+    if (auto* res = std::get_if<SuccessResponse>(&response.value())) {
+        co_return *res;
+    }
+
+    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
+        co_return Error{err->code, err->message};
+    }
+
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
 } // namespace yams::daemon

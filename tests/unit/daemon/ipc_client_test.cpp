@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/version.hpp>
+#include <yams/cli/asio_client_pool.hpp>
 
 namespace yams::daemon::test {
 
@@ -22,6 +23,8 @@ protected:
         clientConfig_.connectTimeout = 500ms;
         clientConfig_.requestTimeout = 1000ms;
         clientConfig_.autoStart = false; // never spawn external daemon during unit tests
+
+    poolConfig_.socketPath = clientConfig_.socketPath; // ensure pool also targets nowhere
     }
 
     void TearDown() override { cleanupTestFiles(); }
@@ -35,6 +38,7 @@ protected:
     }
 
     ClientConfig clientConfig_;
+    yams::cli::AsioClientPool::Config poolConfig_;
 };
 
 // Basic connect should fail when no daemon is present
@@ -48,51 +52,38 @@ TEST_F(IpcClientTest, BasicConnectionFailsWhenNoDaemon) {
 
 // Generic call() with PingRequest should fail gracefully without daemon
 TEST_F(IpcClientTest, GenericCallPing) {
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
-    PingRequest req;
-    auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.ping();
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::NetworkError);
 }
 
 // Generic call() with StatusRequest should fail gracefully without daemon
 TEST_F(IpcClientTest, GenericCallStatus) {
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
+    yams::cli::AsioClientPool pool{poolConfig_};
     StatusRequest req{true};
-    auto result = client.call(req);
+    auto result = pool.call<StatusRequest, StatusResponse>(req);
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::NetworkError);
 }
 
 // Generic call() with SearchRequest should fail gracefully without daemon
 TEST_F(IpcClientTest, GenericCallSearch) {
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
     SearchRequest req{"test query", 10,    false, false, 0.8, {}, "keyword", false,
                       false,        false, false, false, 0,   0,  0,         ""};
-    auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.call<SearchRequest, SearchResponse>(req);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::NetworkError);
 }
 
 // Error mapping still yields NetworkError without a daemon
 TEST_F(IpcClientTest, ErrorResponseMapping) {
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
     GetRequest req; // invalid by design
     req.hash = "";
     req.byName = false;
-    auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.call<GetRequest, ErrorResponse>(req);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::NetworkError);
 }
@@ -108,25 +99,21 @@ TEST_F(IpcClientTest, ConcurrentGenericCalls) {
     std::vector<std::thread> threads;
     for (int t = 0; t < numThreads; ++t) {
         threads.emplace_back([this, &successCount, &failCount, callsPerThread]() {
-            DaemonClient client(clientConfig_);
-            auto connectResult = client.connect();
-            ASSERT_FALSE(connectResult);
-
+            yams::cli::AsioClientPool pool{poolConfig_};
             for (int i = 0; i < callsPerThread; ++i) {
                 if (i % 3 == 0) {
-                    PingRequest req;
-                    auto r = client.call(req);
+                    auto r = pool.ping();
                     if (!r)
                         failCount++;
                 } else if (i % 3 == 1) {
                     StatusRequest req{false};
-                    auto r = client.call(req);
+                    auto r = pool.call<StatusRequest, StatusResponse>(req);
                     if (!r)
                         failCount++;
                 } else {
                     SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
                                       false,  false, false, false, 0,   0,  0,         ""};
-                    auto r = client.call(req);
+                    auto r = pool.call<SearchRequest, SearchResponse>(req);
                     if (!r)
                         failCount++;
                 }
@@ -144,14 +131,10 @@ TEST_F(IpcClientTest, ConcurrentGenericCalls) {
 // Env flags should not change the absence-of-daemon behavior
 TEST_F(IpcClientTest, ProviderBackedGeneratorAvailable) {
     ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
-
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
     SearchRequest req{"provider", 5,     false, false, 0.7, {}, "keyword", false,
                       false,      false, false, false, 0,   0,  0,         ""};
-    auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.call<SearchRequest, SearchResponse>(req);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::NetworkError);
 
@@ -161,11 +144,9 @@ TEST_F(IpcClientTest, ProviderBackedGeneratorAvailable) {
 TEST_F(IpcClientTest, ProviderBackedInitializationStatus) {
     ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
 
-    DaemonClient client(clientConfig_);
-    ASSERT_FALSE(client.connect());
-
     StatusRequest sreq{true};
-    auto sres = client.call(sreq);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto sres = pool.call<StatusRequest, StatusResponse>(sreq);
     EXPECT_FALSE(sres);
     EXPECT_EQ(sres.error().code, ErrorCode::NetworkError);
 
@@ -175,16 +156,13 @@ TEST_F(IpcClientTest, ProviderBackedInitializationStatus) {
 TEST_F(IpcClientTest, ProviderDisabledFallbackToFuzzyOrFTS) {
     ::setenv("YAMS_DISABLE_ONNX", "1", 1);
 
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
     SearchRequest req{"fallback case", 5,     false, false, 0.7, {}, "keyword", false,
                       false,           false, false, false, 0,   0,  0,         ""};
     req.fuzzy = true;
     req.similarity = 0.7;
 
-    auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.call<SearchRequest, SearchResponse>(req);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::NetworkError);
 
@@ -193,19 +171,17 @@ TEST_F(IpcClientTest, ProviderDisabledFallbackToFuzzyOrFTS) {
 
 // Circuit breaker should handle repeated failures gracefully
 TEST_F(IpcClientTest, CircuitBreaker) {
-    DaemonClient client(clientConfig_);
     for (int i = 0; i < 10; ++i) {
-        PingRequest req;
-        auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.ping();
         EXPECT_FALSE(result);
     }
 }
 
 // Auto-reconnect is not possible without a daemon
 TEST_F(IpcClientTest, AutoReconnect) {
-    DaemonClient client(clientConfig_);
-    PingRequest req;
-    auto pingResult = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto pingResult = pool.ping();
     EXPECT_FALSE(pingResult);
 }
 
@@ -220,23 +196,21 @@ TEST_F(IpcClientTest, RequestTimeout) {
 
     SearchRequest req{"complex query", 1000,  false, false, 0.7, {}, "keyword", false,
                       false,           false, false, false, 0,   0,  0,         ""};
-    auto result = client.call(req);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto result = pool.call<SearchRequest, SearchResponse>(req);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error().code, yams::ErrorCode::NetworkError);
 }
 
 // Model operations shouldn't succeed without a daemon
 TEST_F(IpcClientTest, ModelOperations) {
-    DaemonClient client(clientConfig_);
-    auto connectResult = client.connect();
-    ASSERT_FALSE(connectResult);
-
     LoadModelRequest loadReq{"test-model"};
-    auto loadResult = client.call(loadReq);
+    yams::cli::AsioClientPool pool{poolConfig_};
+    auto loadResult = pool.call<LoadModelRequest, SuccessResponse>(loadReq);
     EXPECT_FALSE(loadResult);
 
     ModelStatusRequest statusReq{"test-model"};
-    auto statusResult = client.call(statusReq);
+    auto statusResult = pool.call<ModelStatusRequest, ModelStatusResponse>(statusReq);
     EXPECT_FALSE(statusResult);
 }
 

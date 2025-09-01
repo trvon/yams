@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/cli/asio_client_pool.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -1194,7 +1195,8 @@ public:
             }
 
             // Verify daemon is responsive, then request model preload (non-fatal on error)
-            auto st = daemon_client_->status();
+            yams::cli::AsioClientPool pool{};
+            auto st = pool.status();
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
                 // Search will gracefully fall back when daemon is unavailable/slow.
@@ -1203,7 +1205,7 @@ public:
                 daemon::LoadModelRequest req;
                 req.modelName = config_.model_name;
                 req.preload = true;
-                auto lm = daemon_client_->loadModel(req);
+                auto lm = pool.call<daemon::LoadModelRequest, daemon::ModelLoadResponse>(req);
                 if (!lm) {
                     spdlog::warn("Failed to preload model in daemon: {}", lm.error().message);
                 }
@@ -1246,7 +1248,7 @@ public:
             req.modelName = config_.model_name;
             req.normalize = config_.normalize_embeddings;
 
-            auto result = daemon_client_->generateEmbedding(req);
+            auto result = daemon_client_->generateEmbedding(req).get();
             if (!result) {
                 return Error{ErrorCode::NetworkError, result.error().message};
             }
@@ -1287,7 +1289,7 @@ public:
             req.normalize = config_.normalize_embeddings;
             req.batchSize = config_.batch_size;
 
-            auto result = daemon_client_->generateBatchEmbeddings(req);
+            auto result = daemon_client_->generateBatchEmbeddings(req).get();
             if (!result) {
                 return Error{ErrorCode::NetworkError, result.error().message};
             }

@@ -100,6 +100,11 @@ if(TARGET yams::daemon_client)
     target_compile_definitions(yams_vector PRIVATE YAMS_HAS_DAEMON_CLIENT)
 endif()
 
+# Link Asio client pool (embedding_generator uses AsioClientPool)
+# yams_asio_client target is defined at the top level src/CMakeLists.txt
+# before vector, so it's always available.
+target_link_libraries(yams_vector PUBLIC yams_asio_client)
+
 # Conditionally link ONNX Runtime
 if(YAMS_ENABLE_ONNX AND TARGET onnxruntime::onnxruntime)
     target_link_libraries(yams_vector PRIVATE onnxruntime::onnxruntime)

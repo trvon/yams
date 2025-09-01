@@ -5,6 +5,7 @@
 #include <iostream>
 #include <ostream>
 #include <yams/core/types.h>
+#include <yams/core/task.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -55,29 +56,29 @@ public:
     void setBodyTimeout(std::chrono::milliseconds timeout);
 
     // High-level request methods
-    Result<SearchResponse> search(const SearchRequest& req);
-    Result<AddResponse> add(const AddRequest& req);
-    Result<GetResponse> get(const GetRequest& req);
-    Result<GetInitResponse> getInit(const GetInitRequest& req) { return call<GetInitRequest>(req); }
-    Result<GetChunkResponse> getChunk(const GetChunkRequest& req) {
+    Task<Result<SearchResponse>> search(const SearchRequest& req);
+        Task<Result<AddResponse>> add(const AddRequest& req);
+    Task<Result<GetResponse>> get(const GetRequest& req);
+    Task<Result<GetInitResponse>> getInit(const GetInitRequest& req) { return call<GetInitRequest>(req); }
+    Task<Result<GetChunkResponse>> getChunk(const GetChunkRequest& req) {
         return call<GetChunkRequest>(req);
     }
-    Result<SuccessResponse> getEnd(const GetEndRequest& req) { return call<GetEndRequest>(req); }
-    Result<ListResponse> list(const ListRequest& req);
-    Result<GrepResponse> grep(const GrepRequest& req);
+    Task<Result<SuccessResponse>> getEnd(const GetEndRequest& req) { return call<GetEndRequest>(req); }
+    Task<Result<ListResponse>> list(const ListRequest& req);
+    Task<Result<GrepResponse>> grep(const GrepRequest& req);
     // Streaming path for AddDocument (header-first, final-only chunk)
-    Result<AddDocumentResponse> streamingAddDocument(const AddDocumentRequest& req);
+    Task<Result<AddDocumentResponse>> streamingAddDocument(const AddDocumentRequest& req);
 
     // High-level streaming helpers
-    Result<void> getToStdout(const GetInitRequest& req) {
+    Task<Result<void>> getToStdout(const GetInitRequest& req) {
         if (auto c = connect(); !c)
-            return c.error();
-        auto init = call<GetInitRequest>(req);
+            co_return c.error();
+        auto init = co_await call<GetInitRequest>(req);
         if (!init)
-            return init.error();
+            co_return init.error();
         const auto& ir = init.value();
         if (req.metadataOnly) {
-            return Result<void>();
+            co_return Result<void>();
         }
         uint64_t remaining = ir.totalSize;
         if (req.maxBytes > 0 && req.maxBytes < remaining)
@@ -87,9 +88,9 @@ public:
         while (remaining > 0) {
             uint32_t ask = static_cast<uint32_t>(std::min<uint64_t>(remaining, step));
             GetChunkRequest creq{ir.transferId, offset, ask};
-            auto cres = call<GetChunkRequest>(creq);
+            auto cres = co_await call<GetChunkRequest>(creq);
             if (!cres)
-                return cres.error();
+                co_return cres.error();
             auto& chunk = cres.value();
             if (!chunk.data.empty()) {
                 std::cout.write(chunk.data.data(), static_cast<std::streamsize>(chunk.data.size()));
@@ -107,37 +108,37 @@ public:
         }
         if (ir.transferId != 0) {
             GetEndRequest ereq{ir.transferId};
-            (void)call<GetEndRequest>(ereq);
+            (void)co_await call<GetEndRequest>(ereq);
         }
         if (config_.singleUseConnections) {
             disconnect();
         }
-        return Result<void>();
+        co_return Result<void>();
     }
 
     // Streaming grep helper method
-    Result<GrepResponse> streamingGrep(const GrepRequest& req);
+    Task<Result<GrepResponse>> streamingGrep(const GrepRequest& req);
 
     // Streaming get helpers (init/header-only + chunk loop)
-    Result<void> streamingGetToStdout(const GetInitRequest& req) { return getToStdout(req); }
-    Result<void> streamingGetToFile(const GetInitRequest& req,
+    Task<Result<void>> streamingGetToStdout(const GetInitRequest& req) { return getToStdout(req); }
+    Task<Result<void>> streamingGetToFile(const GetInitRequest& req,
                                     const std::filesystem::path& outputPath) {
         return getToFile(req, outputPath);
     }
 
-    Result<void> getToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
+    Task<Result<void>> getToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
         if (auto c = connect(); !c)
-            return c.error();
-        auto init = call<GetInitRequest>(req);
+            co_return c.error();
+        auto init = co_await call<GetInitRequest>(req);
         if (!init)
-            return init.error();
+            co_return init.error();
         const auto& ir = init.value();
         if (req.metadataOnly) {
-            return Result<void>();
+            co_return Result<void>();
         }
         std::ofstream out(outputPath, std::ios::binary);
         if (!out)
-            return Error{ErrorCode::WriteError, "Failed to open output path"};
+            co_return Error{ErrorCode::WriteError, "Failed to open output path"};
         uint64_t remaining = ir.totalSize;
         if (req.maxBytes > 0 && req.maxBytes < remaining)
             remaining = req.maxBytes;
@@ -146,9 +147,9 @@ public:
         while (remaining > 0) {
             uint32_t ask = static_cast<uint32_t>(std::min<uint64_t>(remaining, step));
             GetChunkRequest creq{ir.transferId, offset, ask};
-            auto cres = call<GetChunkRequest>(creq);
+            auto cres = co_await call<GetChunkRequest>(creq);
             if (!cres)
-                return cres.error();
+                co_return cres.error();
             auto& chunk = cres.value();
             if (!chunk.data.empty()) {
                 out.write(chunk.data.data(), static_cast<std::streamsize>(chunk.data.size()));
@@ -167,24 +168,24 @@ public:
         out.close();
         if (ir.transferId != 0) {
             GetEndRequest ereq{ir.transferId};
-            (void)call<GetEndRequest>(ereq);
+            (void)co_await call<GetEndRequest>(ereq);
         }
         if (config_.singleUseConnections) {
             disconnect();
         }
-        return Result<void>();
+        co_return Result<void>();
     }
-    Result<SuccessResponse> remove(const DeleteRequest& req);
-    Result<StatusResponse> status();
-    Result<void> shutdown(bool graceful = true);
-    Result<void> ping();
+    Task<Result<SuccessResponse>> remove(const DeleteRequest& req);
+    Task<Result<StatusResponse>> status();
+    Task<Result<void>> shutdown(bool graceful = true);
+    Task<Result<void>> ping();
 
     // Embedding request methods
-    Result<EmbeddingResponse> generateEmbedding(const GenerateEmbeddingRequest& req);
-    Result<BatchEmbeddingResponse> generateBatchEmbeddings(const BatchEmbeddingRequest& req);
-    Result<ModelLoadResponse> loadModel(const LoadModelRequest& req);
-    Result<SuccessResponse> unloadModel(const UnloadModelRequest& req);
-    Result<ModelStatusResponse> getModelStatus(const ModelStatusRequest& req);
+    Task<Result<EmbeddingResponse>> generateEmbedding(const GenerateEmbeddingRequest& req);
+    Task<Result<BatchEmbeddingResponse>> generateBatchEmbeddings(const BatchEmbeddingRequest& req);
+    Task<Result<ModelLoadResponse>> loadModel(const LoadModelRequest& req);
+    Task<Result<SuccessResponse>> unloadModel(const UnloadModelRequest& req);
+    Task<Result<ModelStatusResponse>> getModelStatus(const ModelStatusRequest& req);
 
     // Chunked response handling
     struct ChunkedResponseHandler {
@@ -275,16 +276,16 @@ public:
     };
 
     // Streaming search helper method
-    Result<SearchResponse> streamingSearch(const SearchRequest& req);
+    Task<Result<SearchResponse>> streamingSearch(const SearchRequest& req);
 
     // Streaming list helper method
-    Result<ListResponse> streamingList(const ListRequest& req);
+    Task<Result<ListResponse>> streamingList(const ListRequest& req);
 
     // Public method to allow generic request sending by helpers
-    Result<Response> executeRequest(const Request& req);
+    Task<Result<Response>> executeRequest(const Request& req);
 
     // Generic typed call (templated) – returns ResponseOfT<Req>
-    template <class Req> Result<ResponseOfT<Req>> call(const Req& req);
+    template <class Req> Task<Result<ResponseOfT<Req>>> call(const Req& req);
 
     // Check if daemon is running (without connecting)
     static bool isDaemonRunning(const std::filesystem::path& socketPath = {});
@@ -309,10 +310,10 @@ private:
     ClientConfig config_;
 
     // Generic request sending
-    Result<Response> sendRequest(const Request& req);
+    Task<Result<Response>> sendRequest(const Request& req);
 
     // Send request with chunked response handling
-    Result<void> sendRequestStreaming(const Request& req,
+    Task<Result<void>> sendRequestStreaming(const Request& req,
                                       std::shared_ptr<ChunkedResponseHandler> handler);
 
     // Auto-start daemon if configured and not running
@@ -335,7 +336,7 @@ private:
 };
 
 // Generic typed call helper using ResponseOf trait
-template <class Req> Result<ResponseOfT<Req>> DaemonClient::call(const Req& req) {
+template <class Req> Task<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& req) {
     static_assert(std::disjunction_v<
                       std::is_same<Req, SearchRequest>, std::is_same<Req, AddRequest>,
                       std::is_same<Req, GetRequest>, std::is_same<Req, GetInitRequest>,
@@ -353,31 +354,31 @@ template <class Req> Result<ResponseOfT<Req>> DaemonClient::call(const Req& req)
     // Prefer streaming path for streaming-capable requests when enabled
     if constexpr (std::is_same_v<Req, SearchRequest>) {
         if (config_.enableChunkedResponses) {
-            return streamingSearch(req);
+            co_return co_await streamingSearch(req);
         }
     } else if constexpr (std::is_same_v<Req, ListRequest>) {
         if (config_.enableChunkedResponses) {
-            return streamingList(req);
+            co_return co_await streamingList(req);
         }
     } else if constexpr (std::is_same_v<Req, GrepRequest>) {
         if (config_.enableChunkedResponses) {
-            return streamingGrep(req);
+            co_return co_await streamingGrep(req);
         }
     } else if constexpr (std::is_same_v<Req, AddDocumentRequest>) {
         if (config_.enableChunkedResponses) {
-            return streamingAddDocument(req);
+            co_return co_await streamingAddDocument(req);
         }
     }
 
-    auto r = sendRequest(Request{req});
+    auto r = co_await sendRequest(Request{req});
     if (!r)
-        return r.error();
+        co_return r.error();
     auto& payload = r.value();
     if (auto* ok = std::get_if<ResponseOfT<Req>>(&payload))
-        return *ok;
+        co_return *ok;
     if (auto* er = std::get_if<ErrorResponse>(&payload))
-        return Error{er->code, er->message};
-    return Error{ErrorCode::InvalidData, "Unexpected response type"};
+        co_return Error{er->code, er->message};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
 // ============================================================================

@@ -74,7 +74,7 @@ protected:
             }
             DaemonClient client{};
             // Prefer status for service readiness
-            if (auto st = client.status(); st) {
+            if (auto st = client.status().get(); st) {
                 const auto& s = st.value();
                 auto has = [&](const char* key) -> bool {
                     auto it = s.readinessStates.find(key);
@@ -87,7 +87,7 @@ protected:
                 }
             } else {
                 // Fallback to ping as a readiness probe when status isn't available yet
-                if (auto pg = client.ping(); pg) {
+                if (auto pg = client.ping().get(); pg) {
                     return true;
                 }
             }

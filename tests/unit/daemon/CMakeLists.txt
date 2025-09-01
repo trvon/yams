@@ -57,6 +57,7 @@ add_executable(ipc_client_test
 )
 target_link_libraries(ipc_client_test PRIVATE
     yams::daemon
+    yams_asio_client
     GTest::gtest
     GTest::gtest_main
 )

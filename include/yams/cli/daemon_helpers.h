@@ -18,6 +18,7 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/cli/asio_client_pool.hpp>
 #include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
@@ -448,42 +449,27 @@ inline bool should_stream(const yams::daemon::GrepRequest& r) {
     return r.pathsOnly || r.filesOnly || r.countOnly || r.maxMatches > 0 || (!r.path.empty()) ||
            (!r.paths.empty() && r.paths.size() >= file_hint_threshold) || r.recursive;
 }
-inline Result<yams::daemon::SearchResponse> call_pref(yams::daemon::DaemonClient* c,
+inline Result<yams::daemon::SearchResponse> call_pref(yams::daemon::DaemonClient* /*c*/,
                                                       const yams::daemon::SearchRequest& r) {
-    // Always use streaming for search requests to match server behavior
-    spdlog::debug("[PooledRequestManager] Using streamingSearch for query='{}' limit={}", r.query,
-                  r.limit);
-    return c->streamingSearch(r);
+    // Synchronous roundtrip via Asio client pool (no Task::get())
+    yams::cli::AsioClientPool pool{};
+    return pool.call<yams::daemon::SearchRequest, yams::daemon::SearchResponse>(r);
 }
-inline Result<yams::daemon::ListResponse> call_pref(yams::daemon::DaemonClient* c,
+inline Result<yams::daemon::ListResponse> call_pref(yams::daemon::DaemonClient* /*c*/,
                                                     const yams::daemon::ListRequest& r) {
-    if (should_stream(r)) {
-        spdlog::debug(
-            "[PooledRequestManager] Using streamingList limit={} showSnippets={} pathsOnly={}",
-            r.limit, r.showSnippets, r.pathsOnly);
-        return c->streamingList(r);
-    }
-    spdlog::debug("[PooledRequestManager] Using unary list limit={} showSnippets={} pathsOnly={}",
-                  r.limit, r.showSnippets, r.pathsOnly);
-    return c->list(r);
+    yams::cli::AsioClientPool pool{};
+    return pool.call<yams::daemon::ListRequest, yams::daemon::ListResponse>(r);
 }
-inline Result<yams::daemon::GrepResponse> call_pref(yams::daemon::DaemonClient* c,
+inline Result<yams::daemon::GrepResponse> call_pref(yams::daemon::DaemonClient* /*c*/,
                                                     const yams::daemon::GrepRequest& r) {
-    if (should_stream(r)) {
-        spdlog::debug("[PooledRequestManager] Using streamingGrep pattern='{}' paths={} "
-                      "recursive={} maxMatches={}",
-                      r.pattern, r.paths.size(), r.recursive, r.maxMatches);
-        return c->streamingGrep(r);
-    }
-    spdlog::debug(
-        "[PooledRequestManager] Using unary grep pattern='{}' paths={} recursive={} maxMatches={}",
-        r.pattern, r.paths.size(), r.recursive, r.maxMatches);
-    return c->grep(r);
+    yams::cli::AsioClientPool pool{};
+    return pool.call<yams::daemon::GrepRequest, yams::daemon::GrepResponse>(r);
 }
 template <class Req>
-inline Result<yams::daemon::ResponseOfT<Req>> call_pref(yams::daemon::DaemonClient* c,
+inline Result<yams::daemon::ResponseOfT<Req>> call_pref(yams::daemon::DaemonClient* /*c*/,
                                                         const Req& r) {
-    return c->template call<Req>(r);
+    yams::cli::AsioClientPool pool{};
+    return pool.call<Req, yams::daemon::ResponseOfT<Req>>(r);
 }
 
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>>

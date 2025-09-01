@@ -148,59 +148,5 @@ if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
     target_link_libraries(yams_cli PRIVATE $<BUILD_INTERFACE:yams_profiling>)
 endif()
 
-# ---------------------------------------------------------------
-# Asio client pool reusable library (for CLI and MCP consumers)
-# ---------------------------------------------------------------
-add_library(yams_asio_client STATIC
-    asio_client_pool.cpp
-)
-
-target_include_directories(yams_asio_client
-    PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-)
-
-target_link_libraries(yams_asio_client
-    PUBLIC
-        yams_boost_headers
-        yams_daemon_client
-    PRIVATE
-        spdlog::spdlog
-)
-
-target_compile_features(yams_asio_client PUBLIC cxx_std_20)
-set_target_properties(yams_asio_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# Ensure Boost headers are visible even with Conan target quirks
-if(TARGET yams_boost_headers)
-    get_target_property(_yams_boost_inc yams_boost_headers INTERFACE_INCLUDE_DIRECTORIES)
-    if(_yams_boost_inc)
-        target_include_directories(yams_asio_client SYSTEM PRIVATE ${_yams_boost_inc})
-    endif()
-endif()
-if(DEFINED Boost_INCLUDE_DIRS)
-    target_include_directories(yams_asio_client SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
-endif()
-target_include_directories(yams_asio_client SYSTEM PRIVATE
-    $<$<TARGET_EXISTS:boost::_libboost>:$<TARGET_PROPERTY:boost::_libboost,INTERFACE_INCLUDE_DIRECTORIES>>
-)
-if(TARGET Boost::headers)
-    get_target_property(_boost_headers_inc_asio Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
-    if(_boost_headers_inc_asio)
-        target_include_directories(yams_asio_client SYSTEM PRIVATE ${_boost_headers_inc_asio})
-    endif()
-elseif(TARGET Boost::boost)
-    get_target_property(_boost_boost_inc_asio Boost::boost INTERFACE_INCLUDE_DIRECTORIES)
-    if(_boost_boost_inc_asio)
-        target_include_directories(yams_asio_client SYSTEM PRIVATE ${_boost_boost_inc_asio})
-    endif()
-elseif(TARGET boost::boost)
-    get_target_property(_boost_boost_lc_inc_asio boost::boost INTERFACE_INCLUDE_DIRECTORIES)
-    if(_boost_boost_lc_inc_asio)
-        target_include_directories(yams_asio_client SYSTEM PRIVATE ${_boost_boost_lc_inc_asio})
-    endif()
-endif()
-
 # Link the reusable Asio client into the CLI
 target_link_libraries(yams_cli PUBLIC yams_asio_client)

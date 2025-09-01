@@ -43,6 +43,23 @@ if(TARGET yams_cli)
     gtest_discover_tests(update_command_tests
         DISCOVERY_TIMEOUT 30
     )
+
+    # Daemon command CLI parsing tests
+    add_executable(daemon_command_tests
+        daemon_command_test.cpp
+    )
+
+    target_compile_features(daemon_command_tests PRIVATE cxx_std_20)
+    target_link_libraries(daemon_command_tests
+        PRIVATE
+            GTest::gtest_main
+            yams_cli
+    )
+
+    add_test(NAME daemon_command_tests COMMAND daemon_command_tests)
+    gtest_discover_tests(daemon_command_tests
+        DISCOVERY_TIMEOUT 30
+    )
 else()
     message(WARNING "yams_cli target not found - skipping update_command_tests")
 endif()

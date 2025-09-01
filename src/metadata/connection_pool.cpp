@@ -288,13 +288,15 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         return timeoutResult.error();
     }
 
-    // Enable WAL mode if requested
+    // Enable WAL mode if requested (disabled in tests to avoid tempfs WAL I/O issues)
+#ifndef YAMS_TESTING
     if (config_.enableWAL) {
         auto walResult = db.enableWAL();
         if (!walResult) {
             return walResult.error();
         }
     }
+#endif
 
     // Enable foreign keys if requested
     if (config_.enableForeignKeys) {

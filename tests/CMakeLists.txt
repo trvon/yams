@@ -21,6 +21,9 @@ target_link_libraries(test_utils INTERFACE
     yams::core
 )
 
+# Define YAMS_TESTING for all tests to enable test-safe code paths
+target_compile_definitions(test_utils INTERFACE YAMS_TESTING=1)
+
 # Enable better test discovery
 set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 set_property(GLOBAL PROPERTY CTEST_TARGETS_ADDED 1)

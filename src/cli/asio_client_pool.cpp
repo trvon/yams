@@ -2,7 +2,14 @@
 
 #include <spdlog/spdlog.h>
 #include <array>
-#include <vector>
+#include <span>
+#include <yams/daemon/client/daemon_client.h>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/read.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/write.hpp>
 #include <boost/system/error_code.hpp>
 
 namespace yams::cli {
@@ -16,54 +23,54 @@ using yams::daemon::Response;
 using yams::daemon::StatusRequest;
 using yams::daemon::StatusResponse;
 
-// Connection impl
-yams::Result<void> AsioClientPool::Connection::connect(const std::filesystem::path& socketPath) {
-    if (is_open()) {
-        connected = true;
-        return yams::Result<void>();
-    }
-    try {
-        boost::asio::local::stream_protocol::endpoint ep(socketPath.string());
-        socket.connect(ep); // throws on error
-        connected = true;
-        return yams::Result<void>();
-    } catch (const boost::system::system_error& e) {
-        connected = false;
-        return Error{ErrorCode::NetworkError, std::string("connect failed: ") + e.code().message()};
-    }
-}
+namespace {
+struct Connection {
+    explicit Connection(std::shared_ptr<boost::asio::io_context> io)
+        : strand(boost::asio::make_strand(*io)), socket(strand) {}
 
-void AsioClientPool::Connection::close() {
-    try {
+    boost::asio::strand<boost::asio::io_context::executor_type> strand;
+    boost::asio::local::stream_protocol::socket socket;
+    bool connected = false;
+
+    yams::Result<void> connect(const std::filesystem::path& socketPath) {
         if (socket.is_open()) {
-            // Best-effort shutdown; ignore errors
-            try {
-                socket.shutdown(boost::asio::socket_base::shutdown_both);
-            } catch (...) {
-            }
-            socket.close();
+            connected = true;
+            return yams::Result<void>();
         }
-    } catch (...) {
-        // Swallow any close errors; we're tearing down
+        try {
+            boost::asio::local::stream_protocol::endpoint ep(socketPath.string());
+            socket.connect(ep);
+            connected = true;
+            return yams::Result<void>();
+        } catch (const boost::system::system_error& e) {
+            connected = false;
+            return yams::Error{yams::ErrorCode::NetworkError,
+                               std::string("connect failed: ") + e.code().message()};
+        }
     }
-    connected = false;
-}
 
-std::shared_ptr<AsioClientPool::Connection> AsioClientPool::acquire() {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (auto s = weakConn_.lock()) {
-        if (s->is_open())
-            return s;
+    void close() {
+        try {
+            if (socket.is_open()) {
+                try {
+                    socket.shutdown(boost::asio::socket_base::shutdown_both);
+                } catch (...) {
+                }
+                socket.close();
+            }
+        } catch (...) {
+        }
+        connected = false;
     }
-    auto fresh = std::make_shared<Connection>(io_);
-    weakConn_ = fresh;
-    return fresh;
-}
+};
+} // namespace
 
-yams::Result<Message> AsioClientPool::roundtrip(const Request& req,
-                                                std::shared_ptr<Connection> conn) {
+yams::Result<Message> AsioClientPool::roundtrip(const Request& req) {
+    auto io = std::make_shared<boost::asio::io_context>();
+    auto conn = std::make_shared<Connection>(io);
     // Resolve daemon socket path using existing helper
-    auto sock = yams::daemon::DaemonClient::resolveSocketPath();
+    auto sock = cfg_.socketPath.empty() ? yams::daemon::DaemonClient::resolveSocketPath()
+                                        : cfg_.socketPath;
     if (sock.empty()) {
         return Error{ErrorCode::InvalidState, "Could not resolve daemon socket path"};
     }
@@ -115,7 +122,7 @@ yams::Result<Message> AsioClientPool::roundtrip(const Request& req,
     // Read payload
     std::vector<uint8_t> payload(hdr.payload_size);
     if (hdr.payload_size > 0) {
-        std::size_t pread = boost::asio::read(conn->socket, boost::asio::buffer(payload), ec);
+    std::size_t pread = boost::asio::read(conn->socket, boost::asio::buffer(payload), ec);
         if (ec) {
             conn->close();
             return Error{ErrorCode::NetworkError,
@@ -141,9 +148,8 @@ yams::Result<Message> AsioClientPool::roundtrip(const Request& req,
 }
 
 yams::Result<void> AsioClientPool::ping() {
-    auto conn = acquire();
     Request req = PingRequest{};
-    auto res = roundtrip(req, conn);
+    auto res = roundtrip(req);
     if (!res)
         return res.error();
     auto& msg = res.value();
@@ -161,9 +167,8 @@ yams::Result<void> AsioClientPool::ping() {
 }
 
 yams::Result<StatusResponse> AsioClientPool::status() {
-    auto conn = acquire();
     Request req = StatusRequest{};
-    auto res = roundtrip(req, conn);
+    auto res = roundtrip(req);
     if (!res)
         return res.error();
     auto& msg = res.value();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -8,6 +9,8 @@
 #include <yams/daemon/ipc/async_socket.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
+
+#include <yams/daemon/ipc/connection_fsm.h>
 
 namespace yams::daemon {
 
@@ -22,16 +25,22 @@ public:
         std::chrono::milliseconds requestTimeout{5000};
     };
 
-    static Result<Response> send_request(const Request& req, const Options& opts);
+    explicit AsioTransportAdapter(const Options& opts);
+
+    Task<Result<Response>> send_request(const Request& req);
 
     using HeaderCallback = std::function<void(const Response&)>;
     using ChunkCallback = std::function<bool(const Response&, bool)>;
     using ErrorCallback = std::function<void(const Error&)>;
     using CompleteCallback = std::function<void()>;
 
-    static Result<void> send_request_streaming(const Request& req, const Options& opts,
+    Task<Result<void>> send_request_streaming(const Request& req,
                                                HeaderCallback onHeader, ChunkCallback onChunk,
                                                ErrorCallback onError, CompleteCallback onComplete);
+
+private:
+    Options opts_;
+    ConnectionFsm fsm_;
 };
 
 } // namespace yams::daemon

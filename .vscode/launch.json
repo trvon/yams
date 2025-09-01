@@ -6,7 +6,7 @@
       "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/yams-debug/src/daemon/yams-daemon",
-      "args": ["--log-level", "debug","--socket", "/tmp/yams-daemon-501.sock", "--data-dir", "/Volumes/picaso/yams", "--pid-file", "/tmp/yams-daemon.pid", "--foreground"],
+      "args": ["--log-level", "debug", "--foreground"],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "build (Debug)",
       "env": {
@@ -24,7 +24,8 @@
       "cwd": "${workspaceFolder}",
       "env": {
         "YAMS_LOG_LEVEL": "debug",
-        "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1"
+        "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1:sleep_before_dying=10",
+        "LSAN_OPTIONS": "use_tls=0:verbosity=1:log_threads=1"
       }
     }
   ]

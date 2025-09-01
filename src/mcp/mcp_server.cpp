@@ -38,9 +38,15 @@ std::mutex StdioTransport::io_mutex_;
 
 // StdioTransport implementation
 StdioTransport::StdioTransport() {
-    // Ensure unbuffered I/O for stdio communication
+    // Ensure predictable stdio behavior. In tests, avoid changing global iostream
+    // configuration so that rdbuf redirection in unit tests works as expected.
+#ifndef YAMS_TESTING
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
+#endif
+    // Capture current stream buffers so we honor caller redirections (tests set rdbuf)
+    outbuf_ = std::cout.rdbuf();
+    inbuf_ = std::cin.rdbuf();
 }
 
 void StdioTransport::send(const json& message) {
@@ -49,8 +55,11 @@ void StdioTransport::send(const json& message) {
         // Lock mutex to ensure atomic write
         std::lock_guard<std::mutex> lock(io_mutex_);
         const std::string payload = message.dump();
-        std::cout << payload << "\n";
-        std::cout.flush();
+        if (outbuf_) {
+            std::ostream out(outbuf_);
+            out << payload << "\n";
+            out.flush();
+        }
     }
 }
 
@@ -95,31 +104,34 @@ MessageResult StdioTransport::receive() {
     }
 
     // MCP stdio transport: newline-delimited JSON messages
+    // Use captured input buffer to respect redirections
+    std::istream in(inbuf_);
+
     while (state_.load() != TransportState::Closing) {
         // Check for input availability
-        std::streamsize avail = std::cin.rdbuf() ? std::cin.rdbuf()->in_avail() : 0;
+        std::streamsize avail = in.rdbuf() ? in.rdbuf()->in_avail() : 0;
 
         // Check for EOF first
-        if (std::cin.eof()) {
+        if (in.eof()) {
             state_.store(TransportState::Disconnected);
             return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
         }
 
         if (isInputAvailable(100) || avail > 0) {
             std::string line;
-            std::cin.clear();
+            in.clear();
 
             // Lock mutex for thread-safe getline
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
-                if (!std::getline(std::cin, line)) {
-                    if (std::cin.eof()) {
+                if (!std::getline(in, line)) {
+                    if (in.eof()) {
                         spdlog::debug("EOF on stdin, closing transport");
                         state_.store(TransportState::Disconnected);
                         return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
                     }
                     // Clear error and retry if we should
-                    std::cin.clear();
+                    in.clear();
                     if (!shouldRetryAfterError()) {
                         state_.store(TransportState::Error);
                         return Error{ErrorCode::NetworkError, "Too many consecutive I/O errors"};
@@ -136,7 +148,7 @@ MessageResult StdioTransport::receive() {
             // Skip empty lines but check for EOF after
             if (line.empty()) {
                 // If we got an empty line and there's no more input, check for EOF
-                if (std::cin.eof() || (!std::cin.rdbuf() || std::cin.rdbuf()->in_avail() == 0)) {
+                if (in.eof() || (!in.rdbuf() || in.rdbuf()->in_avail() == 0)) {
                     // No more input after empty line
                     if (!isInputAvailable(10)) { // Short timeout for empty line check
                         state_.store(TransportState::Disconnected);
@@ -154,7 +166,7 @@ MessageResult StdioTransport::receive() {
 
                 // In test environments or when we shouldn't retry, return error immediately
                 // This prevents hanging when there's no more input after an error
-                if (!shouldRetryAfterError() || std::cin.eof()) {
+                if (!shouldRetryAfterError() || in.eof()) {
                     state_.store(TransportState::Error);
                     return parseResult.error();
                 }
@@ -2073,23 +2085,14 @@ Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameReques
     MCPGetByNameResponse mcp_response;
 
     // Prepare pooled client for streaming calls
-    yams::cli::DaemonClientPool::Config pool_config;
-    pool_config.max_clients = 4;
-    pool_config.client_config.requestTimeout = std::chrono::seconds(20);
-    yams::cli::DaemonClientPool pool(pool_config);
-
-    auto clientRes = pool.acquire();
-    if (!clientRes) {
-        return Error{ErrorCode::NetworkError, "Failed to acquire daemon client"};
-    }
-    auto client = std::move(clientRes).value();
+    yams::cli::AsioClientPool pool{};
 
     daemon::GetInitRequest init{};
     init.name = req.name;
     init.byName = true;
     // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
 
-    auto initRes = client->getInit(init);
+    auto initRes = pool.call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
     if (!initRes) {
         return initRes.error();
     }
@@ -2125,12 +2128,12 @@ Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameReques
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = client->getChunk(c);
+        auto cRes = pool.call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
         if (!cRes) {
             // Attempt to close the transfer before returning error
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)client->getEnd(e);
+            (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
             return cRes.error();
         }
         const auto& chunk = cRes.value();
@@ -2151,7 +2154,7 @@ Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameReques
     // End transfer regardless
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)client->getEnd(end);
+    (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; no extra flags in response type.
@@ -2204,16 +2207,7 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI behavior for large content
     MCPCatDocumentResponse mcp_response;
 
-    yams::cli::DaemonClientPool::Config pool_config;
-    pool_config.max_clients = 4;
-    pool_config.client_config.requestTimeout = std::chrono::seconds(20);
-    yams::cli::DaemonClientPool pool(pool_config);
-
-    auto clientRes = pool.acquire();
-    if (!clientRes) {
-        return Error{ErrorCode::NetworkError, "Failed to acquire daemon client"};
-    }
-    auto client = std::move(clientRes).value();
+    yams::cli::AsioClientPool pool{};
 
     daemon::GetInitRequest init{};
     init.hash = req.hash;
@@ -2221,7 +2215,7 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
     init.byName = !req.name.empty();
     // GetInitRequest no longer supports raw/extract flags; server determines mode
 
-    auto initRes = client->getInit(init);
+    auto initRes = pool.call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
     if (!initRes) {
         return initRes.error();
     }
@@ -2249,11 +2243,11 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = client->getChunk(c);
+        auto cRes = pool.call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
         if (!cRes) {
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)client->getEnd(e);
+            (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
             return cRes.error();
         }
         const auto& chunk = cRes.value();
@@ -2273,7 +2267,7 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
 
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)client->getEnd(end);
+    (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; response type has no truncated flag.

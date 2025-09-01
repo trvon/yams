@@ -4,6 +4,7 @@
 add_library(yams_daemon_client STATIC
     client/daemon_client.cpp
     client/asio_transport.cpp
+    client/global_io_context.cpp
     ipc/ipc_protocol.cpp
     ipc/message_framing.cpp
 )

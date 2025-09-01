@@ -18,6 +18,7 @@ if(NOT TARGET pool_add_then_query_test)
     target_link_libraries(pool_add_then_query_test PRIVATE
         yams_mcp
         yams_cli
+    yams_asio_client
         yams_api
         yams_search
         yams_metadata
@@ -40,6 +41,7 @@ if(NOT TARGET pooled_request_integration_test)
     target_link_libraries(pooled_request_integration_test PRIVATE
         yams_mcp
         yams_cli
+    yams_asio_client
         yams_api
         yams_search
         yams_metadata
@@ -64,6 +66,7 @@ if(NOT TARGET boundary_ipc_pool_tests)
     )
     target_link_libraries(boundary_ipc_pool_tests PRIVATE
         yams_cli
+    yams_asio_client
         yams_api
         yams_search
         yams_metadata
@@ -104,6 +107,7 @@ if(NOT TARGET stream_return_while_adding_test)
     target_link_libraries(stream_return_while_adding_test PRIVATE
         yams_mcp
         yams_cli
+    yams_asio_client
         yams_api
         yams_search
         yams_metadata

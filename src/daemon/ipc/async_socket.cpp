@@ -71,7 +71,12 @@ public:
             desc->cancel(ec);
             // Release native handle so owner (::close) remains the single closer
             desc->release();
-            // desc shared_ptr will destroy object after pending handlers complete
+            // Ensure all canceled operations are processed before returning to reduce UAF risk
+            try {
+                io_.restart();
+                io_.run_for(std::chrono::milliseconds(0));
+            } catch (...) {
+            }
         }
         return Result<void>();
     }
@@ -223,7 +228,8 @@ private:
         awaiter->alive.store(false, std::memory_order_release);
         auto keep_alive = awaiter; // keep shared state alive through resume
         try {
-            if (h && !h.done())
+            // Avoid calling done() which may access freed coroutine state; resume defensively
+            if (h)
                 h.resume();
         } catch (...) {
         }
@@ -233,6 +239,7 @@ private:
     boost::asio::io_context io_;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
     std::mutex mutex_;
+    // Use shared_ptr to keep descriptors alive across in-flight async handlers safely.
     std::unordered_map<int, std::shared_ptr<boost::asio::posix::stream_descriptor>> descriptors_;
     std::unordered_map<int, uint64_t> socket_generations_;
 };

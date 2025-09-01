@@ -15,6 +15,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <sstream>
 #include <string>
 #include <thread>
@@ -25,46 +29,61 @@
 
 namespace yams::cli {
 
-class DaemonCommand : public ICommand {
+    class DaemonCommand : public ICommand {
 public:
+    DaemonCommand() = default;
+
     std::string getName() const override { return "daemon"; }
 
-    std::string getDescription() const override { return "Manage the YAMS daemon"; }
+    std::string getDescription() const override { return "Manage YAMS daemon process"; }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
+        auto* daemon = app.add_subcommand(getName(), getDescription());
+        daemon->require_subcommand();
 
-        auto* cmd = app.add_subcommand("daemon", getDescription());
+        // Start command
+        auto* start = daemon->add_subcommand("start", "Start the YAMS daemon");
+        start->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        start->add_option("--data-dir,--storage", dataDir_, "Data directory for daemon storage");
+        start->add_option("--pid-file", pidFile_, "PID file path");
+        start->add_option("--log-level", startLogLevel_,
+                          "Daemon log level (trace, debug, info, warn, error)")
+            ->expected(1);
+        start->add_option("--config", startConfigPath_, "Path to daemon config file");
+        start->add_option("--daemon-binary", startDaemonBinary_,
+                          "Path to yams-daemon executable (override)");
+        start->add_flag("--foreground", startForeground_, "Run daemon in foreground (don't fork)");
 
-        // Global options for daemon command
-        cmd->add_option("--socket,-s", socketPath_, "Path to the daemon socket");
-        cmd->add_option("--pid-file", pidFile_, "Path to the daemon PID file");
-        cmd->add_option("--data-dir", dataDir_, "Data directory for daemon data");
-        cmd->add_flag("--foreground", foreground_, "Run the daemon in the foreground");
-        cmd->add_flag("--force,-f", force_, "Force stop (SIGKILL if needed)");
-
-        // Subcommands
-        auto* start = cmd->add_subcommand("start", "Start the YAMS daemon");
         start->callback([this]() { startDaemon(); });
 
-        auto* stop = cmd->add_subcommand("stop", "Stop the YAMS daemon");
-        stop->add_flag("--force,-f", force_, "Force stop (SIGKILL if needed)");
+        // Stop command
+        auto* stop = daemon->add_subcommand("stop", "Stop the YAMS daemon");
+        stop->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        stop->add_flag("--force", force_, "Force stop (kill -9)");
+
         stop->callback([this]() { stopDaemon(); });
 
-    auto* status = cmd->add_subcommand("status", "Show daemon status");
-    status->add_flag("-d,--detailed", detailed_, "Show detailed status information");
+        // Status command
+        auto* status = daemon->add_subcommand("status", "Check daemon status");
+        status->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        status->add_flag("-d,--detailed", detailed_, "Show detailed status");
+
         status->callback([this]() { showStatus(); });
 
-        auto* restart = cmd->add_subcommand("restart", "Restart the YAMS daemon");
-        restart->callback([this]() { restartDaemon(); });
+        // Restart command
+        auto* restart = daemon->add_subcommand("restart", "Restart the YAMS daemon");
+        restart->add_option("--socket", socketPath_, "Socket path for daemon communication");
 
-        cmd->require_subcommand(1);
+        restart->callback([this]() { restartDaemon(); });
     }
 
     Result<void> execute() override {
-        // No-op: work executed by subcommand callbacks
+        // This is called by the base command framework
+        // The actual work is done in the callbacks above
         return Result<void>();
     }
+
 
 private:
     bool isVersionCompatible(const std::string& runningVersion) {
@@ -127,35 +146,30 @@ private:
 
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
         // Remove socket file if it exists
-        if (!socketPath.empty() && std::filesystem::exists(socketPath)) {
-            if (std::filesystem::remove(socketPath)) {
+        if (!socketPath.empty()) {
+            std::filesystem::path sp{socketPath};
+            if (std::filesystem::exists(sp) && std::filesystem::remove(sp)) {
                 spdlog::debug("Removed stale socket file: {}", socketPath);
             }
         }
 
         // Remove PID file if it exists
-        if (!pidFilePath.empty() && std::filesystem::exists(pidFilePath)) {
-            if (std::filesystem::remove(pidFilePath)) {
+        if (!pidFilePath.empty()) {
+            std::filesystem::path pp{pidFilePath};
+            if (std::filesystem::exists(pp) && std::filesystem::remove(pp)) {
                 spdlog::debug("Removed stale PID file: {}", pidFilePath);
             }
         }
     }
 
     bool checkAndHandleVersionMismatch(const std::string& socketPath) {
-        if (!daemon::DaemonClient::isDaemonRunning(socketPath)) {
+    if (!daemon::DaemonClient::isDaemonRunning(socketPath)) {
             return false; // No daemon running, no version mismatch
         }
 
-        // Connect and check version
-        daemon::DaemonClient client;
-        auto connectResult = client.connect();
-        if (!connectResult) {
-            spdlog::warn("Could not connect to running daemon to check version: {}",
-                         connectResult.error().message);
-            return false; // Treat as not ready; let startup spinner handle readiness
-        }
-
-        auto statusResult = client.status();
+    // Probe status synchronously via AsioClientPool (no Task::get())
+    yams::cli::AsioClientPool pool{};
+    auto statusResult = pool.status();
         if (!statusResult) {
             spdlog::warn("Could not get status from running daemon: {}",
                          statusResult.error().message);
@@ -167,8 +181,10 @@ private:
         if (!isVersionCompatible(status.version)) {
             spdlog::info("Stopping incompatible daemon (version {})...", status.version);
 
-            // Try graceful shutdown via socket first
-            auto shutdownResult = client.shutdown(true);
+            // Try graceful shutdown via socket first using pool
+            daemon::ShutdownRequest sreq; sreq.graceful = true;
+            yams::cli::AsioClientPool pool{};
+            auto shutdownResult = pool.call<daemon::ShutdownRequest, daemon::SuccessResponse>(sreq);
             bool stopped = false;
 
             if (shutdownResult) {
@@ -246,11 +262,103 @@ private:
             return;
         }
 
-        if (foreground_) {
-            // Run daemon in current process (useful for debugging)
+        // Determine foreground mode preference: start-level flag overrides global
+        const bool runForeground = startForeground_ || foreground_;
+
+        if (runForeground) {
+            // Exec yams-daemon with provided flags, do not return on success
             spdlog::info("Starting YAMS daemon in foreground mode...");
-            // TODO: Initialize and run daemon directly
-            spdlog::error("Foreground mode not yet implemented");
+
+            // Derive executable path
+            std::string exePath;
+            if (!startDaemonBinary_.empty()) {
+                exePath = startDaemonBinary_;
+            } else if (const char* daemonBin = std::getenv("YAMS_DAEMON_BIN"); daemonBin && *daemonBin) {
+                exePath = daemonBin;
+            } else {
+                // Try to auto-detect relative to CLI binary location
+                std::error_code ec;
+                fs::path selfExe;
+#ifndef _WIN32
+                char buf[4096];
+                ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    selfExe = fs::path(buf);
+                }
+#endif
+                if (!selfExe.empty()) {
+                    auto cliDir = selfExe.parent_path();
+                    std::vector<fs::path> candidates = {
+                        cliDir / "yams-daemon",
+                        cliDir.parent_path() / "yams-daemon",
+                        cliDir.parent_path() / "daemon" / "yams-daemon",
+                        cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
+                        cliDir.parent_path().parent_path() / "yams-daemon"
+                    };
+                    for (const auto& p : candidates) {
+                        if (fs::exists(p)) { exePath = p.string(); break; }
+                    }
+                }
+                if (exePath.empty()) {
+                    exePath = "yams-daemon"; // fallback to PATH
+                }
+            }
+
+            // Pass storage directory via env for the daemon
+            if (!dataDir_.empty()) {
+                setenv("YAMS_STORAGE", dataDir_.c_str(), 1);
+            } else if (cli_) {
+                auto p = cli_->getDataPath();
+                if (!p.empty()) setenv("YAMS_STORAGE", p.c_str(), 1);
+            }
+            // Pass log level via env too (daemon may read it)
+            if (!startLogLevel_.empty()) {
+                setenv("YAMS_LOG_LEVEL", startLogLevel_.c_str(), 1);
+            }
+
+            // Build argv using stable storage first, then create the char* array
+            std::vector<std::string> args;
+            args.push_back(exePath);                   // argv[0]
+            args.emplace_back("--socket");
+            args.push_back(socketPath_);
+            // Optional data-dir (prefer explicit CLI option, then global CLI data path)
+            std::string effectiveDataDir;
+            if (!dataDir_.empty()) {
+                effectiveDataDir = dataDir_;
+            } else if (cli_) {
+                effectiveDataDir = cli_->getDataPath();
+            }
+            if (!effectiveDataDir.empty()) {
+                args.emplace_back("--data-dir");
+                args.push_back(effectiveDataDir);
+            }
+            if (!pidFile_.empty()) {
+                args.emplace_back("--pid-file");
+                args.push_back(pidFile_);
+            }
+            if (!startConfigPath_.empty()) {
+                args.emplace_back("--config");
+                args.push_back(startConfigPath_);
+            }
+            if (!startLogLevel_.empty()) {
+                args.emplace_back("--log-level");
+                args.push_back(startLogLevel_);
+            }
+            // Ensure foreground flag is propagated so the daemon doesn't daemonize
+            args.emplace_back("--foreground");
+
+            std::vector<char*> argv;
+            argv.reserve(args.size() + 1);
+            for (auto& s : args) {
+                argv.push_back(const_cast<char*>(s.c_str()));
+            }
+            argv.push_back(nullptr);
+
+            // Exec and never return on success
+            ::execvp(exePath.c_str(), argv.data());
+            spdlog::error("Failed to exec yams-daemon ({}): {}", exePath, strerror(errno));
+            std::exit(1);
         } else {
             // Start daemon in background
             daemon::ClientConfig config;
@@ -262,6 +370,17 @@ private:
                 config.dataDir = cli_->getDataPath();
             }
 
+            // Optional: pass debug overrides via environment for the child process
+            if (!startLogLevel_.empty()) {
+                setenv("YAMS_LOG_LEVEL", startLogLevel_.c_str(), 1);
+            }
+            if (!startDaemonBinary_.empty()) {
+                setenv("YAMS_DAEMON_BIN", startDaemonBinary_.c_str(), 1);
+            }
+            if (!startConfigPath_.empty()) {
+                setenv("YAMS_CONFIG", startConfigPath_.c_str(), 1);
+            }
+
             auto result = daemon::DaemonClient::startDaemon(config);
             if (!result) {
                 spdlog::error("Failed to start daemon: {}", result.error().message);
@@ -270,7 +389,6 @@ private:
 
             // Live spinner: poll status until Ready (or timeout)
             using namespace std::chrono_literals;
-            daemon::DaemonClient client;
             const auto timeout = 45s;
             auto t0 = std::chrono::steady_clock::now();
 
@@ -280,19 +398,13 @@ private:
             pi.setShowCount(false);
             pi.start("Starting daemon…");
 
-            // Try to connect repeatedly while waiting for the socket to appear
-            while (std::chrono::steady_clock::now() - t0 < timeout) {
-                auto connectRes = client.connect();
-                if (connectRes) break;
-                // keep spinner moving even if we can't connect yet
-                pi.tick();
-                std::this_thread::sleep_for(150ms);
-            }
+                // Brief grace period for socket binding before polling status
+                std::this_thread::sleep_for(300ms);
 
             bool became_ready = false;
             // Poll status (even failures should keep the spinner visible)
             while (std::chrono::steady_clock::now() - t0 < timeout) {
-                auto statusRes = client.status();
+                    auto statusRes = yams::cli::AsioClientPool{}.status();
                 if (statusRes) {
                     const auto& s = statusRes.value();
                     bool ready = s.ready || (s.overallStatus == "Ready");
@@ -360,10 +472,10 @@ private:
 
         // First try graceful shutdown via socket
         if (daemonRunning) {
-            daemon::DaemonClient client;
-            auto connectResult = client.connect();
-            if (connectResult) {
-                auto shutdownResult = client.shutdown(!force_);
+            yams::cli::AsioClientPool pool{};
+            daemon::ShutdownRequest sreq; sreq.graceful = !force_;
+            {
+                auto shutdownResult = pool.call<daemon::ShutdownRequest, daemon::SuccessResponse>(sreq);
                 if (shutdownResult) {
                     spdlog::info("Sent shutdown request to daemon");
 
@@ -397,8 +509,6 @@ private:
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
                 }
-            } else {
-                spdlog::warn("Could not connect to daemon: {}", connectResult.error().message);
             }
         }
 
@@ -541,11 +651,9 @@ private:
         // Stop daemon if running
         if (daemon::DaemonClient::isDaemonRunning(socketPath_)) {
             spdlog::info("Stopping YAMS daemon...");
-
-            daemon::DaemonClient client;
-            if (auto result = client.connect(); result) {
-                client.shutdown(true);
-            }
+            yams::cli::AsioClientPool pool{};
+            daemon::ShutdownRequest sreq; sreq.graceful = true;
+            (void)pool.call<daemon::ShutdownRequest, daemon::SuccessResponse>(sreq);
 
             // Wait for daemon to stop
             for (int i = 0; i < 10; i++) {
@@ -583,6 +691,11 @@ private:
     bool force_ = false;
     bool detailed_ = false;
     std::string dataDir_;
+    // Start-subcommand-only options
+    bool startForeground_ = false;
+    std::string startLogLevel_;
+    std::string startConfigPath_;
+    std::string startDaemonBinary_;
     YamsCLI* cli_ = nullptr;
 };
 

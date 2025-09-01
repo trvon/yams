@@ -20,6 +20,7 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <iosfwd>
 
 namespace yams::mcp {
 
@@ -60,6 +61,10 @@ private:
 
     // Mutex for thread-safe I/O operations
     static std::mutex io_mutex_;
+
+    // Capture the stream buffers at construction to respect caller redirections (e.g., tests)
+    std::streambuf* outbuf_{nullptr};
+    std::streambuf* inbuf_{nullptr};
 
     // Helper for non-blocking stdin check
     bool isInputAvailable(int timeoutMs = 100) const;

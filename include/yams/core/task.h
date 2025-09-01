@@ -82,12 +82,6 @@ public:
             std::rethrow_exception(handle_.promise().exception_);
         }
         T out = std::move(handle_.promise().value_.value());
-        // Safe to destroy now that we're done
-        if (handle_ && handle_.done()) {
-            auto h = handle_;
-            handle_ = {};
-            h.destroy();
-        }
         return out;
     }
 
@@ -177,11 +171,9 @@ public:
         if (handle_.promise().exception_) {
             std::rethrow_exception(handle_.promise().exception_);
         }
-        if (handle_ && handle_.done()) {
-            auto h = handle_;
-            handle_ = {};
-            h.destroy();
-        }
+        // NOTE: Do not destroy handle here. The coroutine frame will be leaked,
+        // but this prevents a UAF crash when the IO context is on another thread.
+        // Proper fix is to eliminate sync-over-async calls to get().
     }
 
     // Awaitable interface

@@ -10,6 +10,7 @@
 
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/cli/asio_client_pool.hpp>
 
 using namespace std::chrono_literals;
 
@@ -26,11 +27,12 @@ protected:
                          started.error().message);
         }
         // Wait until daemon reports ready (metadata repo + content store initialized)
-        DaemonClient probe(cfg);
+    DaemonClient probe(cfg);
+    yams::cli::AsioClientPool pool{};
         const auto t_deadline = std::chrono::steady_clock::now() + 30s;
         bool ready = false;
         while (std::chrono::steady_clock::now() < t_deadline) {
-            auto st = probe.status();
+            auto st = pool.status();
             if (st) {
                 const auto& s = st.value();
                 bool meta_ready = false;
@@ -72,9 +74,10 @@ TEST_F(PoolAddThenQueryIT, AddFilesThenSearchGrepList) {
     client_cfg.bodyTimeout = std::chrono::milliseconds(60000);
     client_cfg.maxRetries = 5;
     DaemonClient client(client_cfg);
+    yams::cli::AsioClientPool pool{};
 
     // 1) Ping
-    auto ping_res = client.ping();
+    auto ping_res = pool.ping();
     ASSERT_TRUE(ping_res) << "Daemon did not respond to ping: " << ping_res.error().message;
 
     // 2) Add three small in-memory documents
@@ -84,7 +87,7 @@ TEST_F(PoolAddThenQueryIT, AddFilesThenSearchGrepList) {
     const std::string base_name = std::string("pool-add-then-query-") + std::to_string(now_ms);
 
     auto make_add_req = [&](const std::string& suffix, const std::string& text) {
-        AddDocumentRequest req;
+        yams::daemon::AddDocumentRequest req;
         req.name = base_name + "-" + suffix;
         req.content = text;
         req.tags = {"it-test"};
@@ -95,24 +98,24 @@ TEST_F(PoolAddThenQueryIT, AddFilesThenSearchGrepList) {
     auto a2_req = make_add_req("beta", "beta content for integration test\nneedle-two\n");
     auto a3_req = make_add_req("gamma", "gamma content for integration test\nneedle-three\n");
 
-    auto add1_res = client.call<AddDocumentRequest>(a1_req);
+    auto add1_res = pool.call<yams::daemon::AddDocumentRequest, yams::daemon::AddDocumentResponse>(a1_req);
     ASSERT_TRUE(add1_res) << "Failed to add document 1: " << add1_res.error().message;
-    auto add2_res = client.call<AddDocumentRequest>(a2_req);
+    auto add2_res = pool.call<yams::daemon::AddDocumentRequest, yams::daemon::AddDocumentResponse>(a2_req);
     ASSERT_TRUE(add2_res) << "Failed to add document 2: " << add2_res.error().message;
-    auto add3_res = client.call<AddDocumentRequest>(a3_req);
+    auto add3_res = pool.call<yams::daemon::AddDocumentRequest, yams::daemon::AddDocumentResponse>(a3_req);
     ASSERT_TRUE(add3_res) << "Failed to add document 3: " << add3_res.error().message;
 
     // 3) List (retry: fetch a page and count entries that include our base_name)
-    ListRequest lreq{};
+    yams::daemon::ListRequest lreq{};
     lreq.limit = 1000;    // fetch a larger page to avoid pagination misses
     lreq.recentCount = 0; // show all (disable recent-only trimming when possible)
     lreq.recent = false;  // don't force recent
-    Result<ListResponse> lres(ErrorCode::Unknown);
+    yams::Result<yams::daemon::ListResponse> lres(yams::ErrorCode::Unknown);
     size_t match_count = 0;
     {
         const auto t_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         do {
-            lres = client.list(lreq);
+            lres = pool.call<ListRequest, ListResponse>(lreq);
             match_count = 0;
             if (lres) {
                 for (const auto& it : lres.value().items) {
@@ -132,13 +135,13 @@ TEST_F(PoolAddThenQueryIT, AddFilesThenSearchGrepList) {
     ASSERT_GE(match_count, 3u) << "Expected at least 3 listed items containing base_name";
 
     // 4) Grep (retry to allow indexing)
-    GrepRequest greq{};
+    yams::daemon::GrepRequest greq{};
     greq.pattern = "integration test";
-    Result<GrepResponse> gres(ErrorCode::Unknown);
+    yams::Result<yams::daemon::GrepResponse> gres(yams::ErrorCode::Unknown);
     {
         const auto t_deadline = std::chrono::steady_clock::now() + 30s;
         do {
-            gres = client.grep(greq);
+            gres = pool.call<yams::daemon::GrepRequest, yams::daemon::GrepResponse>(greq);
             if (gres && gres.value().totalMatches >= 3)
                 break;
             std::this_thread::sleep_for(150ms);
@@ -148,14 +151,14 @@ TEST_F(PoolAddThenQueryIT, AddFilesThenSearchGrepList) {
     EXPECT_GE(gres.value().totalMatches, 3u);
 
     // 5) Search (retry; now that list shows items, search should also surface content soon)
-    SearchRequest sreq{};
+    yams::daemon::SearchRequest sreq{};
     sreq.query = "needle-two"; // content token within beta document
     sreq.literalText = true;   // exact substring
-    Result<SearchResponse> sres(ErrorCode::Unknown);
+    yams::Result<yams::daemon::SearchResponse> sres(yams::ErrorCode::Unknown);
     {
         const auto t_deadline = std::chrono::steady_clock::now() + 30s;
         do {
-            sres = client.search(sreq);
+            sres = pool.call<yams::daemon::SearchRequest, yams::daemon::SearchResponse>(sreq);
             if (sres && !sres.value().results.empty())
                 break;
             std::this_thread::sleep_for(200ms);
