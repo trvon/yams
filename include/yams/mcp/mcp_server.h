@@ -171,12 +171,16 @@ public:
 private:
     // Modern C++20 tool handlers (type-safe, clean)
     Result<MCPSearchResponse> handleSearchDocuments(const MCPSearchRequest& req);
+    // Async variant to migrate to coroutine-based pipeline
+    yams::Task<Result<MCPSearchResponse>> handleSearchDocumentsAsync(const MCPSearchRequest& req);
     Result<MCPGrepResponse> handleGrepDocuments(const MCPGrepRequest& req);
+    yams::Task<Result<MCPGrepResponse>> handleGrepDocumentsAsync(const MCPGrepRequest& req);
     Result<MCPDownloadResponse> handleDownload(const MCPDownloadRequest& req);
     Result<MCPStoreDocumentResponse> handleStoreDocument(const MCPStoreDocumentRequest& req);
     Result<MCPRetrieveDocumentResponse>
     handleRetrieveDocument(const MCPRetrieveDocumentRequest& req);
     Result<MCPListDocumentsResponse> handleListDocuments(const MCPListDocumentsRequest& req);
+    yams::Task<Result<MCPListDocumentsResponse>> handleListDocumentsAsync(const MCPListDocumentsRequest& req);
     Result<MCPStatsResponse> handleGetStats(const MCPStatsRequest& req);
     Result<MCPAddDirectoryResponse> handleAddDirectory(const MCPAddDirectoryRequest& req);
 

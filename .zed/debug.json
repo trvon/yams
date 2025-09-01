@@ -1,0 +1,32 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "name": "Debug yams-daemon (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "${workspaceFolder}/build/yams-debug/src/daemon/yams-daemon",
+    "args": ["--log-level", "debug", "--foreground"],
+    "cwd": "${workspaceFolder}",
+    "preLaunchTask": "build (Debug)",
+    "env": {
+      "YAMS_LOG_LEVEL": "debug",
+      "YAMS_STORAGE": "/Volumes/picaso/yams",
+      "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1"
+    }
+  },
+  {
+    "name": "Attach to yams-daemon (LLDB)",
+    "adapter": "CodeLLDB",
+    "request": "attach",
+    "pid": "${command:pickProcess}",
+    "cwd": "${workspaceFolder}",
+    "env": {
+      "YAMS_LOG_LEVEL": "debug",
+      "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1:sleep_before_dying=10",
+      "LSAN_OPTIONS": "use_tls=0:verbosity=1:log_threads=1"
+    }
+  }
+]

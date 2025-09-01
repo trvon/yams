@@ -10,6 +10,7 @@ endif()
 
 # Derive version from git tags or allow override via -DYAMS_VERSION=MAJOR.MINOR.PATCH
 set(YAMS_VERSION "" CACHE STRING "Override Yams version (semver: MAJOR.MINOR.PATCH)")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT YAMS_VERSION)
     find_package(Git QUIET)

@@ -12,6 +12,11 @@
 #include <yams/daemon/ipc/response_of.hpp>
 #include <yams/daemon/ipc/message_framing.h>
 
+// Forward-declare Task to avoid requiring coroutine support in all includers
+namespace yams { template <typename T> class Task; }
+
+// Forward declarations for sync helpers are present in impl; no heavy async includes here
+
 namespace yams::cli {
 
 // Minimal Boost.Asio-based client pool focused on Ping/Status for first wiring.
@@ -54,6 +59,17 @@ public:
         }
         return Error{ErrorCode::InvalidData, "Unexpected message kind"};
     }
+
+    // ===== Async (coroutine) API =====
+    // Non-blocking ping
+    yams::Task<yams::Result<void>> async_ping();
+
+    // Non-blocking status
+    yams::Task<yams::Result<yams::daemon::StatusResponse>> async_status();
+
+    // Non-blocking generic unary call (variant-based). Callers can downcast to specific type.
+    yams::Task<yams::Result<yams::daemon::Response>> async_call_variant(
+        const yams::daemon::Request& req);
 
 private:
     // Send a framed request and receive a full framed response

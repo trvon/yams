@@ -389,7 +389,7 @@ private:
 
             // Live spinner: poll status until Ready (or timeout)
             using namespace std::chrono_literals;
-            const auto timeout = 45s;
+            const auto timeout = 10s;
             auto t0 = std::chrono::steady_clock::now();
 
             // Use shared progress indicator for consistent TTY rendering
@@ -436,8 +436,7 @@ private:
 
             if (!became_ready) {
                 pi.stop();
-                spdlog::warn(
-                    "Daemon started but not fully ready yet. It will finish initializing in the background.");
+                spdlog::warn("Daemon start initiated. It will finish initializing in the background.");
                 spdlog::warn("Tip: run 'yams daemon status -d' or check the log for progress.");
             }
         }

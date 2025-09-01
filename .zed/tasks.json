@@ -1,0 +1,30 @@
+[
+  {
+    "label": "build (Debug)",
+    "command": "cmake --build --preset yams-debug"
+  },
+  {
+    "label": "conan: install (Debug)",
+    "command": "conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing"
+  },
+  {
+    "label": "cmake: configure (Debug)",
+    "command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
+  },
+  {
+    "label": "build+test (Debug)",
+    "command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure -j"
+  },
+  {
+    "label": "conan: install (Release)",
+    "command": "conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing"
+  },
+  {
+    "label": "cmake: configure (Release)",
+    "command": "cmake --preset yams-release"
+  },
+  {
+    "label": "build (Release)",
+    "command": "cmake --build --preset yams-release"
+  }
+]

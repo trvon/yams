@@ -3,10 +3,16 @@
 
 #include <span>
 
+
 #include <spdlog/spdlog.h>
 #include <cstring>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <optional>
+#include <chrono>
+#include <mutex>
+#include <memory>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -17,51 +23,25 @@
 
 namespace yams::daemon {
 
-static Result<int> connect_unix_socket(const std::filesystem::path& p) {
-#ifndef _WIN32
-    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return Error{ErrorCode::NetworkError, "Failed to create socket"};
-    }
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-    {
-        int on = 1;
-        ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
-    struct sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
 
-    if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
-        ::close(fd);
-        return Error{ErrorCode::NetworkError, "Failed to connect"};
-    }
-    // non-blocking for safety; our AsyncSocket handles the rest
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) {
-        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    }
-    return fd;
-#else
-    return Error{ErrorCode::InternalError, "Asio transport not supported on Windows"};
-#endif
-}
+
+
 
 AsioTransportAdapter::AsioTransportAdapter(const Options& opts) : opts_(opts) {}
 
 Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
     fsm_.on_connect(-1); // Placeholder fd
-    auto fdres = connect_unix_socket(opts_.socketPath);
+
+#ifndef _WIN32
+    auto& ioctx = yams::daemon::GlobalIOContext::instance().get_io_context();
+    // Connect with per-request timeout using AsyncIOContext
+    auto fdres = co_await ioctx.async_connect_unix(opts_.socketPath, opts_.requestTimeout);
     if (!fdres) {
         fsm_.on_error(static_cast<int>(fdres.error().code));
         co_return fdres.error();
     }
-#ifndef _WIN32
     int fd = fdres.value();
     fsm_.on_connect(fd);
-    auto& ioctx = yams::daemon::GlobalIOContext::instance().get_io_context();
-
     DefaultAsyncSocket sock(fd, ioctx);
 
     Message msg;
@@ -136,7 +116,7 @@ Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
     co_return out;
 #else
     fsm_.on_error(ErrorCode::InternalError);
-    co_return fdres.error();
+    co_return Error{ErrorCode::InternalError, "Asio transport not supported on Windows"};
 #endif
 }
 
@@ -145,15 +125,16 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(
     AsioTransportAdapter::ChunkCallback onChunk, AsioTransportAdapter::ErrorCallback onError,
     AsioTransportAdapter::CompleteCallback onComplete) {
     fsm_.on_connect(-1); // Placeholder fd
-    auto fdres = connect_unix_socket(opts_.socketPath);
+#ifndef _WIN32
+    auto& ioctx = yams::daemon::GlobalIOContext::instance().get_io_context();
+    // Connect with per-request timeout using AsyncIOContext
+    auto fdres = co_await ioctx.async_connect_unix(opts_.socketPath, opts_.requestTimeout);
     if (!fdres) {
         fsm_.on_error(static_cast<int>(fdres.error().code));
         co_return fdres.error();
     }
-#ifndef _WIN32
     int fd = fdres.value();
     fsm_.on_connect(fd);
-    auto& ioctx = yams::daemon::GlobalIOContext::instance().get_io_context();
     DefaultAsyncSocket sock(fd, ioctx);
 
     Message msg;
@@ -313,7 +294,7 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(
     co_return Result<void>();
 #else
     fsm_.on_error(ErrorCode::InternalError);
-    co_return fdres.error();
+    co_return Error{ErrorCode::InternalError, "Asio transport not supported on Windows"};
 #endif
 }
 

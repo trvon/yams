@@ -38,6 +38,13 @@ public:
                                                HeaderCallback onHeader, ChunkCallback onChunk,
                                                ErrorCallback onError, CompleteCallback onComplete);
 
+public:
+    // Toggle FSM metrics and snapshot logging for transport observability
+    void enableFsmMetrics(bool on) noexcept { fsm_.enable_metrics(on); }
+    void enableFsmSnapshots(bool on) noexcept { fsm_.enable_snapshots(on); }
+    void debugDumpFsmSnapshots(std::size_t maxEntries = 10) const noexcept { fsm_.debug_dump_snapshots(maxEntries); }
+    ConnectionFsm::State fsmState() const noexcept { return fsm_.state(); }
+
 private:
     Options opts_;
     ConnectionFsm fsm_;

@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <filesystem>
 #include <span>
 #include <utility>
 #include <vector>
@@ -282,6 +283,11 @@ public:
     // Post a functor to be executed on the IO thread.
     // Thread-safe: can be called from any thread. The functor will run on the IO loop.
     void post(std::function<void()> fn);
+
+    // Coroutine-friendly sleep that resumes on the IO context thread.
+    // Non-blocking; safe to call from any thread.
+    Task<void> sleep_for(std::chrono::milliseconds d);
+    Task<Result<int>> async_connect_unix(const std::filesystem::path& socketPath, std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
     void run();
     void stop();

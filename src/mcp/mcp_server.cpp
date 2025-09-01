@@ -3,6 +3,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/async_socket.h>
+#include <yams/core/task.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
@@ -21,6 +22,9 @@
 #include <memory>
 #include <mutex>
 #include <regex>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 
 // Platform-specific includes for non-blocking I/O
 #ifdef _WIN32
@@ -32,6 +36,40 @@
 #endif
 
 namespace yams::mcp {
+namespace {
+// Prefer async client for MCP (future state), but until handlers are coroutine-based,
+// avoid bridging via Task::get() which can hang tests. For now default to sync path.
+bool use_async_client() {
+    const char* v = std::getenv("YAMS_ASYNC_CLIENT");
+    if (!v) return true; // Default ON for MCP
+    std::string s(v);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    if (s == "0" || s == "false" || s == "no" || s == "off") {
+        return false;
+    }
+    return true;
+}
+
+template <typename Manager, typename TRequest, typename Render>
+Result<void> pooled_execute(Manager& manager, const TRequest& req,
+                            std::function<Result<void>()> fallback, Render&& render) {
+    // Until MCP request handlers are refactored to be coroutines that can co_await,
+    // force the synchronous path to avoid Task::get() bridging that can hang.
+    // TODO(ipc-async): Introduce Task<Result<void>> pooled_execute_async and migrate callers.
+    (void)use_async_client; // silence unused in current stage
+    return manager.execute(req, std::move(fallback), std::forward<Render>(render));
+}
+
+// Async variant to be used once MCP handlers become coroutine-based.
+// Not used yet to avoid bridging via Task::get(); call sites will migrate to co_await this.
+template <typename Manager, typename TRequest, typename Render>
+[[nodiscard]] yams::Task<Result<void>> pooled_execute_async(Manager& manager, const TRequest& req,
+                                                           std::function<Result<void>()> fallback,
+                                                           Render&& render) {
+    // Forward the Task without bridging; callers should co_await this when handlers are async.
+    return manager.execute_async(req, std::move(fallback), std::forward<Render>(render));
+}
+} // namespace
 
 // Define static mutex for StdioTransport
 std::mutex StdioTransport::io_mutex_;
@@ -55,11 +93,14 @@ void StdioTransport::send(const json& message) {
         // Lock mutex to ensure atomic write
         std::lock_guard<std::mutex> lock(io_mutex_);
         const std::string payload = message.dump();
-        if (outbuf_) {
-            std::ostream out(outbuf_);
-            out << payload << "\n";
-            out.flush();
+        // Write to std::cout so tests that redirect cout capture output deterministically.
+        // If we captured a custom outbuf_ at construction, ensure std::cout uses it.
+        if (outbuf_ && std::cout.rdbuf() != outbuf_) {
+            std::streambuf* old = std::cout.rdbuf(outbuf_);
+            (void)old; // suppress unused warning
         }
+        std::cout << payload << "\n";
+        std::cout.flush();
     }
 }
 
@@ -323,7 +364,86 @@ void MCPServer::start() {
         }
 
         // Process valid message
-        auto response = handleRequest(messageResult.value());
+        auto request = messageResult.value();
+
+        // Async dispatch for search behind YAMS_ASYNC_CLIENT
+        bool useAsync = false;
+        if (const char* v = std::getenv("YAMS_ASYNC_CLIENT")) {
+            std::string s(v);
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+            useAsync = (s == "1" || s == "true" || s == "yes" || s == "on");
+        }
+        if (useAsync) {
+            std::string method = request.value("method", "");
+            if (method == "search") {
+                auto id = request.value("id", json{});
+                auto params = request.value("params", json::object());
+
+                // Launch coroutine on IO context thread to handle the request asynchronously
+                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                    auto task = [this, id, params]() -> yams::Task<void> {
+                        auto mcpReq = MCPSearchRequest::fromJson(params);
+                        auto result = co_await handleSearchDocumentsAsync(mcpReq);
+                        if (result) {
+                            auto resp = createResponse(id, result.value().toJson());
+                            transport_->send(resp);
+                        } else {
+                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            transport_->send(err);
+                        }
+                        co_return;
+                    }();
+                    (void)task; // fire-and-forget
+                });
+
+                // Skip synchronous handling for this request
+                continue;
+            } else if (method == "grep") {
+                auto id = request.value("id", json{});
+                auto params = request.value("params", json::object());
+
+                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                    auto task = [this, id, params]() -> yams::Task<void> {
+                        auto mcpReq = MCPGrepRequest::fromJson(params);
+                        auto result = co_await handleGrepDocumentsAsync(mcpReq);
+                        if (result) {
+                            auto resp = createResponse(id, result.value().toJson());
+                            transport_->send(resp);
+                        } else {
+                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            transport_->send(err);
+                        }
+                        co_return;
+                    }();
+                    (void)task; // fire-and-forget
+                });
+
+                continue;
+            } else if (method == "list") {
+                auto id = request.value("id", json{});
+                auto params = request.value("params", json::object());
+
+                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                    auto task = [this, id, params]() -> yams::Task<void> {
+                        auto mcpReq = MCPListDocumentsRequest::fromJson(params);
+                        auto result = co_await handleListDocumentsAsync(mcpReq);
+                        if (result) {
+                            auto resp = createResponse(id, result.value().toJson());
+                            transport_->send(resp);
+                        } else {
+                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            transport_->send(err);
+                        }
+                        co_return;
+                    }();
+                    (void)task; // fire-and-forget
+                });
+
+                continue;
+            }
+        }
+
+        auto response = handleRequest(request);
         if (response) {
             const auto& resp = response.value();
             // Do not send a response for notifications (no id)
@@ -1066,7 +1186,7 @@ Result<MCPSearchResponse> MCPServer::handleSearchDocuments(const MCPSearchReques
         return Result<void>();
     };
 
-    auto result = search_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*search_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1077,6 +1197,60 @@ Result<MCPSearchResponse> MCPServer::handleSearchDocuments(const MCPSearchReques
     }
 
     return mcp_response;
+}
+
+// Async variant for coroutine-based pipeline (not yet wired by default)
+yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocumentsAsync(
+    const MCPSearchRequest& req) {
+    daemon::SearchRequest daemon_req;
+    daemon_req.query = req.query;
+    daemon_req.limit = req.limit;
+    daemon_req.fuzzy = req.fuzzy;
+    daemon_req.similarity = static_cast<double>(req.similarity);
+    daemon_req.hashQuery = req.hash;
+    daemon_req.searchType = req.type;
+    daemon_req.verbose = req.verbose;
+    daemon_req.pathsOnly = req.pathsOnly;
+    daemon_req.showLineNumbers = req.lineNumbers;
+    daemon_req.beforeContext = req.beforeContext;
+    daemon_req.afterContext = req.afterContext;
+    daemon_req.context = req.context;
+
+    MCPSearchResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::SearchResponse& resp) -> Result<void> {
+        mcp_response.total = resp.totalCount;
+        mcp_response.type = "daemon";
+        mcp_response.executionTimeMs = resp.elapsed.count();
+        for (const auto& item : resp.results) {
+            MCPSearchResponse::Result m;
+            m.id = item.id;
+            m.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
+            m.title = item.title;
+            m.path = item.path;
+            m.score = item.score;
+            m.snippet = item.snippet;
+            mcp_response.results.push_back(std::move(m));
+        }
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error = Error{ErrorCode::NetworkError,
+                                "Daemon not available or failed to respond. Try restarting the "
+                                "daemon (yams daemon start) and re-run the command."};
+        return Result<void>();
+    };
+
+    auto r = co_await pooled_execute_async(*search_req_manager_, daemon_req, fallback, render);
+    if (execution_error) {
+        co_return execution_error.value();
+    }
+    if (!r) {
+        co_return r.error();
+    }
+    co_return mcp_response;
 }
 
 Result<MCPGrepResponse> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
@@ -1129,7 +1303,7 @@ Result<MCPGrepResponse> MCPServer::handleGrepDocuments(const MCPGrepRequest& req
         return Result<void>();
     };
 
-    auto result = grep_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*grep_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1467,7 +1641,7 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             add_error = Error{ErrorCode::NetworkError, "Daemon not available during post-index"};
             return Result<void>();
         };
-        if (auto res = store_req_manager_->execute(addReq, fallbackAdd, renderAdd); !res) {
+    if (auto res = pooled_execute(*store_req_manager_, addReq, fallbackAdd, renderAdd); !res) {
             if (verbose) {
                 spdlog::debug("[MCP] post-index: daemon call failed error='{}'",
                               res.error().message);
@@ -1483,6 +1657,120 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
     }
 
     return mcp_response;
+}
+
+yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocumentsAsync(const MCPGrepRequest& req) {
+    // Convert MCP request to daemon request
+    daemon::GrepRequest daemon_req;
+    daemon_req.pattern = req.pattern;
+    daemon_req.paths = req.paths;
+    daemon_req.caseInsensitive = req.ignoreCase;
+    daemon_req.wholeWord = req.word;
+    daemon_req.invertMatch = req.invert;
+    daemon_req.showLineNumbers = req.lineNumbers;
+    daemon_req.showFilename = req.withFilename;
+    daemon_req.countOnly = req.count;
+    daemon_req.filesOnly = req.filesWithMatches;
+    daemon_req.filesWithoutMatch = req.filesWithoutMatch;
+    daemon_req.afterContext = req.afterContext;
+    daemon_req.beforeContext = req.beforeContext;
+    daemon_req.contextLines = req.context;
+    daemon_req.colorMode = req.color;
+    if (req.maxCount) {
+        daemon_req.maxMatches = *req.maxCount;
+    }
+
+    MCPGrepResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::GrepResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.matchCount = resp.totalMatches;
+        mcp_response.fileCount = resp.filesSearched;
+
+        std::ostringstream oss;
+        for (const auto& match : resp.matches) {
+            if (mcp_response.fileCount > 1 || req.withFilename) {
+                oss << match.file << ":";
+            }
+            if (req.lineNumbers) {
+                oss << match.lineNumber << ":";
+            }
+            oss << match.line << "\n";
+        }
+        mcp_response.output = oss.str();
+
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
+
+    auto result = co_await pooled_execute_async(*grep_req_manager_, daemon_req, fallback, render);
+
+    if (execution_error) {
+        co_return execution_error.value();
+    }
+
+    if (!result) {
+        co_return result.error();
+    }
+
+    co_return mcp_response;
+}
+
+yams::Task<Result<MCPListDocumentsResponse>> MCPServer::handleListDocumentsAsync(const MCPListDocumentsRequest& req) {
+    // Convert MCP request to daemon request
+    daemon::ListRequest daemon_req;
+    daemon_req.namePattern = req.pattern;
+    daemon_req.tags = req.tags;
+    daemon_req.fileType = req.type;
+    daemon_req.mimeType = req.mime;
+    daemon_req.extensions = req.extension;
+    daemon_req.binaryOnly = req.binary;
+    daemon_req.textOnly = req.text;
+    daemon_req.recentCount = req.recent;
+    daemon_req.sortBy = req.sortBy;
+    daemon_req.reverse = (req.sortOrder == "desc");
+    daemon_req.limit = req.limit;
+    daemon_req.offset = req.offset;
+
+    MCPListDocumentsResponse mcp_response;
+    std::optional<Error> execution_error;
+
+    auto render = [&](const daemon::ListResponse& resp) -> Result<void> {
+        // Convert daemon response to MCP response
+        mcp_response.total = resp.totalCount;
+        for (const auto& item : resp.items) {
+            json docJson = {{"hash", item.hash},          {"path", item.path},
+                            {"name", item.name},          {"size", item.size},
+                            {"mime_type", item.mimeType}, {"created", item.created},
+                            {"modified", item.modified},  {"indexed", item.indexed}};
+            mcp_response.documents.push_back(std::move(docJson));
+        }
+        return Result<void>();
+    };
+
+    auto fallback = [&]() -> Result<void> {
+        execution_error =
+            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
+        return Result<void>();
+    };
+
+    auto result = co_await pooled_execute_async(*list_req_manager_, daemon_req, fallback, render);
+
+    if (execution_error) {
+        co_return execution_error.value();
+    }
+
+    if (!result) {
+        co_return result.error();
+    }
+
+    co_return mcp_response;
 }
 
 Result<MCPStoreDocumentResponse>
@@ -1521,7 +1809,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         return Result<void>();
     };
 
-    auto result = store_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*store_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1571,7 +1859,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         return Result<void>();
     };
 
-    auto result = retrieve_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*retrieve_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1623,7 +1911,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         return Result<void>();
     };
 
-    auto result = list_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*list_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1674,7 +1962,7 @@ Result<MCPStatsResponse> MCPServer::handleGetStats(const MCPStatsRequest& req) {
         return Result<void>();
     };
 
-    auto result = stats_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*stats_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1722,7 +2010,7 @@ Result<MCPAddDirectoryResponse> MCPServer::handleAddDirectory(const MCPAddDirect
         return Result<void>();
     };
 
-    auto result = store_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*store_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -1766,7 +2054,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         return Result<void>();
     };
 
-    auto result = update_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*update_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();
@@ -2190,7 +2478,7 @@ Result<MCPDeleteByNameResponse> MCPServer::handleDeleteByName(const MCPDeleteByN
         return Result<void>();
     };
 
-    auto result = delete_req_manager_->execute(daemon_req, fallback, render);
+    auto result = pooled_execute(*delete_req_manager_, daemon_req, fallback, render);
 
     if (execution_error) {
         return execution_error.value();

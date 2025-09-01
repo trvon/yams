@@ -1,6 +1,7 @@
 # YAMS — Yet Another Memory System
 
-[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)
+[![Latest tag](https://img.shields.io/github/v/tag/trvon/yams?sort=semver&label=latest%20tag)](https://github.com/trvon/yams/tags)     [![](https://dcbadge.limes.pink/api/server/INVITE)](https://discord.gg/jJPfwSv9yC)
+
 **Note**: Pre‑1.0 releases (v0.x) are not considered stable. Expect breaking changes until v1.0.
 
 Persistent memory for LLMs and applications. Content‑addressed storage with deduplication, compression, semantic search, and full‑text indexing.
@@ -52,11 +53,6 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>
 
-- [Discord](https://discord.gg/Jee5ux2Y3e)
-
-## Versioning
-
-YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
 ## Install
 
@@ -143,6 +139,10 @@ yams search "hello" --json
 # retrieve
 yams list --format minimal --limit 1 | xargs yams get
 ```
+
+## Versioning
+
+YAMS provides comprehensive versioning through content-addressed storage. Every stored document gets a unique SHA-256 hash that serves as an immutable version identifier. You can track changes using metadata updates (`yams update`), organize versions with collections (`--collection release-v1.0`), and capture point-in-time states with snapshots (`--snapshot-id 2024Q4`).
 
 ## Docs
 

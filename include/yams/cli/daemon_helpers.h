@@ -17,7 +17,9 @@
 #include <vector>
 
 #include <yams/core/types.h>
+#include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/cli/asio_client_pool.hpp>
 #include <yams/daemon/ipc/response_of.hpp>
 
@@ -599,6 +601,120 @@ public:
         } catch (...) {
             fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
             return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+        }
+    }
+
+    // Async (coroutine) execution path using pooled DaemonClient::call<TRequest>()
+    // Mirrors the sync logic but avoids blocking during the daemon roundtrip.
+    [[nodiscard]] yams::Task<Result<void>> execute_async(const TRequest& req,
+                                                         std::function<Result<void>()> fallback,
+                                                         RenderFunc render) {
+        auto acquire_start = std::chrono::steady_clock::now();
+        auto lease_res = pool_->acquire();
+        auto acquire_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - acquire_start);
+
+        if (!lease_res) {
+            spdlog::warn("[PooledRequestManager] Pool acquire failed after {} ms: {}",
+                         acquire_ms.count(), lease_res.error().message);
+            try {
+                co_return fallback ? fallback() : Error{ErrorCode::ResourceBusy, "Pool unavailable"};
+            } catch (...) {
+                co_return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+            }
+        }
+
+        auto lease = std::move(lease_res).value();
+        const auto client_id = lease.client_id();
+
+        auto is_transient = [](const Error& e) {
+            if (e.code == ErrorCode::NetworkError)
+                return true; // treat ECONNRESET/EPIPE as transient
+            if (e.code == ErrorCode::InvalidState || e.code == ErrorCode::NotInitialized) {
+                const std::string& m = e.message;
+                return m.find("not ready") != std::string::npos ||
+                       m.find("not available") != std::string::npos ||
+                       m.find("initializ") != std::string::npos; // initializing/initialization
+            }
+            return false;
+        };
+
+        constexpr int kMaxAttempts = 3;
+        std::chrono::milliseconds backoff{75};
+        Error last_err{ErrorCode::Unknown, "unknown"};
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            auto t0 = std::chrono::steady_clock::now();
+            auto resp = co_await lease->call<TRequest>(req);
+            auto t1 = std::chrono::steady_clock::now();
+            auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
+
+            if (pool_->config().verbose) {
+                spdlog::debug(
+                    "[PooledRequestManager/async] client={} waited={}ms roundtrip={}ms "
+                    "deadline={}ms attempt={}",
+                    client_id, lease.waited().count(), call_ms.count(),
+                    pool_->config().client_config.requestTimeout.count(), attempt);
+            }
+
+            if (resp) {
+                co_return render(resp.value());
+            }
+
+            last_err = resp.error();
+            const bool network = (last_err.code == ErrorCode::NetworkError);
+            const bool is_reset = (last_err.message.find("Connection reset") != std::string::npos ||
+                                   last_err.message.find("Broken pipe") != std::string::npos ||
+                                   last_err.message.find("EPIPE") != std::string::npos ||
+                                   last_err.message.find("ECONNRESET") != std::string::npos);
+            if (is_reset) {
+                spdlog::debug("[PooledRequestManager/async] client {} attempt {}: {}", client_id,
+                              attempt, last_err.message);
+            } else {
+                spdlog::warn("[PooledRequestManager/async] Daemon call error on client {} (attempt {}): {}",
+                              client_id, attempt, last_err.message);
+            }
+            if (network) {
+                pool_->mark_bad(client_id);
+            }
+
+            if (attempt < kMaxAttempts && is_transient(last_err)) {
+                // Tiny jittered backoff using IO context timer (non-blocking)
+                auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
+                auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+                co_await io.sleep_for(backoff + jitter);
+                backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
+                continue;
+            }
+
+            break; // non-transient or exhausted
+        }
+
+        daemon_failures_.fetch_add(1, std::memory_order_relaxed);
+        const bool is_network = (last_err.code == ErrorCode::NetworkError);
+        spdlog::error("[PooledRequestManager/async] Daemon call failed on client {}: {}{}.",
+                      client_id, last_err.message, is_network ? " (network)" : "");
+        if (is_network) {
+            pool_->mark_bad(client_id);
+        }
+
+        try {
+            if (!fallback) {
+                spdlog::error("[PooledRequestManager/async] No fallback provided; surfacing daemon error");
+                co_return last_err;
+            }
+            auto fb = fallback();
+            if (fb) {
+                fallbacks_succeeded_.fetch_add(1, std::memory_order_relaxed);
+                spdlog::info("[PooledRequestManager/async] Recovered from daemon failure via fallback");
+                co_return fb;
+            }
+            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+            spdlog::error("[PooledRequestManager/async] Fallback path failed after daemon error: {}",
+                          fb.error().message);
+            co_return fb;
+        } catch (...) {
+            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+            co_return Error{ErrorCode::InternalError, "Fallback threw an exception"};
         }
     }
 

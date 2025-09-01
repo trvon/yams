@@ -2,6 +2,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
+#include <yams/daemon/client/global_io_context.h>
 
 #include <spdlog/spdlog.h>
 
@@ -410,7 +411,7 @@ Task<Result<StatusResponse>> DaemonClient::status() {
             co_return lastErr;
         }
         using namespace std::chrono_literals;
-        std::this_thread::sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
+        co_await GlobalIOContext::instance().get_io_context().sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
     }
     co_return lastErr;
 }
