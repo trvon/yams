@@ -34,7 +34,8 @@ public:
     using ClockMs = std::uint64_t; // avoid <chrono> in the public header
     using Callback = std::function<void(State)>;
 
-    explicit RepairFsm(Config cfg = {}) : cfg_(cfg) {}
+    explicit RepairFsm(Config cfg) : cfg_(cfg) {}
+    explicit RepairFsm() : cfg_{} {}
 
     State state() const noexcept { return state_; }
     const Config& config() const noexcept { return cfg_; }

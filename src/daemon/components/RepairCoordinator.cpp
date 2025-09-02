@@ -72,7 +72,13 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
 }
 
 void RepairCoordinator::run(std::stop_token st) {
-    core::RepairFsm fsm;
+    core::RepairFsm::Config fsmConfig;
+    fsmConfig.enable_online_repair = true;
+    fsmConfig.max_repair_concurrency = cfg_.maintenanceTokens;
+    fsmConfig.repair_backoff_ms = 250;
+    fsmConfig.max_retries = 3;
+    
+    core::RepairFsm fsm(fsmConfig);
     fsm.set_on_state_change([](core::RepairFsm::State state) {
         spdlog::debug("RepairFsm state changed to: {}", core::RepairFsm::to_string(state));
     });
@@ -97,15 +103,21 @@ void RepairCoordinator::run(std::stop_token st) {
         lock.unlock();
         
         // Check scheduling hints
-        RepairSchedulingAdapter::SchedulingHints hints{};
+        RepairSchedulingAdapter::SchedulingHints adapterHints{};
         size_t active = activeConnFn_ ? activeConnFn_() : 0;
-        hints.streaming_high_load = (active > 0);
-        hints.maintenance_allowed = maintenance_allowed();
-        hints.closing = st.stop_requested();
+        adapterHints.streaming_high_load = (active > 0);
+        adapterHints.maintenance_allowed = maintenance_allowed();
+        adapterHints.closing = st.stop_requested();
         
-        fsm.set_scheduling_hints(hints);
+        // Convert to RepairFsm hints
+        core::RepairFsm::SchedulingHints fsmHints;
+        fsmHints.streaming_high_load = adapterHints.streaming_high_load;
+        fsmHints.maintenance_allowed = adapterHints.maintenance_allowed;
+        fsmHints.closing = adapterHints.closing;
         
-        if (hints.closing || (hints.streaming_high_load && batch.empty())) {
+        fsm.set_scheduling_hints(fsmHints);
+        
+        if (adapterHints.closing || (adapterHints.streaming_high_load && batch.empty())) {
             if (state_)
                 state_->stats.repairBusyTicks++;
             continue;
