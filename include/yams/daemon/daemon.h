@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
 
@@ -20,6 +21,7 @@ class LifecycleComponent;
 class ServiceManager;
 class RequestDispatcher;
 class RepairCoordinator;
+class SocketServer;
 // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
 
 struct DaemonConfig {
@@ -47,8 +49,6 @@ struct DaemonConfig {
     std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
 
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
-    class AsyncIOContext;
-    template <typename IOContextT> class AsyncSocket;
     struct DownloadPolicy {
         bool enable{false};                               // feature gate
         std::vector<std::string> allowedHosts{};          // exact or wildcard patterns
@@ -78,6 +78,15 @@ public:
     bool isStopRequested() const { return stopRequested_.load(); }
 
     const StateComponent& getState() const { return state_; }
+    // Lifecycle FSM accessor
+    const DaemonLifecycleFsm& getLifecycle() const { return lifecycleFsm_; }
+    
+    // Socket server accessor (for testing)
+    SocketServer* getSocketServer() const { return socketServer_.get(); }
+    
+    // Document event notifications - forwarded to RepairCoordinator
+    void onDocumentAdded(const std::string& hash, const std::string& path);
+    void onDocumentRemoved(const std::string& hash);
 
     // Path resolution helpers
     enum class PathType { Socket, PidFile, LogFile };
@@ -89,8 +98,12 @@ public:
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::unique_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
-    // IPC server removed during Boost.Asio migration; acceptance loop handled elsewhere
+    // Integrated socket server (replaces external yams-socket-server)
+    std::unique_ptr<SocketServer> socketServer_;
     std::unique_ptr<RepairCoordinator> repairCoordinator_;
+
+    // Lifecycle FSM (authoritative lifecycle state)
+    DaemonLifecycleFsm lifecycleFsm_{};
 
     // Threading and state
     std::atomic<bool> running_{false};

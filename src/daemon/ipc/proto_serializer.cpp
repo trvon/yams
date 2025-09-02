@@ -906,13 +906,19 @@ template <> struct ProtoBinding<ListResponse> {
 template <> struct ProtoBinding<StatusResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kStatusResponse;
     static void set(Envelope& env, const StatusResponse& r) {
-        // Best-effort: map overallStatus to state string
+        // DEPRECATION NOTICE: overallStatus/ready are legacy display hints only.
+        // Lifecycle will be driven by DaemonLifecycleFsm and exposed via
+        // StatusResponse.state/lastError. For now, map overallStatus to state string to preserve
+        // behavior.
         env.mutable_status_response()->set_state(
             r.overallStatus.empty() ? (r.running ? "ready" : "stopped") : r.overallStatus);
+        // TODO(PBI-007-06): When protocol adds lifecycle_state (enum) and lifecycle_last_error,
+        // populate them from DaemonLifecycleFsm snapshot(); keep
+        // ready/readinessStates/initProgress/overallStatus for compatibility.
     }
     static StatusResponse get(const Envelope& env) {
         StatusResponse r{};
-        // Best-effort reconstruction
+        // Best-effort reconstruction from legacy 'state' string.
         r.overallStatus = env.status_response().state();
         r.running = (r.overallStatus != "stopped");
         r.ready = (r.overallStatus == "ready");
@@ -922,6 +928,8 @@ template <> struct ProtoBinding<StatusResponse> {
         r.memoryUsageMb = 0;
         r.cpuUsagePercent = 0;
         r.version = "";
+        // TODO(lifecycle-fsm): read new fields (state enum, last_error, last_transition_time) when
+        // available.
         return r;
     }
 };

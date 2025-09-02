@@ -4,8 +4,8 @@
 #include <fstream>
 #include <iostream>
 #include <ostream>
-#include <yams/core/types.h>
 #include <yams/core/task.h>
+#include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -57,13 +57,17 @@ public:
 
     // High-level request methods
     Task<Result<SearchResponse>> search(const SearchRequest& req);
-        Task<Result<AddResponse>> add(const AddRequest& req);
+    Task<Result<AddResponse>> add(const AddRequest& req);
     Task<Result<GetResponse>> get(const GetRequest& req);
-    Task<Result<GetInitResponse>> getInit(const GetInitRequest& req) { return call<GetInitRequest>(req); }
+    Task<Result<GetInitResponse>> getInit(const GetInitRequest& req) {
+        return call<GetInitRequest>(req);
+    }
     Task<Result<GetChunkResponse>> getChunk(const GetChunkRequest& req) {
         return call<GetChunkRequest>(req);
     }
-    Task<Result<SuccessResponse>> getEnd(const GetEndRequest& req) { return call<GetEndRequest>(req); }
+    Task<Result<SuccessResponse>> getEnd(const GetEndRequest& req) {
+        return call<GetEndRequest>(req);
+    }
     Task<Result<ListResponse>> list(const ListRequest& req);
     Task<Result<GrepResponse>> grep(const GrepRequest& req);
     // Streaming path for AddDocument (header-first, final-only chunk)
@@ -122,11 +126,12 @@ public:
     // Streaming get helpers (init/header-only + chunk loop)
     Task<Result<void>> streamingGetToStdout(const GetInitRequest& req) { return getToStdout(req); }
     Task<Result<void>> streamingGetToFile(const GetInitRequest& req,
-                                    const std::filesystem::path& outputPath) {
+                                          const std::filesystem::path& outputPath) {
         return getToFile(req, outputPath);
     }
 
-    Task<Result<void>> getToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
+    Task<Result<void>> getToFile(const GetInitRequest& req,
+                                 const std::filesystem::path& outputPath) {
         if (auto c = connect(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
@@ -314,7 +319,7 @@ private:
 
     // Send request with chunked response handling
     Task<Result<void>> sendRequestStreaming(const Request& req,
-                                      std::shared_ptr<ChunkedResponseHandler> handler);
+                                            std::shared_ptr<ChunkedResponseHandler> handler);
 
     // Auto-start daemon if configured and not running
     Result<void> autoStartDaemonIfNeeded();

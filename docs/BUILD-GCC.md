@@ -64,6 +64,7 @@ sudo apt-get install -y \
     cmake \
     pkg-config \
     libssl-dev \
+    libcurl4-openssl-dev \
     libsqlite3-dev \
     libncurses-dev \
     protobuf-compiler \
@@ -75,6 +76,7 @@ sudo apt-get install -y \
 sudo yum install -y \
     cmake3 \
     openssl-devel \
+    libcurl-devel \
     sqlite-devel \
     ncurses-devel \
     protobuf-compiler \
@@ -86,6 +88,7 @@ sudo yum install -y \
 sudo dnf install -y \
     cmake \
     openssl-devel \
+    libcurl-devel \
     sqlite-devel \
     ncurses-devel \
     protobuf-compiler \
@@ -97,6 +100,7 @@ sudo dnf install -y \
 sudo pacman -S \
     cmake \
     openssl \
+    curl \
     sqlite \
     ncurses \
     protobuf
@@ -142,6 +146,20 @@ make -j$(nproc)
 # Run tests
 ctest --output-on-failure
 ```
+
+### Building Without CURL
+
+If you don't need HTTP download features, you can build without CURL:
+
+```bash
+CC=gcc CXX=g++ cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DYAMS_REQUIRE_CURL=OFF
+
+make -j$(nproc)
+```
+
+**Note**: When YAMS_REQUIRE_CURL=OFF, HTTP downloader features will be unavailable.
 
 ### Build with Coverage
 
@@ -222,7 +240,23 @@ If using an older version, upgrade GCC or use a developer toolset.
 
 **Solution**: Ensure all dependencies are installed and pkg-config can find them:
 ```bash
-pkg-config --list-all | grep -E "(sqlite|openssl|protobuf)"
+pkg-config --list-all | grep -E "(sqlite|openssl|protobuf|libcurl)"
+```
+
+### Issue: "Could NOT find CURL" during configuration
+
+**Solution**: Either install libcurl development package:
+```bash
+# Ubuntu/Debian
+sudo apt-get install libcurl4-openssl-dev
+
+# RHEL/CentOS
+sudo yum install libcurl-devel
+```
+
+Or build without CURL support:
+```bash
+cmake .. -DYAMS_REQUIRE_CURL=OFF
 ```
 
 ## Performance Optimization

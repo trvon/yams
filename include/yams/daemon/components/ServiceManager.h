@@ -36,6 +36,8 @@ namespace yams::daemon {
 
 class ServiceManager : public IComponent {
 public:
+    using InitCompleteCallback = std::function<void(bool success, const std::string& error)>;
+
     ServiceManager(const DaemonConfig& config, StateComponent& state);
     ~ServiceManager() override;
 
@@ -43,6 +45,9 @@ public:
     const char* getName() const override { return "ServiceManager"; }
     Result<void> initialize() override;
     void shutdown() override;
+
+    // Set callback to be invoked when async initialization completes
+    void setInitCompleteCallback(InitCompleteCallback callback) { initCompleteCallback_ = callback; }
 
     // Service Accessors
     std::shared_ptr<api::IContentStore> getContentStore() const { return contentStore_; }
@@ -87,6 +92,8 @@ private:
 
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
     mutable std::mutex searchEngineMutex_;
+    
+    InitCompleteCallback initCompleteCallback_;
 };
 
 } // namespace yams::daemon

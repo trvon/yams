@@ -15,11 +15,13 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/name_resolver.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -105,6 +107,22 @@ RequestDispatcher::RequestDispatcher(YamsDaemon* daemon, ServiceManager* service
 RequestDispatcher::~RequestDispatcher() = default;
 
 Response RequestDispatcher::dispatch(const Request& req) {
+    // Check lifecycle state for all non-status requests
+    bool is_status_or_ping = std::holds_alternative<StatusRequest>(req) ||
+                            std::holds_alternative<PingRequest>(req);
+    
+    if (!is_status_or_ping) {
+        auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+        if (lifecycleSnapshot.state != LifecycleState::Ready &&
+            lifecycleSnapshot.state != LifecycleState::Degraded) {
+            // Return status response for all requests when not ready
+            // This prevents hanging and gives clients current state info
+            StatusRequest statusReq;
+            statusReq.detailed = true;
+            return handleStatusRequest(statusReq);
+        }
+    }
+    
     // For requests that need services, check readiness.
     bool needs_services = !std::holds_alternative<StatusRequest>(req) &&
                           !std::holds_alternative<ShutdownRequest>(req) &&
@@ -171,6 +189,16 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
     res.memoryUsageMb = getMemoryUsage();
     res.cpuUsagePercent = getCpuUsage();
     res.version = YAMS_VERSION_STRING;
+    // FSM transport metrics (aggregated snapshot)
+    {
+        auto snap = FsmMetricsRegistry::instance().snapshot();
+        res.fsmTransitions = snap.transitions;
+        res.fsmHeaderReads = snap.headerReads;
+        res.fsmPayloadReads = snap.payloadReads;
+        res.fsmPayloadWrites = snap.payloadWrites;
+        res.fsmBytesSent = snap.bytesSent;
+        res.fsmBytesReceived = snap.bytesReceived;
+    }
 
     // Overall readiness (backward compatibility)
     res.ready = state_->readiness.fullyReady();
@@ -196,8 +224,37 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
         res.initProgress["model_provider"] = state_->readiness.modelLoadProgress.load();
     }
 
-    // Overall status
-    res.overallStatus = state_->readiness.overallStatus();
+    // Overall status from lifecycle FSM
+    auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+    switch (lifecycleSnapshot.state) {
+        case LifecycleState::Unknown:
+            res.overallStatus = "Unknown";
+            break;
+        case LifecycleState::Starting:
+            res.overallStatus = "Starting";
+            break;
+        case LifecycleState::Initializing:
+            res.overallStatus = "Initializing";
+            break;
+        case LifecycleState::Ready:
+            res.overallStatus = "Ready";
+            break;
+        case LifecycleState::Degraded:
+            res.overallStatus = "Degraded";
+            break;
+        case LifecycleState::Failed:
+            res.overallStatus = "Failed: " + lifecycleSnapshot.lastError;
+            break;
+        case LifecycleState::Stopping:
+            res.overallStatus = "Stopping";
+            break;
+        case LifecycleState::Stopped:
+            res.overallStatus = "Stopped";
+            break;
+        default:
+            res.overallStatus = "Unknown";
+            break;
+    }
 
     // Add model information if available from service manager
     if (serviceManager_ && serviceManager_->getModelProvider()) {
@@ -605,7 +662,10 @@ Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& r
             AddDocumentResponse response;
             response.hash = ""; // Directory operations don't have a single hash
             response.path = req.path;
-            response.documentsAdded = static_cast<uint32_t>(serviceResp.filesIndexed);
+            response.documentsAdded = static_cast<size_t>(serviceResp.filesProcessed);
+
+            // Note: For directory operations, individual files are notified via the indexing service
+            // No need to notify here as it would be redundant
 
             return response;
         } else {
@@ -642,6 +702,11 @@ Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& r
             response.hash = serviceResp.hash;
             response.path = req.path.empty() ? req.name : req.path;
             response.documentsAdded = 1; // Service returns single document info
+
+            // Notify daemon about the added document for repair coordination
+            if (daemon_ && !serviceResp.hash.empty()) {
+                daemon_->onDocumentAdded(serviceResp.hash, response.path);
+            }
 
             return response;
         }
@@ -1042,6 +1107,10 @@ Response RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
 
             if (daemonResult.success) {
                 response.successCount++;
+                // Notify daemon about the removed document for repair coordination
+                if (daemon_ && !deleteResult.hash.empty()) {
+                    daemon_->onDocumentRemoved(deleteResult.hash);
+                }
             } else {
                 response.failureCount++;
             }
@@ -1561,6 +1630,11 @@ Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
 
         if (!response.success) {
             response.error = "Download failed";
+        } else {
+            // Notify daemon about the downloaded document for repair coordination
+            if (daemon_ && !response.hash.empty()) {
+                daemon_->onDocumentAdded(response.hash, response.localPath);
+            }
         }
 
         return response;

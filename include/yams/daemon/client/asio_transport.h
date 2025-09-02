@@ -1,21 +1,22 @@
 #pragma once
 
-#include <filesystem>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
-#include <yams/daemon/ipc/async_socket.h>
+#include <yams/core/task.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
-
 #include <yams/daemon/ipc/connection_fsm.h>
 
 namespace yams::daemon {
 
-// A minimal transport that uses the existing AsyncIOContext/AsyncSocket to
-// send framed requests and receive framed responses (unary and streaming).
+// A minimal transport that uses native boost::asio to send framed requests 
+// and receive framed responses (unary and streaming).
 class AsioTransportAdapter {
 public:
     struct Options {
@@ -34,18 +35,37 @@ public:
     using ErrorCallback = std::function<void(const Error&)>;
     using CompleteCallback = std::function<void()>;
 
-    Task<Result<void>> send_request_streaming(const Request& req,
-                                               HeaderCallback onHeader, ChunkCallback onChunk,
-                                               ErrorCallback onError, CompleteCallback onComplete);
+    Task<Result<void>> send_request_streaming(const Request& req, HeaderCallback onHeader,
+                                              ChunkCallback onChunk, ErrorCallback onError,
+                                              CompleteCallback onComplete);
 
 public:
     // Toggle FSM metrics and snapshot logging for transport observability
     void enableFsmMetrics(bool on) noexcept { fsm_.enable_metrics(on); }
     void enableFsmSnapshots(bool on) noexcept { fsm_.enable_snapshots(on); }
-    void debugDumpFsmSnapshots(std::size_t maxEntries = 10) const noexcept { fsm_.debug_dump_snapshots(maxEntries); }
+    void debugDumpFsmSnapshots(std::size_t maxEntries = 10) const noexcept {
+        fsm_.debug_dump_snapshots(maxEntries);
+    }
     ConnectionFsm::State fsmState() const noexcept { return fsm_.state(); }
 
 private:
+    // Helper to connect with timeout
+    boost::asio::awaitable<Result<std::unique_ptr<boost::asio::local::stream_protocol::socket>>>
+    async_connect_with_timeout(const std::filesystem::path& path, 
+                              std::chrono::milliseconds timeout);
+
+    // Helper to read exact number of bytes with timeout
+    boost::asio::awaitable<Result<std::vector<uint8_t>>>
+    async_read_exact(boost::asio::local::stream_protocol::socket& socket,
+                     size_t size,
+                     std::chrono::milliseconds timeout);
+
+    // Helper to write all data with timeout
+    boost::asio::awaitable<Result<void>>
+    async_write_all(boost::asio::local::stream_protocol::socket& socket,
+                    const std::vector<uint8_t>& data,
+                    std::chrono::milliseconds timeout);
+
     Options opts_;
     ConnectionFsm fsm_;
 };

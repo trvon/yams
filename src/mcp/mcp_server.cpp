@@ -1,9 +1,9 @@
 #include <yams/cli/asio_client_pool.hpp>
+#include <yams/cli/async_bridge.h>
 #include <yams/config/config_migration.h>
+#include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
-#include <yams/daemon/ipc/async_socket.h>
-#include <yams/core/task.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <errno.h>
 #include <filesystem>
@@ -22,9 +23,6 @@
 #include <memory>
 #include <mutex>
 #include <regex>
-#include <algorithm>
-#include <cctype>
-#include <cstdlib>
 
 // Platform-specific includes for non-blocking I/O
 #ifdef _WIN32
@@ -37,38 +35,21 @@
 
 namespace yams::mcp {
 namespace {
-// Prefer async client for MCP (future state), but until handlers are coroutine-based,
-// avoid bridging via Task::get() which can hang tests. For now default to sync path.
-bool use_async_client() {
-    const char* v = std::getenv("YAMS_ASYNC_CLIENT");
-    if (!v) return true; // Default ON for MCP
-    std::string s(v);
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
-    if (s == "0" || s == "false" || s == "no" || s == "off") {
-        return false;
-    }
-    return true;
-}
-
+// Synchronous pooled_execute is deprecated and returns NotImplemented
+// This is kept only for toolRegistry compatibility until it's migrated to async
 template <typename Manager, typename TRequest, typename Render>
 Result<void> pooled_execute(Manager& manager, const TRequest& req,
                             std::function<Result<void>()> fallback, Render&& render) {
-    // Until MCP request handlers are refactored to be coroutines that can co_await,
-    // force the synchronous path to avoid Task::get() bridging that can hang.
-    // TODO(ipc-async): Introduce Task<Result<void>> pooled_execute_async and migrate callers.
-    (void)use_async_client; // silence unused in current stage
-    return manager.execute(req, std::move(fallback), std::forward<Render>(render));
+    (void)manager;
+    (void)req;
+    (void)fallback;
+    (void)render;
+    return Error{ErrorCode::NotImplemented, 
+                 "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
 }
 
 // Async variant to be used once MCP handlers become coroutine-based.
-// Not used yet to avoid bridging via Task::get(); call sites will migrate to co_await this.
-template <typename Manager, typename TRequest, typename Render>
-[[nodiscard]] yams::Task<Result<void>> pooled_execute_async(Manager& manager, const TRequest& req,
-                                                           std::function<Result<void>()> fallback,
-                                                           Render&& render) {
-    // Forward the Task without bridging; callers should co_await this when handlers are async.
-    return manager.execute_async(req, std::move(fallback), std::forward<Render>(render));
-}
+
 } // namespace
 
 // Define static mutex for StdioTransport
@@ -309,11 +290,11 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Quick daemon health probe via Asio pool (prefer ping; fallback to status)
     {
         yams::cli::AsioClientPool asio_pool{};
-        auto pong = asio_pool.ping();
+        auto pong = yams::cli::run_sync(asio_pool.async_ping(), std::chrono::seconds(2));
         if (pong) {
             spdlog::info("Daemon reachable via Asio client pool (ping)");
         } else {
-            auto st = asio_pool.status();
+            auto st = yams::cli::run_sync(asio_pool.async_status(), std::chrono::seconds(2));
             if (st) {
                 spdlog::info("Daemon reachable via Asio client pool (status)");
             } else {
@@ -366,14 +347,8 @@ void MCPServer::start() {
         // Process valid message
         auto request = messageResult.value();
 
-        // Async dispatch for search behind YAMS_ASYNC_CLIENT
-        bool useAsync = false;
-        if (const char* v = std::getenv("YAMS_ASYNC_CLIENT")) {
-            std::string s(v);
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-            useAsync = (s == "1" || s == "true" || s == "yes" || s == "on");
-        }
-        if (useAsync) {
+        // Async dispatch is now the default for all MCP handlers
+        {
             std::string method = request.value("method", "");
             if (method == "search") {
                 auto id = request.value("id", json{});
@@ -383,12 +358,13 @@ void MCPServer::start() {
                 yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPSearchRequest::fromJson(params);
-                        auto result = co_await handleSearchDocumentsAsync(mcpReq);
+                        auto result = co_await handleSearchDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
                             transport_->send(resp);
                         } else {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            auto err =
+                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
                             transport_->send(err);
                         }
                         co_return;
@@ -405,7 +381,7 @@ void MCPServer::start() {
                 yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPGrepRequest::fromJson(params);
-                        auto result = co_await handleGrepDocumentsAsync(mcpReq);
+                        auto result = co_await handleGrepDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
                             transport_->send(resp);
@@ -426,7 +402,7 @@ void MCPServer::start() {
                 yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPListDocumentsRequest::fromJson(params);
-                        auto result = co_await handleListDocumentsAsync(mcpReq);
+                        auto result = co_await handleListDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
                             transport_->send(resp);
@@ -440,8 +416,83 @@ void MCPServer::start() {
                 });
 
                 continue;
+            } else if (method == "get") {
+                auto id = request.value("id", json{});
+                auto params = request.value("params", json::object());
+
+                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                    auto task = [this, id, params]() -> yams::Task<void> {
+                        auto mcpReq = MCPRetrieveDocumentRequest::fromJson(params);
+                        auto result = co_await handleRetrieveDocument(mcpReq);
+                        if (result) {
+                            auto resp = createResponse(id, result.value().toJson());
+                            transport_->send(resp);
+                        } else {
+                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            transport_->send(err);
+                        }
+                        co_return;
+                    }();
+                    (void)task; // fire-and-forget
+                });
+
+                continue;
+            } else if (method == "add") {
+                auto id = request.value("id", json{});
+                auto params = request.value("params", json::object());
+
+                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                    auto task = [this, id, params]() -> yams::Task<void> {
+                        auto mcpReq = MCPStoreDocumentRequest::fromJson(params);
+                        auto result = co_await handleStoreDocument(mcpReq);
+                        if (result) {
+                            auto resp = createResponse(id, result.value().toJson());
+                            transport_->send(resp);
+                        } else {
+                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            transport_->send(err);
+                        }
+                        co_return;
+                    }();
+                    (void)task; // fire-and-forget
+                });
+
+                continue;
+            } else if (method == "tools/call") {
+                auto id = request.value("id", json{});
+                auto params = request.value("params", json::object());
+                auto toolName = params.value("name", "");
+                auto toolArgs = params.value("arguments", json::object());
+
+                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, toolName, toolArgs] {
+                    auto task = [this, id, toolName, toolArgs]() -> yams::Task<void> {
+                        if (!toolRegistry_) {
+                            auto err = createError(id, protocol::INTERNAL_ERROR, "Tool registry not initialized");
+                            transport_->send(err);
+                            co_return;
+                        }
+
+                        auto toolResult = co_await toolRegistry_->callTool(toolName, toolArgs);
+                        
+                        // Wrap non-MCP-shaped results into MCP content format for compatibility with MCP clients
+                        if (toolResult.contains("content") && toolResult["content"].is_array()) {
+                            auto resp = createResponse(id, toolResult);
+                            transport_->send(resp);
+                        } else {
+                            json wrapped = {
+                                {"content", json::array({json{{"type", "text"}, {"text", toolResult.dump(2)}}})}};
+                            auto resp = createResponse(id, wrapped);
+                            transport_->send(resp);
+                        }
+                        co_return;
+                    }();
+                    (void)task; // fire-and-forget
+                });
+
+                continue;
             }
         }
+        // Fall through to synchronous handling for any unhandled methods
 
         auto response = handleRequest(request);
         if (response) {
@@ -492,9 +543,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
         } else if (method == "tools/list") {
             response = listTools();
         } else if (method == "tools/call") {
-            std::string toolName = params.value("name", "");
-            json toolArgs = params.value("arguments", json::object());
-            response = callTool(toolName, toolArgs);
+            // Tool calls are handled asynchronously in the start() method
+            return Error{ErrorCode::InvalidOperation, "Tool calls must be made through async message handling"};
         } else if (method == "resources/list") {
             response = listResources();
         } else if (method == "resources/read") {
@@ -1123,18 +1173,12 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", "Tool registry not initialized"}};
     }
 
-    auto toolResult = toolRegistry_->callTool(name, arguments);
-    // Wrap non-MCP-shaped results into MCP content format for compatibility with MCP clients
-    if (toolResult.contains("content") && toolResult["content"].is_array()) {
-        return toolResult;
-    }
-    json wrapped = {
-        {"content", json::array({json{{"type", "text"}, {"text", toolResult.dump(2)}}})}};
-    return wrapped;
+    // This method is deprecated - tools should be called via the async path in start()
+    return {{"error", "Synchronous tool calls are not supported. Use async message handling."}};
 }
 
 // Modern C++20 tool handler implementations
-Result<MCPSearchResponse> MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
+yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     // This function will now be a client to the daemon.
     // It converts the MCP request to a daemon request, sends it, and converts the response.
 
@@ -1186,74 +1230,26 @@ Result<MCPSearchResponse> MCPServer::handleSearchDocuments(const MCPSearchReques
         return Result<void>();
     };
 
-    auto result = pooled_execute(*search_req_manager_, daemon_req, fallback, render);
-
-    if (execution_error) {
-        return execution_error.value();
-    }
-
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::SearchRequest>(daemon_req);
     if (!result) {
-        return result.error();
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
     }
 
-    return mcp_response;
-}
-
-// Async variant for coroutine-based pipeline (not yet wired by default)
-yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocumentsAsync(
-    const MCPSearchRequest& req) {
-    daemon::SearchRequest daemon_req;
-    daemon_req.query = req.query;
-    daemon_req.limit = req.limit;
-    daemon_req.fuzzy = req.fuzzy;
-    daemon_req.similarity = static_cast<double>(req.similarity);
-    daemon_req.hashQuery = req.hash;
-    daemon_req.searchType = req.type;
-    daemon_req.verbose = req.verbose;
-    daemon_req.pathsOnly = req.pathsOnly;
-    daemon_req.showLineNumbers = req.lineNumbers;
-    daemon_req.beforeContext = req.beforeContext;
-    daemon_req.afterContext = req.afterContext;
-    daemon_req.context = req.context;
-
-    MCPSearchResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::SearchResponse& resp) -> Result<void> {
-        mcp_response.total = resp.totalCount;
-        mcp_response.type = "daemon";
-        mcp_response.executionTimeMs = resp.elapsed.count();
-        for (const auto& item : resp.results) {
-            MCPSearchResponse::Result m;
-            m.id = item.id;
-            m.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
-            m.title = item.title;
-            m.path = item.path;
-            m.score = item.score;
-            m.snippet = item.snippet;
-            mcp_response.results.push_back(std::move(m));
-        }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error = Error{ErrorCode::NetworkError,
-                                "Daemon not available or failed to respond. Try restarting the "
-                                "daemon (yams daemon start) and re-run the command."};
-        return Result<void>();
-    };
-
-    auto r = co_await pooled_execute_async(*search_req_manager_, daemon_req, fallback, render);
     if (execution_error) {
         co_return execution_error.value();
     }
-    if (!r) {
-        co_return r.error();
-    }
+
     co_return mcp_response;
 }
 
-Result<MCPGrepResponse> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
+yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     // Convert MCP request to daemon request
     daemon::GrepRequest daemon_req;
     daemon_req.pattern = req.pattern;
@@ -1303,20 +1299,26 @@ Result<MCPGrepResponse> MCPServer::handleGrepDocuments(const MCPGrepRequest& req
         return Result<void>();
     };
 
-    auto result = pooled_execute(*grep_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::GrepRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
-    if (!result) {
-        return result.error();
-    }
-
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& req) {
+yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownloadRequest& req) {
     const bool verbose =
         (std::getenv("YAMS_POOL_VERBOSE") && std::string(std::getenv("YAMS_POOL_VERBOSE")) != "0" &&
          std::string(std::getenv("YAMS_POOL_VERBOSE")) != "false");
@@ -1503,7 +1505,7 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             storage.stagingDir = staging;
         }
         if (!ensure_dir(storage.stagingDir)) {
-            return Error{ErrorCode::InternalError, std::string("Failed to create staging dir: ") +
+            co_return Error{ErrorCode::InternalError, std::string("Failed to create staging dir: ") +
                                                        storage.stagingDir.string()};
         }
 
@@ -1512,7 +1514,7 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             (void)ensure_dir(storage.objectsDir);
         }
     } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError,
+        co_return Error{ErrorCode::InternalError,
                      std::string("Failed to prepare staging dir: ") + e.what()};
     }
 
@@ -1531,7 +1533,7 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             spdlog::debug("[MCP] download: failed for url='{}' error='{}'", req.url,
                           dlRes.error().message);
         }
-        return Error{ErrorCode::InternalError, dlRes.error().message};
+        co_return Error{ErrorCode::InternalError, dlRes.error().message};
     }
 
     const auto& final = dlRes.value();
@@ -1637,143 +1639,35 @@ Result<MCPDownloadResponse> MCPServer::handleDownload(const MCPDownloadRequest& 
             (void)resp;
             return Result<void>();
         };
-        auto fallbackAdd = [&]() -> Result<void> {
-            add_error = Error{ErrorCode::NetworkError, "Daemon not available during post-index"};
-            return Result<void>();
-        };
-    if (auto res = pooled_execute(*store_req_manager_, addReq, fallbackAdd, renderAdd); !res) {
+        // Use AsioClientPool directly for the daemon call
+        yams::cli::AsioClientPool pool{};
+        auto result = co_await pool.async_call<daemon::AddDocumentRequest>(addReq);
+        if (!result) {
             if (verbose) {
                 spdlog::debug("[MCP] post-index: daemon call failed error='{}'",
-                              res.error().message);
+                              result.error().message);
             }
-            return res.error();
+            // Non-fatal: download succeeded but indexing failed
+            mcp_response.indexed = false;
+        } else {
+            auto renderResult = renderAdd(result.value());
+            if (!renderResult) {
+                // Non-fatal: download succeeded but indexing render failed
+                mcp_response.indexed = false;
+            }
         }
-        if (add_error) {
-            if (verbose) {
-                spdlog::debug("[MCP] post-index: fallback error='{}'", add_error->message);
-            }
-            return add_error.value();
-        }
-    }
-
-    return mcp_response;
-}
-
-yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocumentsAsync(const MCPGrepRequest& req) {
-    // Convert MCP request to daemon request
-    daemon::GrepRequest daemon_req;
-    daemon_req.pattern = req.pattern;
-    daemon_req.paths = req.paths;
-    daemon_req.caseInsensitive = req.ignoreCase;
-    daemon_req.wholeWord = req.word;
-    daemon_req.invertMatch = req.invert;
-    daemon_req.showLineNumbers = req.lineNumbers;
-    daemon_req.showFilename = req.withFilename;
-    daemon_req.countOnly = req.count;
-    daemon_req.filesOnly = req.filesWithMatches;
-    daemon_req.filesWithoutMatch = req.filesWithoutMatch;
-    daemon_req.afterContext = req.afterContext;
-    daemon_req.beforeContext = req.beforeContext;
-    daemon_req.contextLines = req.context;
-    daemon_req.colorMode = req.color;
-    if (req.maxCount) {
-        daemon_req.maxMatches = *req.maxCount;
-    }
-
-    MCPGrepResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::GrepResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.matchCount = resp.totalMatches;
-        mcp_response.fileCount = resp.filesSearched;
-
-        std::ostringstream oss;
-        for (const auto& match : resp.matches) {
-            if (mcp_response.fileCount > 1 || req.withFilename) {
-                oss << match.file << ":";
-            }
-            if (req.lineNumbers) {
-                oss << match.lineNumber << ":";
-            }
-            oss << match.line << "\n";
-        }
-        mcp_response.output = oss.str();
-
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    auto result = co_await pooled_execute_async(*grep_req_manager_, daemon_req, fallback, render);
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    if (!result) {
-        co_return result.error();
     }
 
     co_return mcp_response;
 }
 
-yams::Task<Result<MCPListDocumentsResponse>> MCPServer::handleListDocumentsAsync(const MCPListDocumentsRequest& req) {
-    // Convert MCP request to daemon request
-    daemon::ListRequest daemon_req;
-    daemon_req.namePattern = req.pattern;
-    daemon_req.tags = req.tags;
-    daemon_req.fileType = req.type;
-    daemon_req.mimeType = req.mime;
-    daemon_req.extensions = req.extension;
-    daemon_req.binaryOnly = req.binary;
-    daemon_req.textOnly = req.text;
-    daemon_req.recentCount = req.recent;
-    daemon_req.sortBy = req.sortBy;
-    daemon_req.reverse = (req.sortOrder == "desc");
-    daemon_req.limit = req.limit;
-    daemon_req.offset = req.offset;
 
-    MCPListDocumentsResponse mcp_response;
-    std::optional<Error> execution_error;
 
-    auto render = [&](const daemon::ListResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.total = resp.totalCount;
-        for (const auto& item : resp.items) {
-            json docJson = {{"hash", item.hash},          {"path", item.path},
-                            {"name", item.name},          {"size", item.size},
-                            {"mime_type", item.mimeType}, {"created", item.created},
-                            {"modified", item.modified},  {"indexed", item.indexed}};
-            mcp_response.documents.push_back(std::move(docJson));
-        }
-        return Result<void>();
-    };
 
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
 
-    auto result = co_await pooled_execute_async(*list_req_manager_, daemon_req, fallback, render);
 
-    if (execution_error) {
-        co_return execution_error.value();
-    }
 
-    if (!result) {
-        co_return result.error();
-    }
-
-    co_return mcp_response;
-}
-
-Result<MCPStoreDocumentResponse>
+yams::Task<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
@@ -1809,20 +1703,28 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         return Result<void>();
     };
 
-    auto result = pooled_execute(*store_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::AddDocumentRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
-    if (!result) {
-        return result.error();
-    }
-
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPRetrieveDocumentResponse>
+
+
+yams::Task<Result<MCPRetrieveDocumentResponse>>
 MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     // Convert MCP request to daemon request
     daemon::GetRequest daemon_req;
@@ -1859,20 +1761,28 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         return Result<void>();
     };
 
-    auto result = pooled_execute(*retrieve_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::GetRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
-    if (!result) {
-        return result.error();
-    }
-
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPListDocumentsResponse>
+
+
+yams::Task<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     // Convert MCP request to daemon request
     daemon::ListRequest daemon_req;
@@ -1911,20 +1821,26 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         return Result<void>();
     };
 
-    auto result = pooled_execute(*list_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::ListRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
-    if (!result) {
-        return result.error();
-    }
-
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPStatsResponse> MCPServer::handleGetStats(const MCPStatsRequest& req) {
+yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsRequest& req) {
     // Convert MCP request to daemon request
     daemon::GetStatsRequest daemon_req;
     daemon_req.showFileTypes = req.fileTypes;
@@ -1962,20 +1878,30 @@ Result<MCPStatsResponse> MCPServer::handleGetStats(const MCPStatsRequest& req) {
         return Result<void>();
     };
 
-    auto result = pooled_execute(*stats_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::GetStatsRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPAddDirectoryResponse> MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
+yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
     // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
     daemon_req.path = req.directoryPath;
@@ -2010,20 +1936,30 @@ Result<MCPAddDirectoryResponse> MCPServer::handleAddDirectory(const MCPAddDirect
         return Result<void>();
     };
 
-    auto result = pooled_execute(*store_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::AddDocumentRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPUpdateMetadataResponse>
+yams::Task<Result<MCPUpdateMetadataResponse>>
 MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     // Convert MCP request to daemon request
     daemon::UpdateDocumentRequest daemon_req;
@@ -2054,17 +1990,27 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         return Result<void>();
     };
 
-    auto result = pooled_execute(*update_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::UpdateDocumentRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return mcp_response;
+    co_return mcp_response;
 }
 
 void MCPServer::initializeToolRegistry() {
@@ -2368,7 +2314,7 @@ json MCPServer::createError(const json& id, int code, const std::string& message
     return json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}};
 }
 
-Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
+yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI robustness
     MCPGetByNameResponse mcp_response;
 
@@ -2380,11 +2326,11 @@ Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameReques
     init.byName = true;
     // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
 
-    auto initRes = pool.call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
-    if (!initRes) {
-        return initRes.error();
+    auto initResult = co_await pool.async_call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
+    if (!initResult) {
+        co_return initResult.error();
     }
-    const auto& initVal = initRes.value();
+    const auto& initVal = initResult.value();
     // Map GetInitResponse fields and metadata into MCP response
     mcp_response.size = initVal.totalSize;
     // Optional metadata keys: hash, path, fileName, mimeType
@@ -2416,13 +2362,13 @@ Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameReques
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = pool.call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
+        auto cRes = co_await pool.async_call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
         if (!cRes) {
             // Attempt to close the transfer before returning error
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
-            return cRes.error();
+            (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
+            co_return cRes.error();
         }
         const auto& chunk = cRes.value();
         if (!chunk.data.empty()) {
@@ -2442,14 +2388,14 @@ Result<MCPGetByNameResponse> MCPServer::handleGetByName(const MCPGetByNameReques
     // End transfer regardless
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
+    (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; no extra flags in response type.
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPDeleteByNameResponse> MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
+yams::Task<Result<MCPDeleteByNameResponse>> MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
     // Convert MCP request to daemon request
     daemon::DeleteRequest daemon_req;
     daemon_req.name = req.name;
@@ -2478,20 +2424,30 @@ Result<MCPDeleteByNameResponse> MCPServer::handleDeleteByName(const MCPDeleteByN
         return Result<void>();
     };
 
-    auto result = pooled_execute(*delete_req_manager_, daemon_req, fallback, render);
+    // Use AsioClientPool directly for the daemon call
+    yams::cli::AsioClientPool pool{};
+    auto result = co_await pool.async_call<daemon::DeleteRequest>(daemon_req);
+    if (!result) {
+        execution_error = result.error();
+    } else {
+        auto renderResult = render(result.value());
+        if (!renderResult) {
+            execution_error = renderResult.error();
+        }
+    }
 
     if (execution_error) {
-        return execution_error.value();
+        co_return execution_error.value();
     }
 
     if (!result) {
-        return result.error();
+        co_return result.error();
     }
 
-    return mcp_response;
+    co_return mcp_response;
 }
 
-Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocumentRequest& req) {
+yams::Task<Result<MCPCatDocumentResponse>> MCPServer::handleCatDocument(const MCPCatDocumentRequest& req) {
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI behavior for large content
     MCPCatDocumentResponse mcp_response;
 
@@ -2503,9 +2459,9 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
     init.byName = !req.name.empty();
     // GetInitRequest no longer supports raw/extract flags; server determines mode
 
-    auto initRes = pool.call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
+    auto initRes = co_await pool.async_call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
     if (!initRes) {
-        return initRes.error();
+        co_return initRes.error();
     }
     const auto& initVal = initRes.value();
     // Map GetInitResponse fields and metadata into MCP response
@@ -2531,12 +2487,12 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = pool.call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
+        auto cRes = co_await pool.async_call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
         if (!cRes) {
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
-            return cRes.error();
+            (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
+            co_return cRes.error();
         }
         const auto& chunk = cRes.value();
         if (!chunk.data.empty()) {
@@ -2555,27 +2511,27 @@ Result<MCPCatDocumentResponse> MCPServer::handleCatDocument(const MCPCatDocument
 
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)pool.call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
+    (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; response type has no truncated flag.
-    return mcp_response;
+    co_return mcp_response;
 }
 
 // Implementation of collection restore
-Result<MCPRestoreCollectionResponse>
+yams::Task<Result<MCPRestoreCollectionResponse>>
 MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
     try {
         if (!metadataRepo_) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+            co_return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
         }
 
         if (!store_) {
-            return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+            co_return Error{ErrorCode::NotInitialized, "Content store not initialized"};
         }
 
         if (req.collection.empty()) {
-            return Error{ErrorCode::InvalidArgument, "Collection name is required"};
+            co_return Error{ErrorCode::InvalidArgument, "Collection name is required"};
         }
 
         spdlog::debug("MCP handleRestoreCollection: restoring collection '{}'", req.collection);
@@ -2583,7 +2539,7 @@ MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
         // Get documents from collection
         auto docsResult = metadataRepo_->findDocumentsByCollection(req.collection);
         if (!docsResult) {
-            return Error{ErrorCode::InternalError,
+            co_return Error{ErrorCode::InternalError,
                          "Failed to find collection documents: " + docsResult.error().message};
         }
 
@@ -2594,7 +2550,7 @@ MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
             response.dryRun = req.dryRun;
             spdlog::info("MCP handleRestoreCollection: no documents found in collection '{}'",
                          req.collection);
-            return response;
+            co_return response;
         }
 
         MCPRestoreCollectionResponse response;
@@ -2606,7 +2562,7 @@ MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
             std::error_code ec;
             std::filesystem::create_directories(outputDir, ec);
             if (ec) {
-                return Error{ErrorCode::IOError,
+                co_return Error{ErrorCode::IOError,
                              "Failed to create output directory: " + ec.message()};
             }
         }
@@ -2741,31 +2697,31 @@ MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
         spdlog::info("MCP handleRestoreCollection: restored {} files from collection '{}'{}",
                      response.filesRestored, req.collection, req.dryRun ? " [DRY-RUN]" : "");
 
-        return response;
+        co_return response;
     } catch (const std::exception& e) {
         spdlog::error("MCP handleRestoreCollection exception: {}", e.what());
-        return Error{ErrorCode::InternalError,
+        co_return Error{ErrorCode::InternalError,
                      std::string("Restore collection failed: ") + e.what()};
     }
 }
 
-Result<MCPRestoreSnapshotResponse>
-MCPServer::handleRestoreSnapshot(const MCPRestoreSnapshotRequest& /*req*/) {
-    return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
+yams::Task<Result<MCPRestoreSnapshotResponse>>
+MCPServer::handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req) {
+    co_return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
 }
 
-Result<MCPListCollectionsResponse>
-MCPServer::handleListCollections(const MCPListCollectionsRequest& /*req*/) {
+yams::Task<Result<MCPListCollectionsResponse>>
+MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
     MCPListCollectionsResponse response;
     // TODO: Implement collection listing
-    return response;
+    co_return response;
 }
 
-Result<MCPListSnapshotsResponse>
-MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& /*req*/) {
+yams::Task<Result<MCPListSnapshotsResponse>>
+MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
     MCPListSnapshotsResponse response;
     // TODO: Implement snapshot listing
-    return response;
+    co_return response;
 }
 
 } // namespace yams::mcp

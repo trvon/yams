@@ -7,6 +7,7 @@
 #include <vector>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -154,7 +155,8 @@ public:
                 return executeLocal();
             };
 
-            if (auto d = daemon_first(dreq, fallback, render); d) {
+            auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+            if (result) {
                 return Result<void>();
             }
 

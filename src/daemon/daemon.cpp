@@ -8,6 +8,7 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/components/SocketServer.h>
 // IPC server implementation removed in PBI-007; client uses Boost.Asio path.
 
 namespace yams::daemon {
@@ -68,10 +69,23 @@ Result<void> YamsDaemon::start() {
 
     spdlog::info("Starting YAMS daemon...");
 
+    // Starting -> Initializing
+    lifecycleFsm_.reset();
+    // The act of starting transitions towards Initializing once bootstrapped later
+
     if (auto result = lifecycleManager_->initialize(); !result) {
         running_ = false;
         return result;
     }
+
+    // Set callback to transition to Ready state when initialization completes
+    serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
+        if (success) {
+            lifecycleFsm_.dispatch(HealthyEvent{});
+        } else {
+            lifecycleFsm_.dispatch(FailureEvent{error});
+        }
+    });
 
     if (auto result = serviceManager_->initialize(); !result) {
         running_ = false;
@@ -79,8 +93,30 @@ Result<void> YamsDaemon::start() {
         return result;
     }
 
-    // Mark IPC as not ready (server handled externally); lifecycle remains functional.
-    state_.readiness.ipcServerReady = false;
+    // Initialize request dispatcher
+    requestDispatcher_ = std::make_unique<RequestDispatcher>(
+        this, serviceManager_.get(), &state_);
+
+    // Start integrated socket server
+    SocketServer::Config socketConfig;
+    socketConfig.socketPath = config_.socketPath;
+    socketConfig.workerThreads = config_.workerThreads;
+    socketConfig.maxConnections = 100;  // TODO: make configurable
+    
+    socketServer_ = std::make_unique<SocketServer>(
+        socketConfig, requestDispatcher_.get(), &state_);
+    
+    if (auto result = socketServer_->start(); !result) {
+        running_ = false;
+        serviceManager_->shutdown();
+        lifecycleManager_->shutdown();
+        return Error{ErrorCode::IOError, 
+                    "Failed to start socket server: " + result.error().message};
+    }
+
+    // Mark IPC as ready now that socket server is running
+    state_.readiness.ipcServerReady = true;
+    spdlog::info("Socket server started on {}", config_.socketPath.string());
 
     // Start feature-flagged repair coordinator (idle-only)
     if (config_.enableAutoRepair) {
@@ -88,7 +124,6 @@ Result<void> YamsDaemon::start() {
         rcfg.enable = true;
         rcfg.dataDir = config_.dataDir;
         rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
-        rcfg.tickMs = 2000;
         // Safe lambda: only dereference ipcServer_ while daemon is running; we stop
         // the coordinator before tearing down ipcServer_ in stop().
         auto activeFn = []() -> size_t { return 0; };
@@ -97,16 +132,25 @@ Result<void> YamsDaemon::start() {
         repairCoordinator_->start();
     }
 
+    // Signal that core bootstrapping completed; advance lifecycle
+    lifecycleFsm_.dispatch(BootstrappedEvent{});
+
     // Start lightweight main loop thread; no in-process IPC acceptor
     daemonThread_ = std::jthread([this](std::stop_token token) {
         spdlog::debug("Daemon main loop started.");
+        // Drive lifecycle FSM periodically
+        lifecycleFsm_.tick();
         while (!token.stop_requested() && !stopRequested_.load()) {
             std::unique_lock<std::mutex> lock(stop_mutex_);
             if (stop_cv_.wait_for(lock, std::chrono::seconds(1),
                                   [&] { return stopRequested_.load(); })) {
-                break; // Shutdown requested
+                // Shutdown requested: inform lifecycle FSM and exit loop
+                lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
+                break;
             }
             // Periodic tasks can be added here
+            // TODO(PBI-007-06): Prefer DaemonLifecycleFsm as lifecycle authority; call fsm_.tick()
+            // here once FSM is wired
         }
         spdlog::debug("Daemon main loop exiting.");
     });
@@ -121,6 +165,14 @@ Result<void> YamsDaemon::stop() {
     }
 
     spdlog::info("Stopping YAMS daemon...");
+
+    // Stop socket server first to prevent new connections
+    if (socketServer_) {
+        spdlog::debug("Stopping socket server...");
+        socketServer_->stop();
+        socketServer_.reset();
+        state_.readiness.ipcServerReady = false;
+    }
 
     stopRequested_ = true;
     stop_cv_.notify_all();
@@ -147,11 +199,28 @@ Result<void> YamsDaemon::stop() {
 
     // No socket file created by in-process server
 
+    // Mark lifecycle stopped
+    lifecycleFsm_.dispatch(StoppedEvent{});
+
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();
 }
 
 // run() method removed; loop is inlined in start()
+
+void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
+    if (repairCoordinator_) {
+        RepairCoordinator::DocumentAddedEvent event{hash, path};
+        repairCoordinator_->onDocumentAdded(event);
+    }
+}
+
+void YamsDaemon::onDocumentRemoved(const std::string& hash) {
+    if (repairCoordinator_) {
+        RepairCoordinator::DocumentRemovedEvent event{hash};
+        repairCoordinator_->onDocumentRemoved(event);
+    }
+}
 
 // Path resolution helpers remain static methods of YamsDaemon
 namespace {

@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
     "minor": 20,
@@ -16,36 +16,107 @@
     {
       "name": "yams-debug",
       "displayName": "YAMS Debug (Conan + Ninja)",
-      "description": "Conan toolchain + Ninja, single-config Debug",
+      "description": "Conan toolchain + Ninja, single-config Debug with tests, tracing, and benchmarks",
       "inherits": "base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "toolchainFile": "${sourceDir}/build/${presetName}/build/Debug/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "YAMS_USE_CONAN": "ON"
+        "YAMS_USE_CONAN": "ON",
+        "YAMS_BUILD_TESTS": "ON",
+        "YAMS_BUILD_BENCHMARKS": "ON",
+        "YAMS_ENABLE_TRACING": "ON"
       }
     },
     {
       "name": "yams-release",
       "displayName": "YAMS Release (Conan + Ninja)",
-      "description": "Conan toolchain + Ninja, single-config Release",
+      "description": "Conan toolchain + Ninja, single-config Release with production defaults",
       "inherits": "base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "toolchainFile": "${sourceDir}/build/${presetName}/build/Release/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "YAMS_USE_CONAN": "ON"
+        "YAMS_USE_CONAN": "ON",
+        "YAMS_BUILD_TESTS": "OFF",
+        "YAMS_BUILD_BENCHMARKS": "OFF",
+        "YAMS_ENABLE_TRACING": "OFF"
+      }
+    },
+    {
+      "name": "yams-debug-no-conan",
+      "displayName": "YAMS Debug (System deps + Ninja)",
+      "description": "System dependencies + Ninja, single-config Debug",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "YAMS_USE_CONAN": "OFF",
+        "YAMS_BUILD_TESTS": "ON",
+        "YAMS_BUILD_BENCHMARKS": "ON",
+        "YAMS_ENABLE_TRACING": "ON"
+      }
+    },
+    {
+      "name": "yams-release-no-conan",
+      "displayName": "YAMS Release (System deps + Ninja)",
+      "description": "System dependencies + Ninja, single-config Release",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "YAMS_USE_CONAN": "OFF",
+        "YAMS_BUILD_TESTS": "OFF",
+        "YAMS_BUILD_BENCHMARKS": "OFF",
+        "YAMS_ENABLE_TRACING": "OFF"
       }
     }
   ],
   "buildPresets": [
-    { "name": "yams-debug",   "configurePreset": "yams-debug" },
-    { "name": "yams-release", "configurePreset": "yams-release" }
+    { "name": "yams-debug", "configurePreset": "yams-debug" },
+    { "name": "yams-release", "configurePreset": "yams-release" },
+    { "name": "yams-debug-no-conan", "configurePreset": "yams-debug-no-conan" },
+    {
+      "name": "yams-release-no-conan",
+      "configurePreset": "yams-release-no-conan"
+    }
   ],
   "testPresets": [
-    { "name": "yams-debug",   "configurePreset": "yams-debug",   "output": { "outputOnFailure": true } },
-    { "name": "yams-release", "configurePreset": "yams-release", "output": { "outputOnFailure": true } }
+    {
+      "name": "yams-debug",
+      "configurePreset": "yams-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "yams-release",
+      "configurePreset": "yams-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "yams-debug-no-conan",
+      "configurePreset": "yams-debug-no-conan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "yams-release-no-conan",
+      "configurePreset": "yams-release-no-conan",
+      "output": { "outputOnFailure": true }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "yams-debug",
+      "configurePreset": "yams-debug",
+      "generators": ["TGZ", "ZIP"]
+    },
+    {
+      "name": "yams-release",
+      "configurePreset": "yams-release",
+      "generators": ["TGZ", "ZIP"]
+    }
   ]
 }

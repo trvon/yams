@@ -2179,6 +2179,13 @@ struct StatusResponse {
     double memoryUsageMb;
     double cpuUsagePercent;
     std::string version;
+    // FSM metrics (transport state machine), exposed in daemon status
+    uint64_t fsmTransitions = 0;
+    uint64_t fsmHeaderReads = 0;
+    uint64_t fsmPayloadReads = 0;
+    uint64_t fsmPayloadWrites = 0;
+    uint64_t fsmBytesSent = 0;
+    uint64_t fsmBytesReceived = 0;
     std::map<std::string, size_t> requestCounts;
 
     // Readiness state tracking (new fields)
@@ -2234,7 +2241,10 @@ struct StatusResponse {
     void serialize(Serializer& ser) const {
         ser << running << ready << static_cast<uint64_t>(uptimeSeconds)
             << static_cast<uint64_t>(requestsProcessed) << static_cast<uint64_t>(activeConnections)
-            << memoryUsageMb << cpuUsagePercent << version;
+            << memoryUsageMb << cpuUsagePercent << version
+            << static_cast<uint64_t>(fsmTransitions) << static_cast<uint64_t>(fsmHeaderReads)
+            << static_cast<uint64_t>(fsmPayloadReads) << static_cast<uint64_t>(fsmPayloadWrites)
+            << static_cast<uint64_t>(fsmBytesSent) << static_cast<uint64_t>(fsmBytesReceived);
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -2308,6 +2318,36 @@ struct StatusResponse {
         if (!versionResult)
             return versionResult.error();
         res.version = std::move(versionResult.value());
+        // Deserialize FSM metrics
+        auto fsmTransResult = deser.template read<uint64_t>();
+        if (!fsmTransResult)
+            return fsmTransResult.error();
+        res.fsmTransitions = fsmTransResult.value();
+
+        auto fsmHdrReadsResult = deser.template read<uint64_t>();
+        if (!fsmHdrReadsResult)
+            return fsmHdrReadsResult.error();
+        res.fsmHeaderReads = fsmHdrReadsResult.value();
+
+        auto fsmPayloadReadsResult = deser.template read<uint64_t>();
+        if (!fsmPayloadReadsResult)
+            return fsmPayloadReadsResult.error();
+        res.fsmPayloadReads = fsmPayloadReadsResult.value();
+
+        auto fsmPayloadWritesResult = deser.template read<uint64_t>();
+        if (!fsmPayloadWritesResult)
+            return fsmPayloadWritesResult.error();
+        res.fsmPayloadWrites = fsmPayloadWritesResult.value();
+
+        auto fsmBytesSentResult = deser.template read<uint64_t>();
+        if (!fsmBytesSentResult)
+            return fsmBytesSentResult.error();
+        res.fsmBytesSent = fsmBytesSentResult.value();
+
+        auto fsmBytesReceivedResult = deser.template read<uint64_t>();
+        if (!fsmBytesReceivedResult)
+            return fsmBytesReceivedResult.error();
+        res.fsmBytesReceived = fsmBytesReceivedResult.value();
 
         // Deserialize request counts
         auto countsCountResult = deser.template read<uint32_t>();

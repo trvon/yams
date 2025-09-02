@@ -65,8 +65,14 @@ Result<void> ServiceManager::initialize() {
         auto result = initializeAsync(token);
         if (!result) {
             spdlog::error("Async resource initialization failed: {}", result.error().message);
+            if (initCompleteCallback_) {
+                initCompleteCallback_(false, result.error().message);
+            }
         } else {
             spdlog::info("All daemon services initialized successfully");
+            if (initCompleteCallback_) {
+                initCompleteCallback_(true, "");
+            }
         }
     });
 

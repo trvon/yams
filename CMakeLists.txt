@@ -1855,24 +1855,4 @@ set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 # CPack already included above at line 1306
-
-# Generate and install CMake package config for find_package(Yams)
-include(CMakePackageConfigHelpers)
-
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/YamsConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/YamsConfig.cmake"
-    INSTALL_DESTINATION ${YAMS_CMAKE_PACKAGE_DIR}
-)
-
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/YamsConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
-
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/YamsConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/YamsConfigVersion.cmake"
-    DESTINATION ${YAMS_CMAKE_PACKAGE_DIR}
-)
+# YamsConfig.cmake generation and installation already handled above

@@ -14,11 +14,11 @@
 #include <yams/search/search_executor.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first search
-#include <signal.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
+#include <yams/cli/async_bridge.h>
 
 namespace yams::cli {
 
@@ -484,7 +484,7 @@ public:
 
                 return Result<void>();
             };
-            auto daemonResult = daemon_first(dreq, fallback, render);
+            auto daemonResult = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
             if (!daemonResult) {
                 // If daemon failed and fallback also failed, return the error
                 return daemonResult.error();

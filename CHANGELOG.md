@@ -5,16 +5,69 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.6.0] - 2025-08-29
+## [v0.6.0] - 2025-01-03
+
+### Repository
+- SourceHut: https://sr.ht/~trvon/yams/
 
 ### Added
-- Protobuf-backed IPC payloads (protobuf-only) with Envelope schema and oneof covering daemon/client requests and responses.
-- MessageFramer uses ProtoSerializer exclusively; transport framing (header, length, CRC, streaming flags, request_id) unchanged.
-- MAX_MESSAGE_SIZE checks in encode/decode; Envelope carries version, request_id, session_id, client_version.
+- **Asynchronous Daemon Client Architecture**
+  - Complete async/await infrastructure for daemon communication
+  - Coroutine-based `AsioClientPool` with `async_call()`, `async_ping()`, `async_status()`
+  - Non-blocking `PooledRequestManager` with retry logic and connection leasing
+  - Removed all synchronous APIs - fully async pipeline end-to-end
+  - `run_sync()` bridge for CLI commands using `co_spawn`/`use_future`
+  - Async sleep implementation via `steady_timer` with cancellation support
+  - Connection pooling with automatic retry and backoff strategies
+
+- **Connection State Machine**
+  - Deterministic `ConnectionFsm` for IPC connection lifecycle management
+  - Clean state transitions: Disconnected → Connecting → Connected → ReadingHeader → ReadingPayload → WritingHeader → StreamingChunks → Error/Closed
+  - FSM metrics collection gated by daemon log level (debug/trace only)
+  - Coordination with `RepairFsm` for safe data integrity operations
+  - Guardrails for readable/writable operations based on FSM state
+  - Header-first streaming with chunked transfer support
+
+- **Protobuf IPC Migration**
+  - Complete migration from custom binary serialization to Protocol Buffers
+  - `ProtoSerializer` as the single payload codec for client/server
+  - Comprehensive `ipc_envelope.proto` schema with oneof for all request/response types
+  - Transport framing (header, CRC, streaming) remains unchanged
+  - MAX_MESSAGE_SIZE enforcement in encode/decode paths
+  - Older non-protobuf clients are incompatible after this release
 
 ### Changed
-- Migrated client/server payload codec from custom binary to Protocol Buffers; older non-protobuf clients are incompatible after this release.
-- Logging to include message type and request_id at key boundaries (in progress).
+- **CLI Commands**
+  - All CLI commands migrated to async-first pattern with `run_sync` bridge
+  - Removed deprecated `daemon_first()` and `daemon_first_pooled()` helpers
+  - Commands now use `async_daemon_first()` with proper timeout handling
+  - Consistent error handling and retry logic across all commands
+
+- **MCP Server**
+  - All handlers converted to async (`yams::Task<Result<T>>`)
+  - Improved concurrency and reduced blocking operations
+
+- **Daemon Architecture**
+  - Socket server runs in-process, eliminating need for external IPC server
+  - `state_.readiness.ipcServerReady` now properly reflects socket server status
+  - Graceful shutdown sequence: socket server stops before services
+  - Better resource lifecycle management and error propagation
+
+### Fixed
+- **Async Infrastructure**
+  - Removed spin-wait bridges that caused CPU waste
+  - Fixed head-of-line blocking in request processing
+  - Proper cancellation handling for in-flight operations
+  - Eliminated `Task::get()` usage from production code paths
+
+### Removed
+- **Deprecated Synchronous APIs**
+  - `AsioClientPool::roundtrip()`, `status()`, `ping()`, `call()` (sync versions)
+  - `PooledRequestManager::execute()` (now returns NotImplemented error)
+  - `YAMS_ASYNC_CLIENT` environment variable (async is now mandatory)
+  - Legacy `MessageSerializer` and custom binary serialization code
+  - All synchronous daemon helper functions
+  - Forward declarations of `BinarySerializer`/`BinaryDeserializer` remain in `ipc_protocol.h` for cleanup in v0.7.0
 
 ## [v0.5.9] - 2025-08-29
 

@@ -18,6 +18,7 @@
 #include <yams/app/services/services.hpp>
 // Daemon client API for daemon-first add
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/async_bridge.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -121,7 +122,8 @@ public:
                         return executeWithServices();
                     };
 
-                    if (auto d = daemon_first(dreq, fallback, render); d) {
+                    auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+                    if (result) {
                         return Result<void>();
                     }
                 }

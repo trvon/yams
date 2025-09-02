@@ -3,6 +3,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -249,7 +250,8 @@ public:
 
             auto fallback = [&]() -> Result<void> { return executeWithServices(); };
 
-            if (auto d = daemon_first(dreq, fallback, render); d)
+            auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+            if (result)
                 return Result<void>();
 
             // Fallback to service-based approach

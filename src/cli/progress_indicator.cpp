@@ -24,17 +24,19 @@ bool detect_tty() {
 
 bool detect_unicode() {
     const char* lc = std::getenv("LC_ALL");
-    if (!lc || !*lc) lc = std::getenv("LC_CTYPE");
-    if (!lc || !*lc) lc = std::getenv("LANG");
-    if (!lc) return false;
+    if (!lc || !*lc)
+        lc = std::getenv("LC_CTYPE");
+    if (!lc || !*lc)
+        lc = std::getenv("LANG");
+    if (!lc)
+        return false;
     std::string_view v{lc};
     return v.find("UTF-8") != std::string_view::npos || v.find("utf8") != std::string_view::npos ||
            v.find("utf-8") != std::string_view::npos;
 }
 } // namespace
 
-ProgressIndicator::ProgressIndicator(Style style, bool autoStart)
-    : style_(style) {
+ProgressIndicator::ProgressIndicator(Style style, bool autoStart) : style_(style) {
     // Nothing else
     if (autoStart) {
         start("");
@@ -105,7 +107,8 @@ void ProgressIndicator::render() {
                 // Non-TTY: simple dots progression
                 oss << message_;
                 int dots = (spinnerIndex_ % 4) + 1;
-                for (int i = 0; i < dots; ++i) oss << ".";
+                for (int i = 0; i < dots; ++i)
+                    oss << ".";
             } else if (!unicodeOk) {
                 // ASCII spinner fallback
                 static const char* ascii[] = {"-", "\\", "|", "/"};

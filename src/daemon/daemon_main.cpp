@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <yams/config/config_migration.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 
 // POSIX headers for daemonization
 #include <fcntl.h>     // for open(), O_RDONLY, O_RDWR
@@ -400,6 +401,16 @@ int main(int argc, char* argv[]) {
         spdlog::set_level(spdlog::level::warn);
     } else if (config.logLevel == "error") {
         spdlog::set_level(spdlog::level::err);
+    }
+
+    // Configure FSM metrics based on log level
+    // Enable FSM metrics only for debug or trace levels to avoid introducing new tags
+    {
+        bool enableFsmMetrics = (config.logLevel == "debug" || config.logLevel == "trace");
+        yams::daemon::FsmMetricsRegistry::instance().setEnabled(enableFsmMetrics);
+        if (enableFsmMetrics) {
+            spdlog::debug("FSM metrics collection enabled");
+        }
     }
 
     // Best-effort: notify about config v2 migration before daemonizing (visible to user)

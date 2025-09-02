@@ -1,10 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
-#include <stop_token>
 #include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 namespace yams {
 namespace api {
@@ -31,10 +34,18 @@ public:
     struct Config {
         bool enable{false};
         std::filesystem::path dataDir{}; // used to locate vectors.db
-        std::uint32_t maxBatch{16};      // max docs per tick when idle
-        std::uint32_t tickMs{2000};      // coordinator loop interval
-        // Stage gating: allow heavier stages only when maintenance tokens are available
+        std::uint32_t maxBatch{16};      // max docs per batch
         std::uint32_t maintenanceTokens{1}; // number of concurrent heavy-stage tokens
+    };
+
+    // Event types for document operations
+    struct DocumentAddedEvent {
+        std::string hash;
+        std::string path;
+    };
+
+    struct DocumentRemovedEvent {
+        std::string hash;
     };
 
     // activeConnFn returns current active connection count
@@ -44,6 +55,10 @@ public:
 
     void start();
     void stop();
+    
+    // Event-driven interface - called when documents are added/removed
+    void onDocumentAdded(const DocumentAddedEvent& event);
+    void onDocumentRemoved(const DocumentRemovedEvent& event);
 
 private:
     void run(std::stop_token st);
@@ -96,6 +111,11 @@ private:
     std::function<size_t()> activeConnFn_{};
     Config cfg_{};
     std::atomic<std::uint32_t> tokens_{0};
+    
+    // Event queue for document operations
+    std::queue<std::string> pendingDocuments_;
+    mutable std::mutex queueMutex_;
+    std::condition_variable queueCv_;
 
     std::jthread thread_{};
     std::atomic<bool> running_{false};

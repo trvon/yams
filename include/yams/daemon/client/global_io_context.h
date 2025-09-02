@@ -1,7 +1,8 @@
 #pragma once
 
-#include <yams/daemon/ipc/async_socket.h>
 #include <thread>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 
 namespace yams::daemon {
 
@@ -9,13 +10,14 @@ class GlobalIOContext {
 public:
     static GlobalIOContext& instance();
 
-    yams::daemon::AsyncIOContext& get_io_context();
+    boost::asio::io_context& get_io_context();
 
 private:
     GlobalIOContext();
     ~GlobalIOContext();
 
-    yams::daemon::AsyncIOContext io_context_;
+    boost::asio::io_context io_context_;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
     std::thread io_thread_;
 };
 

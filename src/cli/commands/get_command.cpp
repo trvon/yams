@@ -8,6 +8,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -338,7 +339,7 @@ public:
             };
 
             // Use daemon_first helper with enhanced request
-            return daemon_first(dreq, fallback, render);
+            return run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};

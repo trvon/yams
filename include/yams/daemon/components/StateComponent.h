@@ -26,11 +26,13 @@ struct DaemonReadiness {
     std::atomic<int> vectorIndexProgress{0};
     std::atomic<int> modelLoadProgress{0};
 
+    // DEPRECATED: not an authoritative lifecycle signal. Use DaemonLifecycleFsm state instead.
     bool fullyReady() const {
         return ipcServerReady && contentStoreReady && databaseReady && metadataRepoReady &&
                searchEngineReady && modelProviderReady && vectorIndexReady && pluginsReady;
     }
 
+    // DEPRECATED: for legacy display only; not a lifecycle source of truth.
     std::string overallStatus() const {
         if (fullyReady())
             return "Ready";

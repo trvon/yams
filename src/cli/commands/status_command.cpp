@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <yams/cli/asio_client_pool.hpp>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
@@ -52,17 +53,40 @@ public:
             {
                 // Prefer new Boost.Asio client pool
                 yams::cli::AsioClientPool pool{};
-                if (auto st = pool.status(); st) {
+                if (auto st = yams::cli::run_sync(pool.async_status(), std::chrono::seconds(5)); st) {
                     const auto& s = st.value();
                     if (jsonOutput_) {
                         nlohmann::json j;
                         j["running"] = s.running;
+                        j["ready"] = s.ready;
+                        j["lifecycle_state"] =
+                            s.overallStatus.empty()
+                                ? (s.ready ? "ready" : (s.running ? "starting" : "stopped"))
+                                : s.overallStatus;
                         j["version"] = s.version;
                         j["uptimeSeconds"] = s.uptimeSeconds;
                         j["requestsProcessed"] = s.requestsProcessed;
                         j["activeConnections"] = s.activeConnections;
                         j["memoryUsageMb"] = s.memoryUsageMb;
                         j["cpuUsagePercent"] = s.cpuUsagePercent;
+                        j["fsmTransitions"] = s.fsmTransitions;
+                        j["fsmHeaderReads"] = s.fsmHeaderReads;
+                        j["fsmPayloadReads"] = s.fsmPayloadReads;
+                        j["fsmPayloadWrites"] = s.fsmPayloadWrites;
+                        j["fsmBytesSent"] = s.fsmBytesSent;
+                        j["fsmBytesReceived"] = s.fsmBytesReceived;
+                        if (!s.readinessStates.empty()) {
+                            nlohmann::json rj = nlohmann::json::object();
+                            for (const auto& [k, v] : s.readinessStates)
+                                rj[k] = v;
+                            j["readiness"] = std::move(rj);
+                        }
+                        if (!s.initProgress.empty()) {
+                            nlohmann::json pj = nlohmann::json::object();
+                            for (const auto& [k, v] : s.initProgress)
+                                pj[k] = v;
+                            j["initProgress"] = std::move(pj);
+                        }
                         std::cout << j.dump(2) << std::endl;
                     } else {
                         std::cout << "YAMS Daemon Status\n";
@@ -74,6 +98,12 @@ public:
                                   << ", Active: " << s.activeConnections << "\n";
                         std::cout << "Memory: " << s.memoryUsageMb
                                   << " MB, CPU: " << s.cpuUsagePercent << "%\n";
+                        std::cout << "FSM: transitions=" << s.fsmTransitions
+                                  << ", header_reads=" << s.fsmHeaderReads
+                                  << ", payload_reads=" << s.fsmPayloadReads
+                                  << ", payload_writes=" << s.fsmPayloadWrites << "\n";
+                        std::cout << "     bytes_sent=" << s.fsmBytesSent
+                                  << ", bytes_recv=" << s.fsmBytesReceived << "\n";
                     }
                     return Result<void>();
                 }

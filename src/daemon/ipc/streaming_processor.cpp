@@ -1,4 +1,3 @@
-#include <yams/core/task.h>
 #include <yams/daemon/ipc/streaming_processor.h>
 
 #include <spdlog/spdlog.h>
@@ -10,11 +9,11 @@
 
 namespace yams::daemon {
 
-Task<Response> StreamingRequestProcessor::process(const Request& request) {
+boost::asio::awaitable<Response> StreamingRequestProcessor::process(const Request& request) {
     co_return co_await delegate_->process(request);
 }
 
-Task<std::optional<Response>> StreamingRequestProcessor::process_streaming(const Request& request) {
+boost::asio::awaitable<std::optional<Response>> StreamingRequestProcessor::process_streaming(const Request& request) {
     // Only intercept known stream-friendly types; otherwise delegate.
     if (std::holds_alternative<SearchRequest>(request)) {
         spdlog::debug(
@@ -65,7 +64,7 @@ StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per
     return approx;
 }
 
-Task<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
+boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
     // Emit a tiny heartbeat chunk immediately after header to keep client alive
     if (pending_request_.has_value() && !heartbeat_sent_) {
         heartbeat_sent_ = true;

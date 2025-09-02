@@ -16,11 +16,11 @@
 #include <utility>
 #include <vector>
 
-#include <yams/core/types.h>
+#include <yams/cli/asio_client_pool.hpp>
 #include <yams/core/task.h>
+#include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
-#include <yams/cli/asio_client_pool.hpp>
 #include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
@@ -451,28 +451,7 @@ inline bool should_stream(const yams::daemon::GrepRequest& r) {
     return r.pathsOnly || r.filesOnly || r.countOnly || r.maxMatches > 0 || (!r.path.empty()) ||
            (!r.paths.empty() && r.paths.size() >= file_hint_threshold) || r.recursive;
 }
-inline Result<yams::daemon::SearchResponse> call_pref(yams::daemon::DaemonClient* /*c*/,
-                                                      const yams::daemon::SearchRequest& r) {
-    // Synchronous roundtrip via Asio client pool (no Task::get())
-    yams::cli::AsioClientPool pool{};
-    return pool.call<yams::daemon::SearchRequest, yams::daemon::SearchResponse>(r);
-}
-inline Result<yams::daemon::ListResponse> call_pref(yams::daemon::DaemonClient* /*c*/,
-                                                    const yams::daemon::ListRequest& r) {
-    yams::cli::AsioClientPool pool{};
-    return pool.call<yams::daemon::ListRequest, yams::daemon::ListResponse>(r);
-}
-inline Result<yams::daemon::GrepResponse> call_pref(yams::daemon::DaemonClient* /*c*/,
-                                                    const yams::daemon::GrepRequest& r) {
-    yams::cli::AsioClientPool pool{};
-    return pool.call<yams::daemon::GrepRequest, yams::daemon::GrepResponse>(r);
-}
-template <class Req>
-inline Result<yams::daemon::ResponseOfT<Req>> call_pref(yams::daemon::DaemonClient* /*c*/,
-                                                        const Req& r) {
-    yams::cli::AsioClientPool pool{};
-    return pool.call<Req, yams::daemon::ResponseOfT<Req>>(r);
-}
+
 
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>>
 class PooledRequestManager {
@@ -482,133 +461,21 @@ public:
     explicit PooledRequestManager(DaemonClientPool::Config pool_cfg = DaemonClientPool::Config{})
         : pool_(std::make_unique<DaemonClientPool>(std::move(pool_cfg))) {}
 
-    // Executes request via a pooled DaemonClient.
-    // If pool acquisition fails, fallback() is invoked (caller may perform local handling).
+    // Synchronous execute method - DEPRECATED and only for test compatibility
+    // This will return NotImplemented in production code
     Result<void> execute(const TRequest& req, std::function<Result<void>()> fallback,
                          RenderFunc render) {
-        auto acquire_start = std::chrono::steady_clock::now();
-        auto lease_res = pool_->acquire();
-        auto acquire_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - acquire_start);
-
-        if (!lease_res) {
-            spdlog::warn("[PooledRequestManager] Pool acquire failed after {} ms: {}",
-                         acquire_ms.count(), lease_res.error().message);
-            try {
-                return fallback ? fallback() : Error{ErrorCode::ResourceBusy, "Pool unavailable"};
-            } catch (...) {
-                return Error{ErrorCode::InternalError, "Fallback threw an exception"};
-            }
-        }
-
-        auto lease = std::move(lease_res).value();
-        const auto client_id = lease.client_id();
-
-        // Transient-aware execute with small internal retries to avoid false fallbacks
-        // on brief startup races (metadata repo/content store not yet ready, reconnects, etc.).
-    auto is_transient = [](const Error& e) {
-            if (e.code == ErrorCode::NetworkError)
-        return true; // treat ECONNRESET/EPIPE as transient
-            if (e.code == ErrorCode::InvalidState || e.code == ErrorCode::NotInitialized) {
-                // Heuristic match on common readiness messages
-                const std::string& m = e.message;
-                return m.find("not ready") != std::string::npos ||
-                       m.find("not available") != std::string::npos ||
-                       m.find("initializ") != std::string::npos; // initializing/initialization
-            }
-            return false;
-        };
-
-        constexpr int kMaxAttempts = 3;
-        std::chrono::milliseconds backoff{75};
-        Error last_err{ErrorCode::Unknown, "unknown"};
-        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
-            auto t0 = std::chrono::steady_clock::now();
-            auto resp = call_pref(lease.operator->(), req);
-            auto t1 = std::chrono::steady_clock::now();
-            auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
-
-            if (pool_->config().verbose) {
-                spdlog::debug("[PooledRequestManager] client={} waited={}ms roundtrip={}ms "
-                              "deadline={}ms attempt={}",
-                              client_id, lease.waited().count(), call_ms.count(),
-                              pool_->config().client_config.requestTimeout.count(), attempt);
-            }
-
-            if (resp) {
-                return render(resp.value());
-            }
-
-            last_err = resp.error();
-            const bool network = (last_err.code == ErrorCode::NetworkError);
-            // Downgrade noisy peer-closure errors to debug, keep others at warn
-            const bool is_reset = (last_err.message.find("Connection reset") != std::string::npos ||
-                                   last_err.message.find("Broken pipe") != std::string::npos ||
-                                   last_err.message.find("EPIPE") != std::string::npos ||
-                                   last_err.message.find("ECONNRESET") != std::string::npos);
-            if (is_reset) {
-                spdlog::debug("[PooledRequestManager] client {} attempt {}: {}", client_id,
-                              attempt, last_err.message);
-            } else {
-                spdlog::warn(
-                    "[PooledRequestManager] Daemon call error on client {} (attempt {}): {}",
-                    client_id, attempt, last_err.message);
-            }
-            if (network) {
-                // Force reconnect on next attempt
-                pool_->mark_bad(client_id);
-            }
-
-            if (attempt < kMaxAttempts && is_transient(last_err)) {
-                // Add tiny jitter to avoid thundering herd
-                auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
-                std::this_thread::sleep_for(backoff + jitter);
-                // Exponential backoff up to ~300ms
-                backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
-                continue; // retry
-            }
-
-            // Non-transient or exhausted retries -> go to fallback path
-            break;
-        }
-
-        // If daemon call failed, log and attempt fallback (e.g., local handling)
-        daemon_failures_.fetch_add(1, std::memory_order_relaxed);
-        const bool is_network = (last_err.code == ErrorCode::NetworkError);
-        spdlog::error("[PooledRequestManager] Daemon call failed on client {}: {}{}.", client_id,
-                      last_err.message, is_network ? " (network)" : "");
-
-        if (is_network) {
-            pool_->mark_bad(client_id);
-        }
-
-        try {
-            if (!fallback) {
-                spdlog::error(
-                    "[PooledRequestManager] No fallback provided; surfacing daemon error");
-                return last_err;
-            }
-            auto fb = fallback();
-            if (fb) {
-                fallbacks_succeeded_.fetch_add(1, std::memory_order_relaxed);
-                spdlog::info("[PooledRequestManager] Recovered from daemon failure via fallback");
-                return fb; // success via recovery
-            }
-            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
-            spdlog::error("[PooledRequestManager] Fallback path failed after daemon error: {}",
-                          fb.error().message);
-            return fb; // propagate fallback error
-        } catch (...) {
-            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
-            return Error{ErrorCode::InternalError, "Fallback threw an exception"};
-        }
+        // For test compatibility only - production code should use execute_async
+        (void)req;
+        (void)fallback;
+        (void)render;
+        return Error{ErrorCode::NotImplemented, "Synchronous execute is deprecated. Use execute_async with async_daemon_first."};
     }
 
     // Async (coroutine) execution path using pooled DaemonClient::call<TRequest>()
     // Mirrors the sync logic but avoids blocking during the daemon roundtrip.
-    [[nodiscard]] yams::Task<Result<void>> execute_async(const TRequest& req,
-                                                         std::function<Result<void>()> fallback,
-                                                         RenderFunc render) {
+    [[nodiscard]] yams::Task<Result<void>>
+    execute_async(const TRequest& req, std::function<Result<void>()> fallback, RenderFunc render) {
         auto acquire_start = std::chrono::steady_clock::now();
         auto lease_res = pool_->acquire();
         auto acquire_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -618,7 +485,8 @@ public:
             spdlog::warn("[PooledRequestManager] Pool acquire failed after {} ms: {}",
                          acquire_ms.count(), lease_res.error().message);
             try {
-                co_return fallback ? fallback() : Error{ErrorCode::ResourceBusy, "Pool unavailable"};
+                co_return fallback ? fallback()
+                                   : Error{ErrorCode::ResourceBusy, "Pool unavailable"};
             } catch (...) {
                 co_return Error{ErrorCode::InternalError, "Fallback threw an exception"};
             }
@@ -649,11 +517,10 @@ public:
             auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
 
             if (pool_->config().verbose) {
-                spdlog::debug(
-                    "[PooledRequestManager/async] client={} waited={}ms roundtrip={}ms "
-                    "deadline={}ms attempt={}",
-                    client_id, lease.waited().count(), call_ms.count(),
-                    pool_->config().client_config.requestTimeout.count(), attempt);
+                spdlog::debug("[PooledRequestManager/async] client={} waited={}ms roundtrip={}ms "
+                              "deadline={}ms attempt={}",
+                              client_id, lease.waited().count(), call_ms.count(),
+                              pool_->config().client_config.requestTimeout.count(), attempt);
             }
 
             if (resp) {
@@ -670,18 +537,18 @@ public:
                 spdlog::debug("[PooledRequestManager/async] client {} attempt {}: {}", client_id,
                               attempt, last_err.message);
             } else {
-                spdlog::warn("[PooledRequestManager/async] Daemon call error on client {} (attempt {}): {}",
-                              client_id, attempt, last_err.message);
+                spdlog::warn(
+                    "[PooledRequestManager/async] Daemon call error on client {} (attempt {}): {}",
+                    client_id, attempt, last_err.message);
             }
             if (network) {
                 pool_->mark_bad(client_id);
             }
 
             if (attempt < kMaxAttempts && is_transient(last_err)) {
-                // Tiny jittered backoff using IO context timer (non-blocking)
+                // Tiny jittered backoff (can't mix Task with boost::asio::awaitable, use sync sleep)
                 auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
-                auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-                co_await io.sleep_for(backoff + jitter);
+                std::this_thread::sleep_for(backoff + jitter);
                 backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
                 continue;
             }
@@ -699,18 +566,21 @@ public:
 
         try {
             if (!fallback) {
-                spdlog::error("[PooledRequestManager/async] No fallback provided; surfacing daemon error");
+                spdlog::error(
+                    "[PooledRequestManager/async] No fallback provided; surfacing daemon error");
                 co_return last_err;
             }
             auto fb = fallback();
             if (fb) {
                 fallbacks_succeeded_.fetch_add(1, std::memory_order_relaxed);
-                spdlog::info("[PooledRequestManager/async] Recovered from daemon failure via fallback");
+                spdlog::info(
+                    "[PooledRequestManager/async] Recovered from daemon failure via fallback");
                 co_return fb;
             }
             fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
-            spdlog::error("[PooledRequestManager/async] Fallback path failed after daemon error: {}",
-                          fb.error().message);
+            spdlog::error(
+                "[PooledRequestManager/async] Fallback path failed after daemon error: {}",
+                fb.error().message);
             co_return fb;
         } catch (...) {
             fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
@@ -744,19 +614,12 @@ private:
 // Convenience shims
 // ============================================================================
 
-// Execute with a provided manager (no fallback)
-template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>,
-          typename Fallback, typename Render>
-inline Result<void> daemon_first_pooled(PooledRequestManager<TRequest, TResponse>& manager,
-                                        const TRequest& req, Fallback&& /*unused*/,
-                                        Render&& render) {
-    return manager.execute(req, [] { return Result<void>(); }, std::forward<Render>(render));
-}
 
-// Legacy-like shim that keeps a static pool per TRequest/TResponse
+
+// Async version of daemon_first that can be used with run_sync bridge
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>,
           typename Fallback, typename Render>
-inline Result<void> daemon_first(const TRequest& req, Fallback&& fallback, Render&& render) {
+inline yams::Task<Result<void>> async_daemon_first(const TRequest& req, Fallback&& fallback, Render&& render) {
     // Static pool with basic defaults. Tunable via env if desired.
     static DaemonClientPool::Config cfg = [] {
         DaemonClientPool::Config c;
@@ -777,7 +640,8 @@ inline Result<void> daemon_first(const TRequest& req, Fallback&& fallback, Rende
     }();
 
     static PooledRequestManager<TRequest, TResponse> manager(cfg);
-    return manager.execute(req, std::forward<Fallback>(fallback), std::forward<Render>(render));
+    auto result = co_await manager.execute_async(req, std::forward<Fallback>(fallback), std::forward<Render>(render));
+    co_return result;
 }
 
 } // namespace yams::cli

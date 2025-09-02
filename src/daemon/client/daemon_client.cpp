@@ -1,8 +1,11 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
-#include <yams/daemon/client/global_io_context.h>
+
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -385,7 +388,7 @@ Task<Result<StatusResponse>> DaemonClient::status() {
     // Transient-aware retry loop for early startup/socket closure races
     Error lastErr{ErrorCode::NetworkError, "Uninitialized"};
     for (int attempt = 0; attempt < 5; ++attempt) {
-    auto response = co_await sendRequest(req);
+        auto response = co_await sendRequest(req);
         if (response) {
             if (auto* res = std::get_if<StatusResponse>(&response.value())) {
                 co_return *res;
@@ -411,7 +414,8 @@ Task<Result<StatusResponse>> DaemonClient::status() {
             co_return lastErr;
         }
         using namespace std::chrono_literals;
-        co_await GlobalIOContext::instance().get_io_context().sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
+        // Can't mix Task with boost::asio::awaitable, use sync sleep
+        std::this_thread::sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
     }
     co_return lastErr;
 }
@@ -977,8 +981,9 @@ Task<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
     co_return handler->getResults();
 }
 
-Task<Result<void>> DaemonClient::sendRequestStreaming(const Request& req,
-                                                std::shared_ptr<ChunkedResponseHandler> handler) {
+Task<Result<void>>
+DaemonClient::sendRequestStreaming(const Request& req,
+                                   std::shared_ptr<ChunkedResponseHandler> handler) {
     if (auto rc = connect(); !rc) {
         co_return rc.error();
     }
@@ -998,15 +1003,15 @@ Task<Result<void>> DaemonClient::sendRequestStreaming(const Request& req,
     auto onComplete = [handler]() { handler->onComplete(); };
 
     AsioTransportAdapter adapter(opts);
-    auto res = co_await adapter.send_request_streaming(
-        req, onHeader, onChunk, onError, onComplete);
+    auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
     if (!res)
         co_return res.error();
     co_return Result<void>();
 }
 
 // Streaming AddDocument helper: header-first then final chunk contains full response
-Task<Result<AddDocumentResponse>> DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
+Task<Result<AddDocumentResponse>>
+DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
     struct AddDocHandler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& /*headerResponse*/) override {}
         bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override {
@@ -1045,7 +1050,8 @@ Task<Result<AddDocumentResponse>> DaemonClient::streamingAddDocument(const AddDo
     co_return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
 }
 
-Task<Result<EmbeddingResponse>> DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
+Task<Result<EmbeddingResponse>>
+DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
     auto response = co_await sendRequest(req);
     if (!response) {
         co_return response.error();
@@ -1242,7 +1248,8 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         } else if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
             configPath = (std::filesystem::path(xdgConfigHome) / "yams" / "config.toml").string();
         } else if (const char* homeEnv = std::getenv("HOME")) {
-            configPath = (std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml").string();
+            configPath =
+                (std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml").string();
         }
 
         // Allow overriding daemon path for development via YAMS_DAEMON_BIN
@@ -1266,12 +1273,10 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
                 auto cliDir = selfExe.parent_path();
                 // Common build-tree locations
                 std::vector<std::filesystem::path> candidates = {
-                    cliDir / "yams-daemon",
-                    cliDir.parent_path() / "yams-daemon",
+                    cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
                     cliDir.parent_path() / "daemon" / "yams-daemon",
                     cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
-                    cliDir.parent_path().parent_path() / "yams-daemon"
-                };
+                    cliDir.parent_path().parent_path() / "yams-daemon"};
                 for (const auto& p : candidates) {
                     if (std::filesystem::exists(p)) {
                         exePath = p.string();
@@ -1296,8 +1301,8 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
                    configPath.c_str(), nullptr);
         } else if (ll && *ll) {
-            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
-                   "--log-level", ll, nullptr);
+            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--log-level",
+                   ll, nullptr);
         } else {
             // No config file or log level, just pass socket
             execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);

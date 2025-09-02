@@ -20,15 +20,15 @@ public:
                               RequestHandler::Config cfg)
         : delegate_(std::move(delegate)), cfg_(cfg) {}
 
-    [[nodiscard]] Task<Response> process(const Request& request) override;
+    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request) override;
 
     // Returns std::nullopt to signal chunked streaming; stores internal state
     // and serves chunks from next_chunk(). When not recognized, delegates.
-    [[nodiscard]] Task<std::optional<Response>> process_streaming(const Request& request) override;
+    [[nodiscard]] boost::asio::awaitable<std::optional<Response>> process_streaming(const Request& request) override;
 
     [[nodiscard]] bool supports_streaming(const Request& request) const override;
 
-    [[nodiscard]] Task<RequestProcessor::ResponseChunk> next_chunk() override;
+    [[nodiscard]] boost::asio::awaitable<RequestProcessor::ResponseChunk> next_chunk() override;
 
 private:
     // Lazy compute: store request to compute on first next_chunk() to allow

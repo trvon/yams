@@ -168,8 +168,15 @@ void LifecycleComponent::handleSignal(int signal) {
             if (daemon_) {
                 // This is a crucial part. The signal handler should not do much work.
                 // It should signal the main loop to shut down gracefully.
-                // Here, we call the stop method on the main daemon class.
-                daemon_->stop();
+                // Here, we request a graceful stop and notify lifecycle FSM.
+                daemon_->requestStop();
+                daemon_->getLifecycle(); // ensure object exists; dispatch below
+                // Dispatch shutdown request to FSM (non-blocking)
+                // Note: signal handler context is limited; we only set flags and rely on main loop
+                // to process tick and transitions.
+                // Safe because getLifecycle returns a const&; but we only need to set a flag.
+                // We avoid calling non-async-signal-safe operations here beyond logging.
+                // Therefore, actual dispatch will be in main loop when it notices stopRequested_.
             }
             break;
         case SIGHUP:
