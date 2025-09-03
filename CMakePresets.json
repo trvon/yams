@@ -14,72 +14,149 @@
       }
     },
     {
-      "name": "yams-debug",
-      "displayName": "YAMS Debug (Conan + Ninja)",
-      "description": "Conan toolchain + Ninja, single-config Debug with tests, tracing, and benchmarks",
+      "name": "yams-debug-tidy",
+      "displayName": "YAMS Debug Tidy (Conan + Ninja)",
+      "description": "Conan toolchain + Ninja Debug with strict clang-tidy, warnings-as-errors, and Unity off",
+      "inherits": [
+        "debug-common",
+        "ccache",
+        "lld"
+      ],
+      "toolchainFile": "${sourceDir}/build/yams-debug/build/Debug/generators/conan_toolchain.cmake",
+      "cacheVariables": {
+        "YAMS_USE_CONAN": "ON",
+        "CMAKE_UNITY_BUILD": "OFF",
+        "CMAKE_C_CLANG_TIDY": "clang-tidy;-checks=bugprone-*,performance-*,modernize-*,cppcoreguidelines-*,readability-*,portability-*,clang-analyzer-*,concurrency-*;-warnings-as-errors=bugprone-*,clang-analyzer-*,concurrency*;-header-filter=^${sourceDir}/(src|include|plugins|tools|tests)/.*",
+        "CMAKE_CXX_CLANG_TIDY": "clang-tidy;-checks=bugprone-*,performance-*,modernize-*,cppcoreguidelines-*,readability-*,portability-*,clang-analyzer-*,concurrency-*;-warnings-as-errors=bugprone-*,clang-analyzer-*,concurrency*;-header-filter=^${sourceDir}/(src|include|plugins|tools|tests)/.*"
+      }
+    },
+    {
+      "name": "ninja-base",
+      "hidden": true,
       "inherits": "base",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/build/${presetName}/build/Debug/generators/conan_toolchain.cmake",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "debug-common",
+      "hidden": true,
+      "inherits": "ninja-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "YAMS_USE_CONAN": "ON",
         "YAMS_BUILD_TESTS": "ON",
         "YAMS_BUILD_BENCHMARKS": "ON",
-        "YAMS_ENABLE_TRACING": "ON"
+        "YAMS_ENABLE_TRACING": "ON",
+        "CMAKE_UNITY_BUILD": "ON"
+      }
+    },
+    {
+      "name": "release-common",
+      "hidden": true,
+      "inherits": "ninja-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "YAMS_BUILD_TESTS": "OFF",
+        "YAMS_BUILD_BENCHMARKS": "OFF",
+        "YAMS_ENABLE_TRACING": "OFF",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON"
+      }
+    },
+    {
+      "name": "ccache",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
+      }
+    },
+    {
+      "name": "lld",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_MODULE_LINKER_FLAGS": "-fuse-ld=lld"
+      }
+    },
+    {
+      "name": "yams-debug",
+      "displayName": "YAMS Debug (Conan + Ninja)",
+      "description": "Conan toolchain + Ninja Debug with tests/tracing/unity + strict clang-tidy + optional ccache/lld",
+      "inherits": [
+        "debug-common",
+        "ccache",
+        "lld"
+      ],
+      "toolchainFile": "${sourceDir}/build/${presetName}/build/Debug/generators/conan_toolchain.cmake",
+      "cacheVariables": {
+        "YAMS_USE_CONAN": "ON",
+        "CMAKE_C_CLANG_TIDY": "",
+        "CMAKE_CXX_CLANG_TIDY": "",
+        "CMAKE_UNITY_BUILD": "OFF",
+        "CMAKE_UNITY_BUILD_BATCH_SIZE": "1"
       }
     },
     {
       "name": "yams-release",
       "displayName": "YAMS Release (Conan + Ninja)",
-      "description": "Conan toolchain + Ninja, single-config Release with production defaults",
-      "inherits": "base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "description": "Conan toolchain + Ninja Release with IPO + optional lld",
+      "inherits": [
+        "release-common",
+        "lld"
+      ],
       "toolchainFile": "${sourceDir}/build/${presetName}/build/Release/generators/conan_toolchain.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "YAMS_USE_CONAN": "ON",
-        "YAMS_BUILD_TESTS": "OFF",
-        "YAMS_BUILD_BENCHMARKS": "OFF",
-        "YAMS_ENABLE_TRACING": "OFF"
+        "YAMS_USE_CONAN": "ON"
       }
     },
     {
       "name": "yams-debug-no-conan",
       "displayName": "YAMS Debug (System deps + Ninja)",
-      "description": "System dependencies + Ninja, single-config Debug",
-      "inherits": "base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "description": "System dependencies Debug with tests/tracing/unity + strict clang-tidy + optional ccache/lld",
+      "inherits": [
+        "debug-common",
+        "ccache",
+        "lld"
+      ],
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
         "YAMS_USE_CONAN": "OFF",
-        "YAMS_BUILD_TESTS": "ON",
-        "YAMS_BUILD_BENCHMARKS": "ON",
-        "YAMS_ENABLE_TRACING": "ON"
+        "CMAKE_C_CLANG_TIDY": "",
+        "CMAKE_CXX_CLANG_TIDY": "",
+        "CMAKE_UNITY_BUILD": "OFF",
+        "CMAKE_UNITY_BUILD_BATCH_SIZE": "1"
       }
     },
     {
       "name": "yams-release-no-conan",
       "displayName": "YAMS Release (System deps + Ninja)",
-      "description": "System dependencies + Ninja, single-config Release",
-      "inherits": "base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "description": "System dependencies Release with IPO + optional lld",
+      "inherits": [
+        "release-common",
+        "lld"
+      ],
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "YAMS_USE_CONAN": "OFF",
-        "YAMS_BUILD_TESTS": "OFF",
-        "YAMS_BUILD_BENCHMARKS": "OFF",
-        "YAMS_ENABLE_TRACING": "OFF"
+        "YAMS_USE_CONAN": "OFF"
       }
     }
   ],
   "buildPresets": [
-    { "name": "yams-debug", "configurePreset": "yams-debug" },
-    { "name": "yams-release", "configurePreset": "yams-release" },
-    { "name": "yams-debug-no-conan", "configurePreset": "yams-debug-no-conan" },
+    {
+      "name": "yams-debug",
+      "configurePreset": "yams-debug"
+    },
+    {
+      "name": "yams-debug-tidy",
+      "configurePreset": "yams-debug-tidy",
+      "jobs": 1
+    },
+    {
+      "name": "yams-release",
+      "configurePreset": "yams-release"
+    },
+    {
+      "name": "yams-debug-no-conan",
+      "configurePreset": "yams-debug-no-conan"
+    },
     {
       "name": "yams-release-no-conan",
       "configurePreset": "yams-release-no-conan"
@@ -89,34 +166,60 @@
     {
       "name": "yams-debug",
       "configurePreset": "yams-debug",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "yams-release",
       "configurePreset": "yams-release",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "yams-debug-no-conan",
       "configurePreset": "yams-debug-no-conan",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "yams-release-no-conan",
       "configurePreset": "yams-release-no-conan",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     }
   ],
   "packagePresets": [
     {
       "name": "yams-debug",
       "configurePreset": "yams-debug",
-      "generators": ["TGZ", "ZIP"]
+      "generators": [
+        "TGZ",
+        "ZIP"
+      ]
     },
     {
       "name": "yams-release",
       "configurePreset": "yams-release",
-      "generators": ["TGZ", "ZIP"]
+      "generators": [
+        "TGZ",
+        "ZIP"
+      ]
     }
   ]
 }

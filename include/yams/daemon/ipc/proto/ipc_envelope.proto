@@ -336,6 +336,7 @@ message Envelope {
   uint64 request_id = 2;
   string session_id = 3;
   string client_version = 4;
+  bool expects_streaming_response = 5;  // Client indicates if it expects chunked/streaming response
   oneof payload {
     // Requests
     PingRequest ping_request = 10;

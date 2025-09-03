@@ -8,7 +8,8 @@ add_executable(metadata_tests
 
 target_link_libraries(metadata_tests
     PRIVATE
-        GTest::gtest_main
+        test_utils
+        gtest_main
         yams::metadata
         yams::core
         yams_search

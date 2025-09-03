@@ -149,4 +149,3 @@ if(YAMS_ENABLE_PROFILING AND TARGET yams_profiling)
 endif()
 
 # Link the reusable Asio client into the CLI
-target_link_libraries(yams_cli PUBLIC yams_asio_client)

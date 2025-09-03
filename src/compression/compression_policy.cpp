@@ -32,7 +32,7 @@ double getCurrentCPUUsage() {
     lastCheck = now;
 
     // Return a value between 0.1 and 0.4 for testing
-    return 0.1 + (elapsed.count() % 30) / 100.0;
+    return 0.1 + (static_cast<double>(elapsed.count() % 30)) / 100.0;
 }
 
 /**
@@ -106,7 +106,7 @@ CompressionDecision CompressionPolicy::shouldCompress(const api::ContentMetadata
     std::string reason;
     if (metadata.size >= rules_.alwaysCompressAbove) {
         reason = fmt::format("Large file ({:.1f} MB)",
-                             static_cast<double>(metadata.size) / (1024 * 1024));
+                             static_cast<double>(metadata.size) / (1024ULL * 1024ULL));
     } else if (age >= rules_.archiveAfterAge) {
         reason = fmt::format("Old file ({} days)", age.count() / 24);
     } else {
@@ -137,7 +137,7 @@ CompressionAlgorithm CompressionPolicy::selectAlgorithm(const api::ContentMetada
     if (metadata.size >= rules_.preferZstdBelow &&
         pattern.accessFrequency() < rules_.coldFileAccessesPerDay) {
         spdlog::debug("Selecting LZMA for large inactive file: {} MB, {} accesses/day",
-                      metadata.size / (1024 * 1024), pattern.accessFrequency());
+                      metadata.size / (1024ULL * 1024ULL), pattern.accessFrequency());
         return CompressionAlgorithm::LZMA;
     }
 
@@ -161,7 +161,7 @@ uint8_t CompressionPolicy::selectLevel(CompressionAlgorithm algo,
 
         case CompressionAlgorithm::LZMA:
             // For LZMA, balance size vs time based on file size
-            if (metadata.size < 10 * 1024 * 1024) { // < 10MB
+            if (metadata.size < 10ULL * 1024ULL * 1024ULL) { // < 10MB
                 return std::min(rules_.defaultLzmaLevel, uint8_t(5));
             } else {
                 return rules_.defaultLzmaLevel;
@@ -173,14 +173,14 @@ uint8_t CompressionPolicy::selectLevel(CompressionAlgorithm algo,
 }
 
 bool CompressionPolicy::isCompressibleType(const std::string& mimeType,
-                                           const std::string& filename) const {
+                                           std::string_view filename) const {
     // First check excluded types
     if (rules_.excludedTypes.count(toLowerCase(mimeType)) > 0) {
         return false;
     }
 
     // Check excluded extensions
-    auto ext = getExtension(filename);
+    auto ext = getExtension(std::string(filename));
     if (!ext.empty() && rules_.excludedExtensions.count(ext) > 0) {
         return false;
     }
@@ -212,8 +212,8 @@ bool CompressionPolicy::hasSystemResources() const {
     // Check free disk space
     auto freeSpace = getFreeDiskSpace();
     if (freeSpace < rules_.minFreeSpaceBytes) {
-        spdlog::debug("Insufficient disk space: {} MB < {} MB", freeSpace / (1024 * 1024),
-                      rules_.minFreeSpaceBytes / (1024 * 1024));
+        spdlog::debug("Insufficient disk space: {} MB < {} MB", freeSpace / (1024ULL * 1024ULL),
+                      rules_.minFreeSpaceBytes / (1024ULL * 1024ULL));
         return false;
     }
 

@@ -66,10 +66,10 @@ Common options:
 Examples:
 ```bash
 # Debug (single-config Ninja default layout)
-ctest --preset test-yams-debug --output-on-failure
+ctest --preset yams-debug --output-on-failure
 
 # Release
-ctest --preset test-yams-release --output-on-failure
+ctest --preset yams-release --output-on-failure
 ```
 
 Notes:
@@ -97,7 +97,7 @@ Build with sanitizers for faster defect discovery:
 cmake --preset yams-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
 cmake --build --preset yams-debug -j
 # Run tests to exercise instrumented code
-ctest --preset test-yams-debug --output-on-failure -j
+ctest --preset yams-debug --output-on-failure
 ```
 If your project doesn’t expose YA_ENABLE_ASAN/UBSAN, you can add compile/link flags via CMAKE_<LANG>_FLAGS_* cache entries or a toolchain overlay.
 

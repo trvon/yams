@@ -24,15 +24,15 @@ class StateComponent;
  * This implementation directly uses Boost.ASIO's local::stream_protocol
  * for Unix domain sockets, eliminating unnecessary abstraction layers.
  */
-class SocketServer {
-public:
-    struct Config {
-        std::filesystem::path socketPath;
-        size_t maxConnections = 100;
-        size_t workerThreads = 4;
-        std::chrono::milliseconds connectionTimeout{30000};
-        std::chrono::milliseconds acceptBackoffMs{100};
-    };
+    class SocketServer {
+    public:
+        struct Config {
+            std::filesystem::path socketPath;
+            size_t maxConnections = 100;
+            size_t workerThreads = 4;
+            std::chrono::milliseconds connectionTimeout{30000};
+            std::chrono::milliseconds acceptBackoffMs{100};
+        };
 
     SocketServer(const Config& config, 
                  RequestDispatcher* dispatcher,

@@ -1,0 +1,35 @@
+{
+  "name": "yams-object-storage-s3",
+  "version": "0.1.0",
+  "iface": "object-storage",
+  "targets": ["s3", "minio"],
+  "features": [
+    "multipart",
+    "resume",
+    "crc32c",
+    "sha256",
+    "sse-kms",
+    "sse-c",
+    "storage-class",
+    "versioning",
+    "presign-upload",
+    "presign-download",
+    "dr-presence",
+    "dr-replication-lag"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "endpoint": {"type": "string"},
+      "region": {"type": "string"},
+      "bucket": {"type": "string"},
+      "pathStyle": {"type": "boolean"},
+      "accessKey": {"type": "string"},
+      "secretKey": {"type": "string"},
+      "kmsKeyId": {"type": "string"},
+      "defaultStorageClass": {"type": "string"}
+    },
+    "required": ["bucket"]
+  }
+}
+

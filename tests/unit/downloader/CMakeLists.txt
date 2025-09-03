@@ -12,10 +12,10 @@ target_compile_features(downloader_basic_tests PRIVATE cxx_std_20)
 target_link_libraries(downloader_basic_tests
     PRIVATE
         test_utils
+        gtest_main
         yams_downloader
         nlohmann_json::nlohmann_json
         spdlog::spdlog
-        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
 )
 
 # Discover and register tests

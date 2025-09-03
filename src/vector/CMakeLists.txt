@@ -27,11 +27,15 @@ add_library(yams_vector
     ${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
 )
 
+# Disable clang-tidy on this target to avoid third-party C lint errors
+set_target_properties(yams_vector PROPERTIES C_CLANG_TIDY "")
+
 # Suppress warnings for sqlite-vec.c (third-party code)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
         PROPERTIES
         COMPILE_FLAGS "-w"  # Suppress all warnings
+        C_CLANG_TIDY ""     # Disable clang-tidy on third-party C
     )
 elseif(MSVC)
     set_source_files_properties(${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
@@ -100,10 +104,7 @@ if(TARGET yams::daemon_client)
     target_compile_definitions(yams_vector PRIVATE YAMS_HAS_DAEMON_CLIENT)
 endif()
 
-# Link Asio client pool (embedding_generator uses AsioClientPool)
-# yams_asio_client target is defined at the top level src/CMakeLists.txt
-# before vector, so it's always available.
-target_link_libraries(yams_vector PUBLIC yams_asio_client)
+# Asio client pool no longer used directly; DaemonClient provides transport
 
 # Conditionally link ONNX Runtime
 if(YAMS_ENABLE_ONNX AND TARGET onnxruntime::onnxruntime)

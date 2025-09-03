@@ -49,7 +49,9 @@ struct SHA256Hasher::Impl {
 };
 
 SHA256Hasher::SHA256Hasher() : pImpl(std::make_unique<Impl>()) {
-    init();
+    if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
+        throw std::runtime_error("Failed to initialize SHA256");
+    }
 }
 
 SHA256Hasher::~SHA256Hasher() = default;
@@ -79,7 +81,7 @@ std::string SHA256Hasher::finalize() {
 
     // Convert to hex string
     std::string result;
-    result.reserve(hashLen * 2);
+    result.reserve(static_cast<std::string::size_type>(hashLen) * static_cast<std::string::size_type>(2));
 
     for (unsigned int i = 0; i < hashLen; ++i) {
         result += yamsfmt::format("{:02x}", hash[i]);

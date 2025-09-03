@@ -85,8 +85,6 @@ CompressionError CompressionError::create(ErrorCode code, ErrorSeverity severity
     // Set recommended recovery strategy based on error code
     switch (code) {
         case ErrorCode::Success:
-            error.recommendedStrategy = RecoveryStrategy::None;
-            break;
         case ErrorCode::InvalidArgument:
         case ErrorCode::InvalidData:
             error.recommendedStrategy = RecoveryStrategy::None;
@@ -546,8 +544,11 @@ CompressionErrorScope::~CompressionErrorScope() noexcept {
 
             // Log the error but don't attempt recovery in destructor
             spdlog::critical("Uncaught exception in compression operation: {}", error.format());
+        } catch (const std::exception& e) {
+            // Log and suppress exceptions in destructor to avoid termination
+            spdlog::critical("Error while reporting compression exception: {}", e.what());
         } catch (...) {
-            // Suppress all exceptions in destructor
+            spdlog::critical("Error while reporting compression exception: unknown exception");
         }
     }
 }

@@ -1,18 +1,38 @@
 # Building YAMS with GCC/G++
 
+Note: The project prefers LLVM (Clang + LLD) when available. These GCC instructions remain supported, and the build will fall back to GCC automatically when LLVM is not detected.
+
 This document provides instructions for building YAMS with the GNU Compiler Collection (GCC/G++).
 
 ## Prerequisites
 
 ### Compiler Requirements
 
-- **GCC/G++ 11.0 or later** (for C++20 and coroutine support)
-- **GCC/G++ 13.0 or later** (recommended for std::format support)
+- GCC/G++ 11.0 or later (for C++20 and coroutine support)
+- GCC/G++ 13.0 or later (recommended for std::format support)
 
 To check your GCC version:
 ```bash
 g++ --version
 ```
+
+### Build Tools
+
+For the fastest builds, install:
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y ninja-build ccache lld clang-tidy
+
+# Fedora
+sudo dnf install -y ninja-build ccache lld clang-tools-extra
+
+# Arch Linux
+sudo pacman -S --needed ninja ccache lld clang
+```
+
+Notes:
+- clang-tidy is provided by clang-tools-extra on Fedora and bundled with clang on Arch.
+- lld is an optional faster linker; remove it from presets if not installed.
 
 ### Installing GCC
 
@@ -106,7 +126,57 @@ sudo pacman -S \
     protobuf
 ```
 
-## Building YAMS
+## CMake Presets (Ninja) — Recommended
+
+The repository ships with CMake Ninja presets for fast, repeatable builds. Debug presets enable Unity builds; Release presets enable IPO/LTO. Optional overlays use ccache and lld when available.
+
+Tip: Control parallelism via environment:
+```bash
+export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+```
+
+### Quick start (Conan dependencies)
+```bash
+# Configure + build Debug (tests, tracing, Unity build)
+cmake --preset yams-debug
+cmake --build --preset yams-debug
+
+# Configure + build Release (IPO/LTO)
+cmake --preset yams-release
+cmake --build --preset yams-release
+
+# Run tests (Debug)
+ctest --preset yams-debug --output-on-failure
+```
+
+### System dependencies (no Conan)
+```bash
+cmake --preset yams-debug-no-conan
+cmake --build --preset yams-debug-no-conan
+
+cmake --preset yams-release-no-conan
+cmake --build --preset yams-release-no-conan
+```
+
+### Debug defaults
+- Strict clang-tidy runs by default in Debug presets (checks: bugprone-*, performance-*, modernize-*, cppcoreguidelines-*, readability-*, portability-*, clang-analyzer-*, concurrency-*) with warnings-as-errors and header-filter=.*. If a repo-level .clang-tidy exists, it is respected.
+- Sanitizers (ASan/UBSan) are enabled by default for Debug builds. Disable with `-DYAMS_ENABLE_SANITIZERS=OFF`.
+
+Disable or relax checks:
+```bash
+# Disable clang-tidy for a single configure
+cmake --preset yams-debug -D CMAKE_CXX_CLANG_TIDY= -D CMAKE_C_CLANG_TIDY=
+# Or turn off sanitizers
+cmake --preset yams-debug -D YAMS_ENABLE_SANITIZERS=OFF
+```
+
+Notes:
+- If ccache or lld isn’t installed, either install them (recommended) or remove those overlays from the preset inheritance in CMakePresets.json.
+- Ninja is recommended; install via your distro (see Build Tools above).
+
+## Building YAMS (Manual/Classic)
+
+If you prefer manual configuration without presets:
 
 ### Basic Build
 
@@ -159,7 +229,7 @@ CC=gcc CXX=g++ cmake .. \
 make -j$(nproc)
 ```
 
-**Note**: When YAMS_REQUIRE_CURL=OFF, HTTP downloader features will be unavailable.
+Note: When YAMS_REQUIRE_CURL=OFF, HTTP downloader features will be unavailable.
 
 ### Build with Coverage
 
@@ -191,8 +261,8 @@ gcovr --root .. \
 
 YAMS automatically detects std::format availability:
 
-- **GCC 13+**: Full std::format support
-- **GCC 11-12**: Falls back to fmt library
+- GCC 13+: Full std::format support
+- GCC 11–12: Falls back to fmt library
 - The build system will automatically configure the appropriate option
 
 ### Coroutine Support
@@ -214,11 +284,11 @@ CC=gcc CXX=g++ cmake .. \
 
 ### Issue: "std::format not found"
 
-**Solution**: This is expected with GCC < 13. The build will automatically use the fmt library as a fallback.
+Solution: This is expected with GCC < 13. The build will automatically use the fmt library as a fallback.
 
 ### Issue: "ncurses library not found"
 
-**Solution**: Install ncurses development package:
+Solution: Install ncurses development package:
 ```bash
 # Ubuntu/Debian
 sudo apt-get install libncurses-dev
@@ -229,7 +299,7 @@ sudo yum install ncurses-devel
 
 ### Issue: Compilation errors with coroutines
 
-**Solution**: Ensure you're using GCC 11 or later:
+Solution: Ensure you're using GCC 11 or later:
 ```bash
 g++ --version
 ```
@@ -238,14 +308,14 @@ If using an older version, upgrade GCC or use a developer toolset.
 
 ### Issue: Undefined references during linking
 
-**Solution**: Ensure all dependencies are installed and pkg-config can find them:
+Solution: Ensure all dependencies are installed and pkg-config can find them:
 ```bash
 pkg-config --list-all | grep -E "(sqlite|openssl|protobuf|libcurl)"
 ```
 
 ### Issue: "Could NOT find CURL" during configuration
 
-**Solution**: Either install libcurl development package:
+Solution: Either install libcurl development package:
 ```bash
 # Ubuntu/Debian
 sudo apt-get install libcurl4-openssl-dev
@@ -270,7 +340,7 @@ CC=gcc CXX=g++ cmake .. \
     -DCMAKE_EXE_LINKER_FLAGS="-flto -Wl,-O1"
 ```
 
-**Note**: `-march=native` optimizes for your specific CPU but makes binaries non-portable.
+Note: `-march=native` optimizes for your specific CPU but makes binaries non-portable.
 
 ## Verification
 
@@ -293,6 +363,19 @@ YAMS CI/CD pipeline tests GCC builds on Ubuntu. The configuration used in CI can
 
 ## Additional Resources
 
-- [GCC Documentation](https://gcc.gnu.org/onlinedocs/)
-- [GCC C++20 Status](https://gcc.gnu.org/projects/cxx-status.html#cxx20)
-- [YAMS Build Options](BUILD.md)
+- GCC Documentation: https://gcc.gnu.org/onlinedocs/
+- GCC C++20 Status: https://gcc.gnu.org/projects/cxx-status.html#cxx20
+- CMake Presets: https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
+- YAMS Build Options: BUILD.md
+
+## Sanitizers (Debug)
+
+Enable Address/Undefined sanitizer in Debug builds via CMake options (portable):
+
+```bash
+cmake -S . -B build/asan -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=build/asan/generators/conan_toolchain.cmake \
+  -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+cmake --build build/asan -j
+ctest --test-dir build/asan --output-on-failure
+```

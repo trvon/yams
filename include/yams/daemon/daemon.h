@@ -48,6 +48,7 @@ struct DaemonConfig {
     std::chrono::milliseconds heartbeatInterval{500}; // default 500ms
     std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
 
+
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
     struct DownloadPolicy {
         bool enable{false};                               // feature gate

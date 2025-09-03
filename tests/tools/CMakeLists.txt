@@ -6,12 +6,12 @@ add_executable(maintenance_tools_test
 
 target_link_libraries(maintenance_tools_test
     PRIVATE
+        test_utils
         yams::storage_engine
         yams::reference_counter
         yams::crypto
         yams::core
-        GTest::gtest
-        GTest::gtest_main
+        gtest_main
         spdlog::spdlog
 )
 

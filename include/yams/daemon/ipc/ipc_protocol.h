@@ -870,32 +870,23 @@ struct DeleteRequest {
 };
 
 struct ListRequest {
+    // Order fields to minimize padding (clang-tidy: performance.Padding)
+    // Large/aligned and string-like types first, then ints, then bools.
+
     // Basic pagination and sorting
     size_t limit = 20;
-    int offset = 0;
-    int recentCount = 0; // 0 means not set, show all
-    bool recent = true;  // backward compatibility
+
+    // Tag filtering
+    std::vector<std::string> tags; // requested tags filter
 
     // Format and display options
     std::string format = "table"; // "table" | "json" | "csv" | "minimal"
     std::string sortBy = "date";  // "name" | "size" | "date" | "hash"
-    bool reverse = false;
-    bool verbose = false;
-    bool showSnippets = true;
-    bool showMetadata = false;
-    bool showTags = true;
-    bool groupBySession = false;
-    int snippetLength = 50;
-    bool noSnippets = false;
-    bool pathsOnly = false; // Output only file paths
 
     // File type filters
-    std::string fileType;   // "image" | "document" | "archive" | "audio" | "video" | "text" |
-                            // "executable" | "binary"
-    std::string mimeType;   // MIME type filter
-    std::string extensions; // comma-separated extensions
-    bool binaryOnly = false;
-    bool textOnly = false;
+    std::string fileType;    // "image" | "document" | "archive" | "audio" | "video" | "text" | "executable" | "binary"
+    std::string mimeType;    // MIME type filter
+    std::string extensions;  // comma-separated extensions
 
     // Time filters (ISO 8601, relative, or natural language)
     std::string createdAfter;
@@ -906,19 +897,36 @@ struct ListRequest {
     std::string indexedBefore;
 
     // Change tracking
-    bool showChanges = false;
     std::string sinceTime;
-    bool showDiffTags = false;
-    bool showDeleted = false;
     std::string changeWindow = "24h";
 
-    // Tag filtering
-    std::vector<std::string> tags;
+    // Tag filtering (continued)
     std::string filterTags;    // comma-separated tag filter
-    bool matchAllTags = false; // require all tags vs any tag
 
     // Name pattern filtering
     std::string namePattern; // glob pattern for file name/path matching
+
+    // 32-bit integral fields
+    int offset = 0;
+    int recentCount = 0;   // 0 means not set, show all
+    int snippetLength = 50;
+
+    // Booleans last
+    bool recent = true;        // backward compatibility
+    bool reverse = false;
+    bool verbose = false;
+    bool showSnippets = true;
+    bool showMetadata = false;
+    bool showTags = true;
+    bool groupBySession = false;
+    bool noSnippets = false;
+    bool pathsOnly = false;    // Output only file paths
+    bool binaryOnly = false;
+    bool textOnly = false;
+    bool showChanges = false;
+    bool showDiffTags = false;
+    bool showDeleted = false;
+    bool matchAllTags = false; // require all tags vs any tag
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -3215,6 +3223,9 @@ struct Message {
     // Optional fields
     std::optional<std::string> sessionId;
     std::optional<std::string> clientVersion;
+    
+    // Streaming preference - client indicates if it expects chunked/streaming response
+    bool expectsStreamingResponse = false;
 };
 
 // ============================================================================
@@ -3222,7 +3233,7 @@ struct Message {
 // ============================================================================
 
 constexpr uint32_t PROTOCOL_VERSION = 1;
-constexpr size_t MAX_MESSAGE_SIZE = 16 * 1024 * 1024; // 16MB
+constexpr size_t MAX_MESSAGE_SIZE = static_cast<size_t>(16) * static_cast<size_t>(1024) * static_cast<size_t>(1024); // 16MB
 constexpr size_t HEADER_SIZE = 16;                    // version(4) + size(4) + requestId(8)
 
 // Message type tags for serialization

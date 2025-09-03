@@ -1,5 +1,4 @@
 #include <spdlog/spdlog.h>
-#include <yams/cli/asio_client_pool.hpp>
 #include <yams/cli/async_bridge.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
@@ -1195,9 +1194,8 @@ public:
                 return false;
             }
 
-            // Verify daemon is responsive, then request model preload (non-fatal on error)
-            yams::cli::AsioClientPool pool{};
-            auto st = yams::cli::run_sync(pool.async_status(), std::chrono::seconds(5));
+            // Verify daemon is responsive via DaemonClient, then request model preload (non-fatal on error)
+            auto st = yams::cli::run_sync(daemon_client_->status(), std::chrono::seconds(5));
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
                 // Search will gracefully fall back when daemon is unavailable/slow.
@@ -1206,10 +1204,7 @@ public:
                 daemon::LoadModelRequest req;
                 req.modelName = config_.model_name;
                 req.preload = true;
-                auto lm = yams::cli::run_sync(
-                    pool.async_call<daemon::LoadModelRequest, daemon::ModelLoadResponse>(req),
-                    std::chrono::seconds(10)
-                );
+                auto lm = yams::cli::run_sync(daemon_client_->loadModel(req), std::chrono::seconds(10));
                 if (!lm) {
                     spdlog::warn("Failed to preload model in daemon: {}", lm.error().message);
                 }

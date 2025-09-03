@@ -39,8 +39,10 @@ target_link_libraries(all_unit_tests
 )
 
 # Discover tests
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
 gtest_discover_tests(all_unit_tests
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
     PROPERTIES
         LABELS "unit"
-        TIMEOUT 30
+        TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
 )

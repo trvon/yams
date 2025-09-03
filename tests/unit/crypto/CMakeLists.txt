@@ -6,7 +6,7 @@ target_link_libraries(crypto_tests
     PRIVATE
         test_utils
         yams::crypto
-        GTest::gtest_main
+        gtest_main
 )
 
 gtest_discover_tests(crypto_tests

@@ -229,27 +229,22 @@ public:
                 includeGlobsExpanded.push_back(pathFilter_);
             }
 
-            // Attempt daemon search first via generic helper; fall back to local on failure
-            // Set timeout environment variables
+            // Attempt daemon-first using a single DaemonClient instance (no pool).
+            // Keep it simple and deterministic for reliability.
             yams::daemon::DaemonClient::setTimeoutEnvVars(
                 std::chrono::milliseconds(headerTimeoutMs_),
                 std::chrono::milliseconds(bodyTimeoutMs_));
 
-            // Create client config with streaming options
             yams::daemon::ClientConfig clientConfig;
             clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
             clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
-            clientConfig.enableChunkedResponses = enableStreaming_ && !disableStreaming_;
+            clientConfig.requestTimeout = std::chrono::milliseconds(30000);
+            clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
-
-            // Create daemon client with streaming support
+            clientConfig.singleUseConnections = true; // close after each request
             yams::daemon::DaemonClient client(clientConfig);
-
-            // If streaming is disabled, explicitly turn it off
-            if (disableStreaming_) {
-                client.setStreamingEnabled(false);
-            }
+            client.setStreamingEnabled(clientConfig.enableChunkedResponses);
 
             // Create search request
             yams::daemon::SearchRequest dreq;
@@ -286,14 +281,18 @@ public:
 
                 if (pathsOnly_) {
                     if (!enableStreaming_) {
-                        for (const auto& r : items) {
-                            auto itPath = r.metadata.find("path");
-                            if (itPath != r.metadata.end()) {
-                                std::cout << itPath->second << std::endl;
-                            } else if (!r.path.empty()) {
-                                std::cout << r.path << std::endl;
-                            } else {
-                                std::cout << r.id << std::endl;
+                        if (items.empty()) {
+                            std::cout << "(no results)" << std::endl;
+                        } else {
+                            for (const auto& r : items) {
+                                auto itPath = r.metadata.find("path");
+                                if (itPath != r.metadata.end()) {
+                                    std::cout << itPath->second << std::endl;
+                                } else if (!r.path.empty()) {
+                                    std::cout << r.path << std::endl;
+                                } else {
+                                    std::cout << r.id << std::endl;
+                                }
                             }
                         }
                     }
@@ -484,13 +483,37 @@ public:
 
                 return Result<void>();
             };
-            auto daemonResult = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
-            if (!daemonResult) {
-                // If daemon failed and fallback also failed, return the error
-                return daemonResult.error();
+            // Call daemon directly; stream when enabled, otherwise unary.
+            auto daemonResult = clientConfig.enableChunkedResponses
+                                    ? run_sync(client.streamingSearch(dreq), std::chrono::seconds(30))
+                                    : run_sync(client.call(dreq), std::chrono::seconds(30));
+            
+            if (!daemonResult && clientConfig.enableChunkedResponses) {
+                // Transitional fallback: if streaming timed out waiting for header/chunks,
+                // retry a unary call with a longer header timeout to allow full compute.
+                const auto& err = daemonResult.error();
+                if (err.code == ErrorCode::Timeout && err.message.find("Read timeout") != std::string::npos) {
+                    spdlog::warn("Streaming search timed out; retrying unary path with extended header timeout");
+                    // Bump header timeout to body timeout for unary retry
+                    client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs_));
+                    auto unaryRetry = run_sync(client.call(dreq), std::chrono::seconds(60));
+                    if (unaryRetry) {
+                        auto r = render(unaryRetry.value());
+                        if (!r) return r.error();
+                        return Result<void>();
+                    }
+                }
             }
-            // Either daemon succeeded or fallback succeeded
+            if (daemonResult) {
+                auto r = render(daemonResult.value());
+                if (!r) return r.error();
+                return Result<void>();
+            }
+            // Fallback to local on error
+            auto fb = fallback();
+            if (!fb) return fb.error();
             return Result<void>();
+            
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }

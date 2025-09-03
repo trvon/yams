@@ -5,8 +5,7 @@ add_executable(manifest_unit_tests
 target_link_libraries(manifest_unit_tests
     PRIVATE
         test_utils
-        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
-        $<IF:$<TARGET_EXISTS:gtest::gmock_main>,gtest::gmock_main,GTest::gmock_main>
+        gtest_main
         yams::manifest
         yams::chunking
         yams::crypto

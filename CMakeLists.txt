@@ -38,7 +38,12 @@ project(YAMS
     VERSION ${YAMS_SEMVER}
     DESCRIPTION "Yet Another Memory System - High-performance content-addressed storage"
     LANGUAGES C CXX
-)
+ )
+
+# CMake module path and portable toolchain/sanitizers (no-op unless supported)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+include(ToolchainDetect)
+include(Sanitizers)
 
 # Generate version header from project version
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/yams")
@@ -804,7 +809,7 @@ if(YAMS_USE_CONAN)
     endif()
     # MCP server no longer requires Drogon or Boost
     if(YAMS_BUILD_TESTS)
-        # Try Conan-provided GTest packages first (CONFIG mode), then fall back to FetchContent
+        # Try Conan-provided GTest packages first (CONFIG mode)
         set(_yams_gtest_found FALSE)
         find_package(GTest QUIET CONFIG)
         if(GTest_FOUND)
@@ -818,9 +823,10 @@ if(YAMS_USE_CONAN)
             endif()
         endif()
 
-        if(NOT _yams_gtest_found)
-            message(WARNING "Conan build: GTest not found via CMake package. Falling back to FetchContent for googletest.")
-            include(FetchContent)
+        # Always make a local googletest available so we can prefer its targets
+        # to avoid picking up sanitized system installations (e.g., /usr/local)
+        include(FetchContent)
+        if(NOT TARGET gtest)
             FetchContent_Declare(
                 googletest
                 GIT_REPOSITORY https://github.com/google/googletest.git
@@ -829,19 +835,19 @@ if(YAMS_USE_CONAN)
             )
             set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
             FetchContent_MakeAvailable(googletest)
-            # Provide compatibility aliases if only lowercase targets exist
-            if(TARGET gtest AND NOT TARGET GTest::gtest)
-                add_library(GTest::gtest ALIAS gtest)
-            endif()
-            if(TARGET gtest_main AND NOT TARGET GTest::gtest_main)
-                add_library(GTest::gtest_main ALIAS gtest_main)
-            endif()
-            if(TARGET gmock AND NOT TARGET GTest::gmock)
-                add_library(GTest::gmock ALIAS gmock)
-            endif()
-            if(TARGET gmock_main AND NOT TARGET GTest::gmock_main)
-                add_library(GTest::gmock_main ALIAS gmock_main)
-            endif()
+        endif()
+        # Provide compatibility aliases if only lowercase targets exist
+        if(TARGET gtest AND NOT TARGET GTest::gtest)
+            add_library(GTest::gtest ALIAS gtest)
+        endif()
+        if(TARGET gtest_main AND NOT TARGET GTest::gtest_main)
+            add_library(GTest::gtest_main ALIAS gtest_main)
+        endif()
+        if(TARGET gmock AND NOT TARGET GTest::gmock)
+            add_library(GTest::gmock ALIAS gmock)
+        endif()
+        if(TARGET gmock_main AND NOT TARGET GTest::gmock_main)
+            add_library(GTest::gmock_main ALIAS gmock_main)
         endif()
 
         # Log which targets ended up available
@@ -1102,10 +1108,22 @@ if(NOT lzma_POPULATED)
             ${lzma_SOURCE_DIR}/C/7zStream.c
         )
 
+    # Disable clang-tidy for third-party C (and C++) sources in this target
+    # to avoid readability/identifier and other style checks on vendored code.
+    set_target_properties(lzma_sdk PROPERTIES
+        C_CLANG_TIDY ""
+        CXX_CLANG_TIDY ""
+    )
+
     target_include_directories(lzma_sdk PUBLIC
             $<BUILD_INTERFACE:${lzma_SOURCE_DIR}/C>
             $<INSTALL_INTERFACE:include/lzma>
         )
+    if(UNIX)
+        # Ensure pthread affinity APIs/macros are available for LZMA Threads.c
+        target_compile_definitions(lzma_sdk PRIVATE _GNU_SOURCE)
+        target_link_libraries(lzma_sdk PUBLIC pthread)
+    endif()
     # Enable multi-threaded support for LZMA SDK
 
     # Disable warnings for third-party code

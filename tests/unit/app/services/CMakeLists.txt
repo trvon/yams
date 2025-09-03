@@ -7,15 +7,14 @@ add_executable(indexing_service_test
 
 target_link_libraries(indexing_service_test
     PRIVATE
+        test_utils
+        gtest_main
         yams_app_services
         yams::metadata
         yams::api
         yams::content
         yams::detection
         yams::search
-        GTest::gtest
-        GTest::gmock
-        GTest::gtest_main
 )
 
 gtest_discover_tests(indexing_service_test
@@ -33,13 +32,12 @@ add_executable(document_service_test
 
 target_link_libraries(document_service_test
     PRIVATE
+        test_utils
+        gtest_main
         yams_app_services
         yams::metadata
         yams::api
         yams::search
-        GTest::gtest
-        GTest::gmock
-        GTest::gtest_main
 )
 
 gtest_discover_tests(document_service_test
@@ -57,13 +55,12 @@ add_executable(search_service_test
 
 target_link_libraries(search_service_test
     PRIVATE
+        test_utils
+        gtest_main
         yams_app_services
         yams::metadata
         yams::api
         yams::search
-        GTest::gtest
-        GTest::gmock
-        GTest::gtest_main
 )
 
 gtest_discover_tests(search_service_test
@@ -81,13 +78,12 @@ add_executable(grep_service_test
 
 target_link_libraries(grep_service_test
     PRIVATE
+        test_utils
+        gtest_main
         yams_app_services
         yams::metadata
         yams::api
         yams::search
-        GTest::gtest
-        GTest::gmock
-        GTest::gtest_main
 )
 
 gtest_discover_tests(grep_service_test

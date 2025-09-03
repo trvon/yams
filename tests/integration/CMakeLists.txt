@@ -10,6 +10,8 @@ endif()
 
 # pool_add_then_query_test removed - API changed with Boost.ASIO migration
 # Include Boost.Test shim to avoid accidental prg/exec monitor undefined refs
+include(GoogleTest)
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
 include(${CMAKE_SOURCE_DIR}/cmake/boost_test_shim.cmake)
 
 # pooled_request_integration_test removed - API changed with Boost.ASIO migration
@@ -20,15 +22,14 @@ if(NOT TARGET boundary_ipc_pool_tests)
         daemon/boundary_ipc_pool_tests.cpp
     )
     target_link_libraries(boundary_ipc_pool_tests PRIVATE
+        test_utils
+        gtest_main
         yams_cli
-    yams_asio_client
         yams_api
         yams_search
         yams_metadata
         spdlog::spdlog
         nlohmann_json::nlohmann_json
-        GTest::gtest
-        GTest::gtest_main
         Threads::Threads
         yams::boost_test_shim
     )
@@ -49,21 +50,24 @@ if(NOT TARGET stream_return_while_adding_test)
         daemon/stream_return_while_adding_test.cpp
     )
     target_link_libraries(stream_return_while_adding_test PRIVATE
+        test_utils
+        gtest_main
         yams_mcp
         yams_cli
-    yams_asio_client
         yams_api
         yams_search
         yams_metadata
         spdlog::spdlog
         nlohmann_json::nlohmann_json
-        GTest::gtest
-        GTest::gtest_main
         Threads::Threads
         yams::boost_test_shim
     )
-    add_test(NAME stream_return_while_adding_test COMMAND stream_return_while_adding_test)
-    set_tests_properties(stream_return_while_adding_test PROPERTIES LABELS "daemon;integration")
+    gtest_discover_tests(stream_return_while_adding_test
+        DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+        PROPERTIES
+            LABELS "daemon;integration"
+            TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+    )
 endif()
 
 # Discover legacy tests only if enabled and target exists

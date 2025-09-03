@@ -16,12 +16,13 @@
 #include <utility>
 #include <vector>
 
-#include <yams/cli/asio_client_pool.hpp>
 #include <yams/core/task.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/response_of.hpp>
+// Bridge to run async Task<Result<T>> paths synchronously in CLI/tests
+#include <yams/cli/async_bridge.h>
 
 namespace yams::cli {
 
@@ -304,6 +305,16 @@ private:
             client_cfg.bodyTimeout = std::chrono::milliseconds(300000);
         }
         auto client = std::make_unique<yams::daemon::DaemonClient>(client_cfg);
+        
+        // Connect the client before adding to pool
+        auto connect_result = client->connect();
+        if (!connect_result) {
+            if (cfg_.verbose) {
+                spdlog::error("[DaemonClientPool] Failed to connect client: {}", 
+                             connect_result.error().message);
+            }
+            return npos;
+        }
 
         auto e = std::make_shared<Entry>();
         e->client = std::move(client);
@@ -313,7 +324,7 @@ private:
 
         entries_.emplace_back(e);
         if (cfg_.verbose) {
-            spdlog::debug("[DaemonClientPool] Created client {}", entries_.back()->id);
+            spdlog::debug("[DaemonClientPool] Created and connected client {}", entries_.back()->id);
         }
         return entries_.size() - 1;
     }
@@ -332,21 +343,13 @@ private:
         // We drop the lock during connect; another thread won't see this entry because in_use=true
         lk.unlock();
 
-        // Ensure connection is ready (outside lock)
-        if (!client_ptr->isConnected()) {
-            auto rc = client_ptr->connect();
-            if (!rc) {
-                // Failed to connect, mark free and return error
-                lk.lock();
-                // Use stable shared entry pointer under lock
-                entry->in_use = false;
-                entry->last_used = std::chrono::steady_clock::now();
-                connect_failures_++;
-                cv_.notify_one();
-                lk.unlock();
-                return rc.error();
-            }
-        }
+        // Connection check is not needed here. The double connection issue has been
+        // fixed in DaemonClient::sendRequest() and DaemonClient::sendRequestStreaming()
+        // by skipping the legacy connect() call when using AsioTransportAdapter.
+        //
+        // AsioTransportAdapter creates and manages its own boost::asio connections,
+        // so calling the POSIX-based connect() here would create an unused connection
+        // that immediately EOFs, causing spurious entries in the daemon logs.
 
         if (cfg_.verbose) {
             spdlog::debug("[DaemonClientPool] Acquire client {} (waited {} ms, timeout={} ms, "
@@ -465,11 +468,13 @@ public:
     // This will return NotImplemented in production code
     Result<void> execute(const TRequest& req, std::function<Result<void>()> fallback,
                          RenderFunc render) {
-        // For test compatibility only - production code should use execute_async
-        (void)req;
-        (void)fallback;
-        (void)render;
-        return Error{ErrorCode::NotImplemented, "Synchronous execute is deprecated. Use execute_async with async_daemon_first."};
+        // Compatibility bridge for existing sync tests. Production code should
+        // prefer execute_async and run via cli::run_sync from async_bridge.h.
+        // Keep a generous timeout to avoid flakiness under CI.
+        using yams::cli::run_sync;
+        auto task = execute_async(req, std::move(fallback), std::move(render));
+        // 30s default timeout for tests covering daemon startup or large streams
+        return run_sync<void>(std::move(task), std::chrono::milliseconds{30000});
     }
 
     // Async (coroutine) execution path using pooled DaemonClient::call<TRequest>()

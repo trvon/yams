@@ -12,6 +12,7 @@ namespace yamsfmt = fmt;
 #include <algorithm>
 #include <fstream>
 #include <unordered_set>
+#include <limits>
 
 namespace yams::chunking {
 
@@ -35,21 +36,23 @@ struct RabinTables {
         // Initialize modulus tables
         for (int i = 0; i < 64; ++i) {
             for (int j = 0; j < 256; ++j) {
-                modTable[i][j] = modPow(j, i, polynomial);
+                modTable[i][j] = modPow(j, ExpTag{static_cast<size_t>(i)}, PolyTag{polynomial});
             }
         }
     }
 
 private:
-    static uint64_t modPow(uint64_t base, uint64_t exp, uint64_t poly) {
+    struct ExpTag { size_t v; };
+    struct PolyTag { uint64_t v; };
+    static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
         uint64_t result = 1;
-        base %= poly;
-        while (exp > 0) {
-            if (exp & 1) {
-                result = (result * base) % poly;
+        base %= poly.v;
+        while (exp.v > 0) {
+            if (exp.v & 1) {
+                result = (result * base) % poly.v;
             }
-            exp >>= 1;
-            base = (base * base) % poly;
+            exp.v >>= 1;
+            base = (base * base) % poly.v;
         }
         return result;
     }
@@ -129,7 +132,8 @@ std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
         Chunk chunk;
         chunk.offset = pos;
         chunk.size = chunkSize;
-        chunk.data.assign(data.begin() + pos, data.begin() + chunkEnd);
+        chunk.data.assign(data.begin() + static_cast<std::ptrdiff_t>(pos),
+                           data.begin() + static_cast<std::ptrdiff_t>(chunkEnd));
         chunk.hash = pImpl->hasher->hash(chunk.data);
 
         chunks.push_back(std::move(chunk));
@@ -158,7 +162,9 @@ std::vector<Chunk> RabinChunker::chunkFile(const std::filesystem::path& path) {
 
     // Read entire file into memory (for now - streaming version would be better for large files)
     std::vector<std::byte> data(fileSize);
-    file.read(reinterpret_cast<char*>(data.data()), fileSize);
+    const auto maxStream = static_cast<size_t>(std::numeric_limits<std::streamsize>::max());
+    const auto toRead = static_cast<std::streamsize>(std::min(fileSize, maxStream));
+    file.read(reinterpret_cast<char*>(data.data()), toRead);
 
     if (!file) {
         throw std::runtime_error("Failed to read file");
@@ -196,7 +202,8 @@ void RabinChunker::setProgressCallback(ProgressCallback callback) {
 //         Chunk chunk;
 //         chunk.offset = pos;
 //         chunk.size = chunkSize;
-//         chunk.data.assign(data.begin() + pos, data.begin() + chunkEnd);
+//         chunk.data.assign(data.begin() + static_cast<std::ptrdiff_t>(pos),
+//                            data.begin() + static_cast<std::ptrdiff_t>(chunkEnd));
 //         chunk.hash = pImpl->hasher->hash(chunk.data);
 //
 //         co_yield chunk;

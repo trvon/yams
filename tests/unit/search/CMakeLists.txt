@@ -10,9 +10,9 @@ add_executable(search_tests
 
 target_link_libraries(search_tests
     PRIVATE
+        test_utils
+        gtest_main
         yams_search
-        GTest::gtest
-        GTest::gtest_main
         Threads::Threads
 )
 

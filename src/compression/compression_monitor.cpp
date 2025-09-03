@@ -116,7 +116,7 @@ public:
             algoStats.compressionErrors.load() + algoStats.decompressionErrors.load();
 
         if (totalOps > 0) {
-            double errorRate = static_cast<double>(totalErrors) / totalOps;
+            double errorRate = static_cast<double>(totalErrors) / static_cast<double>(totalOps);
             if (errorRate > config_.errorRateThreshold) {
                 triggerAlert(
                     Alert{.type = AlertType::HighErrorRate,
@@ -305,12 +305,12 @@ private:
         }
 
         // Check resource usage
-        if (stats.peakMemoryUsageBytes.load() > 1024 * 1024 * 1024) { // 1GB
+        if (stats.peakMemoryUsageBytes.load() > 1024ULL * 1024ULL * 1024ULL) { // 1GB
             triggerAlert(Alert{.type = AlertType::ResourceExhaustion,
                                .algorithm = CompressionAlgorithm::None,
                                .message = "High memory usage detected",
                                .value = static_cast<double>(stats.peakMemoryUsageBytes.load()),
-                               .threshold = 1024.0 * 1024 * 1024,
+                               .threshold = 1024.0 * 1024.0 * 1024.0,
                                .timestamp = std::chrono::system_clock::now()});
         }
     }

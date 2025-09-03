@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SourceHut: https://sr.ht/~trvon/yams/
 
 ### Added
+- **Development Changes**
+  - Updated tasks for vscode and zed tasks
+  - Enforcing clang-tidy warnings as errors
+  - Attempting to stabilize build system as plugin system is implemeneted per roadmap
+- **Daemon Logging Rotation**
+  - Use rotating file sink to preserve logs across crashes
+  - Log rotation info: `Log rotation enabled: /path/to/logfile.log (max 10MB x 5 files)`
 - **Asynchronous Daemon Client Architecture**
   - Complete async/await infrastructure for daemon communication
   - Coroutine-based `AsioClientPool` with `async_call()`, `async_ping()`, `async_status()`

@@ -21,10 +21,10 @@ add_executable(compression_tests
 
 target_link_libraries(compression_tests
     PRIVATE
+        test_utils
         yams::compression
         yams::core
-        GTest::gtest
-        GTest::gtest_main
+        gtest_main
         spdlog::spdlog
 )
 

@@ -2,6 +2,7 @@
 #include <yams/daemon/ipc/fsm_helpers.h>
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/daemon/ipc/streaming_processor.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -10,6 +11,9 @@
 #include <boost/asio/write.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <spdlog/spdlog.h>
 #include <array>
 #include <chrono>
@@ -17,6 +21,38 @@
 #include <stop_token>
 
 namespace yams::daemon {
+
+namespace {
+// Adapter class to convert RequestDispatcher to RequestProcessor interface
+// Must be defined outside of constructor to avoid lifetime issues
+class DispatcherAdapter : public RequestProcessor {
+public:
+    explicit DispatcherAdapter(RequestDispatcher* d) : dispatcher_(d) {}
+
+    boost::asio::awaitable<Response> process(const Request& request) override {
+        co_return dispatcher_->dispatch(request);
+    }
+
+    boost::asio::awaitable<std::optional<Response>> process_streaming(const Request& request) override {
+        // Return the full response - StreamingRequestProcessor will handle chunking
+        co_return dispatcher_->dispatch(request);
+    }
+
+    bool supports_streaming(const Request& request) const override {
+        return std::holds_alternative<SearchRequest>(request) ||
+               std::holds_alternative<ListRequest>(request) ||
+               std::holds_alternative<GrepRequest>(request);
+    }
+
+    boost::asio::awaitable<ResponseChunk> next_chunk() override {
+        // Not used when wrapped by StreamingRequestProcessor
+        co_return ResponseChunk{};
+    }
+
+private:
+    RequestDispatcher* dispatcher_;
+};
+} // anonymous namespace
 
 // ============================================================================
 // RequestHandler Implementation
@@ -26,11 +62,25 @@ RequestHandler::RequestHandler(std::shared_ptr<RequestProcessor> processor, Conf
     : processor_(std::move(processor)), config_(std::move(config)) {}
 
 RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
-    : dispatcher_(dispatcher), config_(std::move(config)) {}
+    : dispatcher_(dispatcher), config_(std::move(config)) {
+    // Create a processor adapter that wraps the dispatcher
+    if (dispatcher_) {
+        auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
+
+        // Wrap with streaming support if enabled
+        if (config_.enable_streaming) {
+            spdlog::debug("RequestHandler: Wrapping processor with StreamingRequestProcessor");
+            processor_ = std::make_shared<StreamingRequestProcessor>(adapter, config_);
+        } else {
+            spdlog::debug("RequestHandler: Using DispatcherAdapter without streaming");
+            processor_ = adapter;
+        }
+    }
+}
 
 RequestHandler::~RequestHandler() = default;
 
-boost::asio::awaitable<std::vector<uint8_t>> 
+boost::asio::awaitable<std::vector<uint8_t>>
 RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::stop_token token) {
     using boost::asio::use_awaitable;
     try {
@@ -52,7 +102,7 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::st
         }
 
         const Message& message = message_result.value();
-        
+
         // Extract the request from the message payload
         if (!std::holds_alternative<Request>(message.payload)) {
             ErrorResponse error;
@@ -67,7 +117,7 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::st
             }
             co_return encoded.value();
         }
-        
+
         const Request& request = std::get<Request>(message.payload);
 
         // Process the request
@@ -87,7 +137,7 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::st
         Message responseMsg;
         responseMsg.requestId = message.requestId;
         responseMsg.payload = response;
-        
+
         // Serialize and return the response
         auto encoded = ProtoSerializer::encode_payload(responseMsg);
         if (!encoded) {
@@ -102,7 +152,7 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::st
             co_return errorEncoded ? errorEncoded.value() : std::vector<uint8_t>{};
         }
         co_return encoded.value();
-        
+
     } catch (const std::exception& e) {
         ErrorResponse error;
         error.code = ErrorCode::InternalError;
@@ -114,7 +164,7 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::st
     }
 }
 
-boost::asio::awaitable<void> 
+boost::asio::awaitable<void>
 RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket socket,
                                  std::stop_token token) {
     using boost::asio::use_awaitable;
@@ -152,27 +202,44 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 // In persistent mode, continue loop to try reading next request
                 continue;
             }
-            
-            boost::system::error_code ec;
-            size_t bytes_read = co_await boost::asio::async_read(
-                socket, 
-                boost::asio::buffer(buf),
-                boost::asio::transfer_at_least(1),
-                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-            
-            spdlog::debug("socket.async_read returned {} bytes, ec={}", bytes_read, ec.message());
-            
-            if (ec) {
-                if (ec == boost::asio::error::eof) {
-                    spdlog::debug("Connection closed by peer (EOF)");
-                } else {
-                    spdlog::error("Read error: {}", ec.message());
-                }
+
+            using namespace boost::asio::experimental::awaitable_operators;
+            // Inactivity-based timeout for reads: reset timer every awaited read
+            boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+            timer.expires_after(config_.read_timeout);
+
+            // Race the read against the timer
+            auto read_or_timeout = co_await (
+                boost::asio::async_read(
+                    socket,
+                    boost::asio::buffer(buf),
+                    boost::asio::transfer_at_least(1),
+                    boost::asio::use_awaitable) ||
+                timer.async_wait(boost::asio::use_awaitable));
+
+            size_t bytes_read = 0;
+            if (read_or_timeout.index() == 1) {
+                // Idle persistent connection; downgrade to debug to avoid noisy logs
+                spdlog::debug("Read timeout on socket {} after {} ms", socket.native_handle(),
+                              std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout).count());
+                fsm.on_timeout(ConnectionFsm::Operation::Read);
                 break;
+            } else {
+                // Header/payload bytes became available
+                bytes_read = std::get<0>(read_or_timeout);
+                spdlog::debug("socket.async_read returned {} bytes", bytes_read);
+                if (bytes_read == 0) {
+                    spdlog::debug("Connection closed by peer (EOF)");
+                    fsm.on_close_request();
+                    break;
+                }
             }
 
             if (bytes_read == 0) {
-                spdlog::debug("Connection closed (0 bytes read)");
+                // Handle EOF with 0 bytes - this shouldn't happen with async_read
+                // but we handle it defensively
+                spdlog::debug("Connection closed by peer (EOF)");
+                fsm.on_close_request();
                 break;
             }
 
@@ -277,8 +344,11 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
 
                 // Handle the request with correlation id
                 // Route through streaming-aware path so FSM transitions are captured
+                spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with expectsStreamingResponse={}",
+                              message.requestId, message.expectsStreamingResponse);
                 auto handle_result = co_await handle_streaming_request(socket, *request_ptr,
-                                                                       message.requestId, &fsm);
+                                                                       message.requestId, &fsm,
+                                                                       message.expectsStreamingResponse);
                 if (!handle_result) {
                     // Downgrade common client-initiated close errors to debug to avoid noisy logs
                     const auto& msg = handle_result.error().message;
@@ -326,7 +396,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
     }
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::handle_request(boost::asio::local::stream_protocol::socket& socket,
                                const Request& request, uint64_t request_id) {
     // Use streaming mode if enabled
@@ -385,7 +455,7 @@ RequestHandler::handle_request(boost::asio::local::stream_protocol::socket& sock
     }
 }
 
-boost::asio::awaitable<Result<Message>> 
+boost::asio::awaitable<Result<Message>>
 RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket,
                              FrameReader& reader) {
     using boost::asio::use_awaitable;
@@ -393,20 +463,20 @@ RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket
     while (!reader.has_frame()) {
         std::vector<uint8_t> buffer(4096);
         boost::system::error_code ec;
-        
+
         size_t bytes_read = co_await boost::asio::async_read(
-            socket, 
+            socket,
             boost::asio::buffer(buffer, buffer.size()),
             boost::asio::transfer_at_least(1),
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-            
+
         if (ec) {
             if (ec == boost::asio::error::eof) {
                 co_return Error{ErrorCode::NetworkError, "Connection closed"};
             }
             co_return Error{ErrorCode::NetworkError, ec.message()};
         }
-        
+
         buffer.resize(bytes_read);
         if (buffer.empty()) {
             co_return Error{ErrorCode::NetworkError, "Connection closed"};
@@ -432,16 +502,31 @@ RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket
     co_return framer_.parse_frame(frame_result.value());
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socket,
                               const Message& message) {
     using boost::asio::use_awaitable;
+
+    // Check if socket is still open before attempting to write
+    if (!socket.is_open()) {
+        spdlog::debug("write_message: socket is not open, aborting write");
+        co_return Error{ErrorCode::NetworkError, "Socket is closed"};
+    }
+
     // Frame once
     auto frame_result = framer_.frame_message(message);
     if (!frame_result) {
         co_return frame_result.error();
     }
     auto& frame = frame_result.value();
+
+    // Check frame size doesn't exceed reasonable limits
+    constexpr size_t MAX_FRAME_SIZE = 100 * 1024 * 1024; // 100MB
+    if (frame.size() > MAX_FRAME_SIZE) {
+        spdlog::error("write_message: frame size {} exceeds maximum {}", frame.size(), MAX_FRAME_SIZE);
+        co_return Error{ErrorCode::InvalidArgument, "Response too large to send"};
+    }
+
     stats_.bytes_sent += frame.size();
 
     const auto msgType =
@@ -607,26 +692,44 @@ boost::asio::awaitable<std::vector<Response>> RequestHandler::collect_limited_ch
     co_return chunks;
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::socket& socket,
                                         const Request& request,
                                         uint64_t request_id,
-                                        ConnectionFsm* fsm) {
+                                        ConnectionFsm* fsm,
+                                        bool client_expects_streaming) {
     using boost::asio::use_awaitable;
     auto start_time = std::chrono::steady_clock::now();
 
     try {
+        // Check socket is open before processing
+        if (!socket.is_open()) {
+            spdlog::debug("handle_streaming_request: socket closed before processing request_id={}",
+                         request_id);
+            co_return Error{ErrorCode::NetworkError, "Socket closed"};
+        }
         // Use the configured processor (server may decorate with streaming support)
         std::shared_ptr<RequestProcessor> proc = processor_;
+        spdlog::debug("handle_streaming_request: processor type={} for request_id={}",
+                      proc ? typeid(*proc).name() : "null", request_id);
 
         // Process the request with streaming support (may return no value to indicate chunking)
+        // regardless of the client's hint to ensure immediate header emission and avoid timeouts.
+        spdlog::debug("handle_streaming_request: calling process_streaming for request_id={}, client_expects_streaming={}, request_type={}",
+                      request_id, client_expects_streaming, request.index());
         auto response_opt = co_await proc->process_streaming(request);
 
+        spdlog::debug("handle_streaming_request: process_streaming returned has_value={} for request_id={}",
+                      response_opt.has_value(), request_id);
         if (!response_opt.has_value()) {
             // No response means we should use the streaming interface
-            if (proc && can_stream_request(request)) {
-                spdlog::debug("handle_streaming_request: entering streaming mode (request_id={})",
-                              request_id);
+            // Force streaming for stream-capable requests to guarantee header-first behavior
+            bool can_stream = can_stream_request(request);
+            spdlog::debug("handle_streaming_request: response_opt is empty, can_stream={} (request_id={})",
+                          can_stream, request_id);
+            if (proc && can_stream) {
+                spdlog::debug("handle_streaming_request: entering streaming mode (request_id={}, client_expects={})",
+                              request_id, client_expects_streaming);
                 // Inform FSM we are transitioning to write header for streaming
                 if (fsm) {
                     ConnectionFsm::FrameInfo finfo{};
@@ -722,9 +825,28 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                          request_id);
         }
         if (config_.close_after_response) {
-            spdlog::info("closing socket after non-streaming response (request_id={} fd={})",
-                         request_id, socket.native_handle());
-            socket.close();
+            // Optional graceful half-close: shutdown send side then briefly drain peer
+            if (config_.graceful_half_close) {
+                boost::system::error_code ig;
+                socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
+                using namespace boost::asio::experimental::awaitable_operators;
+                boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+                timer.expires_after(config_.graceful_drain_timeout);
+                std::array<uint8_t, 256> tmp{};
+                co_await (
+                    boost::asio::async_read(socket, boost::asio::buffer(tmp),
+                                             boost::asio::transfer_at_least(1),
+                                             boost::asio::use_awaitable) ||
+                    timer.async_wait(boost::asio::use_awaitable));
+                // Close regardless after drain/timeout
+                socket.close();
+                spdlog::info("graceful half-close complete (request_id={} fd={})", request_id,
+                             socket.native_handle());
+            } else {
+                spdlog::info("closing socket after non-streaming response (request_id={} fd={})",
+                             request_id, socket.native_handle());
+                socket.close();
+            }
         } else {
             spdlog::info("keeping socket open after non-streaming response (request_id={} fd={})",
                          request_id, socket.native_handle());
@@ -749,7 +871,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
     }
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& socket,
                                    const Message& message, bool flush) {
     using boost::asio::use_awaitable;
@@ -770,13 +892,29 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
             spdlog::debug("write_header_frame: header_only={} chunked={} last={} size={}B",
                           v.is_header_only, v.is_chunked, v.is_last_chunk,
                           static_cast<uint32_t>(frame.size()));
+            if (v.is_header_only && v.payload_size != 0) {
+                spdlog::warn(
+                    "write_header_frame: header-only frame advertises payload_size={} — expected 0;"
+                    " forcing zero-length header-only per protocol invariant",
+                    v.payload_size);
+            }
         }
     }
 
-    // Write the header frame
+    // Write the header frame with timeout
+    using namespace boost::asio::experimental::awaitable_operators;
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    timer.expires_after(config_.write_timeout);
+    auto write_or_timeout = co_await (
+        boost::asio::async_write(socket, boost::asio::buffer(frame), boost::asio::use_awaitable) ||
+        timer.async_wait(boost::asio::use_awaitable));
+
+    if (write_or_timeout.index() == 1) {
+        const std::string msg = "Write timeout (header)";
+        spdlog::debug("{}", msg);
+        co_return Error{ErrorCode::Timeout, msg};
+    }
     boost::system::error_code ec;
-    co_await boost::asio::async_write(socket, boost::asio::buffer(frame),
-                                      boost::asio::redirect_error(boost::asio::use_awaitable, ec));
     if (ec) {
         const auto& msg = ec.message();
         if (msg.find("Connection reset by peer") != std::string::npos ||
@@ -790,7 +928,7 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
     co_return Result<void>();
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& socket,
                                   const Message& message, bool last_chunk,
                                   bool flush) {
@@ -817,12 +955,21 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
             static_cast<uint32_t>(frame.size()));
     }
 
-    // 1) Send header first (unblocks client waiting on chunk header)
+    // 1) Send header first (unblocks client waiting on chunk header) with timeout
     {
         std::span<const uint8_t> header{frame.data(), headerSize};
+        using namespace boost::asio::experimental::awaitable_operators;
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+        timer.expires_after(config_.write_timeout);
+        auto write_or_timeout = co_await (
+            boost::asio::async_write(socket, boost::asio::buffer(header), boost::asio::use_awaitable) ||
+            timer.async_wait(boost::asio::use_awaitable));
+        if (write_or_timeout.index() == 1) {
+            const std::string msg = "Write timeout (chunk header)";
+            spdlog::debug("{}", msg);
+            co_return Error{ErrorCode::Timeout, msg};
+        }
         boost::system::error_code ec;
-        co_await boost::asio::async_write(socket, boost::asio::buffer(header),
-                                          boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         if (ec) {
             const auto& msg = ec.message();
             if (msg.find("Connection reset by peer") != std::string::npos ||
@@ -842,9 +989,18 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
         std::size_t to_write = std::min<std::size_t>(kWriteChunk, frame.size() - offset);
         std::span<const uint8_t> chunk{frame.data() + offset, to_write};
 
+        using namespace boost::asio::experimental::awaitable_operators;
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+        timer.expires_after(config_.write_timeout);
+        auto write_or_timeout = co_await (
+            boost::asio::async_write(socket, boost::asio::buffer(chunk), boost::asio::use_awaitable) ||
+            timer.async_wait(boost::asio::use_awaitable));
+        if (write_or_timeout.index() == 1) {
+            const std::string msg = "Write timeout (chunk payload)";
+            spdlog::debug("{}", msg);
+            co_return Error{ErrorCode::Timeout, msg};
+        }
         boost::system::error_code ec;
-        co_await boost::asio::async_write(socket, boost::asio::buffer(chunk),
-                                          boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         if (ec) {
             const auto& msg = ec.message();
             if (msg.find("Connection reset by peer") != std::string::npos ||
@@ -869,7 +1025,7 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
     co_return Result<void>();
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket,
                              const Response& response, uint64_t request_id,
                              bool flush) {
@@ -884,7 +1040,7 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     return write_header_frame(socket, response_msg, flush);
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
                             const Response& response, uint64_t request_id,
                             bool last_chunk, bool flush) {
@@ -899,7 +1055,7 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
     return write_chunk_frame(socket, response_msg, last_chunk, flush);
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socket,
                               const Request& request, uint64_t request_id,
                               std::shared_ptr<RequestProcessor> processor,
@@ -1024,9 +1180,26 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
     spdlog::debug("Sent {} chunks for streaming response (request_id={})", chunk_count, request_id);
     if (config_.close_after_response) {
-        spdlog::info("closing socket after streaming response (request_id={} fd={})", request_id,
-                     socket.native_handle());
-        socket.close();
+        if (config_.graceful_half_close) {
+            boost::system::error_code ig;
+            socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
+            using namespace boost::asio::experimental::awaitable_operators;
+            boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+            timer.expires_after(config_.graceful_drain_timeout);
+            std::array<uint8_t, 256> tmp{};
+            co_await (
+                boost::asio::async_read(socket, boost::asio::buffer(tmp),
+                                         boost::asio::transfer_at_least(1),
+                                         boost::asio::use_awaitable) ||
+                timer.async_wait(boost::asio::use_awaitable));
+            socket.close();
+            spdlog::info("graceful half-close complete (streaming) (request_id={} fd={})", request_id,
+                         socket.native_handle());
+        } else {
+            spdlog::info("closing socket after streaming response (request_id={} fd={})", request_id,
+                         socket.native_handle());
+            socket.close();
+        }
         if (fsm) {
             fsm->on_close_request();
         }
@@ -1037,7 +1210,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     co_return Result<void>();
 }
 
-boost::asio::awaitable<Result<void>> 
+boost::asio::awaitable<Result<void>>
 RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, ErrorCode code,
                            const std::string& message, uint64_t request_id) {
     using boost::asio::use_awaitable;

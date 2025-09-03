@@ -74,6 +74,10 @@ public:
             ->default_val(50);
         cmd->add_flag("--no-snippets", noSnippets_, "Disable content previews");
 
+        // Streaming control
+        cmd->add_flag("--no-streaming", disableStreaming_,
+                      "Disable streaming responses from daemon");
+
         // File type filters
         cmd->add_option("--type", fileType_,
                         "Filter by file type (image, document, archive, audio, video, text, "
@@ -182,8 +186,12 @@ public:
             auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
                 // Handle paths-only output
                 if (pathsOnly_) {
-                    for (const auto& e : resp.items) {
-                        std::cout << e.path << std::endl;
+                    if (resp.items.empty()) {
+                        std::cout << "(no results)" << std::endl;
+                    } else {
+                        for (const auto& e : resp.items) {
+                            std::cout << e.path << std::endl;
+                        }
                     }
                     return Result<void>();
                 }
@@ -250,10 +258,22 @@ public:
 
             auto fallback = [&]() -> Result<void> { return executeWithServices(); };
 
-            auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
-            if (result)
-                return Result<void>();
+            // Direct daemon call (no pooling) for determinism
+            yams::daemon::ClientConfig cfg;
+            cfg.enableChunkedResponses = !disableStreaming_;
+            cfg.singleUseConnections = true;
+            cfg.requestTimeout = std::chrono::milliseconds(30000);
+            yams::daemon::DaemonClient client(cfg);
+            client.setStreamingEnabled(cfg.enableChunkedResponses);
 
+            auto result = cfg.enableChunkedResponses
+                              ? run_sync(client.streamingList(dreq), std::chrono::seconds(30))
+                              : run_sync(client.call(dreq), std::chrono::seconds(30));
+            if (result) {
+                auto r = render(result.value());
+                if (!r) return r.error();
+                return Result<void>();
+            }
             // Fallback to service-based approach
             return executeWithServices();
 
@@ -263,6 +283,7 @@ public:
     }
 
 private:
+    bool disableStreaming_ = false;
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();

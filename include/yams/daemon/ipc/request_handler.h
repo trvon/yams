@@ -78,6 +78,12 @@ public:
         // Maximum allowed frame size (bytes) for inbound messages; must align with server limits
         size_t max_frame_size = 10 * 1024 * 1024; // 10MB default
 
+        // When closing after a response, attempt a graceful half-close (shutdown send) and briefly
+        // drain the peer's read side to reduce the chance of truncation at the client. Has no
+        // effect when close_after_response=false (persistent connections).
+        bool graceful_half_close = false;
+        std::chrono::milliseconds graceful_drain_timeout{200};
+
         Config();
     };
 
@@ -120,7 +126,8 @@ public:
     handle_streaming_request(boost::asio::local::stream_protocol::socket& socket,
                             const Request& request,
                             uint64_t request_id,
-                            ConnectionFsm* fsm = nullptr);
+                            ConnectionFsm* fsm = nullptr,
+                            bool client_expects_streaming = false);
 
     // Write a header frame and optionally flush
     [[nodiscard]] boost::asio::awaitable<Result<void>> 

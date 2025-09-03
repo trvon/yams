@@ -5,9 +5,9 @@ add_executable(daemon_lifecycle_integration_test
     daemon_lifecycle_integration_test.cpp
 )
 target_link_libraries(daemon_lifecycle_integration_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_lifecycle_integration_test COMMAND daemon_lifecycle_integration_test)
 set_tests_properties(daemon_lifecycle_integration_test PROPERTIES LABELS "daemon;integration")
@@ -17,13 +17,12 @@ add_executable(daemon_search_integration_test
     daemon_search_integration_test.cpp
 )
 target_link_libraries(daemon_search_integration_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
     yams::search
     yams::metadata
     yams::indexing
-    test_utils
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_search_integration_test COMMAND daemon_search_integration_test)
 set_tests_properties(daemon_search_integration_test PROPERTIES LABELS "daemon;integration")
@@ -33,11 +32,10 @@ add_executable(daemon_streaming_test
     daemon_streaming_test.cpp
 )
 target_link_libraries(daemon_streaming_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
     yams::api
-    test_utils
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_streaming_test COMMAND daemon_streaming_test)
 set_tests_properties(daemon_streaming_test PROPERTIES LABELS "daemon;integration")
@@ -47,9 +45,9 @@ add_executable(daemon_resilience_test
     daemon_resilience_test.cpp
 )
 target_link_libraries(daemon_resilience_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_resilience_test COMMAND daemon_resilience_test)
 set_tests_properties(daemon_resilience_test PROPERTIES LABELS "daemon;integration")
@@ -59,11 +57,11 @@ add_executable(daemon_download_integration_test
     daemon_download_integration_test.cpp
 )
 target_link_libraries(daemon_download_integration_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
     yams::api
     yams::metadata
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_download_integration_test COMMAND daemon_download_integration_test)
 set_tests_properties(daemon_download_integration_test PROPERTIES LABELS "daemon;integration")
@@ -73,11 +71,11 @@ add_executable(daemon_add_normalization_integration_test
     daemon_delete_add_integration_test.cpp
 )
 target_link_libraries(daemon_add_normalization_integration_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
     yams::api
     yams::metadata
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_add_normalization_integration_test COMMAND daemon_add_normalization_integration_test)
 set_tests_properties(daemon_add_normalization_integration_test PROPERTIES LABELS "daemon;integration")
@@ -86,11 +84,11 @@ add_executable(daemon_delete_parity_integration_test
     daemon_delete_add_integration_test.cpp
 )
 target_link_libraries(daemon_delete_parity_integration_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
     yams::api
     yams::metadata
-    GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME daemon_delete_parity_integration_test COMMAND daemon_delete_parity_integration_test)
 set_tests_properties(daemon_delete_parity_integration_test PROPERTIES LABELS "daemon;integration")
@@ -100,6 +98,8 @@ add_executable(pooled_request_integration_test
     pooled_request_integration_test.cpp
 )
 target_link_libraries(pooled_request_integration_test PRIVATE
+    test_utils
+    gtest_main
     yams_mcp
     yams_cli
     yams_api
@@ -108,9 +108,21 @@ target_link_libraries(pooled_request_integration_test PRIVATE
     yams_downloader
     spdlog::spdlog
     nlohmann_json::nlohmann_json
-    GTest::gtest
-    GTest::gtest_main
     Threads::Threads
 )
 add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)
 set_tests_properties(pooled_request_integration_test PROPERTIES LABELS "daemon;integration")
+
+# Protocol streaming/non-streaming behavioral tests
+add_executable(daemon_search_streaming_protocol_test
+    daemon_search_streaming_protocol_test.cpp
+)
+target_link_libraries(daemon_search_streaming_protocol_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams_cli
+    spdlog::spdlog
+)
+add_test(NAME daemon_search_streaming_protocol_test COMMAND daemon_search_streaming_protocol_test)
+set_tests_properties(daemon_search_streaming_protocol_test PROPERTIES LABELS "daemon;integration")

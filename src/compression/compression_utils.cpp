@@ -119,7 +119,7 @@ bool isLikelyCompressed(std::span<const std::byte> data) {
     double entropy = 0.0;
     for (const auto& count : frequency) {
         if (count > 0) {
-            const double p = static_cast<double>(count) / sampleSize;
+            const double p = static_cast<double>(count) / static_cast<double>(sampleSize);
             entropy -= p * std::log2(p);
         }
     }
@@ -181,12 +181,12 @@ size_t estimateCompressionRatio(std::span<const std::byte> data, CompressionAlgo
 
 Result<std::string> getCompressionStats(const CompressionResult& result) {
     const double ratio = result.originalSize > 0
-                             ? static_cast<double>(result.originalSize) / result.compressedSize
+                             ? static_cast<double>(result.originalSize) / static_cast<double>(result.compressedSize)
                              : 0.0;
 
     const double throughputMBps = result.duration.count() > 0
                                       ? (static_cast<double>(result.originalSize) / (1024 * 1024)) /
-                                            (result.duration.count() / 1000000.0)
+                                            (static_cast<double>(result.duration.count()) / 1000000.0)
                                       : 0.0;
 
     std::string algorithmName;

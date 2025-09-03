@@ -191,7 +191,7 @@ public:
             result.compressedSize = compressed.size();
             result.compressionRatio =
                 decompressed.empty() ? 0.0
-                                     : static_cast<double>(decompressed.size()) / compressed.size();
+                                     : static_cast<double>(decompressed.size()) / static_cast<double>(compressed.size());
 
             uint32_t decompressedChecksum = calculateChecksum(decompressed);
             result.validationChecksum = decompressedChecksum;
@@ -367,7 +367,7 @@ public:
         for (const auto& [type, count] : validationStats_) {
             total += count;
         }
-        return total > 0 ? static_cast<double>(validationFailures_) / total : 0.0;
+        return total > 0 ? static_cast<double>(validationFailures_) / static_cast<double>(total) : 0.0;
     }
 
     void resetStats() {
@@ -645,8 +645,10 @@ ValidationScope::~ValidationScope() noexcept {
                 result_ = validator_.validateDecompression({}, decompressedData_, originalChecksum,
                                                            type_);
             }
+        } catch (const std::exception& e) {
+            spdlog::error("Validation scope exception: {}", e.what());
         } catch (...) {
-            // Suppress exceptions in destructor
+            spdlog::error("Validation scope exception: unknown exception");
         }
     }
 }
@@ -702,7 +704,7 @@ double calculateEntropy(std::span<const std::byte> data) {
 
     for (size_t count : freq) {
         if (count > 0) {
-            double p = static_cast<double>(count) / total;
+            double p = static_cast<double>(count) / static_cast<double>(total);
             entropy -= p * std::log2(p);
         }
     }

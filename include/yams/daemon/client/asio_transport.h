@@ -66,6 +66,15 @@ private:
                     const std::vector<uint8_t>& data,
                     std::chrono::milliseconds timeout);
 
+    // Unified receive loop for both non-chunked and chunked responses
+    boost::asio::awaitable<Result<void>>
+    receive_frames(boost::asio::local::stream_protocol::socket& socket,
+                   MessageFramer& framer,
+                   HeaderCallback onHeader,
+                   ChunkCallback onChunk,
+                   ErrorCallback onError,
+                   CompleteCallback onComplete);
+
     Options opts_;
     ConnectionFsm fsm_;
 };

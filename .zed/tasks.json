@@ -13,7 +13,7 @@
   },
   {
     "label": "build+test (Debug)",
-    "command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure -j"
+    "command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure"
   },
   {
     "label": "conan: install (Release)",
@@ -26,5 +26,21 @@
   {
     "label": "build (Release)",
     "command": "cmake --build --preset yams-release"
+  },
+  {
+    "label": "full: clean+conan+configure+build (Debug)",
+    "command": "rm -rf build/yams-debug && conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-debug"
+  },
+  {
+    "label": "full: clean+conan+configure+build+test (Debug)",
+    "command": "rm -rf build/yams-debug CMakeUserPresets.json && conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure"
+  },
+  {
+    "label": "full: clean+conan+configure+build (Release)",
+    "command": "rm -rf build/yams-release && conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-release && cmake --build --preset yams-release"
+  },
+  {
+    "label": "full: clean+conan+configure+build+test (Release)",
+    "command": "rm -rf build/yams-release CMakeUserPresets.json && conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-release -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-release && ctest --preset yams-release --output-on-failure"
   }
 ]

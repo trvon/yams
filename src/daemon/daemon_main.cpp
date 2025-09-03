@@ -1,6 +1,7 @@
 #include <yams/daemon/daemon.h>
 
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <CLI/CLI.hpp>
 
@@ -384,9 +385,18 @@ int main(int argc, char* argv[]) {
 
     // Configure logging (default to file to preserve logs after daemonizing)
     try {
-        auto logger = spdlog::basic_logger_mt("yams-daemon", config.logFile.string(), true);
+        // Use rotating file sink to preserve logs across crashes
+        const size_t max_size = 10 * 1024 * 1024; // 10MB per file
+        const size_t max_files = 5; // Keep 5 rotated files
+        auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+            config.logFile.string(), max_size, max_files);
+        auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
         spdlog::set_default_logger(logger);
         spdlog::flush_on(spdlog::level::info);
+        
+        // Log rotation info
+        spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", 
+                     config.logFile.string(), max_size / (1024*1024), max_files);
     } catch (...) {
         // Fallback silently to default logger
     }

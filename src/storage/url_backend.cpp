@@ -18,32 +18,40 @@
 
 namespace yams::storage {
 
+namespace {
+constexpr long HTTP_NOT_FOUND = 404;
+constexpr long HTTP_CLIENT_ERROR_LO = 400;
+constexpr long HTTP_SUCCESS_LO = 200;
+constexpr long HTTP_SUCCESS_HI = 299; // inclusive upper bound
+}
+
 // LRU cache for remote reads
 class LRUCache {
 public:
     struct CacheEntry {
         std::vector<std::byte> data;
         std::chrono::steady_clock::time_point timestamp;
-        size_t size;
+        size_t size{0};
     };
 
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     explicit LRUCache(size_t maxSize, size_t ttlSeconds)
-        : maxSize_(maxSize), ttl_(ttlSeconds), currentSize_(0) {}
+        : maxSize_(maxSize), ttl_(ttlSeconds) {}
 
-    std::optional<std::vector<std::byte>> get(const std::string& key) {
+    auto get(const std::string& key) -> std::optional<std::vector<std::byte>> {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        auto it = cache_.find(key);
-        if (it == cache_.end()) {
+        auto iter = cache_.find(key);
+        if (iter == cache_.end()) {
             return std::nullopt;
         }
 
         // Check TTL
         auto now = std::chrono::steady_clock::now();
-        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.timestamp);
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - iter->second.timestamp);
         if (age.count() > static_cast<long>(ttl_)) {
-            currentSize_ -= it->second.size;
-            cache_.erase(it);
+            currentSize_ -= iter->second.size;
+            cache_.erase(iter);
             return std::nullopt;
         }
 
@@ -51,16 +59,16 @@ public:
         accessOrder_.remove(key);
         accessOrder_.push_front(key);
 
-        return it->second.data;
+        return iter->second.data;
     }
 
     void put(const std::string& key, const std::vector<std::byte>& data) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         // Remove existing entry if present
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            currentSize_ -= it->second.size;
+        auto iter = cache_.find(key);
+        if (iter != cache_.end()) {
+            currentSize_ -= iter->second.size;
             accessOrder_.remove(key);
         }
 
@@ -76,7 +84,8 @@ public:
         }
 
         // Add new entry
-        cache_[key] = {data, std::chrono::steady_clock::now(), data.size()};
+        cache_[key] =
+            CacheEntry{.data = data, .timestamp = std::chrono::steady_clock::now(), .size = data.size()};
         currentSize_ += data.size();
         accessOrder_.push_front(key);
     }
@@ -93,16 +102,17 @@ private:
     std::list<std::string> accessOrder_;
     size_t maxSize_;
     size_t ttl_;
-    size_t currentSize_;
+    size_t currentSize_{0};
     mutable std::mutex mutex_;
 };
 
 // Write callback for libcurl
-static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-    auto* buffer = static_cast<std::vector<uint8_t>*>(userp);
+static auto writeCallback(void* contents, size_t size, size_t nmemb, void* userp) -> size_t {
+    auto* out = static_cast<std::vector<uint8_t>*>(userp);
     size_t totalSize = size * nmemb;
-    buffer->insert(buffer->end(), static_cast<uint8_t*>(contents),
-                   static_cast<uint8_t*>(contents) + totalSize);
+    auto* bytes = static_cast<uint8_t*>(contents);
+    std::span<const uint8_t> src(bytes, totalSize);
+    out->insert(out->end(), src.begin(), src.end());
     return totalSize;
 }
 
@@ -113,14 +123,15 @@ struct ReadData {
     size_t offset;
 };
 
-static size_t readCallback(void* buffer, size_t size, size_t nmemb, void* userp) {
+static auto readCallback(void* buffer, size_t size, size_t nmemb, void* userp) -> size_t {
     auto* readData = static_cast<ReadData*>(userp);
     size_t bufferSize = size * nmemb;
-    size_t remaining = readData->size - readData->offset;
-    size_t toRead = std::min(bufferSize, remaining);
+    std::span<const std::byte> src(readData->data, readData->size);
+    auto remainingSpan = src.subspan(readData->offset);
+    size_t toRead = std::min(bufferSize, remainingSpan.size());
 
     if (toRead > 0) {
-        std::memcpy(buffer, readData->data + readData->offset, toRead);
+        std::memcpy(buffer, remainingSpan.data(), toRead);
         readData->offset += toRead;
     }
 
@@ -134,7 +145,7 @@ public:
     std::string lastError;
 
     // Retry helpers
-    bool isRetryable(const Error& err) const { return err.code == ErrorCode::NetworkError; }
+    static auto isRetryable(const Error& err) -> bool { return err.code == ErrorCode::NetworkError; }
 
     void backoff(int attempt) const {
         int delay = static_cast<int>(config.baseRetryMs) * (1 << attempt);
@@ -147,30 +158,33 @@ public:
     }
 
     struct HeadResult {
-        long statusCode;
+        long statusCode{0};
         std::unordered_map<std::string, std::string> headers;
     };
 
-    static size_t headerCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
+    static auto headerCallback(char* buffer, size_t size, size_t nitems, void* userdata) -> size_t {
         auto line = std::string(buffer, size * nitems);
         auto pos = line.find(':');
         if (pos != std::string::npos) {
             auto name = line.substr(0, pos);
             auto value = line.substr(pos + 1);
-            while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
                 value.erase(0, 1);
-            while (!value.empty() && (value.back() == '\r' || value.back() == '\n'))
+            }
+            while (!value.empty() && (value.back() == '\r' || value.back() == '\n')) {
                 value.pop_back();
+            }
             auto* hdrs = static_cast<HeadResult*>(userdata);
             hdrs->headers[name] = value;
         }
         return size * nitems;
     }
 
-    Result<HeadResult> performHEADOnce(const std::string& url) {
+    auto performHEADOnce(const std::string& url) -> Result<HeadResult> {
         CURL* curl = curl_easy_init();
-        if (!curl)
-            return Result<HeadResult>(Error{ErrorCode::Unknown, "CURL init failed"});
+        if (curl == nullptr) {
+            return {Error{ErrorCode::Unknown, "CURL init failed"}};
+        }
         HeadResult result;
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
@@ -185,32 +199,34 @@ public:
             healthy.store(false);
             ++errorCount;
             lastError = curl_easy_strerror(res);
-            return Result<HeadResult>(Error{ErrorCode::NetworkError, lastError});
+            return {Error{ErrorCode::NetworkError, lastError}};
         }
         healthy.store(true);
         return result;
     }
 
     // existing members unchanged...
-public:
     BackendConfig config;
     std::string scheme;
     std::string host;
     std::string basePath;
     std::unique_ptr<LRUCache> cache;
 
-    Result<void> parseURL(const std::string& url) {
+    auto parseURL(const std::string& url) -> Result<void> {
         // Parse URL: scheme://[user:pass@]host[:port]/path
         std::regex urlRegex(R"(^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?$)");
         std::smatch match;
 
         if (!std::regex_match(url, match, urlRegex)) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Invalid URL format"});
+            return {Error{ErrorCode::InvalidArgument, "Invalid URL format"}};
         }
 
-        scheme = match[2].str();
-        std::string authority = match[4].str();
-        basePath = match[5].str();
+        constexpr size_t SCHEME_IDX = 2;
+        constexpr size_t AUTHORITY_IDX = 4;
+        constexpr size_t PATH_IDX = 5;
+        scheme = match[SCHEME_IDX].str();
+        std::string authority = match[AUTHORITY_IDX].str();
+        basePath = match[PATH_IDX].str();
 
         // Parse authority for host and credentials
         size_t atPos = authority.find('@');
@@ -229,14 +245,13 @@ public:
 
         // Validate scheme
         if (scheme != "s3" && scheme != "http" && scheme != "https" && scheme != "ftp") {
-            return Result<void>(
-                Error{ErrorCode::InvalidArgument, "Unsupported URL scheme: " + scheme});
+            return {Error{ErrorCode::InvalidArgument, "Unsupported URL scheme: " + scheme}};
         }
 
         return {};
     }
 
-    std::string buildURL(std::string_view key) const {
+    auto buildURL(std::string_view key) const -> std::string {
         std::string url = scheme + "://" + host + basePath;
         if (!url.empty() && url.back() != '/') {
             url += '/';
@@ -245,13 +260,21 @@ public:
         return url;
     }
 
-    Result<void> configureAuth(CURL* curl) {
+    auto configureAuth(CURL* curl) -> Result<void> {
         if (scheme == "s3") {
             // For S3, check AWS credentials
-            const char* accessKey = std::getenv("AWS_ACCESS_KEY_ID");
-            const char* secretKey = std::getenv("AWS_SECRET_ACCESS_KEY");
+            static std::mutex envMutex;
+            const char* accessKey = nullptr;
+            const char* secretKey = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(envMutex);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): guarded by envMutex
+                accessKey = std::getenv("AWS_ACCESS_KEY_ID");
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): guarded by envMutex
+                secretKey = std::getenv("AWS_SECRET_ACCESS_KEY");
+            }
 
-            if (accessKey && secretKey) {
+            if ((accessKey != nullptr) && (secretKey != nullptr)) {
                 // TODO: Implement AWS Signature V4
                 // For now, we'll use basic auth as a placeholder
                 // In production, this needs proper AWS signing
@@ -274,11 +297,10 @@ public:
         return {};
     }
 
-    Result<std::vector<std::byte>> performGETOnce(const std::string& url) {
+    auto performGETOnce(const std::string& url) -> Result<std::vector<std::byte>> {
         CURL* curl = curl_easy_init();
-        if (!curl) {
-            return Result<std::vector<std::byte>>(
-                Error{ErrorCode::Unknown, "Failed to initialize CURL"});
+        if (curl == nullptr) {
+            return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
         }
 
         std::vector<uint8_t> buffer;
@@ -296,34 +318,32 @@ public:
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            return Result<std::vector<std::byte>>(
-                Error{ErrorCode::NetworkError, curl_easy_strerror(res)});
+            return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
         }
 
-        if (httpCode == 404) {
-            return Result<std::vector<std::byte>>(Error{ErrorCode::ChunkNotFound});
+        if (httpCode == HTTP_NOT_FOUND) {
+            return {Error{ErrorCode::ChunkNotFound}};
         }
 
-        if (httpCode >= 400) {
-            return Result<std::vector<std::byte>>(
-                Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)});
+        if (httpCode >= HTTP_CLIENT_ERROR_LO) {
+            return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
         }
 
         // Convert to std::byte vector
         std::vector<std::byte> result(buffer.size());
-        std::transform(buffer.begin(), buffer.end(), result.begin(),
-                       [](uint8_t b) { return std::byte{b}; });
+        std::ranges::transform(buffer, result.begin(),
+                               [](uint8_t byteVal) { return std::byte{byteVal}; });
 
         return result;
     }
 
-    Result<void> performPUTOnce(const std::string& url, std::span<const std::byte> data) {
+    auto performPUTOnce(const std::string& url, std::span<const std::byte> data) -> Result<void> {
         CURL* curl = curl_easy_init();
-        if (!curl) {
-            return Result<void>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
+        if (curl == nullptr) {
+            return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
         }
 
-        ReadData readData{data.data(), data.size(), 0};
+        ReadData readData{.data = data.data(), .size = data.size(), .offset = 0};
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
@@ -340,21 +360,20 @@ public:
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            return Result<void>(Error{ErrorCode::NetworkError, curl_easy_strerror(res)});
+            return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
         }
 
-        if (httpCode >= 400) {
-            return Result<void>(
-                Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)});
+        if (httpCode >= HTTP_CLIENT_ERROR_LO) {
+            return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
         }
 
         return {};
     }
 
-    Result<void> performDELETEOnce(const std::string& url) {
+    auto performDELETEOnce(const std::string& url) -> Result<void> {
         CURL* curl = curl_easy_init();
-        if (!curl) {
-            return Result<void>(Error{ErrorCode::Unknown, "Failed to initialize CURL"});
+        if (curl == nullptr) {
+            return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
         }
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -369,19 +388,18 @@ public:
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            return Result<void>(Error{ErrorCode::NetworkError, curl_easy_strerror(res)});
+            return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
         }
 
-        if (httpCode >= 400 && httpCode != 404) {
-            return Result<void>(
-                Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)});
+        if (httpCode >= HTTP_CLIENT_ERROR_LO && httpCode != HTTP_NOT_FOUND) {
+            return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
         }
 
         return {};
     }
 
     // ---- retry wrappers ----
-    Result<std::vector<std::byte>> performGET(const std::string& url) {
+    auto performGET(const std::string& url) -> Result<std::vector<std::byte>> {
         for (int attempt = 0;; ++attempt) {
             auto result = performGETOnce(url);
             if (result) {
@@ -394,7 +412,7 @@ public:
         }
     }
 
-    Result<void> performPUT(const std::string& url, std::span<const std::byte> data) {
+    auto performPUT(const std::string& url, std::span<const std::byte> data) -> Result<void> {
         for (int attempt = 0;; ++attempt) {
             auto res = performPUTOnce(url, data);
             if (res) {
@@ -407,7 +425,7 @@ public:
         }
     }
 
-    Result<void> performDELETE(const std::string& url) {
+    auto performDELETE(const std::string& url) -> Result<void> {
         for (int attempt = 0;; ++attempt) {
             auto res = performDELETEOnce(url);
             if (res) {
@@ -420,7 +438,7 @@ public:
         }
     }
 
-    Result<HeadResult> performHEAD(const std::string& url) {
+    auto performHEAD(const std::string& url) -> Result<HeadResult> {
         for (int attempt = 0;; ++attempt) {
             auto res = performHEADOnce(url);
             if (res) {
@@ -438,7 +456,9 @@ URLBackend::URLBackend() : pImpl(std::make_unique<Impl>()) {}
 
 URLBackend::~URLBackend() = default;
 
-Result<void> URLBackend::initialize(const BackendConfig& config) {
+// duplicate constants removed; see definitions at top of file
+
+auto URLBackend::initialize(const BackendConfig& config) -> Result<void> {
     pImpl->config = config;
 
     // Parse URL
@@ -459,7 +479,7 @@ Result<void> URLBackend::initialize(const BackendConfig& config) {
     return {};
 }
 
-Result<void> URLBackend::store(std::string_view key, std::span<const std::byte> data) {
+auto URLBackend::store(std::string_view key, std::span<const std::byte> data) -> Result<void> {
     std::string url = pImpl->buildURL(key);
 
     auto result = pImpl->performPUT(url, data);
@@ -471,7 +491,7 @@ Result<void> URLBackend::store(std::string_view key, std::span<const std::byte> 
     return result;
 }
 
-Result<std::vector<std::byte>> URLBackend::retrieve(std::string_view key) const {
+auto URLBackend::retrieve(std::string_view key) const -> Result<std::vector<std::byte>> {
     std::string keyStr(key);
 
     // Check cache first
@@ -492,7 +512,7 @@ Result<std::vector<std::byte>> URLBackend::retrieve(std::string_view key) const 
     return result;
 }
 
-Result<bool> URLBackend::exists(std::string_view key) const {
+auto URLBackend::exists(std::string_view key) const -> Result<bool> {
     std::string url = pImpl->buildURL(key);
     auto headResult = pImpl->performHEAD(url);
     if (!headResult) {
@@ -500,27 +520,28 @@ Result<bool> URLBackend::exists(std::string_view key) const {
         if (headResult.error().code == ErrorCode::ChunkNotFound) {
             return false;
         }
-        return Result<bool>(headResult.error());
+        return {headResult.error()};
     }
     // 2xx indicates success; 404 not found; others propagate error
-    const auto& hr = headResult.value();
-    long status = hr.statusCode;
-    if (status == 404) {
+    const auto& headRes = headResult.value();
+    long status = headRes.statusCode;
+    if (status == HTTP_NOT_FOUND) {
         return false;
     }
-    if (status >= 200 && status < 300) {
+    if (status >= HTTP_SUCCESS_LO && status <= HTTP_SUCCESS_HI) {
         return true;
     }
-    return Result<bool>(
-        Error{ErrorCode::NetworkError, "HEAD unexpected status: " + std::to_string(status)});
+    return {Error{ErrorCode::NetworkError,
+                  "HEAD unexpected status: " + std::to_string(status)}};
 }
 
-Result<void> URLBackend::remove(std::string_view key) {
+auto URLBackend::remove(std::string_view key) -> Result<void> {
     std::string url = pImpl->buildURL(key);
     return pImpl->performDELETE(url);
 }
 
-Result<std::vector<std::string>> URLBackend::list(std::string_view prefix) const {
+auto URLBackend::list(std::string_view prefix) const -> Result<std::vector<std::string>> {
+    (void)prefix; // not yet used
     // This would need protocol-specific implementation
     // For S3: use ListObjects API
     // For HTTP: might need directory listing support
@@ -530,14 +551,14 @@ Result<std::vector<std::string>> URLBackend::list(std::string_view prefix) const
     return std::vector<std::string>{};
 }
 
-Result<::yams::StorageStats> URLBackend::getStats() const {
+auto URLBackend::getStats() const -> Result<::yams::StorageStats> {
     // Return basic stats - could be enhanced with remote metrics
     ::yams::StorageStats stats;
     return stats;
 }
 
-std::future<Result<void>> URLBackend::storeAsync(std::string_view key,
-                                                 std::span<const std::byte> data) {
+auto URLBackend::storeAsync(std::string_view key,
+                            std::span<const std::byte> data) -> std::future<Result<void>> {
     return std::async(
         std::launch::async,
         [this, key = std::string(key), data = std::vector<std::byte>(data.begin(), data.end())]() {
@@ -545,16 +566,17 @@ std::future<Result<void>> URLBackend::storeAsync(std::string_view key,
         });
 }
 
-std::future<Result<std::vector<std::byte>>> URLBackend::retrieveAsync(std::string_view key) const {
+auto URLBackend::retrieveAsync(std::string_view key) const
+    -> std::future<Result<std::vector<std::byte>>> {
     return std::async(std::launch::async,
                       [this, key = std::string(key)]() { return retrieve(key); });
 }
 
-std::string URLBackend::getType() const {
+auto URLBackend::getType() const -> std::string {
     return pImpl->scheme;
 }
 
-Result<void> URLBackend::flush() {
+auto URLBackend::flush() -> Result<void> {
     pImpl->cache->clear();
     return {};
 }

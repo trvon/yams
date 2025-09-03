@@ -32,7 +32,7 @@ add_executable(reference_counter_unit_tests
 target_link_libraries(reference_counter_unit_tests
     PRIVATE
         test_utils
-        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
+        gtest_main
         yams::reference_counter
         yams::storage_engine
 )
@@ -56,7 +56,7 @@ add_executable(storage_backend_unit_tests
 target_link_libraries(storage_backend_unit_tests
     PRIVATE
         test_utils
-        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
+        gtest_main
         yams::storage_engine
         yams::core
         CURL::libcurl

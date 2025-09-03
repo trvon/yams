@@ -5,11 +5,10 @@ add_executable(pdf_content_handler_test
 
 target_link_libraries(pdf_content_handler_test
     PRIVATE
+        test_utils
+        gtest_main
         yams::content
         yams::detection
-        GTest::gtest
-        GTest::gmock
-        GTest::gtest_main
 )
 
 gtest_discover_tests(pdf_content_handler_test
@@ -26,11 +25,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/text_handler_test.cpp")
 
     target_link_libraries(text_handler_test
         PRIVATE
+            test_utils
+            gtest_main
             yams::content
             yams::detection
-            GTest::gtest
-            GTest::gmock
-            GTest::gtest_main
     )
 
     gtest_discover_tests(text_handler_test

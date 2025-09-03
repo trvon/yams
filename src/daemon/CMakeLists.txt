@@ -278,6 +278,8 @@ if(Protobuf_FOUND)
 
     target_compile_features(yams_ipc_proto PUBLIC cxx_std_20)
     set_target_properties(yams_ipc_proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # Disable clang-tidy for generated protobuf sources to avoid false positives
+    set_target_properties(yams_ipc_proto PROPERTIES CXX_CLANG_TIDY "")
 
     # Install and export so dependents in export set are satisfied
     install(TARGETS yams_ipc_proto

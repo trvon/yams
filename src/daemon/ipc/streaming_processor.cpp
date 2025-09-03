@@ -65,83 +65,122 @@ StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per
 }
 
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
-    // Emit a tiny heartbeat chunk immediately after header to keep client alive
-    if (pending_request_.has_value() && !heartbeat_sent_) {
-        heartbeat_sent_ = true;
-        // Synthesize an empty chunk matching the selected mode
-        switch (mode_) {
-            case Mode::Search: {
-                SearchResponse r;
-                r.totalCount = 0;
-                r.elapsed = std::chrono::milliseconds(0);
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                          .is_last_chunk = false};
-            }
-            case Mode::List: {
-                ListResponse r;
-                r.totalCount = 0;
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                          .is_last_chunk = false};
-            }
-            case Mode::Grep: {
-                GrepResponse r;
-                r.totalMatches = 0;
-                r.filesSearched = 0;
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                          .is_last_chunk = false};
-            }
-            case Mode::None:
-            default: {
-                // For non-chunkable types (e.g., AddDocument before compute), send a
-                // lightweight heartbeat so clients reset inactivity timers.
-                SuccessResponse ok{"Streaming started"};
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)},
-                                                          .is_last_chunk = false};
+    try {
+        // Emit a tiny heartbeat chunk immediately after header to keep client alive
+        if (pending_request_.has_value() && !heartbeat_sent_) {
+            heartbeat_sent_ = true;
+            // Synthesize an empty chunk matching the selected mode
+            switch (mode_) {
+                case Mode::Search: {
+                    SearchResponse r;
+                    r.totalCount = 0;
+                    r.elapsed = std::chrono::milliseconds(0);
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
+                                                              .is_last_chunk = false};
+                }
+                case Mode::List: {
+                    ListResponse r;
+                    r.totalCount = 0;
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
+                                                              .is_last_chunk = false};
+                }
+                case Mode::Grep: {
+                    GrepResponse r;
+                    r.totalMatches = 0;
+                    r.filesSearched = 0;
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
+                                                              .is_last_chunk = false};
+                }
+                case Mode::None:
+                default: {
+                    // For non-chunkable types (e.g., AddDocument before compute), send a
+                    // lightweight heartbeat so clients reset inactivity timers.
+                    SuccessResponse ok{"Streaming started"};
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)},
+                                                              .is_last_chunk = false};
+                }
             }
         }
-    }
 
-    // Lazy computation on first real chunk to ensure header already went out immediately
-    if (pending_request_.has_value()) {
-        auto req = *pending_request_;
-        pending_request_.reset();
-        auto t0 = std::chrono::steady_clock::now();
-        Response full = co_await delegate_->process(req);
-        auto t1 = std::chrono::steady_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        // Lazy computation on first real chunk to ensure header already went out immediately
+        if (pending_request_.has_value()) {
+            auto req = *pending_request_;
+            pending_request_.reset();
+            auto t0 = std::chrono::steady_clock::now();
+            
+            Response full;
+            try {
+                full = co_await delegate_->process(req);
+            } catch (const std::exception& e) {
+                spdlog::error("StreamingRequestProcessor: delegate_->process() threw exception: {}", e.what());
+                ErrorResponse err{ErrorCode::InternalError, 
+                                std::string("Failed to process request: ") + e.what()};
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
+                                                          .is_last_chunk = true};
+            }
+            
+            auto t1 = std::chrono::steady_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
-        if (auto* s = std::get_if<SearchResponse>(&full)) {
-            search_.emplace();
-            search_->totalCount = s->totalCount;
-            search_->elapsed = s->elapsed;
-            search_->results = std::move(s->results);
-            search_->pos = 0;
-            spdlog::debug(
-                "StreamingRequestProcessor(Search): computed full response in {} ms ({} results)",
-                ms, search_->results.size());
-        } else if (auto* l = std::get_if<ListResponse>(&full)) {
-            list_.emplace();
-            list_->totalCount = l->totalCount;
-            list_->items = std::move(l->items);
-            list_->pos = 0;
-            spdlog::debug(
-                "StreamingRequestProcessor(List): computed full response in {} ms ({} items)", ms,
-                list_->items.size());
-        } else if (auto* g = std::get_if<GrepResponse>(&full)) {
-            grep_.emplace();
-            grep_->totalMatches = g->totalMatches;
-            grep_->filesSearched = g->filesSearched;
-            grep_->matches = std::move(g->matches);
-            grep_->pos = 0;
-            spdlog::debug("StreamingRequestProcessor(Grep): computed full response in {} ms ({} "
-                          "matches across {} files)",
-                          ms, grep_->matches.size(), grep_->filesSearched);
-        } else {
-            // Not a chunkable type; return as a single last chunk
-            co_return RequestProcessor::ResponseChunk{.data = std::move(full),
-                                                      .is_last_chunk = true};
+            if (auto* s = std::get_if<SearchResponse>(&full)) {
+                search_ = SearchState{};
+                search_->totalCount = s->totalCount;
+                search_->elapsed = s->elapsed;
+                search_->results = std::move(s->results);
+                search_->pos = 0;
+                
+                // Add memory limit check
+                constexpr size_t MAX_RESULTS = 100000; // Reasonable limit
+                if (search_->results.size() > MAX_RESULTS) {
+                    spdlog::warn("StreamingRequestProcessor(Search): result count {} exceeds limit {}, truncating",
+                                search_->results.size(), MAX_RESULTS);
+                    search_->results.resize(MAX_RESULTS);
+                }
+                
+                spdlog::debug(
+                    "StreamingRequestProcessor(Search): computed full response in {} ms ({} results)",
+                    ms, search_->results.size());
+            } else if (auto* l = std::get_if<ListResponse>(&full)) {
+                list_ = ListState{};
+                list_->totalCount = l->totalCount;
+                list_->items = std::move(l->items);
+                list_->pos = 0;
+                
+                // Add memory limit check
+                constexpr size_t MAX_ITEMS = 100000; // Reasonable limit
+                if (list_->items.size() > MAX_ITEMS) {
+                    spdlog::warn("StreamingRequestProcessor(List): item count {} exceeds limit {}, truncating",
+                                list_->items.size(), MAX_ITEMS);
+                    list_->items.resize(MAX_ITEMS);
+                }
+                
+                spdlog::debug(
+                    "StreamingRequestProcessor(List): computed full response in {} ms ({} items)", ms,
+                    list_->items.size());
+            } else if (auto* g = std::get_if<GrepResponse>(&full)) {
+                grep_ = GrepState{};
+                grep_->totalMatches = g->totalMatches;
+                grep_->filesSearched = g->filesSearched;
+                grep_->matches = std::move(g->matches);
+                grep_->pos = 0;
+                
+                // Add memory limit check
+                constexpr size_t MAX_MATCHES = 100000; // Reasonable limit
+                if (grep_->matches.size() > MAX_MATCHES) {
+                    spdlog::warn("StreamingRequestProcessor(Grep): match count {} exceeds limit {}, truncating",
+                                grep_->matches.size(), MAX_MATCHES);
+                    grep_->matches.resize(MAX_MATCHES);
+                }
+                
+                spdlog::debug("StreamingRequestProcessor(Grep): computed full response in {} ms ({} "
+                              "matches across {} files)",
+                              ms, grep_->matches.size(), grep_->filesSearched);
+            } else {
+                // Not a chunkable type; return as a single last chunk
+                co_return RequestProcessor::ResponseChunk{.data = std::move(full),
+                                                          .is_last_chunk = true};
+            }
         }
-    }
 
     switch (mode_) {
         case Mode::Search: {
@@ -221,6 +260,13 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         default:
             // Delegate as last resort
             co_return co_await delegate_->next_chunk();
+    }
+    } catch (const std::exception& e) {
+        spdlog::error("StreamingRequestProcessor::next_chunk() exception: {}", e.what());
+        ErrorResponse err{ErrorCode::InternalError, 
+                        std::string("Streaming error: ") + e.what()};
+        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
+                                                  .is_last_chunk = true};
     }
 }
 

@@ -6,7 +6,7 @@ add_executable(wal_manager_unit_tests
 target_link_libraries(wal_manager_unit_tests
     PRIVATE
         test_utils
-        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
+        gtest_main
         yams::wal
         yams::crypto
 )

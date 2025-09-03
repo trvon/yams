@@ -60,7 +60,7 @@ struct AlgorithmStats {
     [[nodiscard]] double averageRatio() const noexcept {
         uint64_t input = bytesInput.load();
         uint64_t output = bytesOutput.load();
-        return output > 0 ? static_cast<double>(input) / output : 0.0;
+        return output > 0 ? static_cast<double>(input) / static_cast<double>(output) : 0.0;
     }
 
     /**
@@ -72,7 +72,7 @@ struct AlgorithmStats {
         uint64_t ms = compressionTimeMs.load();
         if (ms == 0)
             return 0.0;
-        return (bytes / 1024.0 / 1024.0) / (ms / 1000.0);
+        return (static_cast<double>(bytes) / 1024.0 / 1024.0) / (static_cast<double>(ms) / 1000.0);
     }
 
     /**
@@ -84,7 +84,7 @@ struct AlgorithmStats {
         uint64_t ms = decompressionTimeMs.load();
         if (ms == 0)
             return 0.0;
-        return (bytes / 1024.0 / 1024.0) / (ms / 1000.0);
+        return (static_cast<double>(bytes) / 1024.0 / 1024.0) / (static_cast<double>(ms) / 1000.0);
     }
 
     /**
@@ -175,7 +175,7 @@ struct CompressionStats {
     [[nodiscard]] double overallCompressionRatio() const noexcept {
         uint64_t saved = totalSpaceSaved.load();
         uint64_t original = totalUncompressedBytes.load() + saved;
-        return original > 0 ? static_cast<double>(original) / totalCompressedBytes.load() : 0.0;
+        return original > 0 ? static_cast<double>(original) / static_cast<double>(totalCompressedBytes.load()) : 0.0;
     }
 
     /**
@@ -185,7 +185,7 @@ struct CompressionStats {
     [[nodiscard]] double cacheHitRate() const noexcept {
         uint64_t hits = cacheHits.load();
         uint64_t total = hits + cacheMisses.load();
-        return total > 0 ? (static_cast<double>(hits) / total) * 100.0 : 0.0;
+        return total > 0 ? (static_cast<double>(hits) / static_cast<double>(total)) * 100.0 : 0.0;
     }
 
     /**

@@ -8,12 +8,12 @@
 
 namespace yams::chunking {
 
-// Rabin fingerprinting tables (shared with RabinChunker implementation)
-struct RabinTables {
+// Rabin fingerprinting tables (local to streaming chunker to avoid unity ODR conflicts)
+struct StreamingRabinTables {
     std::array<uint64_t, 256> outTable{};
     std::array<std::array<uint64_t, 256>, 64> modTable{};
 
-    explicit RabinTables(uint64_t polynomial) {
+    explicit StreamingRabinTables(uint64_t polynomial) {
         // Initialize output table
         for (int i = 0; i < 256; ++i) {
             uint64_t hash = 0;
@@ -28,30 +28,33 @@ struct RabinTables {
         // Initialize modulus tables for window operations
         for (int i = 0; i < 64; ++i) {
             for (int j = 0; j < 256; ++j) {
-                modTable[i][j] = modPow(j, i, polynomial);
+                modTable[i][j] = modPow(j, ExpTag{static_cast<size_t>(i)}, PolyTag{polynomial});
             }
         }
     }
 
 private:
-    static uint64_t modPow(uint64_t base, uint64_t exp, uint64_t poly) {
+    struct ExpTag { size_t v; };
+    struct PolyTag { uint64_t v; };
+    static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
         uint64_t result = 1;
-        base %= poly;
-        while (exp > 0) {
-            if (exp & 1) {
-                result = (result * base) % poly;
+        base %= poly.v;
+        while (exp.v > 0) {
+            if (exp.v & 1) {
+                result = (result * base) % poly.v;
             }
-            exp >>= 1;
-            base = (base * base) % poly;
+            exp.v >>= 1;
+            base = (base * base) % poly.v;
         }
         return result;
     }
 };
 
 struct StreamingChunker::Impl {
-    std::unique_ptr<RabinTables> tables;
+    std::unique_ptr<StreamingRabinTables> tables;
 
-    explicit Impl(uint64_t polynomial) : tables(std::make_unique<RabinTables>(polynomial)) {}
+    explicit Impl(uint64_t polynomial)
+        : tables(std::make_unique<StreamingRabinTables>(polynomial)) {}
 };
 
 StreamingChunker::StreamingChunker(ChunkingConfig config)
@@ -113,7 +116,7 @@ std::vector<Chunk> StreamingChunker::chunkData(std::span<const std::byte> data) 
     ctx.hasher = crypto::createSHA256Hasher();
 
     // Process data in simulated "buffers" for consistency with streaming approach
-    constexpr size_t BUFFER_SIZE = 64 * 1024;
+    constexpr size_t BUFFER_SIZE = static_cast<size_t>(64) * static_cast<size_t>(1024);
     size_t offset = 0;
 
     while (offset < data.size()) {

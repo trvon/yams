@@ -8,8 +8,8 @@ add_executable(mcp_tests
 
 target_link_libraries(mcp_tests
     PRIVATE
-        GTest::gtest_main
-        GTest::gmock
+        test_utils
+        gtest_main
         yams_mcp
         yams_app_services
         yams::api

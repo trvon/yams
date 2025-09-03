@@ -438,15 +438,16 @@ Result<void> StorageEngine::cleanupTempFiles() {
 std::filesystem::path
 AtomicFileWriter::generateTempName(const std::filesystem::path& target) const {
     auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(1000, 9999);
-    return std::filesystem::path(
-        yamsfmt::format("{}.tmp.{}.{}", target.string(), timestamp, dis(gen)));
+    std::random_device rngDevice;
+    std::mt19937 gen(rngDevice());
+    constexpr int RAND_ID_MIN = 1000;
+    constexpr int RAND_ID_MAX = 9999;
+    std::uniform_int_distribution<> dist(RAND_ID_MIN, RAND_ID_MAX);
+    return {yamsfmt::format("{}.tmp.{}.{}", target.string(), timestamp, dist(gen))};
 }
 
-Result<void> AtomicFileWriter::writeImpl(const std::filesystem::path& path,
-                                         std::span<const std::byte> data) {
+auto AtomicFileWriter::writeImpl(const std::filesystem::path& path,
+                                 std::span<const std::byte> data) -> Result<void> {
     auto tempPath = generateTempName(path);
 
     // RAII cleanup guard
@@ -456,11 +457,11 @@ Result<void> AtomicFileWriter::writeImpl(const std::filesystem::path& path,
 
         ~TempFileGuard() {
             if (!success) {
-                std::error_code ec;
-                std::filesystem::remove(path, ec);
+                std::error_code removeError;
+                std::filesystem::remove(path, removeError);
             }
         }
-    } guard{tempPath};
+    } guard{.path = tempPath};
 
     // Write to temp file
     {
@@ -469,27 +470,29 @@ Result<void> AtomicFileWriter::writeImpl(const std::filesystem::path& path,
             return Result<void>(ErrorCode::PermissionDenied);
         }
 
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Required by ofstream::write
         file.write(reinterpret_cast<const char*>(data.data()),
                    static_cast<std::streamsize>(data.size()));
         if (!file) {
-            return Result<void>(ErrorCode::Unknown);
+            return {ErrorCode::Unknown};
         }
     }
 
     // Atomic rename
-    std::error_code ec;
-    std::filesystem::rename(tempPath, path, ec);
+    std::error_code renameError;
+    std::filesystem::rename(tempPath, path, renameError);
 
-    if (ec) {
-        return Result<void>(ErrorCode::Unknown);
+    if (renameError) {
+        return {ErrorCode::Unknown};
     }
 
     guard.success = true;
     return {};
 }
 
-std::future<std::vector<Result<void>>> AtomicFileWriter::writeBatch(
-    std::vector<std::pair<std::filesystem::path, std::vector<std::byte>>> items) {
+auto AtomicFileWriter::writeBatch(
+    std::vector<std::pair<std::filesystem::path, std::vector<std::byte>>> items)
+    -> std::future<std::vector<Result<void>>> {
     return std::async(std::launch::async, [this, items = std::move(items)]() {
         std::vector<Result<void>> results;
         results.reserve(items.size());
@@ -503,29 +506,29 @@ std::future<std::vector<Result<void>>> AtomicFileWriter::writeBatch(
 }
 
 // Factory function
-std::unique_ptr<IStorageEngine> createStorageEngine(StorageConfig config) {
+auto createStorageEngine(StorageConfig config) -> std::unique_ptr<IStorageEngine> {
     return std::make_unique<StorageEngine>(std::move(config));
 }
 
 // Utility functions
-Result<void> initializeStorage(const std::filesystem::path& basePath) {
+auto initializeStorage(const std::filesystem::path& basePath) -> Result<void> {
     try {
-        std::error_code ec;
+        std::error_code errorCode;
 
         // Create directory structure
-        std::filesystem::create_directories(basePath / "objects", ec);
-        if (ec) {
-            return Result<void>(ErrorCode::PermissionDenied);
+        std::filesystem::create_directories(basePath / "objects", errorCode);
+        if (errorCode) {
+            return {ErrorCode::PermissionDenied};
         }
 
-        std::filesystem::create_directories(basePath / "temp", ec);
-        if (ec) {
-            return Result<void>(ErrorCode::PermissionDenied);
+        std::filesystem::create_directories(basePath / "temp", errorCode);
+        if (errorCode) {
+            return {ErrorCode::PermissionDenied};
         }
 
-        std::filesystem::create_directories(basePath / "manifests", ec);
-        if (ec) {
-            return Result<void>(ErrorCode::PermissionDenied);
+        std::filesystem::create_directories(basePath / "manifests", errorCode);
+        if (errorCode) {
+            return {ErrorCode::PermissionDenied};
         }
 
         spdlog::debug("Initialized storage at: {}", basePath.string());
@@ -533,11 +536,11 @@ Result<void> initializeStorage(const std::filesystem::path& basePath) {
 
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize storage: {}", e.what());
-        return Result<void>(ErrorCode::Unknown);
+        return {ErrorCode::Unknown};
     }
 }
 
-Result<bool> validateStorageIntegrity(const std::filesystem::path& basePath) {
+auto validateStorageIntegrity(const std::filesystem::path& basePath) -> Result<bool> {
     try {
         // Check required directories exist
         if (!std::filesystem::exists(basePath / "objects") ||
@@ -551,7 +554,7 @@ Result<bool> validateStorageIntegrity(const std::filesystem::path& basePath) {
 
     } catch (const std::exception& e) {
         spdlog::error("Storage validation failed: {}", e.what());
-        return Result<bool>(ErrorCode::Unknown);
+        return {ErrorCode::Unknown};
     }
 }
 

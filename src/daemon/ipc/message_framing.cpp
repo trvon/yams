@@ -65,34 +65,30 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& message,
-                                                                 uint64_t total_size) {
-    // Serialize the message first
+                                                                 uint64_t /*total_size*/) {
+    // Protocol invariant: header-only frames MUST have zero payload.
+    // We still serialize to validate size constraints, but do not include it on the wire.
     auto serialized = serialize_message(message);
     if (!serialized) {
         return serialized.error();
     }
 
-    auto& data = serialized.value();
-
-    // Check size limits
+    const auto& data = serialized.value();
     if (data.size() > max_message_size_) {
         return Error{ErrorCode::InvalidData, "Message size " + std::to_string(data.size()) +
                                                  " exceeds maximum " +
                                                  std::to_string(max_message_size_)};
     }
 
-    // Create frame header
     FrameHeader header;
-    header.payload_size = static_cast<uint32_t>(data.size());
-    header.checksum = calculate_crc32(data);
+    header.payload_size = 0; // invariant for header-only
+    header.checksum = 0;     // no payload => zero checksum
     header.set_chunked(true);
     header.set_header_only(true);
 
-    // Build header-only frame (no payload)
     std::vector<uint8_t> frame;
     frame.reserve(sizeof(FrameHeader));
 
-    // Convert header to network byte order and append
     header.to_network();
     frame.insert(frame.end(), reinterpret_cast<const uint8_t*>(&header),
                  reinterpret_cast<const uint8_t*>(&header) + sizeof(header));
@@ -293,6 +289,13 @@ FrameReader::FeedResult FrameReader::feed(const uint8_t* data, size_t size) {
 
                 // Check if this is a header-only frame
                 if (header.is_header_only()) {
+                    // Tolerate legacy frames that erroneously carried a non-zero payload_size.
+                    if (header.payload_size != 0) {
+                        spdlog::warn(
+                            "FrameReader: header-only frame with non-zero payload_size={} — "
+                            "treating as zero for compatibility",
+                            header.payload_size);
+                    }
                     // Header-only frame is already complete
                     state_ = State::FrameReady;
                     processing_chunked_ = header.is_chunked();

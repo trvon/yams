@@ -358,7 +358,7 @@ public:
         if (totalOperations_ == 0) {
             return 0.0;
         }
-        return static_cast<double>(successfulOperations_) / totalOperations_;
+        return static_cast<double>(successfulOperations_) / static_cast<double>(totalOperations_);
     }
 
     size_t getQueueSize() const {
@@ -846,8 +846,10 @@ RecoveryScope::~RecoveryScope() noexcept {
     if (!executed_ && !request_.data.empty()) {
         try {
             result_ = manager_.performRecovery(request_);
+        } catch (const std::exception& e) {
+            spdlog::error("Recovery scope exception: {}", e.what());
         } catch (...) {
-            // Suppress exceptions in destructor
+            spdlog::error("Recovery scope exception: unknown exception");
         }
     }
 }
@@ -856,9 +858,9 @@ void RecoveryScope::setData(std::span<const std::byte> data) {
     request_.data.assign(data.begin(), data.end());
 }
 
-void RecoveryScope::setAlgorithms(CompressionAlgorithm original, CompressionAlgorithm fallback) {
+void RecoveryScope::setAlgorithms(CompressionAlgorithm original, std::optional<CompressionAlgorithm> fallback) {
     request_.originalAlgorithm = original;
-    request_.fallbackAlgorithm = fallback;
+    request_.fallbackAlgorithm = fallback.value_or(CompressionAlgorithm::None);
 }
 
 RecoveryOperationResult RecoveryScope::execute() {
@@ -887,7 +889,7 @@ CompressionAlgorithm selectFallbackAlgorithm(CompressionAlgorithm failedAlgorith
         return CompressionAlgorithm::Zstandard;
     } else if (failedAlgorithm == CompressionAlgorithm::Zstandard) {
         // Zstandard failed, try LZMA for better compression
-        if (dataSize < 1024 * 1024) {          // Small data
+        if (dataSize < 1024ULL * 1024ULL) {          // Small data
             return CompressionAlgorithm::None; // Store uncompressed
         }
         return CompressionAlgorithm::LZMA;
@@ -926,7 +928,7 @@ double estimateRecoveryProbability(RecoveryOperation operation, size_t previousF
     }
 
     // Reduce probability with each failure
-    double failurePenalty = 0.1 * previousFailures;
+    double failurePenalty = 0.1 * static_cast<double>(previousFailures);
     return std::max(0.0, baseProbability - failurePenalty);
 }
 

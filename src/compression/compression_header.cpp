@@ -78,8 +78,8 @@ bool CompressionHeader::validate() const noexcept {
     return true;
 }
 
-CompressionHeader CompressionHeader::fromResult(const CompressionResult& result,
-                                                uint32_t uncompressedCRC, uint32_t compressedCRC) {
+CompressionHeader CompressionHeader::fromResult(
+    const CompressionResult& result, std::pair<uint32_t, uint32_t> crcs) {
     CompressionHeader header;
     header.magic = MAGIC;
     header.version = VERSION;
@@ -89,8 +89,8 @@ CompressionHeader CompressionHeader::fromResult(const CompressionResult& result,
     header.reserved1 = 0;
     header.uncompressedSize = result.originalSize;
     header.compressedSize = result.compressedSize;
-    header.uncompressedCRC32 = uncompressedCRC;
-    header.compressedCRC32 = compressedCRC;
+    header.uncompressedCRC32 = crcs.first;
+    header.compressedCRC32 = crcs.second;
     header.timestamp = std::chrono::duration_cast<std::chrono::seconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();

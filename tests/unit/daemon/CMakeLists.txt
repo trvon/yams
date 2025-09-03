@@ -12,17 +12,12 @@ function(yams_add_daemon_test TEST_NAME)
     add_executable(${TEST_NAME} ${ARG_SOURCES})
 
     target_link_libraries(${TEST_NAME} PRIVATE
+        test_utils
+        gtest_main
         ${ARG_LIBRARIES}
-        GTest::gtest
-        GTest::gtest_main
     )
 
-    # Handle GTest include directories consistently
-    if(TARGET gtest::gtest)
-        target_include_directories(${TEST_NAME} PRIVATE $<TARGET_PROPERTY:gtest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-    elseif(TARGET GTest::gtest)
-        target_include_directories(${TEST_NAME} PRIVATE $<TARGET_PROPERTY:GTest::gtest,INTERFACE_INCLUDE_DIRECTORIES>)
-    endif()
+    # test_utils already wires gtest includes via link targets
 
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
     set_tests_properties(${TEST_NAME} PROPERTIES LABELS "daemon;unit" TIMEOUT ${ARG_TIMEOUT})
@@ -33,10 +28,10 @@ add_executable(daemon_test
     daemon_test.cpp
 )
 target_link_libraries(daemon_test PRIVATE
+    test_utils
+    gtest_main
     yams::daemon
     yams::daemon_client
-    GTest::gtest
-    GTest::gtest_main
 )
 # Define YAMS_TESTING to enable test API
 target_compile_definitions(daemon_test PRIVATE YAMS_TESTING)
@@ -93,11 +88,11 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
         onnx_model_pool_test.cpp
     )
     target_link_libraries(onnx_model_pool_test PRIVATE
+        gtest_main
+        test_utils
         yams::daemon
         yams::vector
         yams::onnx_plugin
-        GTest::gtest
-        GTest::gtest_main
     )
     add_test(NAME onnx_model_pool_test COMMAND onnx_model_pool_test)
     set_tests_properties(onnx_model_pool_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)
@@ -107,10 +102,10 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
         onnx_model_provider_test.cpp
     )
     target_link_libraries(onnx_model_provider_test PRIVATE
+        gtest_main
+        test_utils
         yams::daemon
         yams::onnx_plugin
-        GTest::gtest
-        GTest::gtest_main
     )
     add_test(NAME onnx_model_provider_test COMMAND onnx_model_provider_test)
     set_tests_properties(onnx_model_provider_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)

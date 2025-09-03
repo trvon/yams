@@ -86,10 +86,12 @@ Run tests with ctest from the inner build directory:
 
 ```bash
 # Debug
-ctest --preset yams-debug --output-on-failure -j
+ctest --preset yams-debug --output-on-failure
+# To parallelize: add -jN (e.g., -j$(nproc) on Linux)
 
 # Release
-ctest --preset yams-release --output-on-failure -j
+ctest --preset yams-release --output-on-failure
+# To parallelize: add -jN (e.g., -j$(nproc) on Linux)
 ```
 
 For single-config Ninja (default here), CMake puts intermediate build files under build/yams-*/build; use the test presets, not raw paths.
@@ -169,3 +171,12 @@ For containerized builds, use a dev image with toolchains or mount your build ca
 - Do not commit local cache or build artifacts.
 - Keep Release builds for benchmarks and distribution; Debug for development.
 - Prefer presets over ad-hoc build commands for repeatability.
+
+
+## Toolchain & Sanitizers
+
+- CMake modules under `cmake/` control portable defaults:
+  - `ToolchainDetect.cmake`: prefers LLD and ThinLTO when supported; enables IPO/LTO portably.
+  - `Sanitizers.cmake`: toggles `ENABLE_ASAN`, `ENABLE_UBSAN`, `ENABLE_TSAN` in Debug builds only.
+- The default toolchain preference is LLVM (Clang + LLD) when present; otherwise the system toolchain is used.
+- No changes to Conan profiles are required; CI passes settings/conf via CLI.

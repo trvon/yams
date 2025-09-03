@@ -45,6 +45,7 @@ private:
     bool pathsOnly_ = false;
     bool literalText_ = false;
     bool regexOnly_ = false;
+    bool disableStreaming_ = false;
     size_t semanticLimit_ = 3;
     std::string filterTags_;
     bool matchAllTags_ = false;
@@ -116,6 +117,10 @@ public:
         cmd->add_option("--limit", maxCount_,
                         "Alias: stop after N matches per file (same as --max-count)");
 
+        // Streaming control
+        cmd->add_flag("--no-streaming", disableStreaming_,
+                      "Disable streaming responses from daemon");
+
         cmd->callback([this]() {
             auto result = execute();
             if (!result) {
@@ -173,8 +178,12 @@ public:
                         for (const auto& match : resp.matches) {
                             files.insert(match.file);
                         }
-                        for (const auto& file : files) {
-                            std::cout << file << std::endl;
+                        if (files.empty()) {
+                            std::cout << "(no results)" << std::endl;
+                        } else {
+                            for (const auto& file : files) {
+                                std::cout << file << std::endl;
+                            }
                         }
                     } else if (countOnly_) {
                         // Count matches per file
@@ -182,11 +191,15 @@ public:
                         for (const auto& match : resp.matches) {
                             fileCounts[match.file]++;
                         }
-                        for (const auto& [file, count] : fileCounts) {
-                            if (showFilename_ || fileCounts.size() > 1) {
-                                std::cout << file << ":";
+                        if (fileCounts.empty()) {
+                            std::cout << "(no results)" << std::endl;
+                        } else {
+                            for (const auto& [file, count] : fileCounts) {
+                                if (showFilename_ || fileCounts.size() > 1) {
+                                    std::cout << file << ":";
+                                }
+                                std::cout << count << std::endl;
                             }
-                            std::cout << count << std::endl;
                         }
                     } else {
                         // Full match output with match type indicators
@@ -252,8 +265,19 @@ public:
                     return executeLocal();
                 };
 
-                auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+                // Simple direct daemon client (no pool) for reliability
+                yams::daemon::ClientConfig cfg;
+                cfg.enableChunkedResponses = !disableStreaming_;
+                cfg.singleUseConnections = true;
+                cfg.requestTimeout = std::chrono::milliseconds(30000);
+                yams::daemon::DaemonClient client(cfg);
+                client.setStreamingEnabled(cfg.enableChunkedResponses);
+                auto result = cfg.enableChunkedResponses
+                                  ? run_sync(client.streamingGrep(dreq), std::chrono::seconds(30))
+                                  : run_sync(client.call(dreq), std::chrono::seconds(30));
                 if (result) {
+                    auto r = render(result.value());
+                    if (!r) return r.error();
                     return Result<void>();
                 }
             }

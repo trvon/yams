@@ -4,6 +4,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <yams/api/content_metadata.h>
@@ -48,8 +49,8 @@ struct AccessPattern {
     [[nodiscard]] double accessFrequency() const {
         auto age = totalAge();
         if (age.count() == 0)
-            return accessCount;
-        return static_cast<double>(accessCount) / (age.count() / 24.0);
+            return static_cast<double>(accessCount);
+        return static_cast<double>(accessCount) / (static_cast<double>(age.count()) / 24.0);
     }
 };
 
@@ -94,14 +95,14 @@ public:
      */
     struct Rules {
         // Age-based rules
-        std::chrono::hours compressAfterAge{24 * 7}; ///< Compress after 1 week
-        std::chrono::hours archiveAfterAge{24 * 30}; ///< Use LZMA after 30 days
+        std::chrono::hours compressAfterAge{std::chrono::hours{24LL} * 7LL}; ///< Compress after 1 week
+        std::chrono::hours archiveAfterAge{std::chrono::hours{24LL} * 30LL}; ///< Use LZMA after 30 days
         std::chrono::hours neverCompressBefore{1};   ///< Don't compress very new files
 
         // Size-based rules
-        size_t alwaysCompressAbove{10 * 1024 * 1024}; ///< Always compress >10MB
+        size_t alwaysCompressAbove{static_cast<size_t>(10) * static_cast<size_t>(1024) * static_cast<size_t>(1024)}; ///< Always compress >10MB
         size_t neverCompressBelow{4096};              ///< Never compress <4KB
-        size_t preferZstdBelow{50 * 1024 * 1024};     ///< Use Zstd for <50MB
+        size_t preferZstdBelow{static_cast<size_t>(50) * static_cast<size_t>(1024) * static_cast<size_t>(1024)};     ///< Use Zstd for <50MB
 
         // Type-based rules
         std::unordered_set<std::string> compressibleTypes{"text/plain",
@@ -141,7 +142,7 @@ public:
         // Performance rules
         double maxCpuUsage{0.5};                      ///< Max 50% CPU for background
         size_t maxConcurrentCompressions{4};          ///< Max parallel compressions
-        size_t minFreeSpaceBytes{1024 * 1024 * 1024}; ///< Need 1GB free space
+        size_t minFreeSpaceBytes{static_cast<size_t>(1024) * static_cast<size_t>(1024) * static_cast<size_t>(1024)}; ///< Need 1GB free space
 
         // Algorithm preferences
         uint8_t defaultZstdLevel{3}; ///< Fast compression
@@ -201,7 +202,7 @@ public:
      * @return True if type should be compressed
      */
     [[nodiscard]] bool isCompressibleType(const std::string& mimeType,
-                                          const std::string& filename) const;
+                                          std::string_view filename) const;
 
     /**
      * @brief Get current rules

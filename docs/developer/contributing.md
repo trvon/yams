@@ -19,22 +19,22 @@ Release:
 conan profile detect --force
 conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
 cmake --preset yams-release
-cmake --build --preset build-yams-release -j
-ctest --preset test-yams-release --output-on-failure -j
+cmake --build --preset yams-release
+ctest --preset yams-release --output-on-failure
 ```
 
 Debug:
 ```bash
 conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
 cmake --preset yams-debug
-cmake --build --preset yams-debug -j
-ctest --preset test-yams-debug --output-on-failure -j
+cmake --build --preset yams-debug
+ctest --preset yams-debug --output-on-failure
 ```
 
 Optional (sanitizers in Debug):
 ```bash
 cmake --preset yams-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
-cmake --build --preset yams-debug -j
+cmake --build --preset yams-debug
 ```
 
 ## Commit messages

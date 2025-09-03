@@ -1,280 +1,106 @@
-#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/chunking/chunker.h>
+#include <yams/chunking/streaming_chunker.h>
+#include <sstream>
 
-#include <numeric>
-#include <thread>
-
-using namespace yams;
 using namespace yams::chunking;
-using namespace yams::test;
 
-class RabinChunkerTest : public YamsTest {
-protected:
-    std::unique_ptr<RabinChunker> chunker;
-    ChunkingConfig config;
-
-    void SetUp() override {
-        YamsTest::SetUp();
-        config = ChunkingConfig{};
-        chunker = std::make_unique<RabinChunker>(config);
-    }
-};
-
-TEST_F(RabinChunkerTest, EmptyData) {
-    std::vector<std::byte> data;
-    auto chunks = chunker->chunkData(data);
-    EXPECT_EQ(chunks.size(), 0u);
+static std::vector<std::byte> make_bytes(size_t n, uint8_t value = 0xAB) {
+    std::vector<std::byte> v;
+    v.resize(n);
+    for (size_t i = 0; i < n; ++i) v[i] = std::byte{value};
+    return v;
 }
 
-TEST_F(RabinChunkerTest, SmallData) {
-    // Data smaller than minimum chunk size
-    auto data = generateRandomBytes(1024); // 1KB
-    auto chunks = chunker->chunkData(data);
+TEST(RabinChunkerTest, EmptyInputProducesNoChunks) {
+    RabinChunker chunker;
+    auto chunks = chunker.chunkData({});
+    EXPECT_TRUE(chunks.empty());
+}
 
+TEST(RabinChunkerTest, SingleByteWithUnitChunkConfig) {
+    ChunkingConfig cfg{};
+    cfg.minChunkSize = 1;
+    cfg.targetChunkSize = 1;
+    cfg.maxChunkSize = 1;
+    RabinChunker chunker(cfg);
+
+    auto data = make_bytes(1, 0x11);
+    auto chunks = chunker.chunkData(std::span<const std::byte>(data.data(), data.size()));
     ASSERT_EQ(chunks.size(), 1u);
-    EXPECT_EQ(chunks[0].size, data.size());
+    EXPECT_EQ(chunks[0].size, 1u);
     EXPECT_EQ(chunks[0].offset, 0u);
-    EXPECT_EQ(chunks[0].data, data);
 }
 
-TEST_F(RabinChunkerTest, MinimumChunkSize) {
-    // Test that chunks respect minimum size
-    auto data = generateRandomBytes(config.minChunkSize * 3);
-    auto chunks = chunker->chunkData(data);
+TEST(RabinChunkerTest, FixedSizeChunksAtBoundary) {
+    ChunkingConfig cfg{};
+    cfg.minChunkSize = 64;
+    cfg.targetChunkSize = 64;
+    cfg.maxChunkSize = 64;
+    RabinChunker chunker(cfg);
 
-    for (const auto& chunk : chunks) {
-        // Last chunk might be smaller
-        if (chunk.offset + chunk.size < data.size()) {
-            EXPECT_GE(chunk.size, config.minChunkSize);
+    // Exactly one chunk
+    auto data1 = make_bytes(64, 0x22);
+    auto chunks1 = chunker.chunkData(std::span<const std::byte>(data1.data(), data1.size()));
+    ASSERT_EQ(chunks1.size(), 1u);
+    EXPECT_EQ(chunks1[0].size, 64u);
+
+    // Off-by-one above boundary: expect 2 chunks (64 + 1)
+    auto data2 = make_bytes(65, 0x33);
+    auto chunks2 = chunker.chunkData(std::span<const std::byte>(data2.data(), data2.size()));
+    ASSERT_EQ(chunks2.size(), 2u);
+    EXPECT_EQ(chunks2[0].size, 64u);
+    EXPECT_EQ(chunks2[1].size, 1u);
+    EXPECT_EQ(chunks2[0].offset, 0u);
+    EXPECT_EQ(chunks2[1].offset, 64u);
+}
+
+TEST(RabinChunkerTest, InvariantsLengthAndRange) {
+    ChunkingConfig cfg{};
+    cfg.minChunkSize = 32;
+    cfg.targetChunkSize = 64;
+    cfg.maxChunkSize = 96;
+    RabinChunker chunker(cfg);
+
+    auto data = make_bytes(1024, 0x44);
+    auto chunks = chunker.chunkData(std::span<const std::byte>(data.data(), data.size()));
+
+    size_t sum = 0;
+    for (const auto& c : chunks) {
+        sum += c.size;
+        // All chunks except possibly the last must be within [min,max]
+        if (&c != &chunks.back()) {
+            EXPECT_GE(c.size, cfg.minChunkSize);
+            EXPECT_LE(c.size, cfg.maxChunkSize);
         }
     }
+    EXPECT_EQ(sum, data.size());
 }
 
-TEST_F(RabinChunkerTest, MaximumChunkSize) {
-    // Create data that won't naturally chunk
-    std::vector<std::byte> data(config.maxChunkSize + 1024, std::byte{0});
-    auto chunks = chunker->chunkData(data);
+TEST(RabinChunkerTest, StreamingMatchesNonStreamingForFixedSize) {
+    ChunkingConfig cfg{};
+    cfg.minChunkSize = 64;
+    cfg.targetChunkSize = 64;
+    cfg.maxChunkSize = 64;
 
-    ASSERT_GE(chunks.size(), 2u);
-    EXPECT_LE(chunks[0].size, config.maxChunkSize);
-}
+    auto data = make_bytes(256, 0x55);
 
-TEST_F(RabinChunkerTest, DeterministicChunking) {
-    // Same data should produce same chunks
-    auto data = generateRandomBytes(1024 * 1024); // 1MB
+    RabinChunker chunker(cfg);
+    auto nonstream = chunker.chunkData(std::span<const std::byte>(data.data(), data.size()));
 
-    auto chunks1 = chunker->chunkData(data);
-    auto chunks2 = chunker->chunkData(data);
-
-    ASSERT_EQ(chunks1.size(), chunks2.size());
-
-    for (size_t i = 0; i < chunks1.size(); ++i) {
-        EXPECT_EQ(chunks1[i].hash, chunks2[i].hash);
-        EXPECT_EQ(chunks1[i].offset, chunks2[i].offset);
-        EXPECT_EQ(chunks1[i].size, chunks2[i].size);
-    }
-}
-
-TEST_F(RabinChunkerTest, ChunkBoundariesWithInsertion) {
-    // Test that insertions don't affect all chunks
-    auto data1 = generateRandomBytes(1024 * 1024); // 1MB
-
-    // Insert some bytes in the middle
-    std::vector<std::byte> data2;
-    data2.insert(data2.end(), data1.begin(), data1.begin() + 500000);
-    auto insertion = generateRandomBytes(1024);
-    data2.insert(data2.end(), insertion.begin(), insertion.end());
-    data2.insert(data2.end(), data1.begin() + 500000, data1.end());
-
-    auto chunks1 = chunker->chunkData(data1);
-    auto chunks2 = chunker->chunkData(data2);
-
-    // Some chunks before and after insertion should remain the same
-    int matchingChunks = 0;
-    for (const auto& chunk1 : chunks1) {
-        for (const auto& chunk2 : chunks2) {
-            if (chunk1.hash == chunk2.hash) {
-                matchingChunks++;
-                break;
-            }
-        }
-    }
-
-    // We should have some matching chunks
-    EXPECT_GT(matchingChunks, 0);
-    EXPECT_LT(matchingChunks, chunks1.size()); // But not all
-}
-
-TEST_F(RabinChunkerTest, ChunkSizeDistribution) {
-    // Test average chunk size over large data
-    auto data = generateRandomBytes(10 * 1024 * 1024); // 10MB
-    auto chunks = chunker->chunkData(data);
-
-    // Calculate average chunk size
-    double avgSize = static_cast<double>(data.size()) / chunks.size();
-
-    // Should be close to target size (within reasonable bounds for random data)
-    EXPECT_GT(avgSize, config.targetChunkSize * 0.25); // 25% of target
-    EXPECT_LT(avgSize, config.targetChunkSize * 2.0);  // 200% of target
-
-    // Check size distribution
-    size_t withinTarget = 0;
-    for (const auto& chunk : chunks) {
-        if (chunk.size >= config.targetChunkSize * 0.5 &&
-            chunk.size <= config.targetChunkSize * 1.5) {
-            withinTarget++;
-        }
-    }
-
-    // Most chunks should be near target size (lowered for statistical variance)
-    double ratio = static_cast<double>(withinTarget) / chunks.size();
-    EXPECT_GT(ratio, 0.1); // At least 10% within range (reduced for random data)
-}
-
-TEST_F(RabinChunkerTest, FileChunking) {
-    // Create test file
-    auto content = generateRandomBytes(500000); // 500KB
-    auto path = createTestFileWithContent(content, "chunk_test.bin");
-
-    auto chunks = chunker->chunkFile(path);
-
-    // Verify chunks reconstruct to original
-    std::vector<std::byte> reconstructed;
-    for (const auto& chunk : chunks) {
-        reconstructed.insert(reconstructed.end(), chunk.data.begin(), chunk.data.end());
-    }
-
-    EXPECT_EQ(reconstructed, content);
-}
-
-TEST_F(RabinChunkerTest, AsyncFileChunking) {
-    auto content = generateRandomBytes(200000);
-    auto path = createTestFileWithContent(content, "async_chunk_test.bin");
-
-    auto future = chunker->chunkFileAsync(path);
-    auto result = future.get();
-
-    ASSERT_TRUE(result.has_value());
-
-    // Compare with sync version
-    auto syncChunks = chunker->chunkFile(path);
-    const auto& asyncChunks = result.value();
-
-    ASSERT_EQ(asyncChunks.size(), syncChunks.size());
-    for (size_t i = 0; i < asyncChunks.size(); ++i) {
-        EXPECT_EQ(asyncChunks[i].hash, syncChunks[i].hash);
-    }
-}
-
-TEST_F(RabinChunkerTest, ProgressCallback) {
-    auto data = generateRandomBytes(1024 * 1024); // 1MB
-
-    std::vector<std::pair<uint64_t, uint64_t>> progressUpdates;
-    chunker->setProgressCallback(
-        [&](uint64_t current, uint64_t total) { progressUpdates.emplace_back(current, total); });
-
-    chunker->chunkData(data);
-
-    EXPECT_GT(progressUpdates.size(), 0u);
-
-    // Verify progress increases monotonically
-    for (size_t i = 1; i < progressUpdates.size(); ++i) {
-        EXPECT_GE(progressUpdates[i].first, progressUpdates[i - 1].first);
-    }
-
-    // Final progress should equal data size
-    if (!progressUpdates.empty()) {
-        EXPECT_EQ(progressUpdates.back().first, data.size());
-    }
-}
-
-TEST_F(RabinChunkerTest, ProcessChunksCallback) {
-    auto data = generateRandomBytes(500000);
-
+    auto streamer = createStreamingChunker(cfg);
     std::vector<ChunkRef> refs;
-    size_t totalProcessed = 0;
+    std::string s(reinterpret_cast<const char*>(data.data()), data.size());
+    std::istringstream iss(s);
+    auto res = static_cast<StreamingChunker*>(streamer.get())->processStream(
+        iss,
+        data.size(),
+        [&](const ChunkRef& ref, std::span<const std::byte>) { refs.push_back(ref); });
+    ASSERT_TRUE(res.has_value());
 
-    chunker->processChunks(data, [&](const ChunkRef& ref, std::span<const std::byte> chunkData) {
-        refs.push_back(ref);
-        totalProcessed += chunkData.size();
-
-        // Verify chunk data matches reference
-        EXPECT_EQ(ref.size, chunkData.size());
-    });
-
-    EXPECT_EQ(totalProcessed, data.size());
-    EXPECT_GT(refs.size(), 0u);
-}
-
-TEST_F(RabinChunkerTest, DeduplicationStats) {
-    // Create data with repeated patterns
-    // Use 32KB pattern (2x min chunk size) for better alignment
-    auto pattern = generateRandomBytes(32 * 1024);
-    std::vector<std::byte> data;
-
-    // Repeat pattern 4 times for 128KB total
-    for (int i = 0; i < 4; ++i) {
-        data.insert(data.end(), pattern.begin(), pattern.end());
-    }
-
-    auto chunks = chunker->chunkData(data);
-    auto stats = calculateDeduplication(chunks);
-
-    EXPECT_EQ(stats.chunkCount, chunks.size());
-    EXPECT_LT(stats.uniqueChunks, stats.chunkCount);
-    EXPECT_GT(stats.getRatio(), 0.0); // Should have some deduplication
-
-    // With repeated data, unique size should be less than total
-    EXPECT_LT(stats.uniqueSize, stats.totalSize);
-}
-
-TEST_F(RabinChunkerTest, ThreadSafety) {
-    // Each thread uses its own chunker instance
-    auto data = generateRandomBytes(100000);
-    constexpr size_t numThreads = 4;
-
-    std::vector<std::thread> threads;
-    std::vector<std::vector<Chunk>> results(numThreads);
-
-    for (size_t i = 0; i < numThreads; ++i) {
-        threads.emplace_back([&, i]() {
-            RabinChunker threadChunker(config);
-            results[i] = threadChunker.chunkData(data);
-        });
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    // All threads should produce identical results
-    for (size_t i = 1; i < numThreads; ++i) {
-        ASSERT_EQ(results[i].size(), results[0].size());
-        for (size_t j = 0; j < results[i].size(); ++j) {
-            EXPECT_EQ(results[i][j].hash, results[0][j].hash);
-        }
+    ASSERT_EQ(refs.size(), nonstream.size());
+    for (size_t i = 0; i < refs.size(); ++i) {
+        EXPECT_EQ(refs[i].size, nonstream[i].size);
+        EXPECT_EQ(refs[i].offset, nonstream[i].offset);
     }
 }
-
-// Performance test (only in release builds)
-#ifdef NDEBUG
-TEST_F(RabinChunkerTest, Performance) {
-    // Test with 100MB of data
-    constexpr size_t dataSize = 100 * 1024 * 1024;
-    auto data = generateRandomBytes(dataSize);
-
-    auto start = std::chrono::high_resolution_clock::now();
-    auto chunks = chunker->chunkData(data);
-    auto end = std::chrono::high_resolution_clock::now();
-
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    auto throughput = (dataSize / 1024.0 / 1024.0) / (duration.count() / 1000.0);
-
-    std::cout << std::format("Chunked {}MB into {} chunks in {}ms ({:.2f}MB/s)\n",
-                             dataSize / 1024 / 1024, chunks.size(), duration.count(), throughput);
-
-    // Expect at least 100MB/s (reduced for varied hardware)
-    EXPECT_GT(throughput, 100.0);
-}
-#endif

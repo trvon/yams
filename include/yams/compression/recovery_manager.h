@@ -288,7 +288,7 @@ public:
      * @param fallback Fallback algorithm
      */
     void setAlgorithms(CompressionAlgorithm original,
-                       CompressionAlgorithm fallback = CompressionAlgorithm::None);
+                       std::optional<CompressionAlgorithm> fallback = std::nullopt);
 
     /**
      * @brief Execute recovery operation

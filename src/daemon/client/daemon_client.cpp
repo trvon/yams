@@ -6,6 +6,8 @@
 
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -14,24 +16,14 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 #include <string_view>
 #include <thread>
 
 #ifndef _WIN32
-#include <fcntl.h>
 #include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#else
-#include <afunix.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
+#include <sys/wait.h>
 #endif
 
 namespace yams::daemon {
@@ -82,114 +74,9 @@ public:
     explicit Impl(const ClientConfig& config)
         : config_(config), headerTimeout_(config.headerTimeout), bodyTimeout_(config.bodyTimeout) {}
 
-    ~Impl() {
-        if (socketFd_ >= 0) {
-#ifdef _WIN32
-            closesocket(socketFd_);
-#else
-            close(socketFd_);
-#endif
-        }
-    }
-
-    Result<void> connect() {
-        if (socketFd_ >= 0) {
-            return Result<void>(); // Already connected
-        }
-
-#ifdef _WIN32
-        // Initialize Winsock once
-        static bool wsInit = false;
-        if (!wsInit) {
-            WSADATA wsa;
-            if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) {
-                wsInit = true;
-            }
-        }
-#endif
-        // Create socket
-        socketFd_ = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (socketFd_ < 0) {
-            return Error{ErrorCode::NetworkError,
-                         "Failed to create socket: " + std::string(strerror(errno))};
-        }
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-        // Prevent SIGPIPE on send; errors will be reported via errno (EPIPE)
-        {
-            int on = 1;
-            ::setsockopt(socketFd_, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-        }
-#endif
-
-        // Connect to server
-        struct sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, config_.socketPath.c_str(), sizeof(addr.sun_path) - 1);
-
-        // Connect to server with short retry window to avoid races with an already-running daemon
-        int rc = -1;
-        int lastErr = 0;
-        for (int attempt = 0; attempt < 10; ++attempt) {
-            rc = ::connect(socketFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-            if (rc == 0) {
-                break;
-            }
-            lastErr = errno;
-            if (lastErr == ENOENT || lastErr == ECONNREFUSED) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
-                continue;
-            }
-            // Other errors: break and report
-            break;
-        }
-
-        if (rc < 0) {
-#ifdef _WIN32
-            closesocket(socketFd_);
-#else
-            close(socketFd_);
-#endif
-            socketFd_ = -1;
-            auto errorMsg = std::string(strerror(lastErr));
-            if (lastErr == ENOENT || lastErr == ECONNREFUSED) {
-                return Error{ErrorCode::NetworkError,
-                             "Daemon not running. Start it with: yams daemon start"};
-            }
-            return Error{ErrorCode::NetworkError, "Failed to connect to daemon: " + errorMsg};
-        }
-
-        // Ensure client socket is non-blocking so our manual timeouts work.
-        // Without this, recv()/send() may block indefinitely and ignore our deadlines.
-#ifndef _WIN32
-        int flags = fcntl(socketFd_, F_GETFL, 0);
-        if (flags >= 0) {
-            (void)fcntl(socketFd_, F_SETFL, flags | O_NONBLOCK);
-        }
-#else
-        u_long mode = 1;
-        ioctlsocket(socketFd_, FIONBIO, &mode);
-#endif
-
-        spdlog::debug("Connected to daemon at {}",
-                      sanitize_for_terminal(config_.socketPath.string()));
-        return Result<void>();
-    }
-
-    void disconnect() {
-        if (socketFd_ >= 0) {
-#ifdef _WIN32
-            closesocket(socketFd_);
-#else
-            close(socketFd_);
-#endif
-            socketFd_ = -1;
-        }
-    }
-
-    bool isConnected() const { return socketFd_ >= 0; }
+    ~Impl() = default;
 
     ClientConfig config_;
-    int socketFd_ = -1;
     CircuitBreaker breaker_;
     std::chrono::milliseconds headerTimeout_{30000}; // 30s default
     std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
@@ -198,8 +85,9 @@ public:
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
-        pImpl->config_.socketPath = resolveSocketPath();
+        pImpl->config_.socketPath = resolveSocketPathConfigFirst();
     }
+    spdlog::debug("DaemonClient init: resolved socket='{}'", pImpl->config_.socketPath.string());
 }
 
 DaemonClient::~DaemonClient() = default;
@@ -219,97 +107,130 @@ void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
     }
 }
 
+// New: lightweight readiness probe that sends a real Ping and waits briefly
+static bool pingDaemonSync(const std::filesystem::path& socketPath,
+                           std::chrono::milliseconds requestTimeout = std::chrono::milliseconds(500),
+                           std::chrono::milliseconds headerTimeout = std::chrono::milliseconds(250),
+                           std::chrono::milliseconds bodyTimeout   = std::chrono::milliseconds(250)) {
+    using namespace yams::daemon;
+    try {
+        AsioTransportAdapter::Options opts{};
+        opts.socketPath     = socketPath.empty() ? DaemonClient::resolveSocketPath() : socketPath;
+        if (opts.socketPath.empty()) return false;
+        opts.requestTimeout = requestTimeout;
+        opts.headerTimeout  = headerTimeout;
+        opts.bodyTimeout    = bodyTimeout;
+
+        AsioTransportAdapter adapter(opts);
+        
+        // Create a synchronous wrapper for the async operation
+        auto& io = GlobalIOContext::instance().get_io_context();
+        std::promise<Result<Response>> promise;
+        auto future = promise.get_future();
+        
+        // Run the async operation and capture result
+        auto task = adapter.send_request(Request{PingRequest{}});
+        
+        // Since Task is a coroutine type, we need to run it to completion
+        // by spawning a coroutine that waits for it
+        auto runner = [](Task<Result<Response>> t, std::promise<Result<Response>>& p) -> Task<void> {
+            try {
+                auto result = co_await t;
+                p.set_value(std::move(result));
+            } catch (...) {
+                p.set_exception(std::current_exception());
+            }
+            co_return;
+        };
+        
+        // Create and start the runner task
+        auto runnerTask = runner(std::move(task), promise);
+        
+        // Process IO events until the future is ready or timeout
+        auto deadline = std::chrono::steady_clock::now() + requestTimeout + headerTimeout + bodyTimeout;
+        while (future.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                return false;  // Timeout
+            }
+            io.run_one();
+        }
+        
+        // Get the result
+        try {
+            auto result = future.get();
+            if (!result) return false;
+            return std::holds_alternative<PongResponse>(result.value());
+        } catch (...) {
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
 Result<void> DaemonClient::connect() {
-    // Auto-start daemon if configured and not running
-    if (pImpl->config_.autoStart) {
-        // Quick retries before deciding it's not running, to avoid respawning when an existing
-        // daemon is just (re)creating/binding its socket.
-        const int quickChecks = 5;
-        const auto quickDelay = std::chrono::milliseconds(50);
-        bool alreadyRunning = false;
-        for (int i = 0; i < quickChecks; ++i) {
-            if (isDaemonRunning(pImpl->config_.socketPath)) {
-                alreadyRunning = true;
+    // Treat connect() as a liveness gate. If the daemon is not reachable and
+    // autoStart is disabled, surface a failure so callers (e.g., pools/tests)
+    // can react accordingly.
+    const bool alive = pingDaemonSync(pImpl->config_.socketPath);
+    if (!alive && !pImpl->config_.autoStart) {
+        return Error{ErrorCode::NetworkError, "Daemon not running"};
+    }
+
+    // Ensure daemon is running if auto-start is enabled; no persistent socket is kept.
+    if (!alive && pImpl->config_.autoStart) {
+        spdlog::info("Daemon not running, attempting to auto-start...");
+        if (auto result = startDaemon(pImpl->config_); !result) {
+            spdlog::warn("Failed to auto-start daemon: {}",
+                         sanitize_for_terminal(result.error().message));
+            spdlog::info("Please manually start the daemon with: yams daemon start");
+            return result.error();
+        }
+        // Wait for daemon readiness with exponential backoff
+        const int maxRetries = 10;
+        const auto baseDelay = std::chrono::milliseconds(100);
+        for (int i = 0; i < maxRetries; ++i) {
+            auto delay = baseDelay * (1 << std::min(i, 5));
+            std::this_thread::sleep_for(delay);
+            if (pingDaemonSync(pImpl->config_.socketPath)) {
+                spdlog::debug("Daemon started successfully after {} retries", i + 1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 break;
             }
-            std::this_thread::sleep_for(quickDelay);
-        }
-
-        if (!alreadyRunning && !isDaemonRunning(pImpl->config_.socketPath)) {
-            spdlog::info("Daemon not running, attempting to auto-start...");
-            if (auto result = startDaemon(pImpl->config_); !result) {
-                spdlog::warn("Failed to auto-start daemon: {}",
-                             sanitize_for_terminal(result.error().message));
-                spdlog::info("Please manually start the daemon with: yams daemon start");
-            } else {
-                // Wait for daemon to start with exponential backoff
-                const int maxRetries = 10;
-                const auto baseDelay = std::chrono::milliseconds(100);
-
-                for (int i = 0; i < maxRetries; ++i) {
-                    auto delay = baseDelay * (1 << std::min(i, 5)); // Cap at 3.2 seconds
-                    std::this_thread::sleep_for(delay);
-
-                    // Check if daemon is now running and ready
-                    if (isDaemonRunning(pImpl->config_.socketPath)) {
-                        spdlog::debug("Daemon started successfully after {} retries", i + 1);
-                        // Give it a bit more time to fully initialize
-                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                        break;
-                    }
-
-                    if (i == maxRetries - 1) {
-                        spdlog::warn("Daemon failed to start after {} retries", maxRetries);
-                    }
-                }
+            if (i == maxRetries - 1) {
+                return Error{ErrorCode::Timeout, "Daemon failed to start after retries"};
             }
         }
     }
-
-    auto rc = pImpl->connect();
-    // If circuit breaker is disabled by config, ensure it doesn't gate subsequent requests
-    // by resetting to a known good state after successful connect attempts.
-    if (rc && !pImpl->config_.enableCircuitBreaker) {
-        // A no-op success record will move HalfOpen->Closed if needed.
+    // Reset breaker state if disabled
+    if (!pImpl->config_.enableCircuitBreaker) {
         pImpl->breaker_.recordSuccess();
     }
-    return rc;
+    return Result<void>();
 }
 
 void DaemonClient::disconnect() {
-    pImpl->disconnect();
+    // No-op for Asio transport; connections are per-request and scoped in adapter
 }
 
 bool DaemonClient::isConnected() const {
-    return pImpl->isConnected();
+    // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
+    return pingDaemonSync(pImpl->config_.socketPath,
+                          std::chrono::milliseconds(250),
+                          std::chrono::milliseconds(150),
+                          std::chrono::milliseconds(300));
 }
 
 Task<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
-    // Use streaming search if enabled
-    if (pImpl->config_.enableChunkedResponses) {
-        co_return co_await streamingSearch(req);
-    }
-
-    // Fall back to traditional request/response
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return Error{response.error().code, response.error().message};
-    }
-
-    if (auto* res = std::get_if<SearchResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    // Always use streaming search
+    co_return co_await streamingSearch(req);
 }
 
 Task<Result<SearchResponse>> DaemonClient::streamingSearch(const SearchRequest& req) {
+    spdlog::debug("DaemonClient::streamingSearch called");
     auto handler = std::make_shared<StreamingSearchHandler>(req.pathsOnly, req.limit);
 
+    spdlog::debug("DaemonClient::streamingSearch calling sendRequestStreaming");
     auto result = co_await sendRequestStreaming(req, handler);
     if (!result) {
         co_return result.error();
@@ -336,49 +257,13 @@ Task<Result<GetResponse>> DaemonClient::get(const GetRequest& req) {
 }
 
 Task<Result<ListResponse>> DaemonClient::list(const ListRequest& req) {
-    // Use streaming list if enabled
-    if (pImpl->config_.enableChunkedResponses) {
-        co_return co_await streamingList(req);
-    }
-
-    // Fall back to traditional request/response
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return Error{response.error().code, response.error().message};
-    }
-
-    if (auto* res = std::get_if<ListResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    spdlog::debug("DaemonClient::list entry: [{}] streaming=true", getRequestName(Request{req}));
+    co_return co_await streamingList(req);
 }
 
 Task<Result<GrepResponse>> DaemonClient::grep(const GrepRequest& req) {
-    // Prefer streaming if enabled
-    if (pImpl->config_.enableChunkedResponses) {
-        co_return co_await streamingGrep(req);
-    }
-
-    // Fallback to traditional request/response
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return Error{response.error().code, response.error().message};
-    }
-
-    if (auto* res = std::get_if<GrepResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    spdlog::debug("DaemonClient::grep entry: [{}] streaming=true", getRequestName(Request{req}));
+    co_return co_await streamingGrep(req);
 }
 
 Task<Result<StatusResponse>> DaemonClient::status() {
@@ -466,11 +351,11 @@ Task<Result<void>> DaemonClient::ping() {
 }
 
 Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
-    if (auto rc = connect(); !rc) {
-        co_return rc.error();
-    }
-    // Do not disconnect here; the transport adapter manages the connection lifecycle.
-
+    spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req), false, pImpl->config_.socketPath.string());
+    // Skip the legacy connect() call when using AsioTransportAdapter
+    // The adapter creates its own connection, and calling connect() here
+    // causes a double connection issue where the POSIX socket immediately EOFs
+    
     AsioTransportAdapter::Options opts;
     opts.socketPath = pImpl->config_.socketPath;
     opts.headerTimeout = pImpl->headerTimeout_;
@@ -483,189 +368,6 @@ Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     co_return r.value();
 }
 
-Result<MessageFramer::FrameHeader> DaemonClient::readFrameHeader(int socketFd) {
-    // Read framed response header first with the header timeout
-    auto headerDeadline = std::chrono::steady_clock::now() + pImpl->headerTimeout_;
-    size_t totalReceived = 0;
-    const size_t headerSize = sizeof(MessageFramer::FrameHeader);
-    std::vector<uint8_t> headerData(headerSize);
-
-    while (totalReceived < headerSize) {
-        if (std::chrono::steady_clock::now() > headerDeadline) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError, "Receive timeout (header)"};
-        }
-
-        ssize_t received =
-            recv(socketFd, headerData.data() + totalReceived, headerSize - totalReceived, 0);
-
-        if (received < 0) {
-            int err = errno;
-            if (err == EAGAIN || err == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            // Treat connection reset/pipe as remote close
-            if (err == ECONNRESET || err == EPIPE) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
-            }
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError,
-                         "Receive failed (header): " + std::string(strerror(err))};
-        } else if (received == 0) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
-        }
-
-        totalReceived += static_cast<size_t>(received);
-    }
-
-    // Parse frame header
-    MessageFramer::FrameHeader header;
-    std::memcpy(&header, headerData.data(), sizeof(header));
-    header.from_network();
-
-    // Validate header
-    if (!header.is_valid()) {
-        pImpl->breaker_.recordFailure();
-        return Error{ErrorCode::InvalidData, "Invalid frame magic"};
-    }
-
-    if (header.payload_size > MAX_MESSAGE_SIZE) {
-        pImpl->breaker_.recordFailure();
-        return Error{ErrorCode::InvalidData,
-                     "Response size too large: " + std::to_string(header.payload_size)};
-    }
-
-    return header;
-}
-
-Result<MessageFramer::FrameHeader>
-DaemonClient::readFrameHeaderWithTimeout(int socketFd, std::chrono::milliseconds timeout) {
-    // Read framed response header with a custom timeout (used for chunk headers)
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    size_t totalReceived = 0;
-    const size_t headerSize = sizeof(MessageFramer::FrameHeader);
-    std::vector<uint8_t> headerData(headerSize);
-
-    while (totalReceived < headerSize) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError, "Receive timeout (header)"};
-        }
-
-        ssize_t received =
-            recv(socketFd, headerData.data() + totalReceived, headerSize - totalReceived, 0);
-
-        if (received < 0) {
-            int err = errno;
-            if (err == EAGAIN || err == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            if (err == ECONNRESET || err == EPIPE) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
-            }
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError,
-                         "Receive failed (header): " + std::string(strerror(err))};
-        } else if (received == 0) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError, "Connection closed by daemon"};
-        }
-
-        totalReceived += static_cast<size_t>(received);
-    }
-
-    MessageFramer::FrameHeader header;
-    std::memcpy(&header, headerData.data(), sizeof(header));
-    header.from_network();
-
-    if (!header.is_valid()) {
-        pImpl->breaker_.recordFailure();
-        return Error{ErrorCode::InvalidData, "Invalid frame magic"};
-    }
-    if (header.payload_size > MAX_MESSAGE_SIZE) {
-        pImpl->breaker_.recordFailure();
-        return Error{ErrorCode::InvalidData,
-                     "Response size too large: " + std::to_string(header.payload_size)};
-    }
-
-    return header;
-}
-
-Result<std::vector<uint8_t>>
-DaemonClient::readFramedData(int socketFd, std::chrono::milliseconds timeout, size_t size) {
-    // Use an inactivity-based timeout: reset the deadline after each successful read.
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    std::vector<uint8_t> data(size);
-    size_t totalReceived = 0;
-
-    while (totalReceived < size) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError, "Receive timeout (data)"};
-        }
-
-        ssize_t received = recv(socketFd, data.data() + totalReceived, size - totalReceived, 0);
-
-        if (received < 0) {
-            int err = errno;
-            if (err == EAGAIN || err == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            // Treat connection reset/pipe as remote close
-            if (err == ECONNRESET || err == EPIPE) {
-                pImpl->breaker_.recordFailure();
-                return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
-            }
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError,
-                         "Receive failed (data): " + std::string(strerror(err))};
-        } else if (received == 0) {
-            pImpl->breaker_.recordFailure();
-            return Error{ErrorCode::NetworkError, "Connection closed during data transfer"};
-        }
-
-        totalReceived += static_cast<size_t>(received);
-        // Reset inactivity deadline on progress
-        deadline = std::chrono::steady_clock::now() + timeout;
-    }
-
-    return data;
-}
-
-Result<std::vector<uint8_t>> DaemonClient::readFullFrame(int socketFd,
-                                                         const MessageFramer::FrameHeader& header) {
-    // Read the header data first
-    const size_t headerSize = sizeof(MessageFramer::FrameHeader);
-    std::vector<uint8_t> headerData(headerSize);
-
-    // Convert header back to network byte order
-    MessageFramer::FrameHeader networkHeader = header;
-    networkHeader.to_network();
-
-    // Copy header to buffer
-    std::memcpy(headerData.data(), &networkHeader, headerSize);
-
-    // Read the payload with body timeout
-    auto payloadResult = readFramedData(socketFd, pImpl->bodyTimeout_, header.payload_size);
-    if (!payloadResult) {
-        return payloadResult.error();
-    }
-
-    // Combine header and payload
-    std::vector<uint8_t> completeFrame;
-    completeFrame.reserve(headerSize + header.payload_size);
-    completeFrame.insert(completeFrame.end(), headerData.begin(), headerData.end());
-    completeFrame.insert(completeFrame.end(), payloadResult.value().begin(),
-                         payloadResult.value().end());
-
-    return completeFrame;
-}
 
 // StreamingListHandler implementation
 void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& headerResponse) {
@@ -708,6 +410,8 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
 void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& headerResponse) {
     // Parse header information from response
     if (auto* searchRes = std::get_if<SearchResponse>(&headerResponse)) {
+        spdlog::debug("StreamingSearchHandler: header received (totalCount={}, elapsed={}ms)",
+                      searchRes->totalCount, searchRes->elapsed.count());
         // Store total count and elapsed time from header
         totalCount_ = searchRes->totalCount;
         elapsed_ = searchRes->elapsed;
@@ -796,7 +500,15 @@ bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunk
 
             // Print result immediately if progressive output is enabled
             if (pathsOnly_) {
-                std::cout << result.path << std::endl;
+                const std::string* p = &result.path;
+                auto it = result.metadata.find("path");
+                if ((p->empty()) && it != result.metadata.end()) {
+                    std::cout << it->second << std::endl;
+                } else if (!p->empty()) {
+                    std::cout << *p << std::endl;
+                } else if (!result.id.empty()) {
+                    std::cout << result.id << std::endl;
+                }
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
@@ -819,6 +531,9 @@ void DaemonClient::StreamingListHandler::onComplete() {
     // Final processing when all chunks have been received
     if (!error_ && !pathsOnly_) {
         spdlog::debug("List complete: found {} items (of {} total)", count_, totalCount_);
+    }
+    if (!error_ && pathsOnly_ && count_ == 0) {
+        std::cout << "(no results)" << std::endl;
     }
 }
 
@@ -847,6 +562,10 @@ void DaemonClient::StreamingSearchHandler::onComplete() {
     if (!error_ && !pathsOnly_) {
         spdlog::debug("Search complete: found {} results (of {} total) in {}ms", count_,
                       totalCount_, elapsed_.count());
+    }
+    if (!error_ && pathsOnly_ && count_ == 0) {
+        // Explicitly indicate no results for paths-only output
+        std::cout << "(no results)" << std::endl;
     }
 }
 
@@ -950,6 +669,9 @@ void DaemonClient::StreamingGrepHandler::onComplete() {
     if (!error_ && !pathsOnly_) {
         spdlog::debug("Grep complete: {} matches across {} files", totalMatches_, filesSearched_);
     }
+    if (!error_ && pathsOnly_ && matches_.empty()) {
+        std::cout << "(no results)" << std::endl;
+    }
 }
 
 Result<GrepResponse> DaemonClient::StreamingGrepHandler::getResults() const {
@@ -984,11 +706,11 @@ Task<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
 Task<Result<void>>
 DaemonClient::sendRequestStreaming(const Request& req,
                                    std::shared_ptr<ChunkedResponseHandler> handler) {
-    if (auto rc = connect(); !rc) {
-        co_return rc.error();
-    }
-    // Do not disconnect here; the transport adapter manages the connection lifecycle.
-
+    spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'", getRequestName(req), true, pImpl->config_.socketPath.string());
+    // Skip the legacy connect() call when using AsioTransportAdapter
+    // The adapter creates its own connection, and calling connect() here
+    // causes a double connection issue where the POSIX socket immediately EOFs
+    
     AsioTransportAdapter::Options opts;
     opts.socketPath = pImpl->config_.socketPath;
     opts.headerTimeout = pImpl->headerTimeout_;
@@ -1003,6 +725,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
     auto onComplete = [handler]() { handler->onComplete(); };
 
     AsioTransportAdapter adapter(opts);
+    spdlog::debug("DaemonClient::sendRequestStreaming calling adapter.send_request_streaming");
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
     if (!res)
         co_return res.error();
@@ -1041,11 +764,11 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
     if (!result) {
         co_return result.error();
     }
-    if (handler->error) {
-        co_return *handler->error;
+    if (handler->error.has_value()) {
+        co_return handler->error.value();
     }
-    if (handler->value) {
-        co_return *handler->value;
+    if (handler->value.has_value()) {
+        co_return handler->value.value();
     }
     co_return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
 }
@@ -1166,48 +889,76 @@ std::filesystem::path DaemonClient::resolveSocketPath() {
 #endif
 }
 
-bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
-    // Resolve socket path if not provided
-    auto path = socketPath.empty() ? resolveSocketPath() : socketPath;
-
-    // Retry a few times to avoid races when the daemon is starting or rotating the socket
-    for (int attempt = 0; attempt < 10; ++attempt) {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-
-        struct sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-
-        if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
-#ifdef _WIN32
-            closesocket(fd);
-#else
-            close(fd);
-#endif
-            return true;
-        }
-
-        int e = errno;
-#ifdef _WIN32
-        closesocket(fd);
-#else
-        close(fd);
-#endif
-
-        if (e == ENOENT || e == ECONNREFUSED) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            continue;
-        }
-
-        // Other errors imply not running or permission issues
-        break;
+std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
+#ifndef _WIN32
+    namespace fs = std::filesystem;
+    if (const char* env = std::getenv("YAMS_DAEMON_SOCKET"); env && *env) {
+        return fs::path(env);
     }
+    try {
+        fs::path cfgPath;
+        if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+            cfgPath = fs::path(xdg) / "yams" / "config.toml";
+        } else if (const char* home = std::getenv("HOME")) {
+            cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
+        }
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            // Lightweight scanner: find [daemon] section, then socket_path = "..."
+            std::ifstream in(cfgPath);
+            if (in) {
+                std::string line;
+                bool inDaemon = false;
+                while (std::getline(in, line)) {
+                    // strip spaces
+                    auto trim = [](std::string s) {
+                        auto issp = [](unsigned char c){ return std::isspace(c); };
+                        s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c){return !issp(c);}));
+                        s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c){return !issp(c);} ).base(), s.end());
+                        return s;
+                    };
+                    line = trim(line);
+                    if (line.empty() || line[0] == '#') continue;
+                    if (line.size() >= 9 && line.rfind("[daemon]", 0) == 0) { inDaemon = true; continue; }
+                    if (inDaemon && !line.empty() && line[0] == '[') { inDaemon = false; }
+                    if (inDaemon) {
+                        // look for socket_path = "..."
+                        const std::string key = "socket_path";
+                        auto pos = line.find(key);
+                        if (pos != std::string::npos) {
+                            auto eq = line.find('=', pos + key.size());
+                            if (eq != std::string::npos) {
+                                std::string rhs = trim(line.substr(eq + 1));
+                                // remove optional quotes
+                                if (!rhs.empty() && (rhs.front() == '"' || rhs.front() == '\'')) {
+                                    char q = rhs.front();
+                                    auto endq = rhs.find_last_of(q);
+                                    if (endq != std::string::npos && endq > 0) {
+                                        std::string val = rhs.substr(1, endq - 1);
+                                        if (!val.empty()) return fs::path(val);
+                                    }
+                                } else if (!rhs.empty()) {
+                                    return fs::path(rhs);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (...) {
+        // ignore and fall back
+    }
+    return resolveSocketPath();
+#else
+    return resolveSocketPath();
+#endif
+}
 
-    return false;
+bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
+    auto path = socketPath.empty() ? resolveSocketPath() : socketPath;
+    // Lightweight readiness probe using real Ping via Asio transport
+    return pingDaemonSync(path, std::chrono::milliseconds(400), std::chrono::milliseconds(200),
+                          std::chrono::milliseconds(300));
 }
 
 Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
@@ -1315,7 +1066,19 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         exit(1);
     }
 
-    // Parent process: do not enforce a hard readiness timeout here.
+    // Parent process: detach a lightweight reaper so short-lived intermediary
+    // children (e.g., if the daemon double-forks) do not become zombies. This
+    // thread will block until the first child exits and will then clean up.
+#ifndef _WIN32
+    {
+        std::thread([pid]() {
+            int status = 0;
+            (void)::waitpid(pid, &status, 0);
+        }).detach();
+    }
+#endif
+
+    // Do not enforce a hard readiness timeout here.
     // Perform a brief best-effort check for the socket, then return success so
     // the caller (CLI) can show a live spinner and poll detailed status.
     // Optional override via env: YAMS_STARTUP_SOCKET_WAIT_MS (default ~500ms)
@@ -1330,7 +1093,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         const auto start = std::chrono::steady_clock::now();
         const auto timeout = std::chrono::milliseconds(wait_ms);
         while (std::chrono::steady_clock::now() - start < timeout) {
-            if (isDaemonRunning(socketPath)) {
+            if (pingDaemonSync(socketPath)) {
                 spdlog::info("Daemon process spawned and socket accepting");
                 return Result<void>();
             }

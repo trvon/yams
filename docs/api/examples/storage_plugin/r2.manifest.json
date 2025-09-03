@@ -1,0 +1,32 @@
+{
+  "name": "yams-object-storage-r2",
+  "version": "0.1.0",
+  "iface": "object-storage",
+  "targets": ["r2"],
+  "features": [
+    "multipart",
+    "resume",
+    "sha256",
+    "versioning",
+    "presign-upload",
+    "presign-download",
+    "dr-presence"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "endpoint": {"type": "string"},
+      "accountId": {"type": "string"},
+      "bucket": {"type": "string"},
+      "accessKey": {"type": "string"},
+      "secretKey": {"type": "string"}
+    },
+    "required": ["bucket"]
+  },
+  "notes": [
+    "R2 does not expose SSE-KMS; uses provider encryption at rest.",
+    "CRC32C is not exposed; prefer sha256 for verification.",
+    "Replication lag metric not available; use presence-based DR readiness."
+  ]
+}
+

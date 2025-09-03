@@ -4,7 +4,6 @@
 #include <iostream>
 #include <vector>
 
-#include <yams/cli/asio_client_pool.hpp>
 #include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -51,9 +50,9 @@ public:
         try {
             // Try daemon-first for quick status snapshot
             {
-                // Prefer new Boost.Asio client pool
-                yams::cli::AsioClientPool pool{};
-                if (auto st = yams::cli::run_sync(pool.async_status(), std::chrono::seconds(5)); st) {
+                // Use DaemonClient directly
+                yams::daemon::DaemonClient client{};
+                if (auto st = yams::cli::run_sync(client.status(), std::chrono::seconds(5)); st) {
                     const auto& s = st.value();
                     if (jsonOutput_) {
                         nlohmann::json j;

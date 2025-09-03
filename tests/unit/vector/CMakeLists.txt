@@ -12,9 +12,9 @@ add_executable(vector_database_tests
 target_link_libraries(vector_database_tests
     PRIVATE
         test_utils
+        gtest_main
         yams::vector
         yams::core
-        $<IF:$<TARGET_EXISTS:gtest::gtest_main>,gtest::gtest_main,GTest::gtest_main>
 )
 
 # Link Tracy if profiling is enabled

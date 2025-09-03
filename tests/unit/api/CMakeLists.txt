@@ -5,10 +5,9 @@ add_executable(test_content_api
 
 target_link_libraries(test_content_api
     PRIVATE
+        test_utils
+        gtest_main
         yams::api
-        GTest::gtest
-        GTest::gtest_main
-        GTest::gmock
 )
 
 # Add test to CTest

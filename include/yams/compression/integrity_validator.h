@@ -58,7 +58,7 @@ struct ValidationConfig {
     ValidationType defaultType = ValidationType::Checksum; ///< Default validation type
     bool enableContinuousValidation = true;                ///< Enable ongoing validation
     double samplingRate = 0.1;                             ///< Fraction of operations to validate
-    size_t maxValidationSize = 10 * 1024 * 1024;           ///< Max size for full validation
+    size_t maxValidationSize = static_cast<size_t>(10) * static_cast<size_t>(1024) * static_cast<size_t>(1024);           ///< Max size for full validation
     std::chrono::milliseconds validationTimeout{5000};     ///< Timeout for validation
     bool enableChecksumCache = true;                       ///< Cache checksums for performance
     size_t checksumCacheSize = 1000;                       ///< Maximum cached checksums

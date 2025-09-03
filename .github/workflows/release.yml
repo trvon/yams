@@ -20,35 +20,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-         # Note: Validation (tests + benchmarks) runs only on linux-hosted
-         # Other platforms do optimized release builds only
-         include:
-           - os: linux-hosted
-             runs_on: "ubuntu-latest"
-             packaging: tgz
-             cmake_args: ""
-             suffix: linux-x86_64
-             hosted: true
-             build_packages: true
-           - os: macos-hosted-arm64
-             runs_on: "macos-14"
-             packaging: zip
-             cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
-             suffix: macos-arm64
-             hosted: true
-             build_packages: true
-           - os: macos-hosted-x64
-             runs_on: "macos-12" # Build on Monterey for wider compatibility
-             packaging: zip
-             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
-             suffix: macos-x86_64
-             hosted: true
-           - os: windows-hosted-x64
-             runs_on: "windows-2022"
-             packaging: zip
-             cmake_args: ""
-             suffix: windows-x86_64
-             hosted: true
+        # Note: Validation (tests + benchmarks) runs only on linux-hosted
+        # Other platforms do optimized release builds only
+        include:
+          - os: linux-hosted
+            runs_on: "ubuntu-latest"
+            packaging: tgz
+            cmake_args: ""
+            suffix: linux-x86_64
+            hosted: true
+            build_packages: true
+          - os: macos-hosted-arm64
+            runs_on: "macos-14"
+            packaging: zip
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
+            suffix: macos-arm64
+            hosted: true
+            build_packages: true
+          - os: macos-hosted-x64
+            runs_on: "macos-12" # Build on Monterey for wider compatibility
+            packaging: zip
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
+            suffix: macos-x86_64
+            hosted: true
+          - os: windows-hosted-x64
+            runs_on: "windows-2022"
+            packaging: zip
+            cmake_args: ""
+            suffix: windows-x86_64
+            hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
       BUILD_DIR: build/yams-release
@@ -135,11 +135,7 @@ jobs:
         shell: bash
         run: |
           conan profile detect --force
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          else
-            sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          fi
+          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           echo "Conan profile configured:" >&2
           conan profile show >&2
 
@@ -592,7 +588,7 @@ jobs:
         run: |
           mkdir -p assets
           # Collect all release files
-          for dir in release-artifacts/release-*; 
+          for dir in release-artifacts/release-*;
           do
             if [ -d "$dir" ]; then
               # Move main archive

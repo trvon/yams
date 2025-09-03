@@ -1,5 +1,6 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -67,6 +68,13 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
     boost::asio::local::stream_protocol::endpoint endpoint(path.string());
     
     try {
+        // Preflight: ensure the socket path exists to catch mismatches early
+        if (!std::filesystem::exists(path)) {
+            std::string msg = "Daemon not started (socket not found at '" + path.string() +
+                              "'). Set YAMS_DAEMON_SOCKET or update config (daemon.socket_path).";
+            spdlog::debug("AsioTransportAdapter preflight: {}", msg);
+            co_return Error{ErrorCode::NetworkError, std::move(msg)};
+        }
         // Set up a timer for timeout
         boost::asio::steady_timer timer(co_await this_coro::executor);
         timer.expires_after(timeout);
@@ -143,7 +151,152 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
     }
 }
 
+awaitable<Result<void>> AsioTransportAdapter::receive_frames(
+    boost::asio::local::stream_protocol::socket& socket, MessageFramer& framer,
+    HeaderCallback onHeader, ChunkCallback onChunk, ErrorCallback onError,
+    CompleteCallback onComplete) {
+    fsm_.on_readable(0); // Transition to reading
+
+    // Read response frames (non-chunked completes in first iteration)
+    bool expectingMore = true;
+    bool headerReceived = false;   // Initial header-only frame received
+    bool headerNotified = false;   // onHeader() delivered to client
+
+    spdlog::debug("AsioTransportAdapter::receive_frames: waiting for response frames");
+
+    while (expectingMore) {
+        // Read frame header
+        auto header_result = co_await async_read_exact(socket, sizeof(MessageFramer::FrameHeader),
+                                                       opts_.headerTimeout);
+        if (!header_result) {
+            fsm_.on_error(static_cast<int>(header_result.error().code));
+            onError(header_result.error());
+            co_return header_result.error();
+        }
+        FsmMetricsRegistry::instance().incrementHeaderReads(1);
+        FsmMetricsRegistry::instance().addBytesReceived(header_result.value().size());
+
+        MessageFramer::FrameHeader netHeader;
+        std::memcpy(&netHeader, header_result.value().data(), sizeof(MessageFramer::FrameHeader));
+        MessageFramer::FrameHeader header = netHeader;
+        header.from_network();
+
+        {
+            ConnectionFsm::FrameInfo info{0u, header.flags, header.payload_size};
+            fsm_.on_header_parsed(info);
+        }
+
+        if (header.payload_size > 100 * 1024 * 1024) {
+            auto err = Error{ErrorCode::InvalidData, "Payload too large"};
+            fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+            onError(err);
+            co_return err;
+        }
+
+        bool isHeaderOnly = header.is_header_only();
+        bool isLastChunk = header.is_last_chunk();
+        bool isChunked = header.is_chunked();
+
+        spdlog::debug(
+            "AsioTransportAdapter: received frame - header_only={}, last_chunk={}, chunked={}, payload_size={}",
+            isHeaderOnly, isLastChunk, isChunked, header.payload_size);
+
+        // Non-chunked complete response
+        if (!isChunked && !headerReceived) {
+            if (header.payload_size > 0) {
+                auto payload_result = co_await async_read_exact(socket, header.payload_size,
+                                                               opts_.bodyTimeout);
+                if (!payload_result) {
+                    fsm_.on_error(static_cast<int>(payload_result.error().code));
+                    onError(payload_result.error());
+                    co_return payload_result.error();
+                }
+
+                // Reconstruct complete frame
+                std::vector<uint8_t> complete_frame;
+                complete_frame.reserve(sizeof(MessageFramer::FrameHeader) + payload_result.value().size());
+                complete_frame.insert(complete_frame.end(), header_result.value().begin(),
+                                      header_result.value().end());
+                complete_frame.insert(complete_frame.end(), payload_result.value().begin(),
+                                      payload_result.value().end());
+
+                auto respMsg = framer.parse_frame(complete_frame);
+                if (!respMsg) {
+                    fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+                    onError(respMsg.error());
+                    co_return respMsg.error();
+                }
+
+                if (!std::holds_alternative<Response>(respMsg.value().payload)) {
+                    auto err = Error{ErrorCode::InvalidData, "Expected Response but got Request"};
+                    onError(err);
+                    co_return err;
+                }
+
+                const auto& response = std::get<Response>(respMsg.value().payload);
+                spdlog::debug("AsioTransportAdapter: delivering complete non-chunked response to handler");
+                onHeader(response);
+                onChunk(response, true);
+                onComplete();
+                break;
+            }
+        } else if (isHeaderOnly && !headerReceived) {
+            // Initial header-only frame: no payload; wait for first chunk
+            headerReceived = true;
+            spdlog::debug("AsioTransportAdapter: header-only frame received (stream start)");
+        } else if (header.payload_size > 0) {
+            // Chunk frame
+            auto payload_result =
+                co_await async_read_exact(socket, header.payload_size, opts_.bodyTimeout);
+            if (!payload_result) {
+                fsm_.on_error(static_cast<int>(payload_result.error().code));
+                onError(payload_result.error());
+                co_return payload_result.error();
+            }
+            FsmMetricsRegistry::instance().incrementPayloadReads(1);
+            FsmMetricsRegistry::instance().addBytesReceived(payload_result.value().size());
+
+            // Reconstruct complete frame
+            std::vector<uint8_t> complete_frame;
+            complete_frame.reserve(sizeof(MessageFramer::FrameHeader) + payload_result.value().size());
+            complete_frame.insert(complete_frame.end(), header_result.value().begin(),
+                                  header_result.value().end());
+            complete_frame.insert(complete_frame.end(), payload_result.value().begin(),
+                                  payload_result.value().end());
+
+            auto respMsg = framer.parse_frame(complete_frame);
+            if (!respMsg || !std::holds_alternative<Response>(respMsg.value().payload)) {
+                auto err = Error{ErrorCode::InvalidData, "Invalid chunk response"};
+                fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
+                onError(err);
+                co_return err;
+            }
+
+            const auto& parsed = std::get<Response>(respMsg.value().payload);
+            if (!headerNotified) {
+                spdlog::debug("AsioTransportAdapter: delivering onHeader to handler");
+                onHeader(parsed);
+                headerNotified = true;
+            }
+            spdlog::debug("AsioTransportAdapter: delivering onChunk to handler (last={})", isLastChunk);
+            bool continueReading = onChunk(parsed, isLastChunk);
+            if (!continueReading) {
+                expectingMore = false;
+            }
+        }
+
+        if (isLastChunk) {
+            expectingMore = false;
+        }
+    }
+
+    fsm_.on_close_request();
+    onComplete();
+    co_return Result<void>{};
+}
+
 Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
+    spdlog::debug("AsioTransportAdapter::send_request called (NON-STREAMING) with request type: {}", req.index());
     // Convert boost::asio::awaitable to Task using co_spawn
     auto& io_ctx = GlobalIOContext::instance().get_io_context();
     
@@ -174,6 +327,10 @@ Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
             msg.timestamp = std::chrono::steady_clock::now();
             msg.payload = req;
             msg.clientVersion = "yams-client-0.3.4";
+            msg.expectsStreamingResponse = false;  // Non-streaming request
+            
+            spdlog::debug("AsioTransportAdapter::send_request: [{}] streaming={} fd={} sock='{}' request_id={}",
+                          getRequestName(req), msg.expectsStreamingResponse, fd, opts_.socketPath.string(), msg.requestId);
 
             MessageFramer framer;
             auto framed = framer.frame_message(msg);
@@ -193,64 +350,26 @@ Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
             FsmMetricsRegistry::instance().incrementPayloadWrites(1);
             FsmMetricsRegistry::instance().addBytesSent(framed.value().size());
 
-            fsm_.on_readable(0); // Transition to reading
-            auto header_result = co_await async_read_exact(socket, 
-                                                          sizeof(MessageFramer::FrameHeader),
-                                                          opts_.headerTimeout);
-            if (!header_result) {
-                fsm_.on_error(static_cast<int>(header_result.error().code));
-                promise.set_value(header_result.error());
+            // Use unified receive loop; capture first response via callbacks
+            auto onHeader = [&](const Response&) {};
+            bool gotResponse = false;
+            Response captured{};
+            auto onChunk = [&](const Response& r, bool) -> bool {
+                if (!gotResponse) {
+                    captured = r;
+                    gotResponse = true;
+                }
+                return false; // stop after first
+            };
+            auto onError = [&](const Error& e) { spdlog::debug("Non-streaming error: {}", e.message); };
+            auto onComplete = [&]() {};
+            auto recv = co_await receive_frames(socket, framer, onHeader, onChunk, onError, onComplete);
+            if (!recv) {
+                promise.set_value(recv.error());
                 co_return;
             }
-            FsmMetricsRegistry::instance().incrementHeaderReads(1);
-            FsmMetricsRegistry::instance().addBytesReceived(header_result.value().size());
-
-            MessageFramer::FrameHeader netHeader;
-            std::memcpy(&netHeader, header_result.value().data(), sizeof(MessageFramer::FrameHeader));
-            MessageFramer::FrameHeader header = netHeader;
-            header.from_network();
-            {
-                ConnectionFsm::FrameInfo info{0u, header.flags, header.payload_size};
-                fsm_.on_header_parsed(info);
-            }
-
-            if (header.payload_size > 100 * 1024 * 1024) {
-                fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                promise.set_value(Error{ErrorCode::InvalidData, "Payload too large"});
-                co_return;
-            }
-
-            auto payload_result = co_await async_read_exact(socket, header.payload_size, 
-                                                           opts_.bodyTimeout);
-            if (!payload_result) {
-                fsm_.on_error(static_cast<int>(payload_result.error().code));
-                promise.set_value(payload_result.error());
-                co_return;
-            }
-            FsmMetricsRegistry::instance().incrementPayloadReads(1);
-            FsmMetricsRegistry::instance().addBytesReceived(payload_result.value().size());
-
-            // Reconstruct complete frame with header + payload
-            std::vector<uint8_t> complete_frame;
-            complete_frame.reserve(sizeof(MessageFramer::FrameHeader) + payload_result.value().size());
-            complete_frame.insert(complete_frame.end(), header_result.value().begin(), header_result.value().end());
-            complete_frame.insert(complete_frame.end(), payload_result.value().begin(), payload_result.value().end());
-
-            auto respMsg = framer.parse_frame(complete_frame);
-            if (!respMsg) {
-                fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                promise.set_value(respMsg.error());
-                co_return;
-            }
-
-            if (!std::holds_alternative<Response>(respMsg.value().payload)) {
-                fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                promise.set_value(Error{ErrorCode::InvalidData, "Expected Response but got something else"});
-                co_return;
-            }
-
-            fsm_.on_close_request();
-            promise.set_value(std::get<Response>(respMsg.value().payload));
+            promise.set_value(gotResponse ? Result<Response>(captured)
+                                          : Result<Response>(Error{ErrorCode::InvalidData, "No response"}));
         },
         detached
     );
@@ -263,6 +382,7 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
                                                                ChunkCallback onChunk, 
                                                                ErrorCallback onError,
                                                                CompleteCallback onComplete) {
+    spdlog::debug("AsioTransportAdapter::send_request_streaming called (STREAMING) with request type: {}", req.index());
     auto& io_ctx = GlobalIOContext::instance().get_io_context();
     
     std::promise<Result<void>> promise;
@@ -294,6 +414,10 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
             msg.timestamp = std::chrono::steady_clock::now();
             msg.payload = req;
             msg.clientVersion = "yams-client-0.3.4";
+            msg.expectsStreamingResponse = true;  // Streaming request
+            
+            spdlog::debug("AsioTransportAdapter::send_request_streaming: [{}] streaming={} fd={} sock='{}' request_id={}",
+                          getRequestName(req), msg.expectsStreamingResponse, fd, opts_.socketPath.string(), msg.requestId);
 
             MessageFramer framer;
             auto framed = framer.frame_message(msg);
@@ -315,125 +439,8 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
             FsmMetricsRegistry::instance().incrementPayloadWrites(1);
             FsmMetricsRegistry::instance().addBytesSent(framed.value().size());
 
-            fsm_.on_readable(0); // Transition to reading
-            
-            // Read streaming response frames
-            bool expectingMore = true;
-            bool headerReceived = false;
-            
-            while (expectingMore) {
-                // Read frame header
-                auto header_result = co_await async_read_exact(socket, 
-                                                              sizeof(MessageFramer::FrameHeader),
-                                                              opts_.headerTimeout);
-                if (!header_result) {
-                    fsm_.on_error(static_cast<int>(header_result.error().code));
-                    onError(header_result.error());
-                    promise.set_value(header_result.error());
-                    co_return;
-                }
-                FsmMetricsRegistry::instance().incrementHeaderReads(1);
-                FsmMetricsRegistry::instance().addBytesReceived(header_result.value().size());
-
-                MessageFramer::FrameHeader netHeader;
-                std::memcpy(&netHeader, header_result.value().data(), sizeof(MessageFramer::FrameHeader));
-                MessageFramer::FrameHeader header = netHeader;
-                header.from_network();
-                
-                {
-                    ConnectionFsm::FrameInfo info{0u, header.flags, header.payload_size};
-                    fsm_.on_header_parsed(info);
-                }
-
-                if (header.payload_size > 100 * 1024 * 1024) {
-                    auto err = Error{ErrorCode::InvalidData, "Payload too large"};
-                    fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                    onError(err);
-                    promise.set_value(err);
-                    co_return;
-                }
-
-                // Check frame type
-                bool isHeaderOnly = header.is_header_only();
-                bool isLastChunk = header.is_last_chunk();
-                
-                if (isHeaderOnly && !headerReceived) {
-                    // This is the initial header frame
-                    headerReceived = true;
-                    
-                    if (header.payload_size > 0) {
-                        auto payload_result = co_await async_read_exact(socket, header.payload_size,
-                                                                       opts_.bodyTimeout);
-                        if (!payload_result) {
-                            fsm_.on_error(static_cast<int>(payload_result.error().code));
-                            onError(payload_result.error());
-                            promise.set_value(payload_result.error());
-                            co_return;
-                        }
-                        FsmMetricsRegistry::instance().incrementPayloadReads(1);
-                        FsmMetricsRegistry::instance().addBytesReceived(payload_result.value().size());
-
-                        // Reconstruct complete frame with header + payload
-                        std::vector<uint8_t> complete_frame;
-                        complete_frame.reserve(sizeof(MessageFramer::FrameHeader) + payload_result.value().size());
-                        complete_frame.insert(complete_frame.end(), header_result.value().begin(), header_result.value().end());
-                        complete_frame.insert(complete_frame.end(), payload_result.value().begin(), payload_result.value().end());
-
-                        auto respMsg = framer.parse_frame(complete_frame);
-                        if (!respMsg || !std::holds_alternative<Response>(respMsg.value().payload)) {
-                            auto err = Error{ErrorCode::InvalidData, "Invalid header response"};
-                            fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                            onError(err);
-                            promise.set_value(err);
-                            co_return;
-                        }
-                        
-                        onHeader(std::get<Response>(respMsg.value().payload));
-                    }
-                } else if (header.payload_size > 0) {
-                    // This is a chunk frame
-                    auto payload_result = co_await async_read_exact(socket, header.payload_size,
-                                                                   opts_.bodyTimeout);
-                    if (!payload_result) {
-                        fsm_.on_error(static_cast<int>(payload_result.error().code));
-                        onError(payload_result.error());
-                        promise.set_value(payload_result.error());
-                        co_return;
-                    }
-                    FsmMetricsRegistry::instance().incrementPayloadReads(1);
-                    FsmMetricsRegistry::instance().addBytesReceived(payload_result.value().size());
-
-                    // Reconstruct complete frame with header + payload
-                    std::vector<uint8_t> complete_frame;
-                    complete_frame.reserve(sizeof(MessageFramer::FrameHeader) + payload_result.value().size());
-                    complete_frame.insert(complete_frame.end(), header_result.value().begin(), header_result.value().end());
-                    complete_frame.insert(complete_frame.end(), payload_result.value().begin(), payload_result.value().end());
-
-                    auto respMsg = framer.parse_frame(complete_frame);
-                    if (!respMsg || !std::holds_alternative<Response>(respMsg.value().payload)) {
-                        auto err = Error{ErrorCode::InvalidData, "Invalid chunk response"};
-                        fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                        onError(err);
-                        promise.set_value(err);
-                        co_return;
-                    }
-                    
-                    bool continueReading = onChunk(std::get<Response>(respMsg.value().payload), 
-                                                  isLastChunk);
-                    if (!continueReading) {
-                        // Client wants to stop reading
-                        expectingMore = false;
-                    }
-                }
-                
-                if (isLastChunk) {
-                    expectingMore = false;
-                }
-            }
-            
-            fsm_.on_close_request();
-            onComplete();
-            promise.set_value(Result<void>{});
+            auto recv = co_await receive_frames(socket, framer, onHeader, onChunk, onError, onComplete);
+            promise.set_value(recv);
         },
         detached
     );

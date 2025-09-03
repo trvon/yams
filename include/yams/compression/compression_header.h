@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <utility>
 #include <vector>
 #include <yams/compression/compressor_interface.h>
 #include <yams/core/types.h>
@@ -107,7 +108,7 @@ struct CompressionHeader {
      * @return Initialized header
      */
     [[nodiscard]] static CompressionHeader
-    fromResult(const CompressionResult& result, uint32_t uncompressedCRC, uint32_t compressedCRC);
+    fromResult(const CompressionResult& result, std::pair<uint32_t, uint32_t> crcs);
 };
 #pragma pack(pop) // Restore default packing
 

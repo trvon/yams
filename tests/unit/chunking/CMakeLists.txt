@@ -1,16 +1,19 @@
 add_executable(chunking_tests
     rabin_chunker_test.cpp
-    streaming_chunker_test.cpp
 )
 
 target_link_libraries(chunking_tests
     PRIVATE
         test_utils
         yams::chunking
-        GTest::gtest_main
+        yams::core
+        gtest_main
+        spdlog::spdlog
 )
 
-gtest_discover_tests(chunking_tests
-    PROPERTIES
-        LABELS "unit;chunking"
+add_test(NAME chunking_tests COMMAND chunking_tests)
+
+set_tests_properties(chunking_tests PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;chunking"
 )

@@ -1,4 +1,3 @@
-#include <yams/cli/asio_client_pool.hpp>
 #include <yams/cli/async_bridge.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
@@ -80,7 +79,12 @@ void StdioTransport::send(const json& message) {
             std::streambuf* old = std::cout.rdbuf(outbuf_);
             (void)old; // suppress unused warning
         }
-        std::cout << payload << "\n";
+        // Emit JSON-RPC over stdio with LSP-style framing for MCP clients:
+        //   Content-Length: <len>\r\n\r\n<payload>
+        // Also append a terminal newline for line-delimited clients.
+        std::cout << "Content-Length: " << payload.size() << "\r\n\r\n";
+        std::cout << payload;
+        std::cout << '\n';
         std::cout.flush();
     }
 }
@@ -125,8 +129,8 @@ MessageResult StdioTransport::receive() {
         return Error{ErrorCode::NetworkError, "Transport is closed or disconnected"};
     }
 
-    // MCP stdio transport: newline-delimited JSON messages
-    // Use captured input buffer to respect redirections
+    // MCP stdio transport: Support both LSP-style Content-Length framing and
+    // newline-delimited JSON. Use captured input buffer to respect redirections.
     std::istream in(inbuf_);
 
     while (state_.load() != TransportState::Closing) {
@@ -140,13 +144,13 @@ MessageResult StdioTransport::receive() {
         }
 
         if (isInputAvailable(100) || avail > 0) {
-            std::string line;
+            std::string firstLine;
             in.clear();
 
-            // Lock mutex for thread-safe getline
+            // Lock mutex for thread-safe reads
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
-                if (!std::getline(in, line)) {
+                if (!std::getline(in, firstLine)) {
                     if (in.eof()) {
                         spdlog::debug("EOF on stdin, closing transport");
                         state_.store(TransportState::Disconnected);
@@ -163,16 +167,70 @@ MessageResult StdioTransport::receive() {
             }
 
             // Handle CRLF: strip trailing '\r' if present
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back();
+            if (!firstLine.empty() && firstLine.back() == '\r') {
+                firstLine.pop_back();
             }
 
-            // Skip empty lines but check for EOF after
-            if (line.empty()) {
-                // If we got an empty line and there's no more input, check for EOF
+            // Check for LSP-style framing
+            if (firstLine.rfind("Content-Length:", 0) == 0) {
+                // Parse length
+                std::size_t colon = firstLine.find(':');
+                std::size_t len = 0;
+                if (colon != std::string::npos) {
+                    // Skip optional space
+                    std::string lenStr = firstLine.substr(colon + 1);
+                    if (!lenStr.empty() && lenStr.front() == ' ')
+                        lenStr.erase(0, 1);
+                    try {
+                        len = static_cast<std::size_t>(std::stoul(lenStr));
+                    } catch (...) {
+                        recordError();
+                        return Error{ErrorCode::InvalidData, "Invalid Content-Length header"};
+                    }
+                } else {
+                    recordError();
+                    return Error{ErrorCode::InvalidData, "Malformed Content-Length header"};
+                }
+
+                // Expect an empty line next (CRLF)
+                std::string blank;
+                {
+                    std::lock_guard<std::mutex> lock(io_mutex_);
+                    (void)std::getline(in, blank);
+                }
+                if (!blank.empty() && blank.back() == '\r')
+                    blank.pop_back();
+
+                // Read exact number of bytes
+                std::string payload;
+                payload.resize(len);
+                {
+                    std::lock_guard<std::mutex> lock(io_mutex_);
+                    in.read(payload.data(), static_cast<std::streamsize>(len));
+                    if (in.gcount() != static_cast<std::streamsize>(len)) {
+                        recordError();
+                        return Error{ErrorCode::NetworkError, "Short read on Content-Length payload"};
+                    }
+                }
+
+                // Parse JSON message using safe parser
+                auto parseResult = json_utils::parse_json(payload);
+                if (!parseResult) {
+                    recordError();
+                    spdlog::debug("JSON parse error (framed): {}", parseResult.error().message);
+                    state_.store(TransportState::Error);
+                    return parseResult.error();
+                }
+
+                resetErrorCount();
+                return parseResult.value();
+            }
+
+            // Fallback: treat line as a full JSON message (newline-delimited mode)
+            if (firstLine.empty()) {
+                // If we got an empty line and there's no more input, check EOF/timeout
                 if (in.eof() || (!in.rdbuf() || in.rdbuf()->in_avail() == 0)) {
-                    // No more input after empty line
-                    if (!isInputAvailable(10)) { // Short timeout for empty line check
+                    if (!isInputAvailable(10)) {
                         state_.store(TransportState::Disconnected);
                         return Error{ErrorCode::NetworkError, "No more input after empty line"};
                     }
@@ -181,10 +239,10 @@ MessageResult StdioTransport::receive() {
             }
 
             // Parse JSON message using safe parser
-            auto parseResult = json_utils::parse_json(line);
+            auto parseResult = json_utils::parse_json(firstLine);
             if (!parseResult) {
                 recordError();
-                spdlog::debug("JSON parse error: {}", parseResult.error().message);
+                spdlog::debug("JSON parse error (line): {}", parseResult.error().message);
 
                 // In test environments or when we shouldn't retry, return error immediately
                 // This prevents hanging when there's no more input after an error
@@ -241,14 +299,16 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize the daemon client pool configuration (new DaemonClientPool)
     yams::cli::DaemonClientPool::Config pool_config;
     pool_config.max_clients = 10; // Cap clients to the daemon
-    // MCP: prefer unary (non-streaming) responses to avoid partial stream handling issues
-    pool_config.client_config.enableChunkedResponses = false;
-    // Keep connections pooled for efficiency
-    pool_config.client_config.singleUseConnections = false;
-    // Be conservative with timeouts for MCP tools
-    pool_config.client_config.requestTimeout = std::chrono::seconds(10);
-    pool_config.client_config.headerTimeout = std::chrono::seconds(5);
-    pool_config.client_config.bodyTimeout = std::chrono::seconds(60);
+    // MCP: enable streaming to avoid header timeouts on large queries and to support
+    // progressive output in tools that can consume it. The pool uses DaemonClient
+    // which will choose streaming for Search/List/Grep when enabled here.
+    pool_config.client_config.enableChunkedResponses = true;
+    // Align with server's close_after_response during stabilization
+    pool_config.client_config.singleUseConnections = true;
+    // Be conservative but practical with timeouts for MCP tools
+    pool_config.client_config.requestTimeout = std::chrono::seconds(30);
+    pool_config.client_config.headerTimeout = std::chrono::seconds(30);
+    pool_config.client_config.bodyTimeout = std::chrono::seconds(120);
     pool_config.idle_timeout = std::chrono::minutes(1);
 
     // Construct pooled request managers; internal DaemonClientPool handles clients
@@ -287,18 +347,18 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     update_req_manager_ = std::make_unique<cli::PooledRequestManager<
         yams::daemon::UpdateDocumentRequest, yams::daemon::UpdateDocumentResponse>>(pool_config);
 
-    // Quick daemon health probe via Asio pool (prefer ping; fallback to status)
+    // Quick daemon health probe via DaemonClient (prefer ping; fallback to status)
     {
-        yams::cli::AsioClientPool asio_pool{};
-        auto pong = yams::cli::run_sync(asio_pool.async_ping(), std::chrono::seconds(2));
+        yams::daemon::DaemonClient probe{};
+        auto pong = yams::cli::run_sync(probe.ping(), std::chrono::seconds(2));
         if (pong) {
-            spdlog::info("Daemon reachable via Asio client pool (ping)");
+            spdlog::info("Daemon reachable (ping)");
         } else {
-            auto st = yams::cli::run_sync(asio_pool.async_status(), std::chrono::seconds(2));
+            auto st = yams::cli::run_sync(probe.status(), std::chrono::seconds(2));
             if (st) {
-                spdlog::info("Daemon reachable via Asio client pool (status)");
+                spdlog::info("Daemon reachable (status)");
             } else {
-                spdlog::debug("Asio probe failed: {}", pong ? "" : pong.error().message);
+                spdlog::debug("Probe failed: {}", pong ? "" : pong.error().message);
             }
         }
     }
@@ -1200,11 +1260,15 @@ yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCP
     // daemon_req.tags = req.tags; // Tags need to be handled if protocol supports it
     // daemon_req.matchAllTags = req.matchAllTags;
 
-    // 2. Execute request via the pooled manager
+    // 2. Execute request via pooled DaemonClient (stream-aware)
+    spdlog::debug("[MCP] Search: dispatch via DaemonClientPool (stream-aware), query='{}' limit={} pathsOnly={}",
+                  daemon_req.query, daemon_req.limit, daemon_req.pathsOnly);
     MCPSearchResponse mcp_response;
     std::optional<Error> execution_error;
 
     auto render = [&](const daemon::SearchResponse& resp) -> Result<void> {
+        spdlog::debug("[MCP] Search: received daemon response totalCount={} results={} elapsed={}ms",
+                      resp.totalCount, resp.results.size(), resp.elapsed.count());
         // 3. Convert daemon response to MCP response
         mcp_response.total = resp.totalCount;
         mcp_response.type = "daemon"; // Indicate response came from daemon
@@ -1230,15 +1294,13 @@ yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCP
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::SearchRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    if (!search_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Search request manager not initialized"};
+    }
+    {
+        auto exec = co_await search_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1299,15 +1361,16 @@ yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrep
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::GrepRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (stream-aware)
+    spdlog::debug("[MCP] Grep: dispatch via DaemonClientPool (stream-aware), pattern='{}' paths={} filesOnly={}",
+                  daemon_req.pattern, daemon_req.paths.size(), daemon_req.filesOnly);
+    if (!grep_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Grep request manager not initialized"};
+    }
+    {
+        auto exec = co_await grep_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1639,21 +1702,27 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
             (void)resp;
             return Result<void>();
         };
-        // Use AsioClientPool directly for the daemon call
-        yams::cli::AsioClientPool pool{};
-        auto result = co_await pool.async_call<daemon::AddDocumentRequest>(addReq);
+        // Use pooled DaemonClient for post-index
+        if (!store_req_manager_) {
+            co_return Error{ErrorCode::NotInitialized, "Store request manager not initialized"};
+        }
+        auto result = store_req_manager_->pool().acquire();
         if (!result) {
-            if (verbose) {
-                spdlog::debug("[MCP] post-index: daemon call failed error='{}'",
-                              result.error().message);
-            }
-            // Non-fatal: download succeeded but indexing failed
+            if (verbose) spdlog::debug("[MCP] post-index: pool acquire failed: {}", result.error().message);
             mcp_response.indexed = false;
         } else {
-            auto renderResult = renderAdd(result.value());
-            if (!renderResult) {
-                // Non-fatal: download succeeded but indexing render failed
+            auto lease = std::move(result).value();
+            auto addres = co_await lease->call<daemon::AddDocumentRequest>(addReq);
+            if (!addres) {
+                if (verbose) {
+                    spdlog::debug("[MCP] post-index: daemon call failed error='{}'", addres.error().message);
+                }
                 mcp_response.indexed = false;
+            } else {
+                auto renderResult = renderAdd(addres.value());
+                if (!renderResult) {
+                    mcp_response.indexed = false;
+                }
             }
         }
     }
@@ -1703,15 +1772,14 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::AddDocumentRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (stream-aware for AddDocument final response)
+    if (!store_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Store request manager not initialized"};
+    }
+    {
+        auto exec = co_await store_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1761,15 +1829,14 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::GetRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (unary)
+    if (!retrieve_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Retrieve request manager not initialized"};
+    }
+    {
+        auto exec = co_await retrieve_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1821,15 +1888,14 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::ListRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (stream-aware for list)
+    if (!list_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "List request manager not initialized"};
+    }
+    {
+        auto exec = co_await list_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1878,15 +1944,14 @@ yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsReq
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::GetStatsRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (unary)
+    if (!stats_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Stats request manager not initialized"};
+    }
+    {
+        auto exec = co_await stats_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1894,9 +1959,7 @@ yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsReq
         co_return execution_error.value();
     }
 
-    if (!result) {
-        co_return result.error();
-    }
+    
 
     co_return mcp_response;
 }
@@ -1936,15 +1999,14 @@ yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const 
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::AddDocumentRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (stream-aware)
+    if (!store_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Store request manager not initialized"};
+    }
+    {
+        auto exec = co_await store_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -1952,9 +2014,7 @@ yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const 
         co_return execution_error.value();
     }
 
-    if (!result) {
-        co_return result.error();
-    }
+    
 
     co_return mcp_response;
 }
@@ -1990,15 +2050,14 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::UpdateDocumentRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (unary is fine here)
+    if (!update_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Update request manager not initialized"};
+    }
+    {
+        auto exec = co_await update_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -2006,9 +2065,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         co_return execution_error.value();
     }
 
-    if (!result) {
-        co_return result.error();
-    }
+    
 
     co_return mcp_response;
 }
@@ -2318,19 +2375,26 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI robustness
     MCPGetByNameResponse mcp_response;
 
-    // Prepare pooled client for streaming calls
-    yams::cli::AsioClientPool pool{};
+    // Prepare pooled daemon client for streaming calls
+    if (!retrieve_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Get request manager not initialized"};
+    }
 
     daemon::GetInitRequest init{};
     init.name = req.name;
     init.byName = true;
     // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
 
-    auto initResult = co_await pool.async_call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
+    auto initResult = retrieve_req_manager_->pool().acquire();
     if (!initResult) {
         co_return initResult.error();
     }
-    const auto& initVal = initResult.value();
+    auto lease = std::move(initResult).value();
+    auto initCall = co_await lease->call<daemon::GetInitRequest>(init);
+    if (!initCall) {
+        co_return initCall.error();
+    }
+    const auto& initVal = initCall.value();
     // Map GetInitResponse fields and metadata into MCP response
     mcp_response.size = initVal.totalSize;
     // Optional metadata keys: hash, path, fileName, mimeType
@@ -2362,12 +2426,12 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = co_await pool.async_call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
+        auto cRes = co_await lease->call<daemon::GetChunkRequest>(c);
         if (!cRes) {
             // Attempt to close the transfer before returning error
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
+            (void)co_await lease->call<daemon::GetEndRequest>(e);
             co_return cRes.error();
         }
         const auto& chunk = cRes.value();
@@ -2388,7 +2452,7 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
     // End transfer regardless
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
+    (void)co_await lease->call<daemon::GetEndRequest>(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; no extra flags in response type.
@@ -2424,15 +2488,14 @@ yams::Task<Result<MCPDeleteByNameResponse>> MCPServer::handleDeleteByName(const 
         return Result<void>();
     };
 
-    // Use AsioClientPool directly for the daemon call
-    yams::cli::AsioClientPool pool{};
-    auto result = co_await pool.async_call<daemon::DeleteRequest>(daemon_req);
-    if (!result) {
-        execution_error = result.error();
-    } else {
-        auto renderResult = render(result.value());
-        if (!renderResult) {
-            execution_error = renderResult.error();
+    // Use pooled DaemonClient (unary)
+    if (!delete_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Delete request manager not initialized"};
+    }
+    {
+        auto exec = co_await delete_req_manager_->execute_async(daemon_req, fallback, render);
+        if (!exec) {
+            execution_error = exec.error();
         }
     }
 
@@ -2440,9 +2503,7 @@ yams::Task<Result<MCPDeleteByNameResponse>> MCPServer::handleDeleteByName(const 
         co_return execution_error.value();
     }
 
-    if (!result) {
-        co_return result.error();
-    }
+    
 
     co_return mcp_response;
 }
@@ -2451,7 +2512,9 @@ yams::Task<Result<MCPCatDocumentResponse>> MCPServer::handleCatDocument(const MC
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI behavior for large content
     MCPCatDocumentResponse mcp_response;
 
-    yams::cli::AsioClientPool pool{};
+    if (!retrieve_req_manager_) {
+        co_return Error{ErrorCode::NotInitialized, "Get request manager not initialized"};
+    }
 
     daemon::GetInitRequest init{};
     init.hash = req.hash;
@@ -2459,10 +2522,11 @@ yams::Task<Result<MCPCatDocumentResponse>> MCPServer::handleCatDocument(const MC
     init.byName = !req.name.empty();
     // GetInitRequest no longer supports raw/extract flags; server determines mode
 
-    auto initRes = co_await pool.async_call<daemon::GetInitRequest, daemon::GetInitResponse>(init);
-    if (!initRes) {
-        co_return initRes.error();
-    }
+    auto leaseRes2 = retrieve_req_manager_->pool().acquire();
+    if (!leaseRes2) co_return leaseRes2.error();
+    auto lease2 = std::move(leaseRes2).value();
+    auto initRes = co_await lease2->call<daemon::GetInitRequest>(init);
+    if (!initRes) co_return initRes.error();
     const auto& initVal = initRes.value();
     // Map GetInitResponse fields and metadata into MCP response
     mcp_response.size = initVal.totalSize;
@@ -2487,11 +2551,11 @@ yams::Task<Result<MCPCatDocumentResponse>> MCPServer::handleCatDocument(const MC
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = co_await pool.async_call<daemon::GetChunkRequest, daemon::GetChunkResponse>(c);
+        auto cRes = co_await lease2->call<daemon::GetChunkRequest>(c);
         if (!cRes) {
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(e);
+            (void)co_await lease2->call<daemon::GetEndRequest>(e);
             co_return cRes.error();
         }
         const auto& chunk = cRes.value();
@@ -2511,7 +2575,7 @@ yams::Task<Result<MCPCatDocumentResponse>> MCPServer::handleCatDocument(const MC
 
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)co_await pool.async_call<daemon::GetEndRequest, daemon::SuccessResponse>(end);
+    (void)co_await lease2->call<daemon::GetEndRequest>(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; response type has no truncated flag.

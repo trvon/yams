@@ -41,6 +41,7 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <thread>
 
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -89,11 +90,17 @@ inline Result<T> run_sync(Task<Result<T>> task,
     auto future = promise->get_future();
     auto task_ptr = std::make_shared<Task<Result<T>>>(std::move(task));
 
-    // Schedule task execution on global IO context
-    yams::daemon::GlobalIOContext::instance().get_io_context().post([task_ptr, promise]() {
+    // Run TaskRunner on a dedicated thread to avoid IO context deadlocks
+    std::thread([task_ptr, promise]() {
         auto coro = TaskRunner::run(task_ptr, promise);
-        (void)coro; // fire and forget
-    });
+        try {
+            coro.get();
+        } catch (const std::exception& e) {
+            promise->set_value(Error{ErrorCode::InternalError, e.what()});
+        } catch (...) {
+            promise->set_value(Error{ErrorCode::InternalError, "Unknown error"});
+        }
+    }).detach();
 
     if (timeout.count() > 0) {
         auto st = future.wait_for(timeout);
@@ -133,11 +140,17 @@ inline Result<void> run_sync<void>(Task<Result<void>> task,
     auto future = promise->get_future();
     auto task_ptr = std::make_shared<Task<Result<void>>>(std::move(task));
 
-    // Schedule task execution on global IO context
-    yams::daemon::GlobalIOContext::instance().get_io_context().post([task_ptr, promise]() {
+    // Run TaskRunner on a dedicated thread to avoid IO context deadlocks
+    std::thread([task_ptr, promise]() {
         auto coro = TaskRunner::run(task_ptr, promise);
-        (void)coro; // fire and forget
-    });
+        try {
+            coro.get();
+        } catch (const std::exception& e) {
+            promise->set_value(Error{ErrorCode::InternalError, e.what()});
+        } catch (...) {
+            promise->set_value(Error{ErrorCode::InternalError, "Unknown error"});
+        }
+    }).detach();
 
     if (timeout.count() > 0) {
         auto st = future.wait_for(timeout);

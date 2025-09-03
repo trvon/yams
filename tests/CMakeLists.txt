@@ -15,9 +15,10 @@ target_include_directories(test_utils INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/utils
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
+# Prefer in-tree/fetched googletest targets to avoid picking up sanitized system libs
 target_link_libraries(test_utils INTERFACE
-    $<IF:$<TARGET_EXISTS:gtest::gtest>,gtest::gtest,GTest::gtest>
-    $<IF:$<TARGET_EXISTS:gtest::gmock>,gtest::gmock,GTest::gmock>
+    $<IF:$<TARGET_EXISTS:gtest>,gtest,$<IF:$<TARGET_EXISTS:GTest::gtest>,GTest::gtest,$<IF:$<TARGET_EXISTS:gtest::gtest>,gtest::gtest,>>> 
+    $<IF:$<TARGET_EXISTS:gmock>,gmock,$<IF:$<TARGET_EXISTS:GTest::gmock>,GTest::gmock,$<IF:$<TARGET_EXISTS:gtest::gmock>,gtest::gmock,>>> 
     yams::core
 )
 
@@ -25,7 +26,7 @@ target_link_libraries(test_utils INTERFACE
 target_compile_definitions(test_utils INTERFACE YAMS_TESTING=1)
 
 # Enable better test discovery
-set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
 set_property(GLOBAL PROPERTY CTEST_TARGETS_ADDED 1)
 set(ENV{CTEST_OUTPUT_ON_FAILURE} 1)
 

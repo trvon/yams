@@ -47,6 +47,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -359,7 +360,7 @@ static std::vector<std::string> extractDocIdsFromCliJson(const std::string& json
 // ---------- Metrics ----------
 
 static double log2d(double x) {
-    return std::log(x) / std::log(2.0);
+    return std::log2(x);
 }
 
 static double dcgAtK(const std::vector<int>& gains, int k) {

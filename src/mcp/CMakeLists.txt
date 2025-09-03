@@ -17,7 +17,6 @@ target_link_libraries(yams_mcp
         yams_app_services
         yams_downloader
         yams::daemon_ipc
-    yams_asio_client
         yams_config
     yams_boost_headers
     $<$<TARGET_EXISTS:boost::_libboost>:boost::_libboost>

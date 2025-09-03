@@ -474,8 +474,7 @@ public:
     }
 
     std::string
-    exportTransactionLog([[maybe_unused]] std::chrono::system_clock::time_point startTime,
-                         [[maybe_unused]] std::chrono::system_clock::time_point endTime) const {
+    exportTransactionLog([[maybe_unused]] std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point> range) const {
         std::shared_lock lock(txMutex_);
 
         std::ostringstream oss;
@@ -767,9 +766,8 @@ void TransactionManager::resetStats() {
 }
 
 std::string
-TransactionManager::exportTransactionLog(std::chrono::system_clock::time_point startTime,
-                                         std::chrono::system_clock::time_point endTime) const {
-    return pImpl->exportTransactionLog(startTime, endTime);
+TransactionManager::exportTransactionLog(std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point> range) const {
+    return pImpl->exportTransactionLog(range);
 }
 
 std::string TransactionManager::getDiagnostics() const {
@@ -804,8 +802,10 @@ TransactionScope::~TransactionScope() noexcept {
             } else {
                 [[maybe_unused]] auto result = manager_.commitTransaction(txId_);
             }
+        } catch (const std::exception& e) {
+            spdlog::error("Transaction scope exception: {}", e.what());
         } catch (...) {
-            // Suppress exceptions in destructor
+            spdlog::error("Transaction scope exception: unknown exception");
         }
     }
 }

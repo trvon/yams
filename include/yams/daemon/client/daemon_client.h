@@ -304,6 +304,8 @@ public:
 
     // Path resolution helper (matches daemon's path resolution)
     static std::filesystem::path resolveSocketPath();
+    // Config-first path resolution: prefer env/config, then fall back to defaults
+    static std::filesystem::path resolveSocketPathConfigFirst();
 
     // Set whether to use streaming for all operations
     void setStreamingEnabled(bool enabled);
@@ -324,20 +326,7 @@ private:
     // Auto-start daemon if configured and not running
     Result<void> autoStartDaemonIfNeeded();
 
-    // Helper method to read framed data with timeout
-    Result<std::vector<uint8_t>> readFramedData(int socketFd, std::chrono::milliseconds timeout,
-                                                size_t size);
-
-    // Helper method to read frame header with proper timeout
-    Result<MessageFramer::FrameHeader> readFrameHeader(int socketFd);
-
-    // Helper method to read frame header with a specific timeout (used for chunk headers)
-    Result<MessageFramer::FrameHeader>
-    readFrameHeaderWithTimeout(int socketFd, std::chrono::milliseconds timeout);
-
-    // Helper method to read full frame with proper timeout
-    Result<std::vector<uint8_t>> readFullFrame(int socketFd,
-                                               const MessageFramer::FrameHeader& header);
+    // Legacy POSIX helpers removed; AsioTransportAdapter handles framing.
 };
 
 // Generic typed call helper using ResponseOf trait
@@ -356,23 +345,24 @@ template <class Req> Task<Result<ResponseOfT<Req>>> DaemonClient::call(const Req
                       std::is_same<Req, GetStatsRequest>>,
                   "Req must be a valid daemon Request alternative");
 
-    // Prefer streaming path for streaming-capable requests when enabled
+    // Prefer streaming for streaming-capable requests unless disabled in config
     if constexpr (std::is_same_v<Req, SearchRequest>) {
         if (config_.enableChunkedResponses) {
             co_return co_await streamingSearch(req);
         }
+        // fall through to unary path below
     } else if constexpr (std::is_same_v<Req, ListRequest>) {
         if (config_.enableChunkedResponses) {
             co_return co_await streamingList(req);
         }
+        // fall through to unary path below
     } else if constexpr (std::is_same_v<Req, GrepRequest>) {
         if (config_.enableChunkedResponses) {
             co_return co_await streamingGrep(req);
         }
+        // fall through to unary path below
     } else if constexpr (std::is_same_v<Req, AddDocumentRequest>) {
-        if (config_.enableChunkedResponses) {
-            co_return co_await streamingAddDocument(req);
-        }
+        co_return co_await streamingAddDocument(req);
     }
 
     auto r = co_await sendRequest(Request{req});

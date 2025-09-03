@@ -18,7 +18,7 @@ extern "C" {
 namespace yams::compression {
 
 namespace {
-constexpr uint8_t DEFAULT_COMPRESSION_LEVEL = 5;
+constexpr uint8_t LZMA_DEFAULT_COMPRESSION_LEVEL = 5;
 constexpr uint8_t KRONOS_LZMA_PROPS_SIZE = 5;
 constexpr uint8_t LZMA2_PROPS_SIZE = 1;
 
@@ -91,7 +91,9 @@ static ISzAlloc g_Alloc = {LzmaAlloc, LzmaFree};
         case SZ_ERROR_THREAD:
             errorMsg = "Threading error";
             break;
-    }
+        default:
+            break;
+}
     return Error{ErrorCode::CompressionError, fmt::format("{} failed: {}", operation, errorMsg)};
 }
 } // namespace
@@ -108,7 +110,7 @@ public:
                                                      uint8_t level) {
         // Use default level if 0
         if (level == 0) {
-            level = DEFAULT_COMPRESSION_LEVEL;
+            level = LZMA_DEFAULT_COMPRESSION_LEVEL;
         }
 
         // Validate level
@@ -213,7 +215,7 @@ private:
 
         spdlog::debug("LZMA compressed {} bytes to {} bytes (ratio: {:.2f}x) in {}μs", data.size(),
                       result.compressedSize,
-                      static_cast<double>(data.size()) / result.compressedSize, duration.count());
+                      static_cast<double>(data.size()) / static_cast<double>(result.compressedSize), duration.count());
 
         return result;
     }
@@ -291,7 +293,7 @@ private:
 
         spdlog::debug("LZMA2 compressed {} bytes to {} bytes (ratio: {:.2f}x) in {}μs", data.size(),
                       result.compressedSize,
-                      static_cast<double>(data.size()) / result.compressedSize, duration.count());
+                      static_cast<double>(data.size()) / static_cast<double>(result.compressedSize), duration.count());
 
         return result;
     }
@@ -330,12 +332,11 @@ private:
         // Initialize decoder
         LzmaDec_Init(&state);
 
-        // Allocate output buffer
-        size_t destLen = expectedSize > 0 ? expectedSize : srcLen * 10;
+        // Allocate output buffer lazily; grow as needed during decode
         std::vector<std::byte> decompressed;
 
         // Decompress in chunks
-        constexpr size_t CHUNK_SIZE = 64 * 1024;
+        constexpr size_t CHUNK_SIZE = static_cast<size_t>(64) * static_cast<size_t>(1024);
         size_t inPos = 0;
 
         while (inPos < srcLen) {
@@ -406,12 +407,11 @@ private:
         // Initialize decoder
         Lzma2Dec_Init(&state);
 
-        // Allocate output buffer
-        size_t destLen = expectedSize > 0 ? expectedSize : srcLen * 10;
+        // Allocate output buffer lazily; grow as needed during decode
         std::vector<std::byte> decompressed;
 
         // Decompress
-        constexpr size_t CHUNK_SIZE = 64 * 1024;
+        constexpr size_t CHUNK_SIZE = static_cast<size_t>(64) * static_cast<size_t>(1024);
         size_t inPos = 0;
 
         while (inPos < srcLen) {

@@ -22,7 +22,7 @@
 		{
 			"label": "build+test (Debug)",
 			"type": "shell",
-			"command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure -j",
+			"command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure",
 			"problemMatcher": []
 		},
 		{

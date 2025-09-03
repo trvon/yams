@@ -1,4 +1,5 @@
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <thread>
@@ -29,7 +30,12 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     try {
         auto existing = spdlog::get("daemon");
         if (!existing) {
-            auto logger = spdlog::basic_logger_mt("daemon", config_.logFile.string(), true);
+            // Use rotating file sink to preserve logs across crashes
+            const size_t max_size = 10 * 1024 * 1024; // 10MB per file
+            const size_t max_files = 5; // Keep 5 rotated files
+            auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                config_.logFile.string(), max_size, max_files);
+            auto logger = std::make_shared<spdlog::logger>("daemon", rotating_sink);
             spdlog::set_default_logger(logger);
             spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
             spdlog::set_level(spdlog::level::debug);

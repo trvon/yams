@@ -11,14 +11,13 @@ if(TARGET yams::integrity AND TARGET yams::storage_engine AND TARGET yams::crypt
 
     target_link_libraries(integrity_unit_tests
         PRIVATE
+            test_utils
+            gtest_main
             yams::integrity
             yams::storage_engine
             yams::reference_counter
             yams::crypto
             yams::core
-            GTest::gtest
-            GTest::gtest_main
-            GTest::gmock
             spdlog::spdlog
     )
 

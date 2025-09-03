@@ -29,8 +29,8 @@ if(TARGET yams_cli)
     target_compile_features(update_command_tests PRIVATE cxx_std_20)
     target_link_libraries(update_command_tests
         PRIVATE
-            GTest::gtest_main
-            GTest::gmock
+            test_utils
+            gtest_main
             yams_cli
             yams::metadata
             yams::api
@@ -52,7 +52,8 @@ if(TARGET yams_cli)
     target_compile_features(daemon_command_tests PRIVATE cxx_std_20)
     target_link_libraries(daemon_command_tests
         PRIVATE
-            GTest::gtest_main
+            test_utils
+            gtest_main
             yams_cli
     )
 

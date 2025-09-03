@@ -1,4 +1,3 @@
-#include <yams/cli/asio_client_pool.hpp>
 #include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/progress_indicator.h>
@@ -168,9 +167,9 @@ private:
             return false; // No daemon running, no version mismatch
         }
 
-        // Probe status via async bridge
-        yams::cli::AsioClientPool pool{};
-        auto statusResult = run_sync(pool.async_status(), std::chrono::seconds(5));
+        // Probe status via DaemonClient
+        yams::daemon::DaemonClient client{};
+        auto statusResult = run_sync(client.status(), std::chrono::seconds(5));
         if (!statusResult) {
             spdlog::warn("Could not get status from running daemon: {}",
                          statusResult.error().message);
@@ -182,13 +181,11 @@ private:
         if (!isVersionCompatible(status.version)) {
             spdlog::info("Stopping incompatible daemon (version {})...", status.version);
 
-            // Try graceful shutdown via socket first using pool
+            // Try graceful shutdown via socket first using DaemonClient
             daemon::ShutdownRequest sreq;
             sreq.graceful = true;
-            yams::cli::AsioClientPool pool{};
-            auto shutdownResult =
-                run_sync(pool.async_call<daemon::ShutdownRequest, daemon::SuccessResponse>(sreq),
-                         std::chrono::seconds(10));
+            yams::daemon::DaemonClient shutClient{};
+            auto shutdownResult = run_sync(shutClient.shutdown(true), std::chrono::seconds(10));
             bool stopped = false;
 
             if (shutdownResult) {
@@ -411,7 +408,8 @@ private:
             bool became_ready = false;
             // Poll status (even failures should keep the spinner visible)
             while (std::chrono::steady_clock::now() - t0 < timeout) {
-                auto statusRes = run_sync(yams::cli::AsioClientPool{}.async_status(), std::chrono::seconds(2));
+                yams::daemon::DaemonClient probe{};
+                auto statusRes = run_sync(probe.status(), std::chrono::seconds(2));
                 if (statusRes) {
                     const auto& s = statusRes.value();
                     // TODO(PBI-007-06): Prefer StatusResponse.lifecycle_state/last_error when
@@ -487,13 +485,11 @@ private:
 
         // First try graceful shutdown via socket
         if (daemonRunning) {
-            yams::cli::AsioClientPool pool{};
+            yams::daemon::DaemonClient shut{};
             daemon::ShutdownRequest sreq;
             sreq.graceful = !force_;
             {
-                auto shutdownResult = run_sync(
-                    pool.async_call<daemon::ShutdownRequest, daemon::SuccessResponse>(sreq),
-                    std::chrono::seconds(10));
+                auto shutdownResult = run_sync(shut.shutdown(sreq.graceful), std::chrono::seconds(10));
                 if (shutdownResult) {
                     spdlog::info("Sent shutdown request to daemon");
 
@@ -627,11 +623,11 @@ private:
             return;
         }
 
-        // Detailed status via robust AsioClientPool path
-        yams::cli::AsioClientPool pool{};
+        // Detailed status via DaemonClient
+        yams::daemon::DaemonClient client{};
         Error lastErr{};
         for (int attempt = 0; attempt < 5; ++attempt) {
-            auto statusResult = run_sync(pool.async_status(), std::chrono::seconds(5));
+            auto statusResult = run_sync(client.status(), std::chrono::seconds(5));
             if (statusResult) {
                 const auto& status = statusResult.value();
                 std::cout << "YAMS Daemon Status:\n";
@@ -681,11 +677,10 @@ private:
         // Stop daemon if running
         if (daemon::DaemonClient::isDaemonRunning(socketPath_)) {
             spdlog::info("Stopping YAMS daemon...");
-            yams::cli::AsioClientPool pool{};
+            yams::daemon::DaemonClient client{};
             daemon::ShutdownRequest sreq;
             sreq.graceful = true;
-            (void)run_sync(pool.async_call<daemon::ShutdownRequest, daemon::SuccessResponse>(sreq),
-                           std::chrono::seconds(10));
+            (void)run_sync(client.shutdown(true), std::chrono::seconds(10));
 
             // Wait for daemon to stop
             for (int i = 0; i < 10; i++) {
