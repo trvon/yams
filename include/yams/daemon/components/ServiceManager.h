@@ -66,6 +66,9 @@ public:
     // Get AppContext for app services
     app::services::AppContext getAppContext() const;
 
+    // Expose resolved daemon configuration for components that need paths
+    const DaemonConfig& getConfig() const { return config_; }
+
 #ifdef YAMS_TESTING
     // Additional test-only accessors can go here if needed
 #endif

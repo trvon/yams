@@ -103,6 +103,8 @@ public:
      * Create download command
      */
     static std::unique_ptr<ICommand> createDownloadCommand();
+    // Create session command (pins + warming)
+    static std::unique_ptr<ICommand> createSessionCommand();
 
     /**
      * Create serve command (MCP server)

@@ -73,7 +73,7 @@ After each suggested command, briefly validate expected outputs or effects in 1â
 - `add`: Add document from file/stdin. Options: `-n/--name <name>`, `-t/--tags <tags>`, `-m/--metadata <k=v>`, `--mime-type <type>`
 - `get`: Retrieve document. Options: `<hash>`, `--name <name>`, `-o/--output <path>`, `-v/--verbose`
 - `cat`: Print content to stdout. Options: `<hash>`, `--name <name>`
-- `delete` (`rm`): Delete by hash, name, or pattern. Options: `--name`, `--names`, `--pattern`, `--force`, `--no-confirm`, `--dry-run`, `--keep-refs`, `-v/--verbose`
+- `delete` (`rm`): Delete by hash, name, pattern, directory, or positional targets. Options: `--name`, `--names`, `--pattern`, `--directory`, `-r/--recursive`, `-f/--force`, `--no-confirm`, `--dry-run`, `--keep-refs`, `-v/--verbose`
 - `list` (`ls`): List documents. Options: `--format`, `-l/--limit`, `--offset`
 - `search`: Search documents. Options: `-l/--limit`, `-t/--type`, `-f/--fuzzy`, `--similarity`, `--json`
 - `config`: Manage config. Subcommands: `get`, `set`, `list`, `validate`, `export`
@@ -83,9 +83,27 @@ After each suggested command, briefly validate expected outputs or effects in 1â
 - `migrate`: Run pending migrations
 - `browse`: Launch interactive TUI
 - `serve`: Start local server (if supported)
+- `session`: Manage pinned items and warming. Subcommands: `pin`, `list`, `unpin`, `warm` (use `--path` for patterns, optional `--tag` and `--meta key=value`). Best practice: when updating metadata, prefer hash-based updates when available to avoid name collisions. Planned flags: `session warm --limit N --parallel P` (control scope/concurrency) and `session list --json` (dump local pins for scripting).
 
 ## Example (End-to-End)
 _Add a README and search for "vector clock":_
 ```sh
 yams add ./README.md --tags "docs,readme"
 yams search "vector clock" --limit 20
+```
+
+_Session examples (prefer hash vs name for metadata updates; planned: `warm --limit N --parallel P`, `list --json`):_
+```sh
+yams session pin --path "docs/**/*.md" --tag notes --meta owner=team
+yams session list
+yams session warm
+yams session unpin --path "docs/**/*.md"
+```
+
+_Delete/rm examples (rm parity and positional targets):_
+```sh
+yams rm -rf ./build
+yams rm '*.log'
+yams delete fileA fileB fileC
+yams delete -r ./dist
+```

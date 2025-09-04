@@ -18,6 +18,8 @@
 #include <iosfwd>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <regex>
 #include <string>
 #include <thread>
@@ -48,6 +50,8 @@ class StdioTransport : public ITransport {
 public:
     StdioTransport();
     void send(const json& message) override;
+    // Enqueue a message for the writer thread (non-blocking for request handlers)
+    void sendAsync(const json& message);
     MessageResult receive() override;
     bool isConnected() const override { return state_.load() == TransportState::Connected; }
     void close() override { state_.store(TransportState::Closing); }
@@ -63,6 +67,13 @@ private:
 
     // Mutex for thread-safe output operations (sending only)
     static std::mutex out_mutex_;
+    // Outbound writer queue + thread to avoid blocking on stdout writes
+    std::mutex queueMutex_;
+    std::condition_variable queueCv_;
+    std::deque<json> outQueue_;
+    std::thread writerThread_;
+    std::atomic<bool> writerRunning_{false};
+    void writerLoop();
 
     // Capture the stream buffers at construction to respect caller redirections (e.g., tests)
     std::streambuf* outbuf_{nullptr};
@@ -276,6 +287,19 @@ private:
 
     // Negotiated protocol version (set during initialize)
     std::string negotiatedProtocolVersion_{"2024-11-05"};
+
+    // === Thread pool scaffolding for MCP request handling ===
+    // Fixed-size worker pool with a task queue
+    std::vector<std::thread> workerPool_;
+    std::mutex taskMutex_;
+    std::condition_variable taskCv_;
+    std::deque<std::function<void()>> taskQueue_;
+    std::atomic<bool> stopWorkers_{false};
+
+    // Start/stop the pool and enqueue tasks
+    void startThreadPool(std::size_t threads);
+    void stopThreadPool();
+    void enqueueTask(std::function<void()> task);
 
 public:
     // Process a single JSON-RPC message. For requests (with id), returns a JSON-RPC response.

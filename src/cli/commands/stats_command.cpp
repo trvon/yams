@@ -42,6 +42,8 @@ public:
                       "Show comprehensive technical details and diagnostics");
         cmd->add_flag("--color", forceColor_, "Force-enable ANSI colors in output");
         cmd->add_flag("--no-color", noColor_, "Disable ANSI colors in output");
+        cmd->add_flag("--daemon-only", daemonOnly_,
+                      "Use daemon results only (no local fallback)");
 
         // Nested subcommand: yams stats vectors
         auto* vectors = cmd->add_subcommand("vectors", "Show vector database statistics");
@@ -49,12 +51,20 @@ public:
             ->default_val("text")
             ->check(CLI::IsMember({"text", "json"}));
         vectors->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+        vectors->add_flag("--daemon-only", daemonOnly_,
+                          "Use daemon results only (no local fallback)");
         vectors->callback([this]() {
             auto result = executeVectors();
             if (!result) {
                 spdlog::error("Stats vectors failed: {}", result.error().message);
                 throw CLI::RuntimeError(1);
             }
+        });
+
+        // System help: explain fields/metrics shown by stats
+        auto* helpCmd = cmd->add_subcommand("help", "Show system metrics help for stats output");
+        helpCmd->callback([this]() {
+            renderSystemHelp();
         });
 
         cmd->callback([this]() {
@@ -94,6 +104,10 @@ public:
 
         // Render lambda for results
         auto render = [&](const yams::daemon::GetStatsResponse& resp) -> Result<void> {
+            // Heuristic fallback only when not forcing daemon-only
+            if (!localOnly_ && !daemonOnly_ && resp.totalDocuments == 0 && resp.totalSize == 0) {
+                return executeLocal();
+            }
             if (format_ == "json") {
                 return renderJSON(resp);
             } else {
@@ -101,13 +115,57 @@ public:
             }
         };
 
-        // Fallback to local execution
+        // Prefer a direct daemon call (no pooling) for determinism, mirroring list_command
+        // Falls back to local stats if the daemon path fails for any reason.
         auto fallback = [&]() -> Result<void> { return executeLocal(); };
 
-        return run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+        try {
+            yams::daemon::ClientConfig cfg;
+            cfg.dataDir = cli_->getDataPath();
+            cfg.enableChunkedResponses = false; // stats is small; avoid streaming complexity
+            cfg.singleUseConnections = true;    // keep isolation to avoid cross-talk
+            cfg.requestTimeout = std::chrono::milliseconds(30000);
+            yams::daemon::DaemonClient client(cfg);
+
+            auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
+            if (result) {
+                return render(result.value());
+            }
+            // On failure, choose fallback only when not daemon-only
+            return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats unavailable"} : fallback();
+        } catch (...) {
+            return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats exception"} : fallback();
+        }
     }
 
 private:
+    void renderSystemHelp() {
+        std::cout << "YAMS System Metrics (stats)\n";
+        std::cout << "===========================\n\n";
+        std::cout << "Core Counters:\n";
+        std::cout << "  - totalDocuments: Number of documents indexed\n";
+        std::cout << "  - totalSize: Total logical size of stored content\n";
+        std::cout << "  - indexedDocuments: Documents with embeddings/index visibility\n";
+        std::cout << "  - vectorIndexSize: On-disk size of the vector index (bytes)\n\n";
+        std::cout << "Streaming Metrics (daemon):\n";
+        std::cout << "  - time_to_first_byte_ms: Time from header to first non-keepalive\n";
+        std::cout << "  - batches_emitted: Number of response chunks sent\n";
+        std::cout << "  - keepalive_count: Keepalive frames sent during compute\n\n";
+        std::cout << "Grep/List/Retrieval Modes:\n";
+        std::cout << "  - Grep hot/cold: hot uses extracted text; cold scans CAS\n";
+        std::cout << "  - List paths-only: avoids snippet/metadata hydration\n";
+        std::cout << "  - Retrieval auto: prefers extracted text when present\n\n";
+        std::cout << "Env Knobs (optional):\n";
+        std::cout << "  - YAMS_KEEPALIVE_MS: Streaming keepalive cadence\n";
+        std::cout << "  - YAMS_GREP_FIRST_BATCH_MAX_WAIT_MS: Grep first-burst window\n";
+        std::cout << "  - YAMS_GREP_BATCH_SIZE: Grep chunk batch size override\n";
+        std::cout << "  - YAMS_LIST_MODE, YAMS_GREP_MODE, YAMS_RETRIEVAL_MODE: hot_only|cold_only|auto\n\n";
+        std::cout << "Per-document Overrides:\n";
+        std::cout << "  - Tag/metadata force_cold=true: Force cold path for a document\n\n";
+        std::cout << "Tips:\n";
+        std::cout << "  - Use 'yams stats --format json' for scriptable output\n";
+        std::cout << "  - Use 'yams stats vectors' to focus on embedding coverage\n";
+    }
     Result<void> executeVectors() {
         // For now, vectors uses the same stats request but focuses on vector data
         yams::daemon::GetStatsRequest dreq;
@@ -151,10 +209,27 @@ private:
             return Result<void>();
         };
 
-        // Fallback to local vector stats
+        // Prefer a direct daemon call (no pooling) for determinism
         auto fallback = [&]() -> Result<void> { return executeVectorsLocal(); };
 
-        return run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+        try {
+            yams::daemon::ClientConfig cfg;
+            cfg.dataDir = cli_->getDataPath();
+            cfg.enableChunkedResponses = false;
+            cfg.singleUseConnections = true;
+            cfg.requestTimeout = std::chrono::milliseconds(30000);
+            yams::daemon::DaemonClient client(cfg);
+
+            auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
+            if (result) {
+                return render(result.value());
+            }
+            return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) unavailable"}
+                              : fallback();
+        } catch (...) {
+            return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) exception"}
+                              : fallback();
+        }
     }
 
     Result<void> executeVectorsLocal() {
@@ -731,6 +806,19 @@ private:
             std::to_string(resp.compressionRatio) + ":1 ratio using content-addressed storage";
         rows.push_back({"Compression", compressionInfo, ""});
 
+        // Streaming metrics if available
+        auto ttfb = resp.additionalStats.find("stream_ttfb_avg_ms");
+        auto streams = resp.additionalStats.find("stream_total_streams");
+        auto batches = resp.additionalStats.find("stream_batches_emitted");
+        auto keepalives = resp.additionalStats.find("stream_keepalives");
+        if (ttfb != resp.additionalStats.end() || streams != resp.additionalStats.end() ||
+            batches != resp.additionalStats.end() || keepalives != resp.additionalStats.end()) {
+            rows.push_back({"Streaming TTFB (avg)", (ttfb!=resp.additionalStats.end()? ttfb->second : "0" ) + std::string(" ms"), ""});
+            if (streams!=resp.additionalStats.end()) rows.push_back({"Streams", streams->second, ""});
+            if (batches!=resp.additionalStats.end()) rows.push_back({"Batches Emitted", batches->second, ""});
+            if (keepalives!=resp.additionalStats.end()) rows.push_back({"Keepalives", keepalives->second, ""});
+        }
+
         yams::cli::ui::render_rows(std::cout, rows);
         std::cout << "\n";
     }
@@ -776,6 +864,12 @@ private:
             metadataStatus = "✓ Running (" + formatNumber(resp.indexedDocuments) + " indexed)";
         }
         statusRows.push_back({"MetadataRepo", metadataStatus, ""});
+
+        // Configured data directory (helps debug path mismatches)
+        auto dataDirIt = resp.additionalStats.find("data_dir");
+        if (dataDirIt != resp.additionalStats.end() && !dataDirIt->second.empty()) {
+            statusRows.push_back({"Data Dir", dataDirIt->second, ""});
+        }
 
         // SearchExecutor status
         auto searchIt = resp.additionalStats.find("service_searchexecutor");
@@ -824,6 +918,10 @@ private:
 
         if (vectorServiceIt == resp.additionalStats.end() || vectorServiceIt->second != "error") {
             yams::cli::ui::render_rows(std::cout, {{"Vector DB", vectorStatus, ""}});
+            auto vdbPathIt = resp.additionalStats.find("vectordb_path");
+            if (vdbPathIt != resp.additionalStats.end() && !vdbPathIt->second.empty()) {
+                yams::cli::ui::render_rows(std::cout, {{"", vdbPathIt->second, ""}});
+            }
             if (resp.vectorIndexSize == 0) {
                 yams::cli::ui::render_rows(std::cout,
                                            {{"", "", "Will initialize on first search"}});
@@ -888,6 +986,7 @@ private:
     bool verbose_ = false;    // Show comprehensive technical details
     bool forceColor_ = false; // --color flag
     bool noColor_ = false;    // --no-color flag
+    bool daemonOnly_ = false; // Force daemon-only, disable local fallback
 };
 
 // Factory function

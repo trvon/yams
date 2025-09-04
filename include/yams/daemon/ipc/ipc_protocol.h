@@ -1535,7 +1535,7 @@ struct GrepRequest {
     bool pathsOnly = false;                   // Show only file paths
     bool literalText = false;                 // Treat pattern as literal text
     bool regexOnly = false;                   // Disable semantic search
-    size_t semanticLimit = 3;                 // Number of semantic results
+    size_t semanticLimit = 10;                // Number of semantic results
     std::vector<std::string> filterTags;      // Filter by tags
     bool matchAllTags = false;                // Require all tags
     std::string colorMode = "auto";           // Color output mode

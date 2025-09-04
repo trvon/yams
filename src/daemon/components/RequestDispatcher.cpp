@@ -24,6 +24,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/ipc/stream_metrics_registry.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -1033,6 +1034,13 @@ Response RequestDispatcher::handleListRequest(const ListRequest& req) {
         serviceReq.showMetadata = req.showMetadata;
         serviceReq.showTags = req.showTags;
         serviceReq.groupBySession = req.groupBySession;
+        // Propagate paths-only hint and minimize hydration when requested
+        serviceReq.pathsOnly = req.pathsOnly;
+        if (req.pathsOnly) {
+            serviceReq.showSnippets = false;
+            serviceReq.showMetadata = false;
+            serviceReq.showTags = false;
+        }
 
         // File type filters
         serviceReq.type = req.fileType;
@@ -1245,21 +1253,26 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             return ErrorResponse{ErrorCode::NotInitialized, "Required services not available"};
         }
 
-        // Get content store statistics
+        // Get content store statistics (authoritative on stored content)
         auto storeStats = contentStore->getStats();
 
-        // Get metadata repository statistics using available methods
-        auto docCountResult = metadataRepo->getDocumentCount();
-        if (!docCountResult) {
-            return ErrorResponse{docCountResult.error().code, docCountResult.error().message};
+        // Get metadata repository statistics using available methods (may lag behind store)
+        size_t metaDocCount = 0;
+        if (auto docCountResult = metadataRepo->getDocumentCount(); docCountResult) {
+            metaDocCount = static_cast<size_t>(docCountResult.value());
+        } else {
+            // Surface error via additionalStats but continue with store-derived counts
+            // so stats remain useful even if metadata is initializing
+            // Note: additionalStats populated later when available
         }
 
         auto indexedCountResult = metadataRepo->getIndexedDocumentCount();
         size_t indexedCount = indexedCountResult ? indexedCountResult.value() : 0;
 
-        // Create stats response
+        // Create stats response. Prefer content store object count when available; fall back to metadata.
         GetStatsResponse response;
-        response.totalDocuments = static_cast<size_t>(docCountResult.value());
+        const size_t storeDocCount = static_cast<size_t>(storeStats.totalObjects);
+        response.totalDocuments = (storeDocCount > 0) ? storeDocCount : metaDocCount;
         response.totalSize = storeStats.totalBytes;
 
         // Get vector database stats
@@ -1267,13 +1280,27 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         size_t vectorDbSize = 0;
 
         // Try to get vector database size and count directly from vectors.db
-        // We need to check common locations for the database
-        std::vector<std::filesystem::path> possiblePaths = {
-            std::filesystem::path("/Volumes/picaso/yams/vectors.db"),
-            std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "") / ".yams" /
-                "vectors.db",
-            std::filesystem::path(std::getenv("YAMS_STORAGE") ? std::getenv("YAMS_STORAGE") : "") /
-                "vectors.db"};
+        // Use configured data directory first; then consider legacy env-based paths as fallbacks
+        std::vector<std::filesystem::path> possiblePaths;
+        try {
+            auto cfg = serviceManager_->getConfig();
+            if (!cfg.dataDir.empty()) {
+                possiblePaths.push_back(cfg.dataDir / "vectors.db");
+            }
+        } catch (...) {
+            // ignore
+        }
+        // Legacy fallbacks
+        if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {
+            possiblePaths.push_back(std::filesystem::path(env) / "vectors.db");
+        }
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            possiblePaths.push_back(std::filesystem::path(home) / ".local" / "share" / "yams" /
+                                    "vectors.db");
+            possiblePaths.push_back(std::filesystem::path(home) / ".yams" / "vectors.db");
+        }
+        // Developer-specific path (kept as lowest-priority fallback)
+        possiblePaths.push_back(std::filesystem::path("/Volumes/picaso/yams/vectors.db"));
 
         for (const auto& vectorDbPath : possiblePaths) {
             if (!vectorDbPath.empty() && std::filesystem::exists(vectorDbPath)) {
@@ -1406,8 +1433,35 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 std::to_string(storeStats.deleteOperations);
 
             // Add metadata repo statistics using available methods
-            response.additionalStats["meta_documents"] = std::to_string(docCountResult.value());
+            response.additionalStats["meta_documents"] = std::to_string(metaDocCount);
             response.additionalStats["meta_indexed_documents"] = std::to_string(indexedCount);
+        }
+
+        // Defensive fallback: if content store reports zero but configured storage exists,
+        // scan objects directory to estimate counts and total size.
+        if (response.totalDocuments == 0 || response.totalSize == 0) {
+            try {
+                auto cfg = serviceManager_->getConfig();
+                std::filesystem::path objectsDir = cfg.dataDir / "storage" / "objects";
+                if (std::filesystem::exists(objectsDir)) {
+                    uint64_t count = 0;
+                    uint64_t bytes = 0;
+                    for (auto it = std::filesystem::recursive_directory_iterator(objectsDir);
+                         it != std::filesystem::recursive_directory_iterator(); ++it) {
+                        if (it->is_regular_file()) {
+                            ++count;
+                            std::error_code ec;
+                            bytes += std::filesystem::file_size(it->path(), ec);
+                        }
+                    }
+                    if (count > 0) {
+                        response.totalDocuments = std::max<size_t>(response.totalDocuments, count);
+                        response.totalSize = std::max<size_t>(response.totalSize, bytes);
+                    }
+                }
+            } catch (...) {
+                // best effort only
+            }
         }
 
         // File type breakdown if requested
@@ -1498,6 +1552,16 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             response.additionalStats["service_metadatarepo"] =
                 metadataRepo ? "running" : "unavailable";
 
+            // Expose configured data directory for clarity
+            try {
+                auto cfg = serviceManager_->getConfig();
+                if (!cfg.dataDir.empty()) {
+                    response.additionalStats["data_dir"] = cfg.dataDir.string();
+                }
+            } catch (...) {
+                // ignore
+            }
+
             // Check search executor
             auto searchExecutor = serviceManager_->getSearchExecutor();
             response.additionalStats["service_searchexecutor"] =
@@ -1513,6 +1577,15 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(response.indexedDocuments);
                     response.additionalStats["vectordb_size"] =
                         std::to_string(response.vectorIndexSize);
+                    // provide vector DB path if known
+                    try {
+                        auto cfg = serviceManager_->getConfig();
+                        if (!cfg.dataDir.empty()) {
+                            response.additionalStats["vectordb_path"] =
+                                (cfg.dataDir / "vectors.db").string();
+                        }
+                    } catch (...) {
+                    }
                 } else {
                     response.additionalStats["vectordb_status"] = "will_initialize_on_first_search";
                 }
@@ -1526,6 +1599,16 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 "contentstore,metadatarepo,searchexecutor,embeddingservice";
             response.additionalStats["service_initialization_time"] =
                 std::to_string(uptimeSeconds); // Time since daemon start
+        }
+
+        // Streaming metrics (aggregated)
+        {
+            auto ssnap = StreamMetricsRegistry::instance().snapshot();
+            response.additionalStats["stream_total_streams"] = std::to_string(ssnap.totalStreams);
+            response.additionalStats["stream_batches_emitted"] = std::to_string(ssnap.batchesEmitted);
+            response.additionalStats["stream_keepalives"] = std::to_string(ssnap.keepalives);
+            uint64_t avg = (ssnap.ttfbCount > 0) ? (ssnap.ttfbSumMs / ssnap.ttfbCount) : 0;
+            response.additionalStats["stream_ttfb_avg_ms"] = std::to_string(avg);
         }
 
         return response;
@@ -1643,11 +1726,11 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
 
         // Map app::services::GrepResponse to daemon GrepResponse with default cap
         const std::size_t defaultCap = 20;
-        const bool applyDefaultCap = !req.countOnly && !req.filesOnly && !req.filesWithoutMatch &&
-                                     !req.pathsOnly && req.maxMatches == 0;
+        // Do not cap when special output modes are requested; emit full set (including semantic)
+        const bool applyDefaultCap = !(req.countOnly || req.filesOnly || req.filesWithoutMatch || req.pathsOnly) && req.maxMatches == 0;
 
         GrepResponse response;
-        response.filesSearched = serviceResp.results.size();
+        response.filesSearched = serviceResp.filesSearched;
         std::size_t emitted = 0;
 
         for (const auto& fileResult : serviceResp.results) {

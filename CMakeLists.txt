@@ -1092,19 +1092,19 @@ if(NOT lzma_POPULATED)
     add_library(lzma_sdk STATIC
             ${lzma_SOURCE_DIR}/C/LzmaEnc.c
             ${lzma_SOURCE_DIR}/C/LzmaDec.c
-            ${lzma_SOURCE_DIR}/C/LzFind.c
             ${lzma_SOURCE_DIR}/C/Lzma2Enc.c
             ${lzma_SOURCE_DIR}/C/Lzma2Dec.c
             ${lzma_SOURCE_DIR}/C/Lzma86Enc.c
             ${lzma_SOURCE_DIR}/C/Lzma86Dec.c
+            ${lzma_SOURCE_DIR}/C/LzFind.c
+            ${lzma_SOURCE_DIR}/C/LzFindMt.c
+            ${lzma_SOURCE_DIR}/C/LzFindOpt.c
             ${lzma_SOURCE_DIR}/C/CpuArch.c
             ${lzma_SOURCE_DIR}/C/Alloc.c
-            ${lzma_SOURCE_DIR}/C/LzFindMt.c
             ${lzma_SOURCE_DIR}/C/Threads.c
             ${lzma_SOURCE_DIR}/C/MtCoder.c
             ${lzma_SOURCE_DIR}/C/MtDec.c
             ${lzma_SOURCE_DIR}/C/Lzma2DecMt.c
-            ${lzma_SOURCE_DIR}/C/LzFindOpt.c
             ${lzma_SOURCE_DIR}/C/7zStream.c
         )
 

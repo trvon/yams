@@ -88,7 +88,7 @@ sudo apt-get install -y \
     libsqlite3-dev \
     libncurses-dev \
     protobuf-compiler \
-    libprotobuf-dev
+    libprotobuf-dev liburing-dev
 ```
 
 ### RHEL/CentOS/Rocky Linux

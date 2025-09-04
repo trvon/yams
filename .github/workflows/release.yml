@@ -136,20 +136,13 @@ jobs:
         run: |
           set -e
           conan profile detect --force
-          # Determine profile path portably
-          PROFILE_PATH=$(conan profile path default 2>/dev/null || echo "$HOME/.conan2/profiles/default")
-          # Portable in-place edit for cppstd across GNU/BSD sed
-          if command -v gsed >/dev/null 2>&1; then SED=gsed; else SED=sed; fi
-          OS_NAME="$(uname)"
-          if [ "$OS_NAME" = "Darwin" ]; then
-            $SED -i '' -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' "$PROFILE_PATH" || true
-            # apple-clang defaults to libc++; ensure it is present
-            grep -q '^settings\.compiler\.libcxx=libc\+\+$' "$PROFILE_PATH" || echo 'settings.compiler.libcxx=libc++' >> "$PROFILE_PATH"
-          else
-            $SED -i -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' "$PROFILE_PATH" || true
+          PROFILE=default
+          conan profile update "compiler.cppstd=20" "$PROFILE"
+          if [ "$(uname)" = "Darwin" ]; then
+            conan profile update "compiler.libcxx=libc++" "$PROFILE"
           fi
-          echo "Conan profile configured (RUNNER_OS=$RUNNER_OS, uname=$OS_NAME):" >&2
-          conan profile show -pr default >&2 || conan profile show >&2
+          echo "Conan profile configured (RUNNER_OS=$RUNNER_OS, uname=$(uname)):" >&2
+          conan profile show -pr "$PROFILE" >&2 || conan profile show >&2
 
       - name: Setup Python (hosted Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
@@ -182,7 +175,7 @@ jobs:
         shell: pwsh
         run: |
           conan profile detect --force
-          conan profile update "settings.compiler.cppstd=20" default
+          conan profile update "compiler.cppstd=20" default
           conan profile show
 
       - name: Install Ninja (Windows)
@@ -218,10 +211,14 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          # Enforce consistent C++ standard across platforms; on macOS also enforce libc++
+          # Enforce consistent C++ standard across platforms; on macOS also enforce libc++ and set arch per matrix
           CONAN_SETTINGS="-s build_type=Release -s compiler.cppstd=20"
           if [ "$RUNNER_OS" = "macOS" ]; then
             CONAN_SETTINGS="$CONAN_SETTINGS -s compiler.libcxx=libc++"
+            case "${{ matrix.suffix }}" in
+              macos-arm64) CONAN_SETTINGS="$CONAN_SETTINGS -s arch=armv8" ;;
+              macos-x86_64) CONAN_SETTINGS="$CONAN_SETTINGS -s arch=x86_64" ;;
+            esac
           fi
           conan install . --output-folder=build/yams-release $CONAN_SETTINGS --build=missing
           cmake --preset yams-release \

@@ -87,9 +87,21 @@ Result<void> UpdateCommand::execute() {
                 return executeLocal();
             };
 
-            auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
-            if (result) {
-                return Result<void>();
+            try {
+                yams::daemon::ClientConfig cfg;
+                cfg.dataDir = cli_->getDataPath();
+                cfg.enableChunkedResponses = false;
+                cfg.singleUseConnections = true;
+                cfg.requestTimeout = std::chrono::milliseconds(30000);
+                yams::daemon::DaemonClient client(cfg);
+                auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
+                if (result) {
+                    auto r = render(result.value());
+                    if (!r) return r.error();
+                    return Result<void>();
+                }
+            } catch (...) {
+                // fall through to local execution
             }
         }
 

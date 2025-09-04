@@ -333,15 +333,29 @@ public:
             }
         }
 
-        // Include content if requested
+        // Include content if requested (prefer hot extracted text when available)
         if (req.includeContent) {
-            std::ostringstream oss;
-            auto rs = ctx_.store->retrieveStream(resolvedHash, oss, nullptr);
-            if (!rs) {
-                return Error{ErrorCode::NotFound, "Document content not found"};
+            bool filled = false;
+            if (ctx_.metadataRepo && foundDoc) {
+                auto contentResult = ctx_.metadataRepo->getContent(foundDoc->id);
+                if (contentResult) {
+                    const auto& optionalContent = contentResult.value();
+                    if (optionalContent.has_value() && !optionalContent->contentText.empty()) {
+                        doc.content = optionalContent->contentText;
+                        doc.size = static_cast<uint64_t>(doc.content->size());
+                        filled = true;
+                    }
+                }
             }
-            doc.content = oss.str();
-            doc.size = static_cast<uint64_t>(doc.content->size());
+            if (!filled) {
+                std::ostringstream oss;
+                auto rs = ctx_.store->retrieveStream(resolvedHash, oss, nullptr);
+                if (!rs) {
+                    return Error{ErrorCode::NotFound, "Document content not found"};
+                }
+                doc.content = oss.str();
+                doc.size = static_cast<uint64_t>(doc.content->size());
+            }
         }
 
         // PBI-006 Phase 1: attach extracted text via MetadataRepository when requested
@@ -491,6 +505,71 @@ public:
             return out;
         }
 
+        // Tiered retrieval: hot (metadata text) vs cold (CAS reconstruct)
+        // Mode: YAMS_RETRIEVAL_MODE = hot_only|cold_only|auto (default: auto)
+        enum class Mode { Auto, HotOnly, ColdOnly };
+        Mode mode = Mode::Auto;
+        if (const char* m = std::getenv("YAMS_RETRIEVAL_MODE")) {
+            std::string v(m);
+            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+            if (v == "hot_only" || v == "hot") mode = Mode::HotOnly;
+            else if (v == "cold_only" || v == "cold") mode = Mode::ColdOnly;
+        }
+
+        // Honor per-document force_cold tag/metadata
+        bool forceCold = false;
+        std::optional<yams::metadata::DocumentInfo> targetDoc;
+        if (ctx_.metadataRepo) {
+            auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            if (docsRes) {
+                for (const auto& d : docsRes.value()) {
+                    if (d.sha256Hash == hash) { targetDoc = d; break; }
+                }
+            }
+            if (targetDoc) {
+                auto md = ctx_.metadataRepo->getAllMetadata(targetDoc->id);
+                if (md) {
+                    auto& all = md.value();
+                    auto it = all.find("force_cold");
+                    if (it != all.end()) {
+                        auto v = it->second.asString();
+                        std::string lv = v; std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
+                        forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                    }
+                    if (!forceCold && all.find("tag:force_cold") != all.end()) forceCold = true;
+                }
+            }
+        }
+
+        if (mode == Mode::HotOnly && !forceCold && ctx_.metadataRepo && targetDoc) {
+            auto c = ctx_.metadataRepo->getContent(targetDoc->id);
+            if (c && c.value().has_value()) {
+                CatDocumentResponse out;
+                out.hash = hash;
+                out.name = name;
+                out.content = c.value()->contentText;
+                out.size = out.content.size();
+                return out;
+            }
+            // if no hot content available, fall through to cold path only when in Auto mode
+            if (mode == Mode::HotOnly) {
+                return Error{ErrorCode::NotFound, "Hot content not available for document"};
+            }
+        }
+
+        // Auto: prefer hot content when available; otherwise cold
+        if (mode == Mode::Auto && !forceCold && ctx_.metadataRepo && targetDoc) {
+            auto c = ctx_.metadataRepo->getContent(targetDoc->id);
+            if (c && c.value().has_value() && !c.value()->contentText.empty()) {
+                CatDocumentResponse out;
+                out.hash = hash;
+                out.name = name;
+                out.content = c.value()->contentText;
+                out.size = out.content.size();
+                return out;
+            }
+        }
+
         // Default path (backward compatible): raw content stream
         std::ostringstream oss;
         auto rs = ctx_.store->retrieveStream(hash, oss, nullptr);
@@ -605,6 +684,34 @@ public:
             out.pattern = req.pattern;
         if (!req.tags.empty())
             out.filteredByTags = req.tags;
+
+        // Hot path: paths-only/minimal listing avoids metadata/snippet hydration entirely.
+        // Also engage when environment forces hot mode.
+        bool forceHot = false;
+        if (const char* m = std::getenv("YAMS_LIST_MODE")) {
+            std::string mode(m);
+            std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+            forceHot = (mode == "hot_only" || mode == "hot");
+        }
+        if (req.pathsOnly || forceHot) {
+            out.documents.reserve(page.size());
+            for (const auto& d : page) {
+                DocumentEntry e;
+                e.name = d.fileName;
+                e.fileName = d.fileName;
+                e.hash = d.sha256Hash;
+                e.path = d.filePath;
+                e.extension = d.fileExtension;
+                e.size = static_cast<uint64_t>(d.fileSize);
+                e.mimeType = d.mimeType;
+                e.fileType = toFileType(d.mimeType);
+                e.created = toEpochSeconds(d.createdTime);
+                e.modified = toEpochSeconds(d.modifiedTime);
+                e.indexed = toEpochSeconds(d.indexedTime);
+                out.documents.push_back(std::move(e));
+            }
+            return out;
+        }
 
         // Build entries in parallel when large pages, else sequential
         const bool useParallel = page.size() >= 200 || std::getenv("YAMS_LIST_CONCURRENCY");

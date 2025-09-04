@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/grep_mode_tls.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
@@ -210,6 +211,24 @@ public:
         const auto& docs = docsRes.value();
         response.filesSearched = docs.size();
 
+        // Mode selection for tiered grep
+        enum class Mode { Auto, HotOnly, ColdOnly };
+        Mode mode = Mode::Auto;
+        // Thread-local override from streaming fast/full execution, if set
+        switch (get_grep_mode_tls()) {
+            case GrepExecMode::HotOnly: mode = Mode::HotOnly; break;
+            case GrepExecMode::ColdOnly: mode = Mode::ColdOnly; break;
+            default: {
+                if (const char* m = std::getenv("YAMS_GREP_MODE")) {
+                    std::string v(m);
+                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                    if (v == "hot_only" || v == "hot") mode = Mode::HotOnly;
+                    else if (v == "cold_only" || v == "cold") mode = Mode::ColdOnly;
+                }
+                break;
+            }
+        }
+
         // Dynamic, bounded parallelism
         size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
         size_t rec = hw > 1 ? (hw - 1) : 1;
@@ -257,31 +276,109 @@ public:
                 }
                 if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) continue;
 
-                std::ostringstream oss;
-                auto rs = ctx_.store->retrieveStream(doc.sha256Hash, oss, nullptr);
-                if (!rs) continue;
-                const std::string content = oss.str();
-                auto lines = splitToLines(content);
+                // Respect per-document force_cold (metadata key or tag)
+                bool forceCold = false;
+                if (ctx_.metadataRepo) {
+                    auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                    if (md) {
+                        auto& all = md.value();
+                        auto it = all.find("force_cold");
+                        if (it != all.end()) {
+                            auto v = it->second.asString();
+                            std::string lv = v;
+                            std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
+                            forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                        }
+                        if (!forceCold && all.find("tag:force_cold") != all.end()) {
+                            forceCold = true;
+                        }
+                    }
+                }
+
+                auto literalMatch = [&](const std::string& line, const std::string& needle) -> bool {
+                    return line.find(needle) != std::string::npos;
+                };
+                auto evalMatch = [&](const std::string& line) -> bool {
+                    if (req.literalText && !req.word && !req.ignoreCase) {
+                        return literalMatch(line, pat);
+                    }
+                    return std::regex_search(line, re);
+                };
 
                 GrepFileResult fileResult; fileResult.file = doc.filePath; fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
                 fileResult.matchCount = 0;
-                for (size_t li = 0; li < lines.size(); ++li) {
-                    const std::string& line = lines[li];
-                    bool matched = std::regex_search(line, re); if (req.invert) matched = !matched; if (!matched) continue;
+                size_t ln_counter = 0;
+                auto onLine = [&](const std::string& line) {
+                    ++ln_counter;
+                    bool matched = evalMatch(line);
+                    if (req.invert) matched = !matched;
+                    if (!matched) return;
                     fileResult.matchCount++;
-                    if (!req.count) {
-                        GrepMatch gm; gm.matchType = "regex"; gm.confidence = 1.0; if (req.lineNumbers) gm.lineNumber = li + 1; gm.line = line;
-                        if (!req.invert) { std::smatch sm; if (std::regex_search(line, sm, re)) { gm.columnStart = static_cast<size_t>(sm.position()) + 1; gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length()); } }
-                        if (beforeContext > 0) { size_t start = (li > static_cast<size_t>(beforeContext)) ? (li - beforeContext) : 0; for (size_t j = start; j < li; ++j) gm.before.push_back(lines[j]); }
-                        if (afterContext > 0) { size_t end = std::min(lines.size(), li + 1 + static_cast<size_t>(afterContext)); for (size_t j = li + 1; j < end; ++j) gm.after.push_back(lines[j]); }
-                        fileResult.matches.push_back(std::move(gm));
+                    if (req.count) return;
+                    GrepMatch gm; gm.matchType = req.literalText ? std::string("literal") : std::string("regex"); gm.confidence = 1.0;
+                    if (req.lineNumbers) gm.lineNumber = ln_counter;
+                    gm.line = line;
+                    if (!req.invert && !req.literalText) {
+                        std::smatch sm; if (std::regex_search(line, sm, re)) { gm.columnStart = static_cast<size_t>(sm.position()) + 1; gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length()); }
+                    } else if (!req.invert && req.literalText) {
+                        auto pos = line.find(pat); if (pos != std::string::npos) { gm.columnStart = pos + 1; gm.columnEnd = gm.columnStart + pat.size(); }
                     }
-                    if (req.maxCount > 0 && static_cast<int>(fileResult.matchCount) >= req.maxCount) break;
+                    fileResult.matches.push_back(std::move(gm));
+                };
+
+                // Hot path: process extracted text line-by-line without touching CAS
+                if (mode == Mode::HotOnly && !forceCold) {
+                    if (ctx_.metadataRepo) {
+                        auto c = ctx_.metadataRepo->getContent(doc.id);
+                        if (c && c.value().has_value()) {
+                            std::istringstream iss(c.value()->contentText);
+                            std::string line; while (std::getline(iss, line)) { if (!line.empty() && line.back()=='\r') line.pop_back(); onLine(line); if (req.maxCount>0 && static_cast<int>(fileResult.matchCount)>=req.maxCount) break; }
+                        } else { continue; }
+                    } else { continue; }
+                } else {
+                    // Cold path: stream content and scan lines incrementally
+                    struct LineScanBuf : public std::streambuf {
+                        std::string buffer;
+                        std::function<void(const std::string&)> cb;
+                        explicit LineScanBuf(std::function<void(const std::string&)> f)
+                            : cb(std::move(f)) {}
+                        int overflow(int ch) override {
+                            if (ch == traits_type::eof())
+                                return 0;
+                            char c = static_cast<char>(ch);
+                            if (c == '\n') {
+                                cb(buffer);
+                                buffer.clear();
+                            } else if (c != '\r') {
+                                buffer.push_back(c);
+                            }
+                            return ch;
+                        }
+                        std::streamsize xsputn(const char* s, std::streamsize n) override {
+                            for (std::streamsize i = 0; i < n; ++i)
+                                overflow(static_cast<unsigned char>(s[i]));
+                            return n;
+                        }
+                    };
+                    LineScanBuf sb(onLine); std::ostream os(&sb);
+                    auto rs = ctx_.store->retrieveStream(doc.sha256Hash, os, nullptr); if (!rs) continue;
+                }
+                
+                // Early exit shaping for files-only/paths-only
+                if (req.filesWithMatches || req.pathsOnly || req.filesWithoutMatch) {
+                    // Defer formatting to caller; we just track counts and file sets below
                 }
 
                 std::lock_guard<std::mutex> lk(outMutex);
-                if (fileResult.matchCount > 0) { totalMatches += static_cast<size_t>(fileResult.matchCount); regexMatches += static_cast<size_t>(fileResult.matchCount); filesWith.push_back(fileResult.file); outResults.push_back(std::move(fileResult)); }
-                else { filesWithout.push_back(doc.filePath); }
+                if (fileResult.matchCount > 0) {
+                    totalMatches += static_cast<size_t>(fileResult.matchCount);
+                    regexMatches += static_cast<size_t>(fileResult.matchCount);
+                    filesWith.push_back(fileResult.file);
+                    if (!req.filesWithMatches && !req.pathsOnly)
+                        outResults.push_back(std::move(fileResult));
+                } else {
+                    filesWithout.push_back(doc.filePath);
+                }
             }
         };
 
@@ -298,9 +395,8 @@ public:
         response.searchStats["workers"] = std::to_string(workers);
         response.searchStats["files_scanned"] = std::to_string(response.filesSearched);
 
-        // Perform semantic search unless disabled or incompatible output modes
-        if (!req.regexOnly && !req.count && !req.filesWithMatches && !req.filesWithoutMatch &&
-            !req.pathsOnly && req.semanticLimit > 0) {
+        // Perform semantic search unless disabled; allow even in count/files-only/paths-only modes
+        if (!req.regexOnly && req.semanticLimit > 0) {
             try {
                 auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
                 yams::search::SearchEngineBuilder builder;

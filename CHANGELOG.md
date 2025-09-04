@@ -3,9 +3,52 @@
 All notable changes to YAMS (Yet Another Memory System) will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 SourceHut: https://sr.ht/~trvon/yams/
 
+## [v0.6.4] - 2025-01-05
+
+### Known Issues
+- Daemon not showing correct storage details
+
+### Added
+- Streaming metrics: Track and expose `stream_total_streams`, `stream_batches_emitted`, `stream_keepalives`, and average `stream_ttfb_avg_ms` via `yams stats` (JSON and technical details in text mode).
+- Grep performance: line-by-line streaming scanner (no full-file buffering) and literal fast-path for `--literal` without word-bounds/case-folding.
+- Add performance: parallel directory traversal/processing with bounded workers.
+- Session helpers: `yams session pin|list|unpin|warm` for hot data management (feature is experimental and may not work reliably).
+
+### Changed
+- List paths-only mode now avoids snippet/metadata hydration end-to-end for faster responses; honors `pathsOnly` through daemon to services.
+- Retrieval (cat/get) prefers extracted text (hot) when available before falling back to CAS (cold), respecting per-document `force_cold`.
+- Grep hot/cold race: daemon emits hot first-burst and cancels cold; batch/first-burst tuning supported via env for testing.
+- Delete command now mirrors `rm` ergonomics:
+  - `rm` alias retained; `-f` is an alias for `--force`; `-r` is an alias for `--recursive`
+  - Positional targets supported (names/paths/patterns); when a single target is provided with `-r`, it is treated as a directory
+  - Multiple positional targets are treated as a names list
+  - Selector requirement relaxed when positional targets are used; mode (directory/pattern/name) is inferred heuristically
+- List paths-only mode now avoids snippet/metadata hydration end-to-end for faster responses; honors `pathsOnly` through daemon to services.
+- Retrieval (cat/get) prefers extracted text (hot) when available before falling back to CAS (cold), respecting per-document `force_cold`.
+- Grep hot/cold race: daemon emits hot first-burst and cancels cold; batch/first-burst tuning supported via env for testing.
+- CMake: Platform-aware linker selection.
+  - Removed hard-coded `-fuse-ld=lld` from presets.
+  - Toolchain now attempts `-fuse-ld=lld` only on non-Apple platforms when supported, gated by `YAMS_PREFER_LLD` (default ON).
+  - macOS Release builds use `-Wl,-dead_strip` instead of GNU `--gc-sections`.
+- Release workflow (macOS): Align Conan arch with target:
+  - `macos-arm64` uses `-s arch=armv8`
+  - `macos-x86_64` uses `-s arch=x86_64`
+
+### Fixed
+- Streaming search finalization: avoid infinite keepalive loop on empty results; keepalive cadence configurable via `YAMS_KEEPALIVE_MS`.
+- Stats command: `yams stats help` now prints a concise system metrics guide.
+- MCP server timeouts with some clients:
+  - Async handlers now run detached (no premature task destruction), preventing “Context server request timeout”
+  - Server sends `notifications/ready` after client `notifications/initialized` for better client compatibility
+  - Stdio framing hardened to consume trailing CR/LF after payloads to avoid parse glitches across clients
+- Streaming search finalization: avoid infinite keepalive loop on empty results; keepalive cadence configurable via `YAMS_KEEPALIVE_MS`.
+- Stats command: `yams stats help` now prints a concise system metrics guide.
+- Docker: ARM64 build now mirrors AMD64 by using Buildx with proper tag suffixes (-arm64) and pushes versioned and latest tags. Multi-arch manifest creation no longer fails with "not found ... -arm64".
+- Release workflow (macOS/Linux): Conan 2 profile updates use correct keys (compiler.cppstd, compiler.libcxx) via `conan profile update`; removed brittle sed/grep edits that broke on macOS.
+- Release workflow (Windows): Corrected Conan 2 profile update syntax (`compiler.cppstd=20`).
 
 ## [v0.6.3] - 2025-01-04
 

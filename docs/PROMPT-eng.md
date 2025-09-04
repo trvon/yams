@@ -10,6 +10,9 @@ This document establishes a unified, machine-readable, and authoritative policy 
 - Use only explicitly permitted tools; default output to plain text unless markdown is specifically requested.
 - Pre-watch default: update and search code via YAMS. After editing files, re-index with YAMS (no external grep/find/rg).
 - All codebase search must use YAMS (search/grep subcommands). Do not use system utilities like grep/find/rg for project queries.
+ - Use `yams session` to manage an interactive session: pin frequently used paths/tags/metadata and warm them for faster retrieval.
+ - Do not run `yams init`; just use `yams add` to index files. The daemon/storage auto-initializes as needed.
+ - Prefer a single compound `yams search` query (multiple terms and/or quoted phrases) over multiple sequential searches; avoid `yams grep` unless explicitly available.
 
 ---
 
@@ -25,10 +28,12 @@ This document establishes a unified, machine-readable, and authoritative policy 
 - YAMS operates natively in the shell; all interaction should be via direct CLI commands.
 
 #### Required YAMS Workflows
-- **Prior to any web/external search:**
+- **Prior to any web/external search (use one compound query):**
   ```bash
-  yams search "<query>" --limit 20
-  yams search "<query>" --fuzzy --similarity 0.7
+  # Prefer a single compound query (multiple terms/phrases)
+  yams search "term1 term2 \"important phrase\"" --limit 50
+  # Optionally broaden with fuzzy matching in the same request
+  # yams search "term1 term2 \"important phrase\"" --fuzzy --similarity 0.7 --limit 50
   # Only search the web if no relevant results in YAMS
   ```
 - **After every web/external result:**
@@ -40,6 +45,10 @@ This document establishes a unified, machine-readable, and authoritative policy 
   yams list --recent 20
   yams add myfile.txt --tags "code,working"
   yams get <hash>
+  yams rm -rf ./build
+  yams rm '*.log'
+  yams delete fileA fileB fileC
+  yams delete -r ./dist
   ```
 - **Pre-Watch Code Update Workflow (until folder track/watch is available):**
   ```bash
@@ -86,6 +95,46 @@ This document establishes a unified, machine-readable, and authoritative policy 
   # Regex matches across indexed code (prefer YAMS grep over system grep)
   yams grep "class\\s+IndexingPipeline" --include="**/*.hpp,**/*.cpp"
   ```
+- **Session + Hot Data (Phase 1):**
+   ```bash
+   # Pin items by path pattern; adds a `pinned` tag to matching docs and stores a local pin list
+   # Notes:
+   # - Pins are tracked locally in: $XDG_STATE_HOME/yams/pinned.json (or ~/.local/state/yams/pinned.json)
+   # - The repository is also updated: matching docs receive tag "pinned" and optional tags/metadata you provide
+   # - When updating metadata, prefer hash-based updates when available to avoid name collisions; otherwise ensure names are unique or filter your pattern to the intended scope.
+   # - Planned flags: `yams session warm --limit N --parallel P` to control scope and concurrency for warming large pin sets.
+   # - Planned output: `yams session list --json` to print the local pins registry for scripting pipelines.
+   # - Quote glob patterns to avoid your shell expanding them before YAMS sees them
+
+   # Basic pin of markdown docs with an extra tag and metadata
+   yams session pin --path "docs/**/*.md" --tag notes --meta owner=team
+
+   # Pin code files with multiple --tag and multiple --meta entries
+   yams session pin --path "src/**/*.{cpp,hpp,h}" --tag pinned --tag hot --meta purpose=index --meta sprint=Q1
+
+   # List locally pinned patterns/entries (client-side pin registry)
+   yams session list
+
+   # Unpin items (removes 'pinned' tag and sets pinned=false metadata on matching docs)
+   yams session unpin --path "docs/**/*.md"
+
+   # Warm pinned items:
+   # - Hydrates snippets/metadata and exercises extraction paths for faster follow-up queries
+   # - Uses the local pin list to find and read matching documents
+   yams session warm
+
+   # Examples to prevent accidental shell expansion — always quote patterns:
+   yams session pin --path "*.md" --tag quick
+   yams session unpin --path "src/**/experimental/*"
+   ```
+- **Daemon Keepalive (PBI‑008):**
+   - Configure keepalive interval via env: `YAMS_KEEPALIVE_MS=500`.
+   - Streaming search now finalizes properly on empty results (no hangs).
+ - **Hot/Cold Modes (PBI‑008):**
+   - List: `YAMS_LIST_MODE=hot_only|cold_only|auto` (paths-only implies hot).
+   - Grep: `YAMS_GREP_MODE=hot_only|cold_only|auto` (hot uses extracted text; cold scans CAS bytes).
+   - Retrieval (cat/get): `YAMS_RETRIEVAL_MODE=hot_only|cold_only|auto` (hot uses extracted text cache when present).
+   - Force-cold per document: set tag `force_cold` or metadata `force_cold=true` to always prefer cold path regardless of global mode.
 - **Codebase Restore (from YAMS)**
   ```bash
   # Restore a file/doc by name or hash
@@ -288,7 +337,7 @@ yams search "sprint=2024-Q1" --paths-only
     --tags "task,pbi-001" \
     --metadata "pbi=001" \
     --metadata "status=in_progress"
-  
+
   # Find all tasks for a PBI
   yams search "pbi=001" --paths-only | grep "task-"
   ```

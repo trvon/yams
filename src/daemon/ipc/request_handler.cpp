@@ -6,6 +6,7 @@
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/ipc/streaming_processor.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/ipc/stream_metrics_registry.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -1314,6 +1315,9 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     // Stream chunks until we get the last one
     bool last_chunk_received = false;
     size_t chunk_count = 0;
+    bool ttfb_recorded = false;
+    auto header_time = std::chrono::steady_clock::now();
+    StreamMetricsRegistry::instance().incStreams(1);
 
     while (!last_chunk_received) {
         spdlog::debug("stream_chunks: preparing chunk #{} (request_id={})", chunk_count + 1,
@@ -1343,6 +1347,17 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 }
             },
             chunk_result.data);
+        // Streaming metrics: batches, keepalives, TTFB
+        StreamMetricsRegistry::instance().incBatches(1);
+        if (item_count == 0 && !last_chunk_received) {
+            StreamMetricsRegistry::instance().incKeepalive(1);
+        }
+        if (!ttfb_recorded && item_count > 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - header_time).count();
+            if (ms >= 0) StreamMetricsRegistry::instance().addTtfb(static_cast<uint64_t>(ms));
+            ttfb_recorded = true;
+        }
         spdlog::debug("stream_chunks: chunk #{} type={} items={} last={} (request_id={})",
                       chunk_count + 1, msg_type, item_count, last_chunk_received, request_id);
 

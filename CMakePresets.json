@@ -17,11 +17,7 @@
       "name": "yams-debug-tidy",
       "displayName": "YAMS Debug Tidy (Conan + Ninja)",
       "description": "Conan toolchain + Ninja Debug with strict clang-tidy, warnings-as-errors, and Unity off",
-      "inherits": [
-        "debug-common",
-        "ccache",
-        "lld"
-      ],
+      "inherits": ["debug-common", "ccache", "lld"],
       "toolchainFile": "${sourceDir}/build/yams-debug/build/Debug/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "YAMS_USE_CONAN": "ON",
@@ -71,22 +67,13 @@
     },
     {
       "name": "lld",
-      "hidden": true,
-      "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
-        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
-        "CMAKE_MODULE_LINKER_FLAGS": "-fuse-ld=lld"
-      }
+      "hidden": true
     },
     {
       "name": "yams-debug",
       "displayName": "YAMS Debug (Conan + Ninja)",
       "description": "Conan toolchain + Ninja Debug with tests/tracing/unity + strict clang-tidy + optional ccache/lld",
-      "inherits": [
-        "debug-common",
-        "ccache",
-        "lld"
-      ],
+      "inherits": ["debug-common", "ccache", "lld"],
       "toolchainFile": "${sourceDir}/build/${presetName}/build/Debug/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "YAMS_USE_CONAN": "ON",
@@ -100,10 +87,7 @@
       "name": "yams-release",
       "displayName": "YAMS Release (Conan + Ninja)",
       "description": "Conan toolchain + Ninja Release with IPO + optional lld",
-      "inherits": [
-        "release-common",
-        "lld"
-      ],
+      "inherits": ["release-common", "lld"],
       "toolchainFile": "${sourceDir}/build/${presetName}/build/Release/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "YAMS_USE_CONAN": "ON"
@@ -113,11 +97,7 @@
       "name": "yams-debug-no-conan",
       "displayName": "YAMS Debug (System deps + Ninja)",
       "description": "System dependencies Debug with tests/tracing/unity + strict clang-tidy + optional ccache/lld",
-      "inherits": [
-        "debug-common",
-        "ccache",
-        "lld"
-      ],
+      "inherits": ["debug-common", "ccache", "lld"],
       "cacheVariables": {
         "YAMS_USE_CONAN": "OFF",
         "CMAKE_C_CLANG_TIDY": "",
@@ -130,10 +110,7 @@
       "name": "yams-release-no-conan",
       "displayName": "YAMS Release (System deps + Ninja)",
       "description": "System dependencies Release with IPO + optional lld",
-      "inherits": [
-        "release-common",
-        "lld"
-      ],
+      "inherits": ["release-common", "lld"],
       "cacheVariables": {
         "YAMS_USE_CONAN": "OFF"
       }
@@ -208,18 +185,12 @@
     {
       "name": "yams-debug",
       "configurePreset": "yams-debug",
-      "generators": [
-        "TGZ",
-        "ZIP"
-      ]
+      "generators": ["TGZ", "ZIP"]
     },
     {
       "name": "yams-release",
       "configurePreset": "yams-release",
-      "generators": [
-        "TGZ",
-        "ZIP"
-      ]
+      "generators": ["TGZ", "ZIP"]
     }
   ]
 }

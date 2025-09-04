@@ -21,7 +21,7 @@ environment:
   STAGE_DIR: stage
   # Use git.tag() to dynamically set the version from the Git tag.
   # If the build is not triggered by a tag, it defaults to "0.0.0-dev".
-  YAMS_VERSION: git.tag(default="0.0.0-dev")
+  YAMS_VERSION: git.tag(default="0.6.0")
 
 packages:
   # Install build dependencies. Arch Linux has up-to-date packages.
@@ -30,6 +30,9 @@ packages:
   - conan # Use distro-packaged Conan (v2) instead of pip to avoid PEP 668 issues
   - ninja # Optional but recommended for CMake presets using Ninja
   - zip
+  - lld
+  - clang
+  - llvm
 
 tasks:
   - setup: |
@@ -49,17 +52,15 @@ tasks:
       echo "Starting build for version $CLEAN_VERSION"
 
       # Run conan install to fetch dependencies and generate CMake toolchain/deps.
-      conan install . --output-folder=${BUILD_DIR} -s build_type=Release -s compiler.cppstd=20 -g CMakeToolchain -g CMakeDeps --build=missing
+      conan install . --output-folder=${BUILD_DIR} -s build_type=Release --build=missing
 
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
         -DYAMS_BUILD_PROFILE=release \
         -DYAMS_VERSION="${CLEAN_VERSION}" \
-        -DCMAKE_CXX_STANDARD=20 \
-        -DCMAKE_INSTALL_PREFIX="$PWD/${STAGE_DIR}"
 
       # Build the project.
-      cmake --build --preset yams-release --parallel
+      cmake --build --preset yams-release
 
       # Install the built artifacts into the staging directory.
       cmake --install "${BUILD_DIR}" --config Release

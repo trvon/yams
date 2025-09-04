@@ -47,7 +47,7 @@ private:
     bool regexOnly_ = false;
     // Default to streaming for quicker first results; user can opt out
     bool disableStreaming_ = false;
-    size_t semanticLimit_ = 3;
+    size_t semanticLimit_ = 10;
     std::string filterTags_;
     bool matchAllTags_ = false;
     std::string colorMode_ = "auto";
@@ -99,7 +99,7 @@ public:
         // Hybrid search options
         cmd->add_flag("--regex-only", regexOnly_, "Disable semantic search, use regex only");
         cmd->add_option("--semantic-limit", semanticLimit_, "Number of semantic results to show")
-            ->default_val(3);
+            ->default_val(10);
 
         // Tag filtering options
         cmd->add_option("--tags", filterTags_,
@@ -175,25 +175,59 @@ public:
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
                     // Handle different output modes
                     if (pathsOnly_ || filesOnly_) {
-                        // Collect unique file paths
+                        // Show files from regex and semantic results (semantic marked with confidence when no regex)
                         std::set<std::string> files;
+                        std::map<std::string, bool> hasRegex;
+                        std::map<std::string, double> semOnlyConf;
+
                         for (const auto& match : resp.matches) {
                             files.insert(match.file);
+                            if (match.matchType == "semantic") {
+                                auto it = semOnlyConf.find(match.file);
+                                if (it == semOnlyConf.end() || match.confidence > it->second) {
+                                    semOnlyConf[match.file] = match.confidence;
+                                }
+                            } else {
+                                hasRegex[match.file] = true;
+                            }
                         }
+
                         if (files.empty()) {
                             std::cout << "(no results)" << std::endl;
                         } else {
                             for (const auto& file : files) {
-                                std::cout << file << std::endl;
+                                auto itR = hasRegex.find(file);
+                                auto itS = semOnlyConf.find(file);
+                                if ((itR == hasRegex.end() || !itR->second) && itS != semOnlyConf.end()) {
+                                    std::cout << "[S:" << std::fixed << std::setprecision(2) << itS->second << "] " << file << std::endl;
+                                } else {
+                                    std::cout << file << std::endl;
+                                }
                             }
                         }
                     } else if (countOnly_) {
-                        // Count matches per file
+                        // Count regex matches per file; also surface semantic suggestions separately
                         std::map<std::string, size_t> fileCounts;
+                        std::set<std::string> regexFiles;
+                        std::map<std::string, double> semanticOnly;
+
                         for (const auto& match : resp.matches) {
-                            fileCounts[match.file]++;
+                            if (match.matchType == "semantic") {
+                                if (regexFiles.find(match.file) == regexFiles.end()) {
+                                    auto it = semanticOnly.find(match.file);
+                                    if (it == semanticOnly.end() || match.confidence > it->second) {
+                                        semanticOnly[match.file] = match.confidence;
+                                    }
+                                }
+                            } else {
+                                regexFiles.insert(match.file);
+                                fileCounts[match.file]++;
+                                // If this file was previously marked as semantic-only, it is no longer semantic-only
+                                semanticOnly.erase(match.file);
+                            }
                         }
-                        if (fileCounts.empty()) {
+
+                        if (fileCounts.empty() && semanticOnly.empty()) {
                             std::cout << "(no results)" << std::endl;
                         } else {
                             for (const auto& [file, count] : fileCounts) {
@@ -201,6 +235,12 @@ public:
                                     std::cout << file << ":";
                                 }
                                 std::cout << count << std::endl;
+                            }
+                            if (!semanticOnly.empty()) {
+                                std::cout << "Semantic suggestions:" << std::endl;
+                                for (const auto& [file, conf] : semanticOnly) {
+                                    std::cout << "[S:" << std::fixed << std::setprecision(2) << conf << "] " << file << std::endl;
+                                }
                             }
                         }
                     } else {
@@ -526,9 +566,9 @@ private:
             }
         }
 
-        // If not regex-only mode and not in special output modes, also perform semantic search
+        // If not regex-only mode, also perform semantic search (even in files-only/paths-only/count modes)
         std::vector<search::HybridSearchResult> semanticResults;
-        if (!regexOnly_ && !filesOnly_ && !pathsOnly_ && !countOnly_ && !filesWithoutMatch_) {
+        if (!regexOnly_) {
             try {
                 // Build HybridSearchEngine for semantic search
                 auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
@@ -587,9 +627,37 @@ private:
 
         // Output results based on mode
         if (filesOnly_ || pathsOnly_) {
-            // Just output file paths
-            for (const auto& file : matchingFiles) {
-                std::cout << file << std::endl;
+            // Show files from regex and semantic results (semantic marked with confidence when no regex)
+            std::set<std::string> files(matchingFiles.begin(), matchingFiles.end());
+            std::map<std::string, double> semOnlyConf;
+
+            // Merge semantic paths (only when not already matched by regex)
+            for (const auto& result : semanticResults) {
+                auto pathIt = result.metadata.find("path");
+                if (pathIt != result.metadata.end()) {
+                    const std::string& p = pathIt->second;
+                    if (files.find(p) == files.end()) {
+                        double conf = result.hybrid_score > 0 ? result.hybrid_score : result.vector_score;
+                        auto itc = semOnlyConf.find(p);
+                        if (itc == semOnlyConf.end() || conf > itc->second) {
+                            semOnlyConf[p] = conf;
+                        }
+                        files.insert(p);
+                    }
+                }
+            }
+
+            if (files.empty()) {
+                std::cout << "(no results)" << std::endl;
+            } else {
+                for (const auto& file : files) {
+                    auto itc = semOnlyConf.find(file);
+                    if (itc != semOnlyConf.end()) {
+                        std::cout << "[S:" << std::fixed << std::setprecision(2) << itc->second << "] " << file << std::endl;
+                    } else {
+                        std::cout << file << std::endl;
+                    }
+                }
             }
         } else if (countOnly_) {
             // Output counts

@@ -7,6 +7,9 @@
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+
 #include <mutex>
 
 #include <spdlog/spdlog.h>
@@ -51,10 +54,74 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 
 // Async variant to be used once MCP handlers become coroutine-based.
 
+// No-op async bridge here; MCP dispatch below uses a detached thread
+// to run yams::Task<> to completion off the io thread.
+
 } // namespace
 
 // Define static mutex for StdioTransport
 std::mutex StdioTransport::out_mutex_;
+
+// Non-blocking send: enqueue message for writer thread
+void StdioTransport::sendAsync(const json& message) {
+    if (state_.load() != TransportState::Connected) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(queueMutex_);
+        outQueue_.push_back(message);
+    }
+    queueCv_.notify_one();
+}
+
+// Dedicated writer thread: drains queue and writes framed messages to stdout
+void StdioTransport::writerLoop() {
+    while (true) {
+        json message;
+        {
+            std::unique_lock<std::mutex> lk(queueMutex_);
+            queueCv_.wait(lk, [&] {
+                return !outQueue_.empty() || state_.load() == TransportState::Closing ||
+                       (externalShutdown_ && *externalShutdown_);
+            });
+            if (!outQueue_.empty()) {
+                message = std::move(outQueue_.front());
+                outQueue_.pop_front();
+            }
+        }
+
+        if (!message.is_null()) {
+            auto currentState = state_.load();
+            if (currentState == TransportState::Connected || currentState == TransportState::Closing) {
+                std::lock_guard<std::mutex> lock(out_mutex_);
+                const std::string payload = message.dump();
+
+                if (outbuf_ && std::cout.rdbuf() != outbuf_) {
+                    (void)std::cout.rdbuf(outbuf_);
+                }
+
+                // LSP/MCP framing
+                std::cout << "Content-Length: " << payload.size() << "\r\n";
+                std::cout << "Content-Type: application/json\r\n\r\n";
+                std::cout << payload;
+                std::cout << "\r\n";
+                std::cout.flush();
+            }
+        }
+
+        // Graceful exit: on close and queue drained, or external shutdown
+        if (state_.load() == TransportState::Closing) {
+            std::unique_lock<std::mutex> lk(queueMutex_);
+            if (outQueue_.empty()) {
+                break;
+            }
+        }
+        if (externalShutdown_ && *externalShutdown_) {
+            break;
+        }
+    }
+    writerRunning_.store(false);
+}
 
 // StdioTransport implementation
 StdioTransport::StdioTransport() {
@@ -68,6 +135,10 @@ StdioTransport::StdioTransport() {
     outbuf_ = std::cout.rdbuf();
     inbuf_ = std::cin.rdbuf();
     state_.store(TransportState::Connected);
+    // Start outbound writer thread for non-blocking sends
+    writerRunning_.store(true);
+    writerThread_ = std::thread(&StdioTransport::writerLoop, this);
+    writerThread_.detach();
 }
 
 void StdioTransport::send(const json& message) {
@@ -208,10 +279,13 @@ MessageResult StdioTransport::receive() {
                     recordError();
                     return Error{ErrorCode::NetworkError, "Short read on Content-Length payload"};
                 }
-                // Compatibility: consume a single trailing newline after framed payload, if present
+                // Compatibility: consume any trailing CR/LF after framed payload, if present
                 if (in.rdbuf() && in.rdbuf()->in_avail() > 0) {
-                    int c = in.peek();
-                    if (c == '\n') { (void)in.get(); }
+                    while (in.rdbuf()->in_avail() > 0) {
+                        int c = in.peek();
+                        if (c == '\r' || c == '\n') { (void)in.get(); }
+                        else { break; }
+                    }
                 }
 
                 // Parse JSON message using safe parser
@@ -316,23 +390,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         daemon_client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
     }
     // Legacy pool config removed
-    // Quick daemon health probe via DaemonClient (prefer ping; fallback to status)
-    try {
-        yams::daemon::DaemonClient probe{};
-        auto pong = yams::cli::run_sync(probe.ping(), std::chrono::seconds(2));
-        if (pong) {
-            spdlog::info("Daemon reachable (ping)");
-        } else {
-            auto st = yams::cli::run_sync(probe.status(), std::chrono::seconds(2));
-            if (st) {
-                spdlog::info("Daemon reachable (status)");
-            } else {
-                spdlog::debug("Probe failed: {}", pong ? "" : pong.error().message);
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Daemon probe exception (non-fatal): {}", e.what());
-    }
+
 
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
@@ -348,6 +406,13 @@ void MCPServer::start() {
     }
 
     spdlog::info("MCP server started");
+    // Start a small fixed thread pool for request handling (avoid unbounded detached threads)
+    {
+        size_t hc = std::thread::hardware_concurrency();
+        if (hc == 0) hc = 2;
+        size_t threads = std::min<size_t>(4, std::max<size_t>(2, hc));
+        startThreadPool(threads);
+    }
 
     // Main message loop with modern error handling
     while (running_ && (!externalShutdown_ || !*externalShutdown_)) {
@@ -385,53 +450,51 @@ void MCPServer::start() {
             std::string method = request.value("method", "");
             // Accept initialized notifications from clients (both MCP and legacy forms)
             if (method == "initialized" || method == "notifications/initialized") {
-                // Client signals readiness; record and do not respond (notification)
+                // Client signals readiness; record and send server readiness notification
                 initialized_.exchange(true);
                 spdlog::info("MCP client sent notifications/initialized");
+                transport_->send(createReadyNotification());
                 continue;
             }
             if (method == "search") {
                 auto id = request.value("id", json{});
                 auto params = request.value("params", json::object());
 
-                // Launch coroutine on IO context thread to handle the request asynchronously
-                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                enqueueTask([this, id, params]() mutable {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPSearchRequest::fromJson(params);
                         auto result = co_await handleSearchDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         } else {
-                            auto err =
-                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            transport_->send(err);
+                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
                         }
                         co_return;
                     }();
-                    (void)task; // fire-and-forget
+                    try { task.get(); } catch (...) {}
                 });
 
-                // Skip synchronous handling for this request
                 continue;
             } else if (method == "grep") {
                 auto id = request.value("id", json{});
                 auto params = request.value("params", json::object());
 
-                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                enqueueTask([this, id, params]() mutable {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPGrepRequest::fromJson(params);
                         auto result = co_await handleGrepDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         } else {
                             auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            transport_->send(err);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
                         }
                         co_return;
                     }();
-                    (void)task; // fire-and-forget
+                    try { task.get(); } catch (...) {}
                 });
 
                 continue;
@@ -439,20 +502,20 @@ void MCPServer::start() {
                 auto id = request.value("id", json{});
                 auto params = request.value("params", json::object());
 
-                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                enqueueTask([this, id, params]() mutable {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPListDocumentsRequest::fromJson(params);
                         auto result = co_await handleListDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         } else {
                             auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            transport_->send(err);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
                         }
                         co_return;
                     }();
-                    (void)task; // fire-and-forget
+                    try { task.get(); } catch (...) {}
                 });
 
                 continue;
@@ -460,20 +523,20 @@ void MCPServer::start() {
                 auto id = request.value("id", json{});
                 auto params = request.value("params", json::object());
 
-                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                enqueueTask([this, id, params]() mutable {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPRetrieveDocumentRequest::fromJson(params);
                         auto result = co_await handleRetrieveDocument(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         } else {
                             auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            transport_->send(err);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
                         }
                         co_return;
                     }();
-                    (void)task; // fire-and-forget
+                    try { task.get(); } catch (...) {}
                 });
 
                 continue;
@@ -481,20 +544,20 @@ void MCPServer::start() {
                 auto id = request.value("id", json{});
                 auto params = request.value("params", json::object());
 
-                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, params] {
+                enqueueTask([this, id, params]() mutable {
                     auto task = [this, id, params]() -> yams::Task<void> {
                         auto mcpReq = MCPStoreDocumentRequest::fromJson(params);
                         auto result = co_await handleStoreDocument(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         } else {
                             auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            transport_->send(err);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
                         }
                         co_return;
                     }();
-                    (void)task; // fire-and-forget
+                    try { task.get(); } catch (...) {}
                 });
 
                 continue;
@@ -504,11 +567,11 @@ void MCPServer::start() {
                 auto toolName = params.value("name", "");
                 auto toolArgs = params.value("arguments", json::object());
 
-                yams::daemon::GlobalIOContext::instance().get_io_context().post([this, id, toolName, toolArgs] {
+                enqueueTask([this, id, toolName, toolArgs]() mutable {
                     auto task = [this, id, toolName, toolArgs]() -> yams::Task<void> {
                         if (!toolRegistry_) {
                             auto err = createError(id, protocol::INTERNAL_ERROR, "Tool registry not initialized");
-                            transport_->send(err);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
                             co_return;
                         }
 
@@ -517,16 +580,16 @@ void MCPServer::start() {
                         // Wrap non-MCP-shaped results into MCP content format for compatibility with MCP clients
                         if (toolResult.contains("content") && toolResult["content"].is_array()) {
                             auto resp = createResponse(id, toolResult);
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         } else {
                             json wrapped = {
                                 {"content", json::array({json{{"type", "text"}, {"text", toolResult.dump(2)}}})}};
                             auto resp = createResponse(id, wrapped);
-                            transport_->send(resp);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
                         }
                         co_return;
                     }();
-                    (void)task; // fire-and-forget
+                    try { task.get(); } catch (...) {}
                 });
 
                 continue;
@@ -557,6 +620,7 @@ void MCPServer::start() {
         }
     }
 
+    stopThreadPool();
     running_ = false;
     spdlog::info("MCP server stopped");
 }
@@ -566,6 +630,7 @@ void MCPServer::stop() {
         return; // Already stopped
     }
 
+    stopThreadPool();
     if (transport_) {
         transport_->close();
     }
@@ -1249,10 +1314,17 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
 // Modern C++20 tool handler implementations
 yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::daemon::SearchRequest dreq;
-    dreq.query = req.query;
+    // Build query with optional path qualifier so daemon-side path filters work via qualifiers.
+    std::string _query = req.query;
+    if (!req.pathPattern.empty()) {
+        if (!_query.empty()) _query += " ";
+        _query += "name:" + req.pathPattern;
+    }
+    dreq.query = _query;
     dreq.limit = req.limit;
     dreq.fuzzy = req.fuzzy;
     dreq.similarity = static_cast<double>(req.similarity);
+    // Pass-through hash when present to enable hash-first search
     dreq.hashQuery = req.hash;
     dreq.searchType = req.type;
     dreq.verbose = req.verbose;
@@ -1595,7 +1667,30 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
                           req.snapshotLabel);
         }
         daemon::AddDocumentRequest addReq;
-        addReq.path = mcp_response.storedPath; // index by stored path
+        // Resolve stored path to absolute under YAMS_STORAGE (or standard data dir) if relative
+        std::filesystem::path __abs = std::filesystem::path(mcp_response.storedPath);
+        if (__abs.is_relative()) {
+            std::filesystem::path __base;
+            if (const char* envStorage = std::getenv("YAMS_STORAGE"); envStorage && *envStorage) {
+                __base = std::filesystem::path(envStorage);
+            } else if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME"); xdgDataHome && *xdgDataHome) {
+                __base = std::filesystem::path(xdgDataHome) / "yams";
+            } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
+                __base = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
+            } else {
+                __base = std::filesystem::current_path();
+            }
+            __abs = __base / __abs;
+        }
+        std::error_code __canon_ec;
+        auto __canon = std::filesystem::weakly_canonical(__abs, __canon_ec);
+        if (!__canon_ec && !__canon.empty()) {
+            __abs = __canon;
+        }
+        if (verbose) {
+            spdlog::debug("[MCP] post-index: resolved stored path: '{}' -> '{}'", mcp_response.storedPath, __abs.string());
+        }
+        addReq.path = __abs.string(); // normalized absolute path
         addReq.collection = req.collection;
         addReq.snapshotId = req.snapshotId;
         addReq.snapshotLabel = req.snapshotLabel;
@@ -1661,12 +1756,12 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         // Call daemon to add/index the downloaded document
         auto addres = co_await daemon_client_->streamingAddDocument(addReq);
         if (!addres) {
-            if (verbose) {
-                spdlog::debug("[MCP] post-index: daemon call failed error='{}'", addres.error().message);
-            }
+            spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'", addReq.path, addres.error().message);
             mcp_response.indexed = false;
         } else {
             mcp_response.indexed = true;
+            const auto& addok = addres.value();
+            spdlog::info("[MCP] post-index: indexed path='{}' hash='{}'", addReq.path, addok.hash);
         }
     }
 
@@ -2549,6 +2644,61 @@ MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
     MCPListSnapshotsResponse response;
     // TODO: Implement snapshot listing
     co_return response;
+}
+
+// === Thread pool implementation for MCPServer ===
+void MCPServer::startThreadPool(std::size_t threads) {
+    stopWorkers_.store(false);
+    for (std::size_t i = 0; i < threads; ++i) {
+        workerPool_.emplace_back([this]() {
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lk(taskMutex_);
+                    taskCv_.wait(lk, [this]() {
+                        return stopWorkers_.load() || !taskQueue_.empty();
+                    });
+                    if (stopWorkers_.load() && taskQueue_.empty()) {
+                        return;
+                    }
+                    task = std::move(taskQueue_.front());
+                    taskQueue_.pop_front();
+                }
+                try {
+                    task();
+                } catch (...) {
+                    // Swallow to keep worker alive
+                }
+            }
+        });
+    }
+}
+
+void MCPServer::stopThreadPool() {
+    {
+        std::lock_guard<std::mutex> lk(taskMutex_);
+        stopWorkers_.store(true);
+    }
+    taskCv_.notify_all();
+    for (auto& t : workerPool_) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    workerPool_.clear();
+    // Clear any remaining tasks
+    {
+        std::lock_guard<std::mutex> lk(taskMutex_);
+        taskQueue_.clear();
+    }
+}
+
+void MCPServer::enqueueTask(std::function<void()> task) {
+    {
+        std::lock_guard<std::mutex> lk(taskMutex_);
+        taskQueue_.push_back(std::move(task));
+    }
+    taskCv_.notify_one();
 }
 
 } // namespace yams::mcp

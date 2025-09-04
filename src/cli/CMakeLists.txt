@@ -22,6 +22,7 @@ set(CLI_SOURCES
     commands/stats_command.cpp
     commands/status_command.cpp
     commands/update_command.cpp
+    commands/session_command.cpp
     commands/completion_command.cpp
     commands/repair_mime_command.cpp
     commands/repair_command.cpp

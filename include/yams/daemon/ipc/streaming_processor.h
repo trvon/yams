@@ -81,6 +81,13 @@ private:
     std::size_t first_burst_limit_{20};
     std::chrono::steady_clock::time_point last_keepalive_{};
     std::chrono::milliseconds keepalive_interval_{500};
+
+    // Grep race controls (PBI-008)
+    std::chrono::steady_clock::time_point first_batch_start_{};
+    std::chrono::milliseconds grep_first_batch_max_wait_{300};
+    std::size_t grep_batch_size_override_{0};
+    bool grep_env_applied_{false};
+    bool cancel_cold_on_hot_{true};
 };
 
 } // namespace yams::daemon

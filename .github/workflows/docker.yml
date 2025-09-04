@@ -185,16 +185,46 @@ jobs:
         shell: bash
         run: |
           if [[ "${ACT:-}" == "true" ]]; then
-            IMAGE="ghcr.io/trvon/yams:latest-arm64"
+            T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:local-arm64"
           else
-            IMAGE="ghcr.io/trvon/yams:latest"
+            T="${{ steps.meta.outputs.tags }}"
+            # Guard against invalid tags generated under limited local metadata
+            if [[ -z "$T" || "$T" == *":-arm64" || "$T" =~ :$ ]]; then
+              V="${{ steps.version.outputs.version }}"
+              if [[ -z "$V" ]]; then V="dev-${GITHUB_SHA::7}"; fi
+              T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${V}-arm64"
+            fi
           fi
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          # Write possibly multi-line tag list safely to GITHUB_OUTPUT
+          {
+            echo "tags<<__TAGS__"
+            echo "$T"
+            echo "__TAGS__"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
-        run: |
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
+      - name: Build and push ARM64 Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: ${{ env.ACT != 'true' && github.event_name != 'pull_request' }}
+          load: ${{ env.ACT == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=YAMS
+            org.opencontainers.image.description=Yet Another Memory System - High-performance content-addressed storage
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.architecture=arm64
+          build-args: |
+            YAMS_VERSION=${{ steps.version.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_TAG=${{ github.ref_name }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
 
   # Create multi-arch manifest
   create-manifest:

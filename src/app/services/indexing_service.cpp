@@ -22,18 +22,41 @@ public:
                              "Directory does not exist: " + req.directoryPath};
             }
 
-            // Iterate through directory
+            // Collect file entries first
+            std::vector<std::filesystem::directory_entry> entries;
             if (req.recursive) {
-                std::filesystem::recursive_directory_iterator dirIter(dirPath);
-                for (const auto& entry : dirIter) {
-                    processDirectoryEntry(entry, req, response);
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(dirPath)) {
+                    if (entry.is_regular_file()) entries.push_back(entry);
                 }
             } else {
-                std::filesystem::directory_iterator dirIter(dirPath);
-                for (const auto& entry : dirIter) {
-                    processDirectoryEntry(entry, req, response);
+                for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
+                    if (entry.is_regular_file()) entries.push_back(entry);
                 }
             }
+
+            // Parallel processing with bounded workers
+            std::atomic<size_t> idx{0};
+            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+            size_t workers = std::min(hw, entries.size() > 0 ? entries.size() : size_t{1});
+            std::mutex respMutex;
+            auto workerFn = [&]() {
+                while (true) {
+                    size_t i = idx.fetch_add(1);
+                    if (i >= entries.size()) break;
+                    AddDirectoryResponse localResp; // partial counts
+                    processDirectoryEntry(entries[i], req, localResp);
+                    // Merge local results into shared response
+                    std::lock_guard<std::mutex> lk(respMutex);
+                    response.filesProcessed += localResp.filesProcessed;
+                    response.filesIndexed += localResp.filesIndexed;
+                    response.filesSkipped += localResp.filesSkipped;
+                    response.filesFailed += localResp.filesFailed;
+                    for (auto& r : localResp.results) response.results.push_back(std::move(r));
+                }
+            };
+            std::vector<std::thread> threads; threads.reserve(workers);
+            for (size_t t = 0; t < workers; ++t) threads.emplace_back(workerFn);
+            for (auto& th : threads) th.join();
 
             return response;
         } catch (const std::exception& e) {

@@ -919,8 +919,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 
     if (pid == 0) {
         // Child process - exec yams-daemon
-        // If a dataDir is provided, export it for daemon consumption
-        // The daemon will use YAMS_STORAGE environment variable
+        // If a dataDir is provided, export it and pass as explicit CLI arg
         if (!dataDir.empty()) {
             setenv("YAMS_STORAGE", dataDir.c_str(), 1);
         }
@@ -983,18 +982,39 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         // Pass socket and optional config/log-level arguments
         const char* ll = std::getenv("YAMS_LOG_LEVEL");
         bool haveCfg = !configPath.empty() && std::filesystem::exists(configPath);
+        const char* dataArg = (!dataDir.empty() ? dataDir.c_str() : nullptr);
         if (haveCfg && ll && *ll) {
-            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-                   configPath.c_str(), "--log-level", ll, nullptr);
+            if (dataArg) {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+                       configPath.c_str(), "--log-level", ll, "--data-dir", dataArg, nullptr);
+            } else {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+                       configPath.c_str(), "--log-level", ll, nullptr);
+            }
         } else if (haveCfg) {
-            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-                   configPath.c_str(), nullptr);
+            if (dataArg) {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+                       configPath.c_str(), "--data-dir", dataArg, nullptr);
+            } else {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
+                       configPath.c_str(), nullptr);
+            }
         } else if (ll && *ll) {
-            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--log-level",
-                   ll, nullptr);
+            if (dataArg) {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--log-level",
+                       ll, "--data-dir", dataArg, nullptr);
+            } else {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--log-level",
+                       ll, nullptr);
+            }
         } else {
-            // No config file or log level, just pass socket
-            execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
+            // Basic args
+            if (dataArg) {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--data-dir",
+                       dataArg, nullptr);
+            } else {
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
+            }
         }
 
         // If we get here, exec failed

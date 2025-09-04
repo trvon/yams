@@ -50,8 +50,10 @@ public:
         try {
             // Try daemon-first for quick status snapshot
             {
-                // Use DaemonClient directly
-                yams::daemon::DaemonClient client{};
+                // Use DaemonClient with CLI data path to align storage
+                yams::daemon::ClientConfig cfg;
+                cfg.dataDir = cli_->getDataPath();
+                yams::daemon::DaemonClient client(cfg);
                 if (auto st = yams::cli::run_sync(client.status(), std::chrono::seconds(5)); st) {
                     const auto& s = st.value();
                     if (jsonOutput_) {

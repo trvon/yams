@@ -151,11 +151,22 @@ public:
                         return executeWithServices();
                     };
 
-                    auto result = run_sync(async_daemon_first(dreq, fallback, render),
-                                            std::chrono::seconds(30));
-                    if (result) {
-                        any_daemon_ok = true;
-                        continue;
+                    try {
+                        yams::daemon::ClientConfig cfg;
+                        cfg.dataDir = cli_->getDataPath();
+                        cfg.enableChunkedResponses = false; // small unary response
+                        cfg.singleUseConnections = true;
+                        cfg.requestTimeout = std::chrono::milliseconds(30000);
+                        yams::daemon::DaemonClient client(cfg);
+                        auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
+                        if (result) {
+                            auto r = render(result.value());
+                            if (!r) return r.error();
+                            any_daemon_ok = true;
+                            continue;
+                        }
+                    } catch (...) {
+                        // fall through to fallback
                     }
                 }
                 if (any_daemon_ok && (targetPaths_.empty() ||

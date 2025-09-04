@@ -388,7 +388,6 @@ set_target_properties(yams_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_executable(yams-daemon
     daemon_main.cpp
 )
-
 target_link_libraries(yams-daemon
     PRIVATE
         "-Wl,--start-group"
@@ -406,21 +405,49 @@ target_link_libraries(yams-daemon
             yams_detection
             yams::storage_engine
             yams::reference_counter
-            yams_compression
+            # Retain our compression archive; do not link lzma_sdk separately to avoid duplicates
+            $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
+            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
+            $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
+            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
+            # Link to the public alias for consistent propagation
+            yams::compression
             yams_manifest
             yams_chunking
             yams_crypto
             yams_extraction
-            "-Wl,--whole-archive" lzma_sdk "-Wl,--no-whole-archive"
         "-Wl,--end-group"
         CLI11::CLI11
         spdlog::spdlog
 )
 
+# Nudge lld to retain required LZMA entry points on ELF platforms
+if(NOT APPLE)
+    target_link_options(yams-daemon PRIVATE
+        "-Wl,--no-as-needed"
+        "-Wl,--no-gc-sections"
+        "-Wl,-u,Lzma2Enc_Create"
+        "-Wl,-u,Lzma2EncProps_Init"
+        "-Wl,-u,Lzma2Enc_SetProps"
+        "-Wl,-u,Lzma2Enc_Destroy"
+        "-Wl,-u,Lzma2Enc_WriteProperties"
+        "-Wl,-u,Lzma2Enc_Encode2"
+        "-Wl,-u,LzmaEncProps_Init"
+        "-Wl,-u,LzmaEncode"
+        "-Wl,-u,LzmaDec_Allocate"
+        "-Wl,-u,LzmaDec_Init"
+        "-Wl,-u,LzmaDec_DecodeToBuf"
+        "-Wl,-u,Lzma2Dec_Allocate"
+        "-Wl,-u,Lzma2Dec_Init"
+        "-Wl,-u,Lzma2Dec_DecodeToBuf"
+    )
+endif()
+
+
+
+
 # Work around rare LTO toolchain issues that can drop 'main' in some environments
 set_target_properties(yams-daemon PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
-target_link_options(yams-daemon PRIVATE -Wl,--no-gc-sections)
-target_link_options(yams-daemon PRIVATE -fuse-ld=bfd)
 
 # Export and install daemon client library
 install(TARGETS yams_daemon_client

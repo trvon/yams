@@ -190,8 +190,9 @@ private:
         // Process chunk
         processor(ref, std::span(ctx.accumulator));
 
-        // Reset accumulator for next chunk
-        ctx.currentChunkStart = ctx.fileOffset;
+        // Reset accumulator for next chunk. fileOffset currently points to the index
+        // of the last byte processed in this chunk; the next chunk starts at +1.
+        ctx.currentChunkStart = ctx.fileOffset + 1;
         ctx.accumulator.clear();
         ctx.accumulator.reserve(config_.targetChunkSize);
     }

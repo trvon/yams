@@ -23,6 +23,7 @@ private:
     std::string names_;
     std::string pattern_;
     std::string directory_;
+    std::vector<std::string> targets_;
     bool force_ = false;
     bool dryRun_ = false;
     bool keepRefs_ = false;
@@ -50,10 +51,12 @@ public:
                           "Delete multiple documents by names (comma-separated)");
         group->add_option("--pattern", pattern_, "Delete documents matching pattern (e.g., *.log)");
         group->add_option("--directory", directory_, "Directory to delete (requires --recursive)");
-        group->require_option(1);
+        group->require_option(0);
+        auto* positional = cmd->add_option("targets", targets_, "Targets to delete (name/path/pattern)");
+        positional->expected(-1);
 
         // Flags (can be combined with any deletion method)
-        cmd->add_flag("--force,--no-confirm", force_, "Skip confirmation prompt");
+        cmd->add_flag("--force,-f,--no-confirm", force_, "Skip confirmation prompt");
         cmd->add_flag("--dry-run", dryRun_,
                       "Preview what would be deleted without actually deleting");
         cmd->add_flag("--keep-refs", keepRefs_, "Keep reference counts (don't decrement)");
@@ -71,6 +74,40 @@ public:
 
     Result<void> execute() override {
         try {
+            // Infer deletion mode from positional targets if no explicit selector is provided
+            if (hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() && directory_.empty() && !targets_.empty()) {
+                auto has_wildcard = [](const std::string& s) {
+                    return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
+                };
+                // Heuristic: treat strings containing a '/' (and not wildcards) as paths (name or directory)
+                auto looks_like_directory = [](const std::string& s) {
+                    if (s.empty()) return false;
+                    if (s.back() == '/') return true;
+                    return s.find('/') != std::string::npos;
+                };
+
+                if (targets_.size() == 1) {
+                    const std::string& t = targets_.front();
+                    // If -r is set, treat single target as a directory even without slashes or wildcards
+                    if (recursive_) {
+                        directory_ = t;
+                    } else if (has_wildcard(t)) {
+                        pattern_ = t;
+                    } else if (looks_like_directory(t)) {
+                        directory_ = t;
+                    } else {
+                        name_ = t;
+                    }
+                } else {
+                    // Multiple targets: treat as names list to mirror rm behavior
+                    std::ostringstream oss;
+                    for (size_t i = 0; i < targets_.size(); ++i) {
+                        if (i > 0) oss << ",";
+                        oss << targets_[i];
+                    }
+                    names_ = oss.str();
+                }
+            }
             // Always try daemon-first for all deletion modes
             yams::daemon::DeleteRequest dreq;
 
@@ -155,9 +192,21 @@ public:
                 return executeLocal();
             };
 
-            auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
-            if (result) {
-                return Result<void>();
+            try {
+                yams::daemon::ClientConfig cfg;
+                cfg.dataDir = cli_->getDataPath();
+                cfg.enableChunkedResponses = false; // delete responses are small
+                cfg.singleUseConnections = true;
+                cfg.requestTimeout = std::chrono::milliseconds(30000);
+                yams::daemon::DaemonClient client(cfg);
+                auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
+                if (result) {
+                    auto r = render(result.value());
+                    if (!r) return r.error();
+                    return Result<void>();
+                }
+            } catch (...) {
+                // fall through
             }
 
             // If daemon failed, try local execution

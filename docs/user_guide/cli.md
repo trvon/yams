@@ -405,7 +405,7 @@ yams search --hash abcd1234 --verbose
 
 ## grep {#cmd-grep}
 
-Regex across indexed code (YAMS only)
+Regex across indexed code (YAMS only, hybrid by default)
 Use YAMS grep for project-wide regex; avoid system utilities for repository queries.
 
 Examples:
@@ -421,6 +421,8 @@ yams grep "##\\s+(watch|git|sync)\\b" --include="**/*.md"
 ```
 
 Notes:
+- Default mode is hybrid: regex plus semantic suggestions; use --regex-only to disable. Tune with --semantic-limit (default: 10).
+- Semantic suggestions are also shown in -l/--files-with-matches, -L/--files-without-match, --paths-only, and -c/--count modes. Regex counts only reflect text matches.
 - --include accepts comma-separated globs or repeated usage; prefer quoting patterns.
 - Pair with yams search --paths-only to scope subsequent grep runs.
 
