@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstddef>
 #include <optional>
+#include <cstdlib>
+#include <string>
 #include <variant>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/system_executor.hpp>
@@ -71,6 +73,19 @@ StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per
 
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
     try {
+        // Allow environment override for keepalive cadence (basic support)
+        if (keepalive_interval_.count() == 500) {
+            if (const char* s = std::getenv("YAMS_KEEPALIVE_MS")) {
+                try {
+                    auto v = static_cast<long>(std::stol(s));
+                    if (v >= 50 && v <= 60000) {
+                        keepalive_interval_ = std::chrono::milliseconds(v);
+                    }
+                } catch (...) {
+                    // ignore invalid value
+                }
+            }
+        }
         // Emit a tiny heartbeat chunk immediately after header to keep client alive
         if (pending_request_.has_value() && !heartbeat_sent_) {
             heartbeat_sent_ = true;
@@ -143,35 +158,45 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                         boost::asio::use_future));
                 // Do not clear pending yet; we may need the request type
             }
-            // Throttle keepalives
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_keepalive_ < keepalive_interval_) {
-                // Sleep until next keepalive interval
-                auto exec = co_await boost::asio::this_coro::executor;
-                boost::asio::steady_timer timer(exec);
-                auto delta = keepalive_interval_ - (now - last_keepalive_);
-                timer.expires_after(delta);
-                co_await timer.async_wait(boost::asio::use_awaitable);
-            }
-            last_keepalive_ = std::chrono::steady_clock::now();
-            // Emit periodic keepalive matching mode
-            switch (mode_) {
-                case Mode::Search: {
-                    SearchResponse r; r.totalCount = 0; r.elapsed = std::chrono::milliseconds(0);
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            // If neither fast nor full compute is ready, emit periodic keepalive;
+            // otherwise fall through to emit real data/completion.
+            bool fast_ready = fast_future_.has_value() &&
+                              fast_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready &&
+                              !first_burst_emitted_;
+            bool full_ready = full_future_.has_value() &&
+                              full_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+
+            if (!fast_ready && !full_ready) {
+                // Throttle keepalives
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_keepalive_ < keepalive_interval_) {
+                    // Sleep until next keepalive interval
+                    auto exec = co_await boost::asio::this_coro::executor;
+                    boost::asio::steady_timer timer(exec);
+                    auto delta = keepalive_interval_ - (now - last_keepalive_);
+                    timer.expires_after(delta);
+                    co_await timer.async_wait(boost::asio::use_awaitable);
                 }
-                case Mode::List: {
-                    ListResponse r; r.totalCount = 0;
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
-                }
-                case Mode::Grep: {
-                    GrepResponse r; r.totalMatches = 0; r.filesSearched = 0;
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
-                }
-                case Mode::None:
-                default: {
-                    SuccessResponse ok{"Streaming in progress"};
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = false};
+                last_keepalive_ = std::chrono::steady_clock::now();
+                // Emit periodic keepalive matching mode
+                switch (mode_) {
+                    case Mode::Search: {
+                        SearchResponse r; r.totalCount = 0; r.elapsed = std::chrono::milliseconds(0);
+                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+                    }
+                    case Mode::List: {
+                        ListResponse r; r.totalCount = 0;
+                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+                    }
+                    case Mode::Grep: {
+                        GrepResponse r; r.totalMatches = 0; r.filesSearched = 0;
+                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+                    }
+                    case Mode::None:
+                    default: {
+                        SuccessResponse ok{"Streaming in progress"};
+                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = false};
+                    }
                 }
             }
         }
