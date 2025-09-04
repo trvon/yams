@@ -83,6 +83,7 @@ void StdioTransport::send(const json& message) {
         // Minimal LSP/MCP framing: only Content-Length header is required
         std::cout << "Content-Length: " << payload.size() << "\r\n\r\n";
         std::cout << payload;
+        std::cout << "\r\n";
         std::cout.flush();
     }
 }

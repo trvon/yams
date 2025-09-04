@@ -33,25 +33,28 @@ packages:
 
 tasks:
   - setup: |
+      # Move into repository directory (SourceHut clones into ./yams)
+      cd yams
       # Configure the Conan profile.
       conan profile detect --force
-      sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
+      sed -i 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
       echo "Conan profile configured:"
-      conan profile show
+      conan profile show default
 
   - build: |
+      cd yams
       # The YAMS_VERSION from git.tag() might include a 'v' prefix (e.g., "v1.2.3").
-      # This line removes the 'v' to get just the version number, matching the GHA workflow.
       CLEAN_VERSION="${YAMS_VERSION#v}"
       echo "Starting build for version $CLEAN_VERSION"
 
-      # Run conan install to fetch dependencies.
-      conan install . --output-folder=${BUILD_DIR} -s build_type=Release --build=missing
+      # Run conan install to fetch dependencies and generate CMake toolchain/deps.
+      conan install . --output-folder=${BUILD_DIR} -s build_type=Release -s compiler.cppstd=20 -g CMakeToolchain -g CMakeDeps --build=missing
 
-      # Configure with CMake.
+      # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
         -DYAMS_BUILD_PROFILE=release \
         -DYAMS_VERSION="${CLEAN_VERSION}" \
+        -DCMAKE_CXX_STANDARD=20 \
         -DCMAKE_INSTALL_PREFIX="$PWD/${STAGE_DIR}"
 
       # Build the project.
@@ -61,7 +64,7 @@ tasks:
       cmake --install "${BUILD_DIR}" --config Release
 
   - package: |
-      # This replicates the "Package" step.
+      cd yams
       CLEAN_VERSION="${YAMS_VERSION#v}"
       echo "Packaging the release..."
       cd "${STAGE_DIR}"
@@ -69,7 +72,7 @@ tasks:
       echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
 
   - package_cpack: |
-      # This replicates the "Build Linux packages (DEB/RPM)" step.
+      cd yams
       CLEAN_VERSION="${YAMS_VERSION#v}"
       echo "Packaging with CPack..."
       cd "${BUILD_DIR}"
@@ -80,6 +83,6 @@ tasks:
 
 artifacts:
   # These are the files that will be available for download after the build.
-  - "yams-*.tar.gz"
-  - "build/yams-release/*.deb"
-  - "build/yams-release/*.rpm"
+  - "yams/yams-*.tar.gz"
+  - "yams/build/yams-release/*.deb"
+  - "yams/build/yams-release/*.rpm"

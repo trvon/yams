@@ -134,10 +134,20 @@ jobs:
         if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
+          set -e
           conan profile detect --force
-          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          echo "Conan profile configured:" >&2
-          conan profile show >&2
+          # Portable in-place edit for cppstd across GNU/BSD sed
+          if command -v gsed >/dev/null 2>&1; then SED=gsed; else SED=sed; fi
+          OS_NAME="$(uname)"
+          if [ "$OS_NAME" = "Darwin" ]; then
+            $SED -i '' -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
+            # Ensure libc++ is set for apple-clang
+            conan profile update "settings.compiler.libcxx=libc++" default || true
+          else
+            $SED -i -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          fi
+          echo "Conan profile configured (RUNNER_OS=$RUNNER_OS, uname=$OS_NAME):" >&2
+          conan profile show default >&2
 
       - name: Setup Python (hosted Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
@@ -173,6 +183,13 @@ jobs:
           conan profile update "settings.compiler.cppstd=20" default
           conan profile show
 
+      - name: Install Ninja (Windows)
+        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
+        shell: pwsh
+        run: |
+          choco install ninja --yes --no-progress
+          ninja --version
+
       - name: Check Conan (self-hosted sanity)
         if: ${{ !matrix.hosted }}
         shell: bash
@@ -199,10 +216,16 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+          # Enforce consistent C++ standard across platforms; on macOS also enforce libc++
+          CONAN_SETTINGS="-s build_type=Release -s compiler.cppstd=20"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            CONAN_SETTINGS="$CONAN_SETTINGS -s compiler.libcxx=libc++"
+          fi
+          conan install . --output-folder=build/yams-release $CONAN_SETTINGS --build=missing
           cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
+            -DCMAKE_CXX_STANDARD=20 \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args}}
           cmake --build --preset yams-release --parallel
@@ -233,11 +256,14 @@ jobs:
           "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           conan --version
 
-          conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+          # Enforce C++20 for MSVC; profile already updated earlier
+          # Generate CMake toolchain and deps; enforce C++20 (required by onnx/onnxruntime)
+          conan install . --output-folder=build/yams-release -s build_type=Release -s compiler.cppstd=20 -g CMakeToolchain -g CMakeDeps --build=missing
 
           cmake --preset yams-release `
             -DYAMS_BUILD_PROFILE=release `
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" `
+            -DCMAKE_CXX_STANDARD=20 `
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\${{ env.STAGE_DIR }}" `
             ${{ matrix.cmake_args }}
 
