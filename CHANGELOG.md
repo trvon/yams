@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 SourceHut: https://sr.ht/~trvon/yams/
 
+## [v0.6.5] - 2025-09-04
+
+### Changed
+- Release workflow: migrate to Conan 2 profiles using a dedicated host profile (`conan/profiles/host.jinja`) that enforces `compiler.cppstd=20` and sets `compiler.libcxx=libc++` on macOS.
+- CMake (Darwin): replace GNU ld flags (`--start-group/--end-group`, `--whole-archive/--no-whole-archive`) with `-Wl,-force_load` for specific archives in CLI, MCP server, and daemon.
+- CI (act): install build tools when missing in containers (cmake, ninja, build-essential/pkg-config) to allow local act runs of the release job.
+
+## Added
+- Search ergonomics:
+  - `-q, --query` flagged alias to safely pass queries that start with '-' (e.g., `yams search -q "--start-group --whole-archive"`).
+  - `--stdin` and `--query-file <path>` to read the query from stdin or a file (`--query-file -` also reads stdin).
+  - Helpful "Query is required" guidance when no query is provided, with tips to use `-q/--query`, `--` to stop option parsing, or stdin/file inputs.
+
+## Fixes
+- macOS linking failures due to GNU-only linker flags appearing in executable link lines; now prevented and defensively stripped if injected elsewhere.
+- SourceHut `.build.yml`: use the Conan host profile and disable ONNX (`-o enable_onnx=False`) to avoid upstream onnxruntime 1.18 build errors with GCC 15; preserves successful release builds on Arch.
+
 ## [v0.6.4] - 2025-01-05
 
 ### Known Issues

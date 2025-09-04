@@ -1,0 +1,8 @@
+include(default)
+
+[settings]
+compiler.cppstd=20
+{% if os == "Macos" %}
+compiler.libcxx=libc++
+{% endif %}
+

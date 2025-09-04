@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -36,6 +37,9 @@ private:
 
     YamsCLI* cli_ = nullptr;
     std::string query_;
+    bool readStdin_ = false;
+    std::string queryFile_;
+    std::vector<std::string> extraArgs_;
     std::string pathFilter_;
     size_t limit_ = 20;
     std::string searchType_ = "keyword";
@@ -154,8 +158,15 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("search", getDescription());
-        cmd->add_option("query", query_, "Search query")->required();
-        cmd->add_option("path", pathFilter_, "Filter results by path pattern (optional)");
+        // Removed positional query to avoid option-name collision; prefer -q/--query or extras
+        // Provide flagged alias to safely pass queries beginning with '-'
+        cmd->add_option("-q,--query", query_, "Search query (use when the query starts with '-')");
+        cmd->add_option("--path", pathFilter_, "Filter results by path pattern (optional)");
+        // Query input sources
+        cmd->add_flag("--stdin", readStdin_, "Read query from STDIN if not provided");
+        cmd->add_option("--query-file", queryFile_,
+                        "Read query from file path (use '-' to read from STDIN)");
+        cmd->allow_extras();
 
         cmd->add_option("-l,--limit", limit_, "Maximum number of results")->default_val(20);
 
@@ -211,7 +222,9 @@ public:
                         "Limit results to paths matching globs (comma-separated or repeated). "
                         "Examples: \"*.cpp\", \"*.{cpp,hpp}\", \"src/**/*.cpp,include/**/*.hpp\"");
 
-        cmd->callback([this]() {
+        cmd->callback([this, cmd]() {
+            // Capture extras for folding into the query string
+            this->extraArgs_ = cmd->remaining();
             auto result = execute();
             if (!result) {
                 spdlog::error("Command failed: {}", result.error().message);
@@ -224,6 +237,54 @@ public:
         YAMS_ZONE_SCOPED_N("SearchCommand::execute");
 
         try {
+            // Resolve base query from flags/stdin/file
+            if (query_.empty()) {
+                if (!queryFile_.empty() && queryFile_ != "-") {
+                    std::ifstream fin(queryFile_, std::ios::in | std::ios::binary);
+                    if (!fin.good()) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     std::string("Failed to open query file: ") + queryFile_};
+                    }
+                    std::ostringstream ss;
+                    ss << fin.rdbuf();
+                    query_ = trim(ss.str());
+                } else if (readStdin_ || (!queryFile_.empty() && queryFile_ == "-")) {
+                    std::ostringstream ss;
+                    ss << std::cin.rdbuf();
+                    query_ = trim(ss.str());
+                }
+            }
+            // Fold any extra positional tokens into the final query
+            if (!extraArgs_.empty()) {
+                std::ostringstream joiner;
+                for (size_t i = 0; i < extraArgs_.size(); ++i) {
+                    if (i)
+                        joiner << ' ';
+                    joiner << extraArgs_[i];
+                }
+                auto extras = trim(joiner.str());
+                if (!extras.empty()) {
+                    if (query_.empty()) {
+                        query_ = extras;
+                    } else {
+                        query_ += ' ';
+                        query_ += extras;
+                    }
+                }
+            }
+            // Final validation
+            if (query_.empty() && extraArgs_.empty() && queryFile_.empty() && !readStdin_) {
+                std::ostringstream help;
+                help << "Query not provided.\n"
+                     << "Tips:\n"
+                     << "  - Provide a query as free args (default): yams search lzma\n"
+                     << "  - Use -q or --query when the query starts with '-': yams search -q "
+                        "\"--start-group\"\n"
+                     << "  - Or use -- to stop option parsing: yams search -- \"--start-group "
+                        "--whole-archive\"\n"
+                     << "  - Or provide the query via --stdin or --query-file.\n";
+                return Error{ErrorCode::InvalidArgument, help.str()};
+            }
             // Normalize include globs (split commas)
             auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
             if (includeGlobsExpanded.empty() && !pathFilter_.empty()) {

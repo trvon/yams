@@ -124,25 +124,41 @@ jobs:
         if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
-          pip3 install conan || python3 -m pip install conan || python -m pip install conan
+          python3 -m pip install --upgrade "conan>=2,<3" || python -m pip install --upgrade "conan>=2,<3"
           conan --version
           mkdir -p ~/.conan2
           # Best-effort: global.conf may not exist in repo for hosted macOS
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
-      - name: Setup Conan Profile (hosted Linux/macOS)
+      - name: Ensure build tools (cmake, ninja) for local runners/act
+        if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
+        shell: bash
+        run: |
+          set -e
+          if ! command -v cmake >/dev/null 2>&1; then
+            echo "cmake not found; installing build tools..."
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo -n true 2>/dev/null || true
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y cmake ninja-build build-essential pkg-config
+            elif command -v brew >/dev/null 2>&1; then
+              brew update
+              brew install cmake ninja
+            else
+              echo "No supported package manager found; please ensure cmake & ninja are installed" >&2
+            fi
+          else
+            echo "cmake present: $(cmake --version | head -1)"
+          fi
+
+      - name: Setup Conan (hosted Linux/macOS)
         if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
           set -e
           conan profile detect --force
-          PROFILE=default
-          conan profile update "compiler.cppstd=20" "$PROFILE"
-          if [ "$(uname)" = "Darwin" ]; then
-            conan profile update "compiler.libcxx=libc++" "$PROFILE"
-          fi
-          echo "Conan profile configured (RUNNER_OS=$RUNNER_OS, uname=$(uname)):" >&2
-          conan profile show -pr "$PROFILE" >&2 || conan profile show >&2
+          echo "Conan detected default profile. Will use host profile conan/profiles/host.jinja at install time."
 
       - name: Setup Python (hosted Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
@@ -158,10 +174,10 @@ jobs:
           python -m pip install --user pipx
           python -m pipx ensurepath
           try {
-            pipx install conan --force
+            pipx install "conan>=2,<3" --force
           } catch {
             Write-Host "pipx install failed; falling back to pip"
-            python -m pip install --upgrade conan
+            python -m pip install --upgrade "conan>=2,<3"
           }
           $scriptDir = "$env:PythonLocation\Scripts"
           $localBin = "$env:USERPROFILE\.local\bin"
@@ -170,13 +186,12 @@ jobs:
           "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           conan --version
 
-      - name: Setup Conan Profile (hosted Windows)
+      - name: Setup Conan (hosted Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
         shell: pwsh
         run: |
           conan profile detect --force
-          conan profile update "compiler.cppstd=20" default
-          conan profile show
+          Write-Host "Conan detected default profile. Will use host profile conan/profiles/host.jinja at install time."
 
       - name: Install Ninja (Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
@@ -211,16 +226,17 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          # Enforce consistent C++ standard across platforms; on macOS also enforce libc++ and set arch per matrix
-          CONAN_SETTINGS="-s build_type=Release -s compiler.cppstd=20"
+          # Use Conan 2 profiles: default build profile + host profile forcing C++20 and libc++ on macOS
+          HOST_PROFILE="./conan/profiles/host.jinja"
+          BUILD_PROFILE="default"
+          CONAN_ARGS="-of build/yams-release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing"
           if [ "$RUNNER_OS" = "macOS" ]; then
-            CONAN_SETTINGS="$CONAN_SETTINGS -s compiler.libcxx=libc++"
             case "${{ matrix.suffix }}" in
-              macos-arm64) CONAN_SETTINGS="$CONAN_SETTINGS -s arch=armv8" ;;
-              macos-x86_64) CONAN_SETTINGS="$CONAN_SETTINGS -s arch=x86_64" ;;
+              macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
+              macos-x86_64) CONAN_ARGS="$CONAN_ARGS -s:h arch=x86_64" ;;
             esac
           fi
-          conan install . --output-folder=build/yams-release $CONAN_SETTINGS --build=missing
+          conan install . $CONAN_ARGS
           cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
@@ -255,9 +271,9 @@ jobs:
           "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           conan --version
 
-          # Enforce C++20 for MSVC; profile already updated earlier
-          # Generate CMake toolchain and deps; enforce C++20. Disable ONNX on Windows to avoid MSVC build issues.
-          conan install . --output-folder=build/yams-release -s build_type=Release -s compiler.cppstd=20 -o enable_onnx=False -g CMakeToolchain -g CMakeDeps --build=missing
+          # Use Conan 2 profiles: default build profile + host profile forcing C++20
+          # Disable ONNX on Windows to avoid MSVC build issues.
+          conan install . -of build/yams-release -pr:h=./conan/profiles/host.jinja -pr:b=default -s build_type=Release -o enable_onnx=False --build=missing
 
           # Ensure toolchain path exists where preset expects it; copy if needed
           $expected = "build/yams-release/build/Release/generators/conan_toolchain.cmake"

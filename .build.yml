@@ -52,7 +52,15 @@ tasks:
       echo "Starting build for version $CLEAN_VERSION"
 
       # Run conan install to fetch dependencies and generate CMake toolchain/deps.
-      conan install . --output-folder=${BUILD_DIR} -s build_type=Release --build=missing
+      # Use our host profile to enforce C++20 and libc++ on mac when relevant.
+      # GCC 15 on Arch triggers upstream onnxruntime 1.18 build errors; disable ONNX here.
+      conan install . \
+        -of ${BUILD_DIR} \
+        -pr:h=./conan/profiles/host.jinja \
+        -pr:b=default \
+        -s build_type=Release \
+        -o enable_onnx=False \
+        --build=missing
 
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \

@@ -75,7 +75,7 @@ After each suggested command, briefly validate expected outputs or effects in 1â
 - `cat`: Print content to stdout. Options: `<hash>`, `--name <name>`
 - `delete` (`rm`): Delete by hash, name, pattern, directory, or positional targets. Options: `--name`, `--names`, `--pattern`, `--directory`, `-r/--recursive`, `-f/--force`, `--no-confirm`, `--dry-run`, `--keep-refs`, `-v/--verbose`
 - `list` (`ls`): List documents. Options: `--format`, `-l/--limit`, `--offset`
-- `search`: Search documents. Options: `-l/--limit`, `-t/--type`, `-f/--fuzzy`, `--similarity`, `--json`
+- `search`: Search documents. Options: `-q/--query`, `--stdin`, `--query-file <path>`, `-l/--limit`, `-t/--type`, `-f/--fuzzy`, `--similarity`, `--json`
 - `config`: Manage config. Subcommands: `get`, `set`, `list`, `validate`, `export`
 - `auth`: Manage authentication
 - `stats`: Show stats. Options: `--json`
@@ -106,4 +106,13 @@ yams rm -rf ./build
 yams rm '*.log'
 yams delete fileA fileB fileC
 yams delete -r ./dist
+```
+
+_Search examples for queries starting with '-' (option-like text):_
+```sh
+yams search -q "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+yams search -- "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+printf '%s\n' "--start-group --whole-archive --end-group -force_load Darwin" | yams search --stdin --paths-only
+yams search --query-file /tmp/query.txt --paths-only
+yams search --query-file - --paths-only < /tmp/query.txt
 ```

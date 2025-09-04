@@ -340,6 +340,13 @@ yams search "class DocumentIndexer ext:.cpp" --paths-only
 
 # Show JSON for scripting
 yams search "SyncManager" --json
+
+# Queries that start with '-' (option-looking) — pass safely
+yams search -q "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+yams search -- "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+printf '%s\n' "--start-group --whole-archive --end-group -force_load Darwin" | yams search --stdin --paths-only
+yams search --query-file /tmp/query.txt --paths-only
+yams search --query-file - --paths-only < /tmp/query.txt
 ```
 
 Hints:
@@ -350,8 +357,17 @@ Search for documents with advanced query capabilities.
 
 Synopsis:
 - yams search "<query>" [options]
+- yams search -q "<query>" [options]
+- yams search --stdin [options]
+- yams search --query-file <path> [options]
 
 Options:
+- -q, --query <text>
+  - Provide the query as an option (useful when it starts with '-')
+- --stdin
+  - Read query from standard input when no query is provided
+- --query-file <path>
+  - Read query from a file path (use '-' to read from stdin)
 - -l, --limit <number>
   - Maximum number of results to return (default: 20)
 - -t, --type <type>

@@ -4,22 +4,36 @@ add_executable(yams-mcp-server
     main.cpp
 )
 
-target_link_libraries(yams-mcp-server
-    PRIVATE
+if(APPLE)
+    target_link_libraries(yams-mcp-server PRIVATE
+        yams_mcp
+        yams::compression
+        CLI11::CLI11
+        spdlog::spdlog
+        Threads::Threads
+    )
+    target_link_options(yams-mcp-server PRIVATE
+        "-Wl,-force_load,$<TARGET_FILE:yams_mcp>"
+        "-Wl,-force_load,$<TARGET_FILE:yams_compression>"
+    )
+    # Defensive: strip any lingering GNU ld group/whole-archive flags if injected elsewhere
+    get_target_property(_yams_mcp_libs yams-mcp-server LINK_LIBRARIES)
+    if(_yams_mcp_libs)
+        list(FILTER _yams_mcp_libs EXCLUDE REGEX "^-Wl,--start-group$|^-Wl,--end-group$|^-Wl,--whole-archive$|^-Wl,--no-whole-archive$")
+        set_target_properties(yams-mcp-server PROPERTIES LINK_LIBRARIES "${_yams_mcp_libs}")
+    endif()
+else()
+    target_link_libraries(yams-mcp-server PRIVATE
         "-Wl,--start-group"
-            # Retain the MCP static lib fully to avoid GC of reachable symbols
             "-Wl,--whole-archive" yams_mcp "-Wl,--no-whole-archive"
-            # Retain only our compression archive (avoid linking lzma_sdk twice)
-            $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
+            "-Wl,--whole-archive" $<TARGET_FILE:yams_compression> "-Wl,--no-whole-archive"
             yams::compression
         "-Wl,--end-group"
         CLI11::CLI11
         spdlog::spdlog
         Threads::Threads
-)
+    )
+endif()
 
 # Nudge lld to retain required LZMA entry points on ELF platforms
 if(NOT APPLE)

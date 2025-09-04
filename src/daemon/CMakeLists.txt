@@ -388,8 +388,42 @@ set_target_properties(yams_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_executable(yams-daemon
     daemon_main.cpp
 )
-target_link_libraries(yams-daemon
-    PRIVATE
+if(APPLE)
+    target_link_libraries(yams-daemon PRIVATE
+        yams::daemon
+        yams_config
+        yams::repair
+        yams_app_services
+        yams_downloader
+        yams_search
+        yams_vector
+        yams_api
+        yams_metadata
+        yams_indexing
+        yams_content
+        yams_detection
+        yams::storage_engine
+        yams::reference_counter
+        # Public alias for consistent propagation
+        yams::compression
+        yams_manifest
+        yams_chunking
+        yams_crypto
+        yams_extraction
+        CLI11::CLI11
+        spdlog::spdlog
+    )
+    target_link_options(yams-daemon PRIVATE
+        "-Wl,-force_load,$<TARGET_FILE:yams_compression>"
+    )
+    # Defensive: strip any lingering GNU ld group/whole-archive flags if injected elsewhere
+    get_target_property(_yamsd_libs yams-daemon LINK_LIBRARIES)
+    if(_yamsd_libs)
+        list(FILTER _yamsd_libs EXCLUDE REGEX "^-Wl,--start-group$|^-Wl,--end-group$|^-Wl,--whole-archive$|^-Wl,--no-whole-archive$")
+        set_target_properties(yams-daemon PROPERTIES LINK_LIBRARIES "${_yamsd_libs}")
+    endif()
+else()
+    target_link_libraries(yams-daemon PRIVATE
         "-Wl,--start-group"
             yams::daemon
             yams_config
@@ -405,12 +439,7 @@ target_link_libraries(yams-daemon
             yams_detection
             yams::storage_engine
             yams::reference_counter
-            # Retain our compression archive; do not link lzma_sdk separately to avoid duplicates
-            $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
-            # Link to the public alias for consistent propagation
+            "-Wl,--whole-archive" $<TARGET_FILE:yams_compression> "-Wl,--no-whole-archive"
             yams::compression
             yams_manifest
             yams_chunking
@@ -419,7 +448,8 @@ target_link_libraries(yams-daemon
         "-Wl,--end-group"
         CLI11::CLI11
         spdlog::spdlog
-)
+    )
+endif()
 
 # Nudge lld to retain required LZMA entry points on ELF platforms
 if(NOT APPLE)

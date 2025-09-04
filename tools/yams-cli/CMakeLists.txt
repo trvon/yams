@@ -4,18 +4,32 @@ add_executable(yams
     main.cpp
 )
 
-target_link_libraries(yams
-    PRIVATE
+if(APPLE)
+    # macOS: link normally, but force-load archives that must be kept
+    target_link_libraries(yams PRIVATE
+        yams_cli
+        yams::compression
+    )
+    target_link_options(yams PRIVATE
+        "-Wl,-force_load,$<TARGET_FILE:yams_cli>"
+        "-Wl,-force_load,$<TARGET_FILE:yams_compression>"
+    )
+    # Defensive: strip any lingering GNU ld group/whole-archive flags if injected elsewhere
+    get_target_property(_yams_libs yams LINK_LIBRARIES)
+    if(_yams_libs)
+        list(FILTER _yams_libs EXCLUDE REGEX "^-Wl,--start-group$|^-Wl,--end-group$|^-Wl,--whole-archive$|^-Wl,--no-whole-archive$")
+        set_target_properties(yams PROPERTIES LINK_LIBRARIES "${_yams_libs}")
+    endif()
+else()
+    # Linux and others: use linker groups and whole-archive
+    target_link_libraries(yams PRIVATE
         "-Wl,--start-group"
             "-Wl,--whole-archive" yams_cli "-Wl,--no-whole-archive"
-            # Retain our compression archive; avoid linking lzma_sdk twice
-            $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
-            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
+            "-Wl,--whole-archive" $<TARGET_FILE:yams_compression> "-Wl,--no-whole-archive"
             yams::compression
         "-Wl,--end-group"
-)
+    )
+endif()
 
 # Nudge lld to retain required LZMA entry points on ELF platforms
 if(NOT APPLE)

@@ -35,6 +35,15 @@ This document establishes a unified, machine-readable, and authoritative policy 
   # Optionally broaden with fuzzy matching in the same request
   # yams search "term1 term2 \"important phrase\"" --fuzzy --similarity 0.7 --limit 50
   # Only search the web if no relevant results in YAMS
+
+  # Queries that start with '-' (option-looking) — use one of:
+  yams search -q "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+  yams search -- "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+
+  # Or read query from stdin/file:
+  printf '%s\n' "--start-group --whole-archive --end-group -force_load Darwin" | yams search --stdin --paths-only
+  yams search --query-file /tmp/query.txt --paths-only
+  yams search --query-file - --paths-only < /tmp/query.txt
   ```
 - **After every web/external result:**
   ```bash
