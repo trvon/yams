@@ -11,6 +11,8 @@
 #include <type_traits>
 #include <vector>
 
+#include <yams/compat/thread_stop_compat.h>
+
 namespace yams::daemon {
 
 // Forward declaration for shared state
@@ -83,9 +85,9 @@ private:
         std::atomic<bool> stopping{false};
     };
 
-    void worker_thread(std::shared_ptr<ThreadPoolState> state, std::stop_token token);
+    void worker_thread(std::shared_ptr<ThreadPoolState> state, yams::compat::stop_token token);
 
-    std::vector<std::jthread> workers_;
+    std::vector<yams::compat::jthread> workers_;
     std::shared_ptr<ThreadPoolState> state_;
 };
 

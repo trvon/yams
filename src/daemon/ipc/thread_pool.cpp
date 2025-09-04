@@ -14,8 +14,9 @@ ThreadPool::ThreadPool(size_t num_threads) : state_(std::make_shared<ThreadPoolS
 
     for (size_t i = 0; i < num_threads; ++i) {
         // Capture shared state by value so threads have their own shared_ptr
-        workers_.emplace_back(
-            [this, state = state_](std::stop_token token) { worker_thread(state, token); });
+        workers_.emplace_back([this, state = state_](yams::compat::stop_token token) {
+            worker_thread(state, token);
+        });
     }
 }
 
@@ -34,7 +35,7 @@ void ThreadPool::stop() {
 
     state_->condition.notify_all();
 
-    // Request stop on all threads
+    // Request stop on all threads (no-op on fallback jthread)
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             worker.request_stop();
@@ -57,7 +58,8 @@ size_t ThreadPool::queue_size() const {
     return state_->tasks.size();
 }
 
-void ThreadPool::worker_thread(std::shared_ptr<ThreadPoolState> state, std::stop_token token) {
+void ThreadPool::worker_thread(std::shared_ptr<ThreadPoolState> state,
+                               yams::compat::stop_token token) {
     // Work with the shared state - safe even if ThreadPool object is destroyed
     while (!token.stop_requested()) {
         std::function<void()> task;

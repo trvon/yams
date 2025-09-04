@@ -35,6 +35,8 @@ Result<void> ServiceManager::initialize() {
     if (dataDir.empty()) {
         if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
             dataDir = fs::path(storageEnv);
+        } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
+            dataDir = fs::path(dataEnv);
         } else if (const char* homeEnv = std::getenv("HOME")) {
             dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
         } else {
@@ -43,6 +45,7 @@ Result<void> ServiceManager::initialize() {
     }
     std::error_code ec;
     fs::create_directories(dataDir, ec);
+    spdlog::info("ServiceManager: resolved data directory: {}", dataDir.string());
     if (ec) {
         return Error{ErrorCode::IOError,
                      std::string("Failed to create storage directory: ") + ec.message()};
@@ -58,6 +61,9 @@ Result<void> ServiceManager::initialize() {
         f.close();
     }
     fs::remove(probe, ec);
+
+    // Persist resolved dataDir for downstream components/telemetry
+    resolvedDataDir_ = dataDir;
 
     // Start background resource initialization
     initThread_ = std::jthread([this](std::stop_token token) {
@@ -221,6 +227,8 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
         if (dataDir.empty()) {
             if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
                 dataDir = fs::path(storageEnv);
+            } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
+                dataDir = fs::path(dataEnv);
             } else if (const char* homeEnv = std::getenv("HOME")) {
                 dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
             } else {
@@ -229,8 +237,14 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
         }
         std::error_code ec;
         fs::create_directories(dataDir, ec);
+        spdlog::info("ServiceManager[async]: using data directory: {}", dataDir.string());
 
-        auto storeRes = yams::api::ContentStoreBuilder::createDefault(dataDir / "storage");
+        // Persist again here in case initialize() was bypassed in some flows
+        resolvedDataDir_ = dataDir;
+
+        auto storeRoot = dataDir / "storage";
+        spdlog::info("ContentStore root: {}", storeRoot.string());
+        auto storeRes = yams::api::ContentStoreBuilder::createDefault(storeRoot);
         if (storeRes) {
             // Convert unique_ptr to shared_ptr
             auto& uniqueStore =
@@ -244,6 +258,7 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
             return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
         auto dbPath = dataDir / "yams.db";
+        spdlog::info("Opening metadata database: {}", dbPath.string());
         database_ = std::make_shared<metadata::Database>();
         if (auto dbRes = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
             !dbRes) {
@@ -306,7 +321,7 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
                 vectorIndexManager_.reset();
             } else {
                 // Check if vectors.db exists and get stats from it
-                auto vectorDbPath = config_.dataDir / "vectors.db";
+                auto vectorDbPath = dataDir / "vectors.db";
                 if (std::filesystem::exists(vectorDbPath)) {
                     state_.readiness.vectorIndexReady = true;
                     // TODO: Get actual count from vectors.db

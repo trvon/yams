@@ -341,16 +341,18 @@ jobs:
           if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
-            coverage_pct=$(python3 <<'PY' 2>/dev/null || echo 'N/A'
-              import xml.etree.ElementTree as ET
-              try:
-                  root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
-                  line_rate = float(root.get('line-rate', 0))
-                  print(f"{line_rate * 100:.1f}%")
-              except Exception:
-                  print('N/A')
-              PY
-            )
+            coverage_pct="$(python3 <<'PY' 2>/dev/null
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
+                line_rate = float(root.get('line-rate', 0))
+                print(f"{line_rate * 100:.1f}%")
+            except Exception:
+                print('N/A')
+            PY
+            )"
+            # Fallback if python failed entirely
+            if [ -z "$coverage_pct" ]; then coverage_pct='N/A'; fi
             echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
           fi

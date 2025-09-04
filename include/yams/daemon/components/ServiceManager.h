@@ -70,6 +70,8 @@ public:
 
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
+    // Resolved data directory used for storage (may derive from env/config)
+    const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
 
 #ifdef YAMS_TESTING
     // Additional test-only accessors can go here if needed
@@ -99,6 +101,7 @@ private:
     mutable std::mutex searchEngineMutex_;
 
     InitCompleteCallback initCompleteCallback_;
+    std::filesystem::path resolvedDataDir_;
 };
 
 } // namespace yams::daemon

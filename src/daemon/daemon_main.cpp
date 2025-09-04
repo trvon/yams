@@ -376,10 +376,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // If dataDir not specified, allow YAMS_STORAGE env to define it
+    // If dataDir not specified, allow environment to define it (YAMS_STORAGE or YAMS_DATA_DIR)
     if (config.dataDir.empty()) {
         if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
             config.dataDir = std::filesystem::path(storageEnv);
+        } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
+            config.dataDir = std::filesystem::path(dataEnv);
         }
     }
 

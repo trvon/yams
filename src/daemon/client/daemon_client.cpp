@@ -925,6 +925,8 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         // If a dataDir is provided, export it and pass as explicit CLI arg
         if (!dataDir.empty()) {
             setenv("YAMS_STORAGE", dataDir.c_str(), 1);
+            // Also export legacy alias used by some components
+            setenv("YAMS_DATA_DIR", dataDir.c_str(), 1);
         }
 
         // Determine config file path (env override > XDG/HOME)

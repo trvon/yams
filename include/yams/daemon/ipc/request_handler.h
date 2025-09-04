@@ -9,11 +9,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 #include <unordered_map>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <yams/compat/thread_stop_compat.h>
 // New: shared request context
 #include <yams/daemon/ipc/request_context.h>
 
@@ -122,7 +122,8 @@ public:
 
     // Handle a connection with coroutines using native boost::asio socket
     [[nodiscard]] boost::asio::awaitable<void>
-    handle_connection(boost::asio::local::stream_protocol::socket socket, std::stop_token token);
+    handle_connection(boost::asio::local::stream_protocol::socket socket,
+                      yams::compat::stop_token token);
 
     // Handle a single request-response cycle (internal use)
     [[nodiscard]] boost::asio::awaitable<Result<void>>
@@ -131,7 +132,7 @@ public:
 
     // Simple interface for handling raw request data (for use with native Boost.ASIO)
     [[nodiscard]] boost::asio::awaitable<std::vector<uint8_t>>
-    handle_request(const std::vector<uint8_t>& request_data, std::stop_token token);
+    handle_request(const std::vector<uint8_t>& request_data, yams::compat::stop_token token);
 
     // Handle a streaming response
     [[nodiscard]] boost::asio::awaitable<Result<void>>

@@ -1307,6 +1307,8 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         // Legacy fallbacks
         if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {
             possiblePaths.push_back(std::filesystem::path(env) / "vectors.db");
+        } else if (const char* env2 = std::getenv("YAMS_DATA_DIR"); env2 && *env2) {
+            possiblePaths.push_back(std::filesystem::path(env2) / "vectors.db");
         }
         if (const char* home = std::getenv("HOME"); home && *home) {
             possiblePaths.push_back(std::filesystem::path(home) / ".local" / "share" / "yams" /
@@ -1571,9 +1573,9 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
 
             // Expose configured data directory for clarity
             try {
-                auto cfg = serviceManager_->getConfig();
-                if (!cfg.dataDir.empty()) {
-                    response.additionalStats["data_dir"] = cfg.dataDir.string();
+                const auto& dd = serviceManager_->getResolvedDataDir();
+                if (!dd.empty()) {
+                    response.additionalStats["data_dir"] = dd.string();
                 }
             } catch (...) {
                 // ignore
@@ -1596,10 +1598,10 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(response.vectorIndexSize);
                     // provide vector DB path if known
                     try {
-                        auto cfg = serviceManager_->getConfig();
-                        if (!cfg.dataDir.empty()) {
+                        const auto& dd = serviceManager_->getResolvedDataDir();
+                        if (!dd.empty()) {
                             response.additionalStats["vectordb_path"] =
-                                (cfg.dataDir / "vectors.db").string();
+                                (dd / "vectors.db").string();
                         }
                     } catch (...) {
                     }

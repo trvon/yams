@@ -285,6 +285,32 @@ public:
                      << "  - Or provide the query via --stdin or --query-file.\n";
                 return Error{ErrorCode::InvalidArgument, help.str()};
             }
+            // Auto-enable literal-text for code-like queries unless user explicitly set it
+            {
+                const std::string& q = query_;
+                auto contains = [&](const char* s) { return q.find(s) != std::string::npos; };
+                bool punct = false;
+                for (char c : q) {
+                    if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
+                        c == '"' || c == '\'' || c == '\\' || c == '`' || c == ';') {
+                        punct = true;
+                        break;
+                    }
+                }
+                int dq = static_cast<int>(std::count(q.begin(), q.end(), '\"'));
+                int lp = static_cast<int>(std::count(q.begin(), q.end(), '('));
+                int rp = static_cast<int>(std::count(q.begin(), q.end(), ')'));
+                int lb = static_cast<int>(std::count(q.begin(), q.end(), '['));
+                int rb = static_cast<int>(std::count(q.begin(), q.end(), ']'));
+                int lc = static_cast<int>(std::count(q.begin(), q.end(), '{'));
+                int rc = static_cast<int>(std::count(q.begin(), q.end(), '}'));
+                bool unbalanced = (dq % 2 != 0) || (lp != rp) || (lb != rb) || (lc != rc);
+                bool codeSeq = contains("::") || contains("->") || contains("#include") ||
+                               contains("template<") || contains("std::");
+                if (!literalText_ && !fuzzySearch_ && (codeSeq || punct || unbalanced)) {
+                    literalText_ = true;
+                }
+            }
             // Normalize include globs (split commas)
             auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
             if (includeGlobsExpanded.empty() && !pathFilter_.empty()) {
@@ -305,6 +331,20 @@ public:
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
             clientConfig.singleUseConnections = false; // reuse connection within process
+            // Ensure daemon auto-starts with the same storage as the CLI
+            if (cli_) {
+                auto dp = cli_->getDataPath();
+                if (!dp.empty()) {
+                    clientConfig.dataDir = dp;
+                }
+            }
+            // Seed env aliases for any subprocess-based startup paths
+            if (clientConfig.dataDir != std::filesystem::path{}) {
+#ifndef _WIN32
+                ::setenv("YAMS_STORAGE", clientConfig.dataDir.string().c_str(), 1);
+                ::setenv("YAMS_DATA_DIR", clientConfig.dataDir.string().c_str(), 1);
+#endif
+            }
             yams::daemon::DaemonClient client(clientConfig);
             client.setStreamingEnabled(clientConfig.enableChunkedResponses);
 
@@ -623,6 +663,35 @@ public:
                 if (!r)
                     return r.error();
                 return Result<void>();
+            } else {
+                // Heuristic retry: if the daemon path failed and the query may contain
+                // syntax/special characters, retry once with literalText enabled (unless user
+                // already requested it).
+                const auto& derr = daemonResult.error();
+                bool parseLike = derr.code == ErrorCode::InvalidArgument ||
+                                 derr.message.find("syntax") != std::string::npos ||
+                                 derr.message.find("FTS5") != std::string::npos ||
+                                 derr.message.find("unbalanced") != std::string::npos ||
+                                 derr.message.find("near") != std::string::npos ||
+                                 derr.message.find("tokenize") != std::string::npos;
+
+                if (!literalText_ && parseLike) {
+                    spdlog::warn("Search failed ({}); retrying with --literal-text enabled",
+                                 derr.message);
+                    yams::daemon::SearchRequest retryReq = dreq;
+                    retryReq.literalText = true;
+
+                    auto retryRes =
+                        clientConfig.enableChunkedResponses
+                            ? run_sync(client.streamingSearch(retryReq), std::chrono::seconds(30))
+                            : run_sync(client.call(retryReq), std::chrono::seconds(30));
+                    if (retryRes) {
+                        auto rr = render(retryRes.value());
+                        if (!rr)
+                            return rr.error();
+                        return Result<void>();
+                    }
+                }
             }
             // Fallback to local on error
             auto fb = fallback();

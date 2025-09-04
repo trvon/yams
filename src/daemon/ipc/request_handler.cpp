@@ -12,7 +12,6 @@
 #include <array>
 #include <chrono>
 #include <span>
-#include <stop_token>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -25,6 +24,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
+#include <yams/compat/thread_stop_compat.h>
 
 namespace yams::daemon {
 
@@ -121,7 +121,8 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
 RequestHandler::~RequestHandler() = default;
 
 boost::asio::awaitable<std::vector<uint8_t>>
-RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::stop_token token) {
+RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
+                               yams::compat::stop_token token) {
     (void)token; // unused
     using boost::asio::use_awaitable;
     try {
@@ -207,7 +208,7 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::st
 
 boost::asio::awaitable<void>
 RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket socket,
-                                  std::stop_token token) {
+                                  yams::compat::stop_token token) {
     using boost::asio::use_awaitable;
     try {
         spdlog::debug("RequestHandler::handle_connection coroutine started");

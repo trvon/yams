@@ -21,7 +21,7 @@ environment:
   STAGE_DIR: stage
   # Use git.tag() to dynamically set the version from the Git tag.
   # If the build is not triggered by a tag, it defaults to "0.0.0-dev".
-  YAMS_VERSION: git.tag(default="0.6.0")
+  YAMS_VERSION: git.tag(default="0.0.0-dev")
 
 packages:
   # Install build dependencies. Arch Linux has up-to-date packages.
