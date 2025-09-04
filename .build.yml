@@ -39,7 +39,8 @@ tasks:
       conan profile detect --force
       sed -i 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
       echo "Conan profile configured:"
-      conan profile show default
+      # Conan v2 syntax: show takes --profile/-pr flag
+      conan profile show -pr default || conan profile show
 
   - build: |
       cd yams

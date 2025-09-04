@@ -100,6 +100,7 @@ RequestHandler::~RequestHandler() = default;
 
 boost::asio::awaitable<std::vector<uint8_t>>
 RequestHandler::handle_request(const std::vector<uint8_t>& request_data, std::stop_token token) {
+    (void)token; // unused
     using boost::asio::use_awaitable;
     try {
         // Parse the message from raw data

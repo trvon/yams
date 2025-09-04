@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 SourceHut: https://sr.ht/~trvon/yams/
 
+
+## [v0.6.3] - 2025-01-04
+
+## Changes
+- CI version bump for source hut and github action builds
+- `yams add` supports multiple files
+- Adding small optimizations to decompression
+
+## Known Issues
+- MCP server usage my vary in successful returns
+- [v0.6.2] CLI performance still degraded, will be addressed in subsequent release
+
 ## [v0.6.2] - 2025-01-04
 
 ## Hot fixes

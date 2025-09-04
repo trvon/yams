@@ -39,8 +39,11 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("add", getDescription());
-        cmd->add_option("path", targetPath_, "Path to file/directory to add (use '-' for stdin)")
-            ->default_val("-");
+        // Accept multiple paths; keep legacy single-path for backward compatibility
+        cmd->add_option("paths", targetPaths_,
+                        "File or directory paths to add (use '-' for stdin). Accepts multiple.");
+        cmd->add_option("path", legacyTargetPath_,
+                        "[Deprecated] Single path to file/directory (use '-' for stdin)");
 
         cmd->add_option("-n,--name", documentName_,
                         "Name for the document (especially useful for stdin)");
@@ -76,10 +79,36 @@ public:
         try {
             // Attempt daemon-first add; fall back to service-based local execution
             {
-                // Skip daemon for stdin input (requires special handling)
-                if (targetPath_.string() != "-") {
+                // Determine effective paths list (prefer multi-path if provided)
+                std::vector<std::filesystem::path> paths;
+                if (!targetPaths_.empty()) {
+                    paths = targetPaths_;
+                } else if (!legacyTargetPath_.empty()) {
+                    paths.push_back(legacyTargetPath_);
+                } else {
+                    // Default to stdin when nothing provided
+                    paths.push_back(std::filesystem::path("-"));
+                }
+
+                // If multiple paths include stdin, require it to be the only entry
+                if (paths.size() > 1) {
+                    for (const auto& p : paths) {
+                        if (p.string() == "-") {
+                            return Error{ErrorCode::InvalidArgument,
+                                         "Stdin '-' cannot be combined with other paths"};
+                        }
+                    }
+                }
+
+                // Process each path; use daemon-first for non-stdin targets
+                bool any_daemon_ok = false;
+                for (const auto& path : paths) {
+                    if (path.string() == "-") {
+                        continue; // handled later via services path
+                    }
+
                     yams::daemon::AddDocumentRequest dreq;
-                    dreq.path = std::filesystem::absolute(targetPath_).string();
+                    dreq.path = std::filesystem::absolute(path).string();
                     dreq.name = documentName_;
                     dreq.tags = tags_;
 
@@ -122,14 +151,20 @@ public:
                         return executeWithServices();
                     };
 
-                    auto result = run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+                    auto result = run_sync(async_daemon_first(dreq, fallback, render),
+                                            std::chrono::seconds(30));
                     if (result) {
-                        return Result<void>();
+                        any_daemon_ok = true;
+                        continue;
                     }
+                }
+                if (any_daemon_ok && (targetPaths_.empty() ||
+                                      (targetPaths_.size() == 1 && targetPaths_[0].string() != "-"))) {
+                    return Result<void>();
                 }
             }
 
-            // Fall back to service-based execution for stdin or if daemon failed
+            // Fall back to service-based execution for stdin and for any remaining paths
             return executeWithServices();
 
         } catch (const std::exception& e) {
@@ -145,22 +180,60 @@ private:
             return Error{ErrorCode::NotInitialized, "Failed to initialize app context"};
         }
 
-        // Check if reading from stdin
-        if (targetPath_.string() == "-") {
+        // Build effective path list
+        std::vector<std::filesystem::path> paths;
+        if (!targetPaths_.empty()) {
+            paths = targetPaths_;
+        } else if (!legacyTargetPath_.empty()) {
+            paths.push_back(legacyTargetPath_);
+        } else {
+            paths.push_back(std::filesystem::path("-"));
+        }
+
+        // If stdin only
+        if (paths.size() == 1 && paths[0].string() == "-") {
             return storeFromStdinWithServices(*appContext);
         }
 
-        // Validate path exists
-        if (!std::filesystem::exists(targetPath_)) {
-            return Error{ErrorCode::FileNotFound, "Path not found: " + targetPath_.string()};
+        // Iterate and process each path
+        size_t ok = 0, failed = 0, indexed = 0;
+        for (const auto& p : paths) {
+            if (p.string() == "-") {
+                auto r = storeFromStdinWithServices(*appContext);
+                if (r) {
+                    ok++;
+                } else {
+                    failed++;
+                }
+                continue;
+            }
+            if (!std::filesystem::exists(p)) {
+                spdlog::warn("Path not found: {}", p.string());
+                failed++;
+                continue;
+            }
+            if (std::filesystem::is_directory(p)) {
+                auto r = storeDirectoryWithServices(*appContext, p);
+                if (r) {
+                    ok++;
+                } else {
+                    failed++;
+                }
+            } else {
+                auto r = storeFileWithServices(*appContext, p);
+                if (r) {
+                    ok++;
+                    indexed++;
+                } else {
+                    failed++;
+                }
+            }
         }
 
-        // Handle directory vs file
-        if (std::filesystem::is_directory(targetPath_)) {
-            return storeDirectoryWithServices(*appContext);
-        } else {
-            return storeFileWithServices(*appContext, targetPath_);
+        if (!cli_->getJsonOutput()) {
+            std::cout << "Completed add: " << ok << " ok, " << failed << " failed" << std::endl;
         }
+        return Result<void>();
     }
 
     Result<void> storeFromStdinWithServices(const app::services::AppContext& appContext) {
@@ -256,7 +329,8 @@ private:
         return Result<void>();
     }
 
-    Result<void> storeDirectoryWithServices(const app::services::AppContext& appContext) {
+    Result<void> storeDirectoryWithServices(const app::services::AppContext& appContext,
+                                            const std::filesystem::path& dirPath) {
         if (!recursive_) {
             return Error{ErrorCode::InvalidArgument, "Directory specified but --recursive not set"};
         }
@@ -269,7 +343,7 @@ private:
 
         // Build IndexingService request
         app::services::AddDirectoryRequest req;
-        req.directoryPath = targetPath_.string();
+        req.directoryPath = dirPath.string();
         req.collection = collection_;
         req.includePatterns = includePatterns_;
         req.excludePatterns = excludePatterns_;
@@ -358,7 +432,9 @@ private:
 
     // Member variables
     YamsCLI* cli_ = nullptr;
-    std::filesystem::path targetPath_;
+    // Multi-path support
+    std::vector<std::filesystem::path> targetPaths_;
+    std::filesystem::path legacyTargetPath_;
     std::string documentName_;
     std::vector<std::string> tags_;
     std::vector<std::string> metadata_;

@@ -38,7 +38,7 @@ jobs:
             hosted: true
             build_packages: true
           - os: macos-hosted-x64
-            runs_on: "macos-12" # Build on Monterey for wider compatibility
+            runs_on: "macos-14"
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
@@ -136,18 +136,20 @@ jobs:
         run: |
           set -e
           conan profile detect --force
+          # Determine profile path portably
+          PROFILE_PATH=$(conan profile path default 2>/dev/null || echo "$HOME/.conan2/profiles/default")
           # Portable in-place edit for cppstd across GNU/BSD sed
           if command -v gsed >/dev/null 2>&1; then SED=gsed; else SED=sed; fi
           OS_NAME="$(uname)"
           if [ "$OS_NAME" = "Darwin" ]; then
-            $SED -i '' -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
-            # Ensure libc++ is set for apple-clang
-            conan profile update "settings.compiler.libcxx=libc++" default || true
+            $SED -i '' -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' "$PROFILE_PATH" || true
+            # apple-clang defaults to libc++; ensure it is present
+            grep -q '^settings\.compiler\.libcxx=libc\+\+$' "$PROFILE_PATH" || echo 'settings.compiler.libcxx=libc++' >> "$PROFILE_PATH"
           else
-            $SED -i -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
+            $SED -i -e 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' "$PROFILE_PATH" || true
           fi
           echo "Conan profile configured (RUNNER_OS=$RUNNER_OS, uname=$OS_NAME):" >&2
-          conan profile show default >&2
+          conan profile show -pr default >&2 || conan profile show >&2
 
       - name: Setup Python (hosted Windows)
         if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
@@ -257,8 +259,16 @@ jobs:
           conan --version
 
           # Enforce C++20 for MSVC; profile already updated earlier
-          # Generate CMake toolchain and deps; enforce C++20 (required by onnx/onnxruntime)
-          conan install . --output-folder=build/yams-release -s build_type=Release -s compiler.cppstd=20 -g CMakeToolchain -g CMakeDeps --build=missing
+          # Generate CMake toolchain and deps; enforce C++20. Disable ONNX on Windows to avoid MSVC build issues.
+          conan install . --output-folder=build/yams-release -s build_type=Release -s compiler.cppstd=20 -o enable_onnx=False -g CMakeToolchain -g CMakeDeps --build=missing
+
+          # Ensure toolchain path exists where preset expects it; copy if needed
+          $expected = "build/yams-release/build/Release/generators/conan_toolchain.cmake"
+          $flat = "build/yams-release/conan_toolchain.cmake"
+          if (!(Test-Path $expected) -and (Test-Path $flat)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $expected) | Out-Null
+            Copy-Item $flat $expected -Force
+          }
 
           cmake --preset yams-release `
             -DYAMS_BUILD_PROFILE=release `

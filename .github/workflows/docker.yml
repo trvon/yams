@@ -89,7 +89,12 @@ jobs:
               T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${V}-amd64"
             fi
           fi
-          echo "tags=$T" >> "$GITHUB_OUTPUT"
+          # Write possibly multi-line tag list safely to GITHUB_OUTPUT
+          {
+            echo "tags<<__TAGS__"
+            echo "$T"
+            echo "__TAGS__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push AMD64 Docker image
         uses: docker/build-push-action@v5

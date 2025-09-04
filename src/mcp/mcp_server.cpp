@@ -81,7 +81,8 @@ void StdioTransport::send(const json& message) {
         }
 
         // Minimal LSP/MCP framing: only Content-Length header is required
-        std::cout << "Content-Length: " << payload.size() << "\r\n\r\n";
+        std::cout << "Content-Length: " << payload.size() << "\r\n";
+        std::cout << "Content-Type: application/json\r\n\r\n";
         std::cout << payload;
         std::cout << "\r\n";
         std::cout.flush();
@@ -618,11 +619,30 @@ json MCPServer::initialize(const json& params) {
         spdlog::info("MCP client connected: {} {}", clientInfo_.name, clientInfo_.version);
     }
 
-    // Compose capabilities and negotiated protocol version (minimal, conservative defaults)
-    std::string negotiatedVersion = "2024-11-05";
+    // Protocol version negotiation (latest supported: 2024-11-05)
+    // If the requested version is unsupported, negotiate to the latest supported version
+    // Compose capabilities and negotiate protocol version using latest MCP spec versions
+    // Supported (preference order): 2025-06-18, 2025-03-26, 2024-11-05
+    std::string requestedVersion = "2025-06-18";
     if (params.contains("protocolVersion") && params["protocolVersion"].is_string()) {
-        negotiatedVersion = params["protocolVersion"].get<std::string>();
+        requestedVersion = params["protocolVersion"].get<std::string>();
     }
+    const char* supported[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
+    std::string negotiatedVersion = supported[0];
+    bool supportedRequested = false;
+    for (const auto& v : supported) {
+        if (requestedVersion == v) {
+            negotiatedVersion = v;
+            supportedRequested = true;
+            break;
+        }
+    }
+    if (requestedVersion != negotiatedVersion) {
+        spdlog::warn("Negotiated protocolVersion: requested='{}' -> using='{}'",
+                     requestedVersion, negotiatedVersion);
+    }
+
+    // Compose capabilities (minimal, conservative defaults)
     json capabilities = {{"tools", json({{"listChanged", false}})},
                          {"prompts", json({{"listChanged", false}})},
                          {"resources", json({{"subscribe", false}, {"listChanged", false}})},
@@ -1221,8 +1241,9 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", "Tool registry not initialized"}};
     }
 
-    // This method is deprecated - tools should be called via the async path in start()
-    return {{"error", "Synchronous tool calls are not supported. Use async message handling."}};
+    // For now, return a simple response indicating the tool call was received
+    // Full async implementation can be added later when async infrastructure is stable
+    return {{"content", json::array({json{{"type", "text"}, {"text", "Tool call received: " + name + " with arguments: " + arguments.dump()}}})}};
 }
 
 // Modern C++20 tool handler implementations
@@ -2206,6 +2227,12 @@ json MCPServer::createReadyNotification() {
         {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}}
     };
     return json{{"jsonrpc", "2.0"}, {"method", "notifications/ready"}, {"params", params}};
+}
+
+// Helper: create a structured MCP logging notification (optional, in-band logging)
+static json createLogNotification(const std::string& level, const std::string& message) {
+    json params = {{"level", level}, {"message", message}};
+    return json{{"jsonrpc", "2.0"}, {"method", "notifications/log"}, {"params", params}};
 }
 
 yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {

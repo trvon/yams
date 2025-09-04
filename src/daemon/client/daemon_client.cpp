@@ -7,6 +7,7 @@
 
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 
@@ -118,78 +119,23 @@ void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
 
 // New: lightweight readiness probe that sends a real Ping and waits briefly
 static bool pingDaemonSync(const std::filesystem::path& socketPath,
-                           std::chrono::milliseconds requestTimeout = std::chrono::milliseconds(500),
-                           std::chrono::milliseconds headerTimeout = std::chrono::milliseconds(250),
-                           std::chrono::milliseconds bodyTimeout   = std::chrono::milliseconds(250)) {
-    using namespace yams::daemon;
-    const bool client_debug = []{
-        if (const char* v = std::getenv("YAMS_CLIENT_DEBUG")) {
-            return std::strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 || strcasecmp(v, "on") == 0;
+                           std::chrono::milliseconds /*requestTimeout*/ = std::chrono::milliseconds(500),
+                           std::chrono::milliseconds /*headerTimeout*/ = std::chrono::milliseconds(250),
+                           std::chrono::milliseconds /*bodyTimeout*/   = std::chrono::milliseconds(250)) {
+    // Best-effort synchronous connectivity probe: try to synchronously connect to the UNIX socket.
+    try {
+        auto path = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
+        if (path.empty()) return false;
+        boost::asio::io_context io;
+        boost::asio::local::stream_protocol::socket sock(io);
+        boost::system::error_code ec;
+        sock.connect(boost::asio::local::stream_protocol::endpoint(path.string()), ec);
+        if (!ec) {
+            sock.close();
+            return true;
         }
         return false;
-    }();
-    try {
-        AsioTransportAdapter::Options opts{};
-        opts.socketPath     = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
-        if (opts.socketPath.empty()) return false;
-        opts.requestTimeout = requestTimeout;
-        opts.headerTimeout  = headerTimeout;
-        opts.bodyTimeout    = bodyTimeout;
-        if (client_debug) {
-            spdlog::debug("[ping] socket='{}' req={}ms hdr={}ms body={}ms", opts.socketPath.string(),
-                          (int)requestTimeout.count(), (int)headerTimeout.count(), (int)bodyTimeout.count());
-        }
-        AsioTransportAdapter adapter(opts);
-        
-        // Create a synchronous wrapper for the async operation
-        auto& io = GlobalIOContext::instance().get_io_context();
-        std::promise<Result<Response>> promise;
-        auto future = promise.get_future();
-        
-        // Run the async operation and capture result
-        auto task = adapter.send_request(Request{PingRequest{}});
-        
-        // Since Task is a coroutine type, we need to run it to completion
-        // by spawning a coroutine that waits for it
-        auto runner = [](Task<Result<Response>> t, std::promise<Result<Response>>& p) -> Task<void> {
-            try {
-                auto result = co_await t;
-                p.set_value(std::move(result));
-            } catch (...) {
-                p.set_exception(std::current_exception());
-            }
-            co_return;
-        };
-        
-        // Create and start the runner task
-        auto runnerTask = runner(std::move(task), promise);
-        
-        // Process IO events until the future is ready or timeout
-        auto deadline = std::chrono::steady_clock::now() + requestTimeout + headerTimeout + bodyTimeout;
-        while (future.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
-            if (std::chrono::steady_clock::now() > deadline) {
-                if (client_debug) spdlog::debug("[ping] timeout waiting for response");
-                return false;  // Timeout
-            }
-            io.run_one();
-        }
-        
-        // Get the result
-        try {
-            auto result = future.get();
-            if (!result) {
-                if (client_debug) spdlog::debug("[ping] error: {}", result.error().message);
-                return false;
-            }
-            bool ok = std::holds_alternative<PongResponse>(result.value());
-            if (client_debug) spdlog::debug("[ping] {}", ok ? "ok" : "unexpected payload");
-            return ok;
-        } catch (...) {
-            if (client_debug) spdlog::debug("[ping] exception while waiting for future result");
-            return false;
-        }
     } catch (...) {
-        if (client_debug) spdlog::debug("[ping] exception setting up adapter/connect");
         return false;
     }
 }

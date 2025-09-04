@@ -409,13 +409,16 @@ private:
         std::span<const std::byte> compressedData{data.data() + sizeof(header),
                                                   data.size() - sizeof(header)};
 
-        // Verify compressed CRC
-        uint32_t actualCRC = calculateCRC32(compressedData);
-        if (actualCRC != header.compressedCRC32) {
-            updateStats([](compression::CompressionStats& stats) {
-                stats.cacheEvictions++; // Using as error counter
-            });
-            return Error(ErrorCode::HashMismatch, "Compressed data CRC mismatch");
+        // Optional compressed CRC check (can be disabled with YAMS_SKIP_DECOMPRESS_CRC)
+        uint32_t actualCRC = 0;
+        if (std::getenv("YAMS_SKIP_DECOMPRESS_CRC") == nullptr) {
+            actualCRC = calculateCRC32(compressedData);
+            if (actualCRC != header.compressedCRC32) {
+                updateStats([](compression::CompressionStats& stats) {
+                    stats.cacheEvictions++; // Using as error counter
+                });
+                return Error(ErrorCode::HashMismatch, "Compressed data CRC mismatch");
+            }
         }
 
         // Get decompressor
@@ -440,11 +443,13 @@ private:
             return result.error();
         }
 
-        // Verify uncompressed CRC
-        actualCRC = calculateCRC32(std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(result.value().data()), result.value().size()});
-        if (actualCRC != header.uncompressedCRC32) {
-            return Error(ErrorCode::HashMismatch, "Decompressed data CRC mismatch");
+        // Optional uncompressed CRC verification (can be disabled with YAMS_SKIP_DECOMPRESS_CRC)
+        if (std::getenv("YAMS_SKIP_DECOMPRESS_CRC") == nullptr) {
+            actualCRC = calculateCRC32(std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(result.value().data()), result.value().size()});
+            if (actualCRC != header.uncompressedCRC32) {
+                return Error(ErrorCode::HashMismatch, "Decompressed data CRC mismatch");
+            }
         }
 
         // Update statistics
@@ -457,8 +462,16 @@ private:
     }
 
     void startAsyncWorkers() {
-        size_t numWorkers = std::min(static_cast<size_t>(std::thread::hardware_concurrency() / 2),
-                                     static_cast<size_t>(4));
+        // Default to half the system cores; allow env override; clamp to [1,64]
+        size_t numWorkers = std::max<size_t>(1, std::thread::hardware_concurrency() / 2);
+        if (const char* s = std::getenv("YAMS_COMPRESSION_WORKERS")) {
+            try {
+                long v = std::strtol(s, nullptr, 10);
+                if (v > 0) numWorkers = static_cast<size_t>(v);
+            } catch (...) {
+            }
+        }
+        if (numWorkers > 64) numWorkers = 64;
 
         for (size_t i = 0; i < numWorkers; ++i) {
             workers_.emplace_back([this] { asyncWorker(); });

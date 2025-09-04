@@ -261,7 +261,7 @@ public:
             // Direct daemon call (no pooling) for determinism
             yams::daemon::ClientConfig cfg;
             cfg.enableChunkedResponses = !disableStreaming_;
-            cfg.singleUseConnections = true;
+            cfg.singleUseConnections = false;
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             yams::daemon::DaemonClient client(cfg);
             client.setStreamingEnabled(cfg.enableChunkedResponses);
@@ -284,7 +284,7 @@ public:
 
 private:
     // Default to non-streaming for best-effort reliability; users can opt back in.
-    bool disableStreaming_ = true;
+    bool disableStreaming_ = false;
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();

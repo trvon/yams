@@ -45,8 +45,8 @@ private:
     bool pathsOnly_ = false;
     bool literalText_ = false;
     bool regexOnly_ = false;
-    // Default to non-streaming for reliability; user can override with daemon flags later
-    bool disableStreaming_ = true;
+    // Default to streaming for quicker first results; user can opt out
+    bool disableStreaming_ = false;
     size_t semanticLimit_ = 3;
     std::string filterTags_;
     bool matchAllTags_ = false;
@@ -270,7 +270,7 @@ public:
                 // Simple direct daemon client (no pool) for reliability
                 yams::daemon::ClientConfig cfg;
                 cfg.enableChunkedResponses = !disableStreaming_;
-                cfg.singleUseConnections = true;
+                cfg.singleUseConnections = false;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
                 yams::daemon::DaemonClient client(cfg);
                 client.setStreamingEnabled(cfg.enableChunkedResponses);

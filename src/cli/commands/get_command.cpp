@@ -341,11 +341,11 @@ public:
             // Best-effort: simple direct daemon call with single-use connection,
             // no streaming; fallback to services on any daemon error
             yams::daemon::ClientConfig cfg;
-            cfg.enableChunkedResponses = false; // prefer reliability over streaming efficiency
-            cfg.singleUseConnections = true;
+            cfg.enableChunkedResponses = true; // allow streaming for faster TTFB
+            cfg.singleUseConnections = false;  // reuse connection within process
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             yams::daemon::DaemonClient client(cfg);
-
+            client.setStreamingEnabled(cfg.enableChunkedResponses);
             auto dres = run_sync(client.call(dreq), std::chrono::seconds(30));
             if (dres) {
                 auto r = render(dres.value());

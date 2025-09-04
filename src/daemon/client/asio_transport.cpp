@@ -88,6 +88,11 @@ struct AsioTransportAdapter::Connection {
         ErrorCallback onError;
         CompleteCallback onComplete;
         std::promise<Result<void>> done;
+
+        StreamingHandler() = default;
+        StreamingHandler(HeaderCallback h, ChunkCallback c, ErrorCallback e, CompleteCallback comp)
+            : onHeader(std::move(h)), onChunk(std::move(c)), onError(std::move(e)),
+              onComplete(std::move(comp)), done() {}
     };
     struct Handler {
         std::optional<UnaryHandler> unary;
@@ -648,7 +653,7 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    AsioTransportAdapter::Connection::StreamingHandler sh{onHeader, onChunk, onError, onComplete};
+    AsioTransportAdapter::Connection::StreamingHandler sh(onHeader, onChunk, onError, onComplete);
     auto fut = sh.done.get_future();
     {
         std::lock_guard<std::mutex> lk(conn->mtx);

@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev \
     libncurses-dev libcurl4-openssl-dev \
     python3 python3-venv python3-pip \
-    gcc g++ ninja-build openssl \
+    gcc g++ ninja-build openssl lld llvm clang \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/venv \

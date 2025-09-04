@@ -31,8 +31,8 @@ private:
     int headerTimeoutMs_ = 30000;
     int bodyTimeoutMs_ = 60000;
     int chunkSize_ = 64 * 1024;
-    // Default to non-streaming for best-effort reliability; users can opt back in
-    bool disableStreaming_ = true;
+    // Default to streaming; users can opt out with --no-streaming
+    bool disableStreaming_ = false;
 
     YamsCLI* cli_ = nullptr;
     std::string query_;
@@ -243,7 +243,7 @@ public:
             clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
-            clientConfig.singleUseConnections = true; // close after each request
+            clientConfig.singleUseConnections = false; // reuse connection within process
             yams::daemon::DaemonClient client(clientConfig);
             client.setStreamingEnabled(clientConfig.enableChunkedResponses);
 

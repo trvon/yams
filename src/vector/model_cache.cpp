@@ -467,6 +467,7 @@ Result<void> warmupWithSamples(std::shared_ptr<void> model,
 
     // Simplified warmup - would actually run inference
     for (const auto& sample : samples) {
+        (void)sample;
         // Simulate inference
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }

@@ -13,6 +13,7 @@ namespace yamsfmt = fmt;
 #include <cstring>
 #include <fstream>
 #include <random>
+#include <deque>
 #include <thread>
 
 // Include generated protobuf headers
@@ -616,25 +617,57 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
             Error{ErrorCode::FileNotFound, "Failed to create output file: " + outputPath.string()});
     }
 
-    // Reconstruct file from chunks
+    // Reconstruct file from chunks (parallel prefetch with limited concurrency)
     uint64_t totalWritten = 0;
-    for (const auto& chunkRef : manifest.chunks) {
-        // Retrieve chunk data
-        auto chunkResult = provider.getChunk(chunkRef.hash);
-        if (!chunkResult.has_value()) {
-            return Result<void>(
-                Error{ErrorCode::ChunkNotFound,
-                      yamsfmt::format("Failed to retrieve chunk {}: {}", chunkRef.hash.substr(0, 8),
-                                      chunkResult.error().message)});
+    const std::size_t totalChunks = manifest.chunks.size();
+    // Prefetch window size: default to half the system cores; allow override via env
+    std::size_t prefetch = std::max<std::size_t>(1, std::thread::hardware_concurrency() / 2);
+    if (const char* s = std::getenv("YAMS_RECONSTRUCT_PREFETCH")) {
+        try {
+            long v = std::strtol(s, nullptr, 10);
+            if (v > 0 && v <= 64) prefetch = static_cast<std::size_t>(v);
+        } catch (...) {
+        }
+    }
+    // Clamp to a reasonable upper bound
+    if (prefetch > 64) prefetch = 64;
+
+    struct Inflight {
+        std::future<Result<std::vector<std::byte>>> fut;
+        manifest::ChunkRef ref;
+    };
+    std::deque<Inflight> queue;
+
+    auto launch_fetch = [&](std::size_t idx) {
+        const auto& ref = manifest.chunks[idx];
+        Inflight in;
+        in.ref = ref;
+        in.fut = std::async(std::launch::async, [&provider, ref]() { return provider.getChunk(ref.hash); });
+        queue.emplace_back(std::move(in));
+    };
+
+    std::size_t nextIdx = 0;
+    const std::size_t warm = std::min(prefetch, totalChunks);
+    for (; nextIdx < warm; ++nextIdx) launch_fetch(nextIdx);
+
+    while (!queue.empty()) {
+        auto in = std::move(queue.front());
+        queue.pop_front();
+        auto chunkResult = in.fut.get();
+        if (!chunkResult) {
+            return Result<void>(Error{ErrorCode::ChunkNotFound,
+                                      yamsfmt::format("Failed to retrieve chunk {}: {}",
+                                                      in.ref.hash.substr(0, 8),
+                                                      chunkResult.error().message)});
         }
 
         const auto& chunkData = chunkResult.value();
 
         // Validate chunk size
-        if (chunkData.size() != chunkRef.size) {
+        if (chunkData.size() != in.ref.size) {
             return Result<void>(Error{ErrorCode::ValidationError,
                                       yamsfmt::format("Chunk {} size mismatch: expected {}, got {}",
-                                                      chunkRef.hash.substr(0, 8), chunkRef.size,
+                                                      in.ref.hash.substr(0, 8), in.ref.size,
                                                       chunkData.size())});
         }
 
@@ -642,11 +675,11 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
         if (pImpl->config.enableChecksums) {
             auto hasher = crypto::createSHA256Hasher();
             auto actualHash = hasher->hash(chunkData);
-            if (actualHash != chunkRef.hash) {
+            if (actualHash != in.ref.hash) {
                 return Result<void>(
                     Error{ErrorCode::ValidationError,
                           yamsfmt::format("Chunk {} hash mismatch at offset {}",
-                                          chunkRef.hash.substr(0, 8), chunkRef.offset)});
+                                          in.ref.hash.substr(0, 8), in.ref.offset)});
             }
         }
 
@@ -655,10 +688,14 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
         if (!file) {
             return Result<void>(
                 Error{ErrorCode::WriteError,
-                      yamsfmt::format("Failed to write chunk at offset {}", chunkRef.offset)});
+                      yamsfmt::format("Failed to write chunk at offset {}", in.ref.offset)});
         }
 
         totalWritten += chunkData.size();
+
+        if (nextIdx < totalChunks && queue.size() < prefetch) {
+            launch_fetch(nextIdx++);
+        }
     }
 
     file.close();
