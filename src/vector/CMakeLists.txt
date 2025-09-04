@@ -60,6 +60,11 @@ target_include_directories(yams_vector
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# Mark third-party headers as SYSTEM to relax warnings from external code
+target_include_directories(yams_vector
+    SYSTEM PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/hnswlib  # HNSWlib headers
 )
 

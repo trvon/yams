@@ -1,6 +1,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/trvon/yams)  [![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)  [![builds.sr.ht status](https://builds.sr.ht/~trvon.svg)](https://builds.sr.ht/~trvon?)
 
 # YAMS — Yet Another Memory System
+**Version v0.6.x will focus on improving stability, performance and the CI. All new features will move to the experimental or v0.7.0 branch**
 
 Persistent memory for LLMs and apps. Content-addressed storage with dedupe, compression, full-text and vector search.
 

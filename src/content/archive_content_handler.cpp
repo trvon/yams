@@ -337,6 +337,7 @@ bool ArchiveContentHandler::canHandle(const detection::FileSignature& signature)
 
 Result<ContentResult> ArchiveContentHandler::process(const std::filesystem::path& path,
                                                      const ContentConfig& config) {
+    (void)config;
     const auto startTime = std::chrono::steady_clock::now();
 
     try {
@@ -447,6 +448,9 @@ Result<ContentResult> ArchiveContentHandler::process(const std::filesystem::path
 Result<ContentResult> ArchiveContentHandler::processBuffer(std::span<const std::byte> data,
                                                            const std::string& hint,
                                                            const ContentConfig& config) {
+    (void)data;
+    (void)hint;
+    (void)config;
     // For buffer processing, we'd need to use libarchive memory functions
     // This is a more complex implementation - for now return not implemented
     return Error{ErrorCode::NotImplemented, "Buffer processing not yet implemented for archives"};

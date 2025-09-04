@@ -7,12 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 
 - [SourceHut](https://sr.ht/~trvon/yams/): https://sr.ht/~trvon/yams/
 
+## [v0.6.x] Meta Message
+
+Version v0.6.x will focus on improving stability, performance and the CI. All new features will move to the experimental or v0.7.0 branch.
+
+## [v0.6.8] - 2025-09-04
+
+### Changed
+- Data directory resolution uses a consistent precedence across CLI and daemon: configuration file > environment (`YAMS_STORAGE`/`YAMS_DATA_DIR`) > CLI flag. This avoids CLI defaults masking configured storage roots.
+- MCP search defaults hardened: runs in hybrid mode with fuzzy matching enabled by default and a similarity threshold of 0.7 when the client doesn’t provide options.
+
+### Added
+- MCP get-by-name and cat now include a fuzzy fallback: if direct lookup fails, a hybrid fuzzy search runs and returns the strongest single match, then retrieves by hash (preferred) or normalized path.
+- URL-aware naming: post-index for MCP downloads now sets the document name from the URL basename (query stripped), improving name-based retrieval. MCP get-by-name also accepts full URLs and normalizes them to the basename automatically.
+
+### Fixed
+- macOS build compatibility and warnings:
+  - `std::jthread/std::stop_token` portability: embedding service falls back to `std::thread` with an atomic stop on platforms lacking libc++ support.
+  - Third‑party noise reduced: mark `hnswlib` includes as SYSTEM and silence `sqlite-vec.c`; fence cast-qual warnings under Clang for HNSW.
+  - Resolved shadowing and unused variable/parameter warnings across content handlers (PDF, audio, image, binary, archive) and daemon client helpers.
+- Name propagation for downloads: downloaded artifacts are indexed with a human-friendly name, making `get --name <file>` work reliably after MCP/CLI downloads.
 
 ## [v0.6.7] - 2025-09-04
 
-## CI bump
+### CI bump
 - SourceHut build fixes
-- Github CI updates
+- GitHub CI updates
 
 ## [v0.6.6] - 2025-09-04
 

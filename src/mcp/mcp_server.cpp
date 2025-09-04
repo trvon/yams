@@ -1415,11 +1415,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
     dreq.query = _query;
     dreq.limit = req.limit;
-    dreq.fuzzy = req.fuzzy;
-    dreq.similarity = static_cast<double>(req.similarity);
+    // Default to fuzzy + hybrid to be resilient to clients that cannot set options
+    dreq.fuzzy = true;
+    dreq.similarity = (req.similarity > 0.0) ? static_cast<double>(req.similarity) : 0.7;
     // Pass-through hash when present to enable hash-first search
     dreq.hashQuery = req.hash;
-    dreq.searchType = req.type;
+    dreq.searchType = "hybrid";
     dreq.verbose = req.verbose;
     dreq.pathsOnly = req.pathsOnly;
     dreq.showLineNumbers = req.lineNumbers;
@@ -1805,6 +1806,24 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
                           mcp_response.storedPath, __abs.string());
         }
         addReq.path = __abs.string(); // normalized absolute path
+
+        // Preserve a human-friendly name for name-based retrieval
+        // Derive from URL basename (strip query params)
+        try {
+            std::string fname;
+            {
+                auto lastSlash = req.url.find_last_of('/');
+                fname = (lastSlash == std::string::npos) ? req.url : req.url.substr(lastSlash + 1);
+                auto q = fname.find('?');
+                if (q != std::string::npos)
+                    fname = fname.substr(0, q);
+            }
+            if (fname.empty())
+                fname = "downloaded_file";
+            addReq.name = std::move(fname);
+        } catch (...) {
+            addReq.name = "downloaded_file";
+        }
         addReq.collection = req.collection;
         addReq.snapshotId = req.snapshotId;
         addReq.snapshotLabel = req.snapshotLabel;
@@ -2454,13 +2473,86 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     MCPGetByNameResponse mcp_response;
 
     daemon::GetInitRequest init{};
+    // Normalize name: if a full URL was provided, use its basename for name-based lookup
     init.name = req.name;
+    try {
+        if (init.name.find("://") != std::string::npos) {
+            auto lastSlash = init.name.find_last_of('/');
+            std::string fname =
+                (lastSlash == std::string::npos) ? init.name : init.name.substr(lastSlash + 1);
+            auto q = fname.find('?');
+            if (q != std::string::npos)
+                fname = fname.substr(0, q);
+            if (!fname.empty())
+                init.name = std::move(fname);
+        }
+    } catch (...) {
+        // keep original name on any error
+    }
     init.byName = true;
     // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
 
     auto initCall = co_await daemon_client_->getInit(init);
     if (!initCall) {
-        co_return initCall.error();
+        // Fallback: fuzzy search top match, then fetch by hash/name
+        yams::daemon::SearchRequest sreq;
+        sreq.query = init.name;
+        sreq.fuzzy = true;
+        sreq.similarity = 0.7;
+        sreq.searchType = "hybrid";
+        sreq.limit = 1;
+        sreq.pathsOnly = false;
+        auto sres = co_await daemon_client_->streamingSearch(sreq);
+        if (!sres || sres.value().results.empty()) {
+            co_return initCall.error();
+        }
+        const auto& best = sres.value().results.front();
+        std::string hash;
+        auto it = best.metadata.find("hash");
+        if (it != best.metadata.end())
+            hash = it->second;
+
+        // Retrieve by hash first (preferred), else by name/path
+        if (!hash.empty()) {
+            yams::daemon::GetRequest greq;
+            greq.hash = hash;
+            greq.metadataOnly = false;
+            auto gres = co_await daemon_client_->get(greq);
+            if (!gres)
+                co_return gres.error();
+            const auto& r = gres.value();
+            mcp_response.size = r.size;
+            mcp_response.hash = r.hash;
+            mcp_response.name = r.name;
+            mcp_response.path = r.path;
+            mcp_response.mimeType = r.mimeType;
+            if (!r.content.empty()) {
+                constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                mcp_response.content =
+                    r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+            }
+            co_return mcp_response;
+        } else {
+            yams::daemon::GetRequest greq;
+            greq.name = best.path;
+            greq.byName = true;
+            greq.metadataOnly = false;
+            auto gres = co_await daemon_client_->get(greq);
+            if (!gres)
+                co_return gres.error();
+            const auto& r = gres.value();
+            mcp_response.size = r.size;
+            mcp_response.hash = r.hash;
+            mcp_response.name = r.name;
+            mcp_response.path = r.path;
+            mcp_response.mimeType = r.mimeType;
+            if (!r.content.empty()) {
+                constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                mcp_response.content =
+                    r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+            }
+            co_return mcp_response;
+        }
     }
     const auto& initVal = initCall.value();
     // Map GetInitResponse fields and metadata into MCP response
@@ -2550,8 +2642,48 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
     dreq.byName = !req.name.empty();
     dreq.metadataOnly = false;
     auto dres = co_await daemon_client_->get(dreq);
-    if (!dres)
+    if (!dres) {
+        // Fallback: fuzzy search by provided name, fetch top hit
+        if (!req.name.empty()) {
+            yams::daemon::SearchRequest sreq;
+            sreq.query = req.name;
+            sreq.fuzzy = true;
+            sreq.similarity = 0.7;
+            sreq.searchType = "hybrid";
+            sreq.limit = 1;
+            sreq.pathsOnly = false;
+            auto sres = co_await daemon_client_->streamingSearch(sreq);
+            if (sres && !sres.value().results.empty()) {
+                const auto& best = sres.value().results.front();
+                std::string hash;
+                auto it = best.metadata.find("hash");
+                if (it != best.metadata.end())
+                    hash = it->second;
+                yams::daemon::GetRequest greq;
+                if (!hash.empty()) {
+                    greq.hash = hash;
+                } else {
+                    greq.name = best.path;
+                    greq.byName = true;
+                }
+                greq.metadataOnly = false;
+                auto gres = co_await daemon_client_->get(greq);
+                if (!gres)
+                    co_return gres.error();
+                const auto& r = gres.value();
+                out.size = r.size;
+                out.hash = r.hash;
+                out.name = r.name;
+                if (!r.content.empty()) {
+                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                    out.content =
+                        r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+                }
+                co_return out;
+            }
+        }
         co_return dres.error();
+    }
     const auto& r = dres.value();
     out.size = r.size;
     out.hash = r.hash;

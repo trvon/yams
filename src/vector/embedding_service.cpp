@@ -65,6 +65,7 @@ bool EmbeddingService::startRepairAsync() {
     }
     repairRunning_ = true;
 
+#ifdef YAMS_HAVE_JTHREAD
     // Launch stop-aware background worker with std::jthread
     repairThread_ = std::jthread([this](std::stop_token stoken) {
         // Ensure running flag is reset when the thread exits
@@ -79,11 +80,26 @@ bool EmbeddingService::startRepairAsync() {
 
         this->runRepair(stoken);
     });
+#else
+    stopRequested_.store(false);
+    repairThread_ = std::thread([this]() {
+        struct Reset {
+            bool& flag;
+            std::mutex& mtx;
+            ~Reset() {
+                std::lock_guard<std::mutex> l(mtx);
+                flag = false;
+            }
+        } reset{repairRunning_, workerMutex_};
+        this->runRepairLegacy();
+    });
+#endif
 
     return true;
 }
 
 void EmbeddingService::stopRepair() {
+#ifdef YAMS_HAVE_JTHREAD
     std::jthread local;
     {
         std::lock_guard<std::mutex> lock(workerMutex_);
@@ -94,6 +110,19 @@ void EmbeddingService::stopRepair() {
     }
     // Request cooperative stop; jthread joins on destruction
     local.request_stop();
+#else
+    std::thread local;
+    {
+        std::lock_guard<std::mutex> lock(workerMutex_);
+        if (!repairThread_.joinable()) {
+            return;
+        }
+        stopRequested_.store(true);
+        local = std::move(repairThread_);
+    }
+    if (local.joinable())
+        local.join();
+#endif
 }
 
 bool EmbeddingService::isRepairRunning() const {
@@ -169,7 +198,11 @@ void EmbeddingService::triggerRepairIfNeeded() {
     }
 }
 
-void EmbeddingService::runRepair(std::stop_token stopToken) {
+void EmbeddingService::runRepair(
+#ifdef YAMS_HAVE_JTHREAD
+    std::stop_token stopToken
+#endif
+) {
     // Cross-process single-writer lock using a lockfile on vectors.db
     fs::path lockPath = dataPath_ / "vectors.db.lock";
     struct FileLock {
@@ -222,7 +255,13 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
             return;
         }
 
-        if (stopToken.stop_requested()) {
+        if (
+#ifdef YAMS_HAVE_JTHREAD
+            stopToken.stop_requested()
+#else
+            stopRequested_.load()
+#endif
+        ) {
             spdlog::debug("Repair thread: stop requested before scan");
             return;
         }
@@ -236,7 +275,13 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
         std::vector<std::string> missingEmbeddings;
         missingEmbeddings.reserve(docsResult.value().size());
         for (const auto& doc : docsResult.value()) {
-            if (stopToken.stop_requested()) {
+            if (
+#ifdef YAMS_HAVE_JTHREAD
+                stopToken.stop_requested()
+#else
+                stopRequested_.load()
+#endif
+            ) {
                 spdlog::debug("Repair thread: stop requested during scan");
                 return;
             }
@@ -271,7 +316,13 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
         }
         spdlog::info("EmbeddingService: using batch size {}", batchSize);
         for (size_t i = 0; i < missingEmbeddings.size(); i += batchSize) {
-            if (stopToken.stop_requested()) {
+            if (
+#ifdef YAMS_HAVE_JTHREAD
+                stopToken.stop_requested()
+#else
+                stopRequested_.load()
+#endif
+            ) {
                 spdlog::debug("Repair thread: stop requested during processing");
                 break;
             }
@@ -297,6 +348,14 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
 
     spdlog::debug("Repair thread stopped");
 }
+
+#if !defined(YAMS_HAVE_JTHREAD)
+// Legacy runner using an atomic stop flag
+void EmbeddingService::runRepairLegacy() {
+    // Delegate to the same implementation by calling the overload with conditional stops
+    runRepair();
+}
+#endif
 
 Result<void>
 EmbeddingService::generateEmbeddingsForDocuments(const std::vector<std::string>& documentHashes) {

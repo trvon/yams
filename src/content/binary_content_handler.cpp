@@ -41,7 +41,7 @@ Result<void> BinaryContentHandler::validate(const std::filesystem::path& path) c
 
 Result<ContentResult> BinaryContentHandler::process(const std::filesystem::path& path,
                                                     const ContentConfig& config) {
-    const auto startTime = std::chrono::steady_clock::now();
+    // Timing not used in this handler; keep minimal processing
 
     // Validate input
     if (auto validationResult = validate(path); !validationResult) {

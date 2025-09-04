@@ -573,22 +573,22 @@ VectorDatabase::getStaleEmbeddings(const std::string& /*model_id*/,
 }
 
 Result<std::vector<VectorRecord>>
-VectorDatabase::getEmbeddingsByVersion(const std::string& model_version, size_t limit) {
+VectorDatabase::getEmbeddingsByVersion(const std::string& /*model_version*/, size_t /*limit*/) {
     // TODO: Implement version filtering
     return std::vector<VectorRecord>{};
 }
 
-Result<void> VectorDatabase::markAsStale(const std::string& chunk_id) {
+Result<void> VectorDatabase::markAsStale(const std::string& /*chunk_id*/) {
     // TODO: Implement stale marking
     return {};
 }
 
-Result<void> VectorDatabase::markAsDeleted(const std::string& chunk_id) {
+Result<void> VectorDatabase::markAsDeleted(const std::string& /*chunk_id*/) {
     // TODO: Implement soft delete
     return {};
 }
 
-Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours age_threshold) {
+Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours /*age_threshold*/) {
     // TODO: Implement purge of soft-deleted records
     return size_t{0};
 }

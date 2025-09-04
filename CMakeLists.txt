@@ -577,6 +577,9 @@ if(YAMS_ENABLE_COVERAGE)
     message(STATUS "Code coverage enabled")
 endif()
 
+
+
+
 # Dependencies
 include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
@@ -709,7 +712,9 @@ if(YAMS_USE_CONAN)
     find_package(SQLite3 REQUIRED)
     find_package(Protobuf REQUIRED)
     find_package(OpenSSL REQUIRED)
-    find_package(onnxruntime REQUIRED)
+    if(YAMS_ENABLE_ONNX)
+        find_package(onnxruntime REQUIRED)
+    endif()
     find_package(tl-expected REQUIRED)
     # Boost headers (for Asio) are provided by Conan; import targets to expose include dirs
     find_package(Boost REQUIRED)

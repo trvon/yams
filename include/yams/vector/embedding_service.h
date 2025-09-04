@@ -5,9 +5,12 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <stop_token>
 #include <string>
 #include <thread>
+#if defined(__cpp_lib_jthread)
+#include <stop_token>
+#define YAMS_HAVE_JTHREAD 1
+#endif
 #include <vector>
 #include <yams/api/content_store.h>
 #include <yams/core/types.h>
@@ -75,9 +78,14 @@ private:
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo_;
     std::filesystem::path dataPath_;
 
-    // Managed background worker (C++20 std::jthread) and lifecycle
+    // Managed background worker (std::jthread when available; otherwise std::thread)
     mutable std::mutex workerMutex_;
+#ifdef YAMS_HAVE_JTHREAD
     std::jthread repairThread_;
+#else
+    std::thread repairThread_;
+    std::atomic<bool> stopRequested_{false};
+#endif
     bool repairRunning_{false};
 
     // Internal helper methods (extracted from repair command)
@@ -86,7 +94,11 @@ private:
                                             bool showProgress = false);
 
     // Stop-aware repair routine used by the managed worker
+#ifdef YAMS_HAVE_JTHREAD
     void runRepair(std::stop_token stopToken);
+#else
+    void runRepairLegacy();
+#endif
 };
 
 } // namespace yams::vector
