@@ -1641,30 +1641,34 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
 
         const auto& serviceResp = result.value();
 
-        // Map app::services::GrepResponse to daemon GrepResponse
-        GrepResponse response;
-        response.totalMatches = serviceResp.totalMatches;
-        response.filesSearched = serviceResp.results.size();
+        // Map app::services::GrepResponse to daemon GrepResponse with default cap
+        const std::size_t defaultCap = 20;
+        const bool applyDefaultCap = !req.countOnly && !req.filesOnly && !req.filesWithoutMatch &&
+                                     !req.pathsOnly && req.maxMatches == 0;
 
-        // Convert matches with enhanced type information
+        GrepResponse response;
+        response.filesSearched = serviceResp.results.size();
+        std::size_t emitted = 0;
+
         for (const auto& fileResult : serviceResp.results) {
             for (const auto& match : fileResult.matches) {
+                if (applyDefaultCap && emitted >= defaultCap) break;
                 GrepMatch daemonMatch;
                 daemonMatch.file = fileResult.file;
                 daemonMatch.lineNumber = match.lineNumber;
                 daemonMatch.line = match.line;
-
-                // Add context lines
                 daemonMatch.contextBefore = match.before;
                 daemonMatch.contextAfter = match.after;
-
-                // Map match type and confidence
                 daemonMatch.matchType = match.matchType.empty() ? "regex" : match.matchType;
                 daemonMatch.confidence = match.confidence;
-
                 response.matches.push_back(std::move(daemonMatch));
+                emitted++;
             }
+            if (applyDefaultCap && emitted >= defaultCap) break;
         }
+
+        // Totals: reflect emitted matches if default cap applied
+        response.totalMatches = applyDefaultCap ? emitted : serviceResp.totalMatches;
 
         // Note: daemon protocol doesn't support filesWithMatches/filesWithoutMatches
 

@@ -73,6 +73,12 @@ private:
 
     // Background compute support and keepalive
     std::optional<std::future<Response>> compute_future_;
+    // First-results-first staged compute
+    std::optional<std::future<Response>> fast_future_;
+    std::optional<std::future<Response>> full_future_;
+    bool first_burst_emitted_{false};
+    std::size_t already_sent_{0};
+    std::size_t first_burst_limit_{20};
     std::chrono::steady_clock::time_point last_keepalive_{};
     std::chrono::milliseconds keepalive_interval_{500};
 };

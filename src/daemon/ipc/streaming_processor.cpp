@@ -108,12 +108,35 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
         }
 
-        // Start background compute after first heartbeat
+        // Start staged background compute after first heartbeat
         if (pending_request_.has_value()) {
-            if (!compute_future_.has_value()) {
+            // Initialize first-burst limit from env once
+            if (first_burst_limit_ == 0) first_burst_limit_ = 20;
+            if (const char* env = std::getenv("YAMS_FIRST_BURST"); env && *env) {
+                try { auto v = static_cast<std::size_t>(std::stoul(env)); if (v > 0) first_burst_limit_ = v; } catch (...) {}
+            }
+
+            if (!fast_future_.has_value() && !full_future_.has_value()) {
                 auto req = *pending_request_;
-                // Spawn background compute; future will become ready when done
-                compute_future_.emplace(
+                // Prepare a reduced-limit request for fast-first results when applicable
+                Request fastReq = req;
+                if (mode_ == Mode::Search) {
+                    if (auto* s = std::get_if<SearchRequest>(&fastReq)) {
+                        if (s->limit == 0 || s->limit > first_burst_limit_) s->limit = first_burst_limit_;
+                    }
+                } else if (mode_ == Mode::List) {
+                    if (auto* l = std::get_if<ListRequest>(&fastReq)) {
+                        if (l->limit == 0 || l->limit > first_burst_limit_) l->limit = first_burst_limit_;
+                    }
+                }
+
+                // Spawn fast and full computes
+                fast_future_.emplace(
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor(),
+                        delegate_->process(fastReq),
+                        boost::asio::use_future));
+                full_future_.emplace(
                     boost::asio::co_spawn(
                         boost::asio::system_executor(),
                         delegate_->process(req),
@@ -153,19 +176,59 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
         }
 
-        // Background compute completion: build state when future is ready
-        if (compute_future_.has_value() && compute_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+        // Fast compute completion: emit first-burst results
+        if (fast_future_.has_value() && fast_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready && !first_burst_emitted_) {
+            Response fast;
+            try {
+                fast = fast_future_->get();
+            } catch (const std::exception& e) {
+                spdlog::debug("StreamingRequestProcessor: fast compute failed: {}", e.what());
+                fast_future_.reset();
+            }
+            if (auto* s = std::get_if<SearchResponse>(&fast)) {
+                search_ = SearchState{};
+                search_->totalCount = s->totalCount;
+                search_->elapsed = s->elapsed;
+                search_->results = std::move(s->results);
+                search_->pos = 0;
+                already_sent_ = search_->results.size();
+                first_burst_emitted_ = true;
+                // Emit the entire fast-burst as one chunk
+                SearchResponse chunk;
+                chunk.totalCount = search_->totalCount;
+                chunk.elapsed = search_->elapsed;
+                chunk.results = search_->results;
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = false};
+            } else if (auto* l = std::get_if<ListResponse>(&fast)) {
+                list_ = ListState{};
+                list_->totalCount = l->totalCount;
+                list_->items = std::move(l->items);
+                list_->pos = 0;
+                already_sent_ = list_->items.size();
+                first_burst_emitted_ = true;
+                ListResponse chunk;
+                chunk.totalCount = list_->totalCount;
+                chunk.items = list_->items;
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = false};
+            } else {
+                // For non-chunkable types, ignore fast path
+                fast_future_.reset();
+            }
+        }
+
+        // Full compute completion: build full state when ready
+        if (full_future_.has_value() && full_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
             Response full;
             try {
-                full = compute_future_->get();
+                full = full_future_->get();
             } catch (const std::exception& e) {
                 spdlog::error("StreamingRequestProcessor: background compute failed: {}", e.what());
                 ErrorResponse err{ErrorCode::InternalError, std::string("Failed to process request: ") + e.what()};
-                compute_future_.reset();
+                full_future_.reset();
                 pending_request_.reset();
                 co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
             }
-            compute_future_.reset();
+            full_future_.reset();
             pending_request_.reset();
 
             // Populate chunking state
@@ -174,7 +237,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 search_->totalCount = s->totalCount;
                 search_->elapsed = s->elapsed;
                 search_->results = std::move(s->results);
-                search_->pos = 0;
+                search_->pos = std::min<std::size_t>(already_sent_, search_->results.size());
                 
                 // Add memory limit check
                 constexpr size_t MAX_RESULTS = 100000; // Reasonable limit
@@ -189,7 +252,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 list_ = ListState{};
                 list_->totalCount = l->totalCount;
                 list_->items = std::move(l->items);
-                list_->pos = 0;
+                list_->pos = std::min<std::size_t>(already_sent_, list_->items.size());
                 
                 // Add memory limit check
                 constexpr size_t MAX_ITEMS = 100000; // Reasonable limit

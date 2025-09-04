@@ -1206,7 +1206,23 @@ boost::asio::awaitable<void> RequestHandler::writer_drain(boost::asio::local::st
             continue;
         }
         // Drain up to budget bytes for this request turn
-        size_t budget = config_.writer_budget_bytes_per_turn;
+        // Dynamic budget: increase turn size under pressure to reduce HoL blocking
+        size_t base_budget = config_.writer_budget_bytes_per_turn;
+        size_t budget = base_budget;
+        const size_t active = rr_active_.size();
+        const size_t queued_bytes = total_queued_bytes_;
+        const size_t queued_cap = config_.total_queued_bytes_cap;
+        // Scale up when many active streams or large queue backlog
+        if (active > 32) budget = budget * 2;
+        if (queued_bytes > (queued_cap / 2)) budget = budget * 2;
+        // Cap budget to a safe maximum (env override)
+        size_t max_budget = 1024 * 1024; // 1MB per turn default
+        if (const char* mb = std::getenv("YAMS_SERVER_WRITER_BUDGET_MAX")) {
+            try { auto v = static_cast<size_t>(std::stoul(mb)); if (v >= 4096) max_budget = v; } catch (...) {}
+        }
+        if (budget > max_budget) budget = max_budget;
+        // Reflect dynamic budget in mux metrics for observability
+        MuxMetricsRegistry::instance().setWriterBudget(budget);
         while (budget > 0 && it != rr_queues_.end() && !it->second.empty()) {
             FrameItem item = std::move(it->second.front());
             it->second.pop_front();

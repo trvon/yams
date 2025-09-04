@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -31,6 +32,7 @@
 #include <poll.h>
 #include <unistd.h>
 #endif
+
 
 namespace yams::mcp {
 namespace {
@@ -186,11 +188,15 @@ MessageResult StdioTransport::receive() {
                     return Error{ErrorCode::InvalidData, "Malformed Content-Length header"};
                 }
 
-                // Expect an empty line next (CRLF)
-                std::string blank;
-                (void)std::getline(in, blank);
-                if (!blank.empty() && blank.back() == '\r')
-                    blank.pop_back();
+                // Consume header lines until an empty line (CRLF) to support multiple headers
+                std::string headerLine;
+                while (std::getline(in, headerLine)) {
+                    if (!headerLine.empty() && headerLine.back() == '\r')
+                        headerLine.pop_back();
+                    if (headerLine.empty())
+                        break; // end of headers
+                    // Ignore additional headers such as Content-Type
+                }
 
                 // Read exact number of bytes
                 std::string payload;
@@ -284,6 +290,13 @@ void StdioTransport::resetErrorCount() noexcept {
 // MCPServer implementation
 MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown) {
+    // Ensure logging goes to stderr to keep stdout clean for MCP framing
+    if (auto existing = spdlog::get("yams-mcp")) {
+        spdlog::set_default_logger(existing);
+    } else {
+        auto logger = spdlog::stderr_color_mt("yams-mcp");
+        spdlog::set_default_logger(logger);
+    }
     // Set external shutdown flag on StdioTransport if applicable
     if (auto* stdioTransport = dynamic_cast<StdioTransport*>(transport_.get())) {
         stdioTransport->setShutdownFlag(externalShutdown_);
@@ -302,7 +315,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     }
     // Legacy pool config removed
     // Quick daemon health probe via DaemonClient (prefer ping; fallback to status)
-    {
+    try {
         yams::daemon::DaemonClient probe{};
         auto pong = yams::cli::run_sync(probe.ping(), std::chrono::seconds(2));
         if (pong) {
@@ -315,6 +328,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                 spdlog::debug("Probe failed: {}", pong ? "" : pong.error().message);
             }
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("Daemon probe exception (non-fatal): {}", e.what());
     }
 
     // Initialize the tool registry with modern handlers
@@ -360,12 +375,14 @@ void MCPServer::start() {
 
         // Process valid message
         auto request = messageResult.value();
+        // Detect JSON‑RPC notification (no "id" field per spec)
+        const bool isNotification = !request.contains("id");
 
         // Async dispatch is now the default for all MCP handlers
         {
             std::string method = request.value("method", "");
-            // Accept tool requests before notifications/initialized (compat)
-            if (method == "notifications/initialized") {
+            // Accept initialized notifications from clients (both MCP and legacy forms)
+            if (method == "initialized" || method == "notifications/initialized") {
                 // Client signals readiness; record and do not respond (notification)
                 initialized_.exchange(true);
                 spdlog::info("MCP client sent notifications/initialized");
@@ -517,24 +534,24 @@ void MCPServer::start() {
 
         auto response = handleRequest(request);
         if (response) {
-            const auto& resp = response.value();
-            // Do not send a response for notifications (no id)
-            if (!(resp.contains("id") && resp["id"].is_null())) {
-                transport_->send(resp);
-
-                // Initialize acknowledged; per MCP spec the client will send notifications/initialized.
-                // Do not emit server-side "ready" notifications; wait for the client signal.
+            // Skip responses for notifications (no id per JSON-RPC 2.0)
+            if (!isNotification) {
+                transport_->send(response.value());
             } else {
                 spdlog::debug("Notification processed without response");
             }
         } else {
-            // Send error response for protocol violations
-            const auto& error = response.error();
-            json errorResponse = {
-                {"jsonrpc", protocol::JSONRPC_VERSION},
-                {"error", {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
-                {"id", nullptr}};
-            transport_->send(errorResponse);
+            // Send error response for protocol violations only for requests (not notifications)
+            if (!isNotification) {
+                const auto& error = response.error();
+                json errorResponse = {
+                    {"jsonrpc", protocol::JSONRPC_VERSION},
+                    {"error", {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
+                    {"id", request.value("id", nullptr)}};
+                transport_->send(errorResponse);
+            } else {
+                spdlog::debug("Notification error ignored (no response sent)");
+            }
         }
     }
 
@@ -639,6 +656,9 @@ json MCPServer::listResources() {
 json MCPServer::readResource(const std::string& uri) {
     if (uri == "yams://stats") {
         // Get storage statistics
+        if (!store_) {
+            return {{"contents", {{{"uri", uri}, {"mimeType", "application/json"}, {"text", json({{"error", "Storage not initialized"}}).dump()}}}}};
+        }
         auto stats = store_->getStats();
         auto health = store_->checkHealth();
 
@@ -658,6 +678,9 @@ json MCPServer::readResource(const std::string& uri) {
                                 .dump()}}}}};
     } else if (uri == "yams://recent") {
         // Get recent documents
+        if (!metadataRepo_) {
+            return {{"contents", {{{"uri", uri}, {"mimeType", "application/json"}, {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}};
+        }
         auto docsResult = metadataRepo_->findDocumentsByPath("%");
         if (!docsResult) {
             return {{"contents", {{"text", "Failed to list documents"}}}};
@@ -707,7 +730,7 @@ json MCPServer::listTools() {
         json props = json::object();
         props["query"] = makeProp("string", "Search query (keywords, phrases, or hash)");
         props["limit"] = makeProp("integer", "Maximum number of results");
-        props["limit"]["default"] = 10;
+        props["limit"]["default"] = 20;
         props["fuzzy"] = makeProp("boolean", "Enable fuzzy matching");
         props["fuzzy"]["default"] = false;
         props["similarity"] = makeProp("number", "Minimum similarity threshold (0-1)");
@@ -919,7 +942,7 @@ json MCPServer::listTools() {
         schema["type"] = "object";
         json props = json::object();
         props["limit"] = makeProp("integer", "Maximum number of results");
-        props["limit"]["default"] = 100;
+        props["limit"]["default"] = 20;
         props["offset"] = makeProp("integer", "Offset for pagination");
         props["offset"]["default"] = 0;
         props["name"] = makeProp("string", "Exact name filter (optional)");
@@ -2168,6 +2191,20 @@ json MCPServer::createResponse(const json& id, const json& result) {
 
 json MCPServer::createError(const json& id, int code, const std::string& message) {
     return json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}};
+}
+
+json MCPServer::createReadyNotification() {
+    // Compose a minimal ready notification per MCP 2.0
+    json capabilities = {{"tools", json({{"listChanged", false}})},
+                         {"prompts", json({{"listChanged", false}})},
+                         {"resources", json({{"subscribe", false}, {"listChanged", false}})},
+                         {"logging", json::object()}};
+    json params = {
+        {"protocolVersion", negotiatedProtocolVersion_},
+        {"capabilities", capabilities},
+        {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}}
+    };
+    return json{{"jsonrpc", "2.0"}, {"method", "notifications/ready"}, {"params", params}};
 }
 
 yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {

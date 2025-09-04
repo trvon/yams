@@ -30,7 +30,7 @@ class StateComponent;
     public:
         struct Config {
             std::filesystem::path socketPath;
-            size_t maxConnections = 100;
+            size_t maxConnections = 1024;
             size_t workerThreads = 4;
             std::chrono::milliseconds connectionTimeout{30000};
             std::chrono::milliseconds acceptBackoffMs{100};

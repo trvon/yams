@@ -91,9 +91,9 @@ int main(int argc, char* argv[]) {
 
     app.add_option("--log-file", config.logFile, "Log file path");
 
-    app.add_option("--workers", config.workerThreads, "Number of worker threads")->default_val(4);
+    app.add_option("--workers", config.workerThreads, "Number of worker threads")->default_val(0);
 
-    app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")->default_val(4);
+    app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")->default_val(8);
 
     app.add_option("--log-level", config.logLevel, "Log level (trace/debug/info/warn/error)")
         ->default_val("info");
@@ -148,6 +148,18 @@ int main(int argc, char* argv[]) {
                 if (config.pidFile.empty() &&
                     daemonSection.find("pid_file") != daemonSection.end()) {
                     config.pidFile = fs::path(daemonSection.at("pid_file"));
+                }
+
+                // Data directory (aka storage) — allow multiple key forms for compatibility
+                if (config.dataDir.empty()) {
+                    if (auto it = daemonSection.find("data_dir"); it != daemonSection.end()) {
+                        config.dataDir = fs::path(it->second);
+                    } else if (auto it2 = daemonSection.find("storage"); it2 != daemonSection.end()) {
+                        config.dataDir = fs::path(it2->second);
+                    } else if (auto it3 = daemonSection.find("storage_path");
+                               it3 != daemonSection.end()) {
+                        config.dataDir = fs::path(it3->second);
+                    }
                 }
 
                 // Worker threads
@@ -393,9 +405,9 @@ int main(int argc, char* argv[]) {
         auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
         spdlog::set_default_logger(logger);
         spdlog::flush_on(spdlog::level::info);
-        
+
         // Log rotation info
-        spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", 
+        spdlog::info("Log rotation enabled: {} (max {}MB x {} files)",
                      config.logFile.string(), max_size / (1024*1024), max_files);
     } catch (...) {
         // Fallback silently to default logger

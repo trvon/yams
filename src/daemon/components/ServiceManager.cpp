@@ -258,6 +258,17 @@ Result<void> ServiceManager::initializeAsync(std::stop_token token) {
         mm.migrate();
 
         metadata::ConnectionPoolConfig poolCfg;
+        // Aggressive defaults for read-heavy workloads
+        size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+        poolCfg.minConnections = std::min<size_t>(std::max<size_t>(4, hw / 2), 16);
+        poolCfg.maxConnections = 64;
+        // Env overrides for tuning
+        if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
+            try { auto v = static_cast<size_t>(std::stoul(envMax)); if (v >= poolCfg.minConnections) poolCfg.maxConnections = v; } catch (...) {}
+        }
+        if (const char* envMin = std::getenv("YAMS_DB_POOL_MIN"); envMin && *envMin) {
+            try { auto v = static_cast<size_t>(std::stoul(envMin)); if (v > 0) poolCfg.minConnections = v; } catch (...) {}
+        }
         connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolCfg);
         if (auto poolInit = connectionPool_->initialize(); !poolInit) {
             return poolInit.error();

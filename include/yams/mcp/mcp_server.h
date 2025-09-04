@@ -117,6 +117,7 @@ private:
     void initializeToolRegistry();
     nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
     nlohmann::json createError(const nlohmann::json& id, int code, const std::string& message);
+    nlohmann::json createReadyNotification();
 
 #ifdef YAMS_TESTING
 public:

@@ -90,14 +90,17 @@ Result<void> YamsDaemon::start() {
 
     spdlog::info("Starting YAMS daemon...");
 
-    // Starting -> Initializing
+    // Starting -> Initializing (ensure ordering so HealthyEvent can promote to Ready)
     lifecycleFsm_.reset();
-    // The act of starting transitions towards Initializing once bootstrapped later
 
     if (auto result = lifecycleManager_->initialize(); !result) {
         running_ = false;
         return result;
     }
+
+    // Transition to Initializing as soon as core lifecycle is bootstrapped,
+    // before kicking off async service initialization to avoid race with HealthyEvent.
+    lifecycleFsm_.dispatch(BootstrappedEvent{});
 
     // Set callback to transition to Ready state when initialization completes
     serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
@@ -153,8 +156,7 @@ Result<void> YamsDaemon::start() {
         repairCoordinator_->start();
     }
 
-    // Signal that core bootstrapping completed; advance lifecycle
-    lifecycleFsm_.dispatch(BootstrappedEvent{});
+    // Bootstrapped event already dispatched before service initialization to prevent race.
 
     // Start lightweight main loop thread; no in-process IPC acceptor
     daemonThread_ = std::jthread([this](std::stop_token token) {

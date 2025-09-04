@@ -56,7 +56,7 @@ public:
             ->check(CLI::IsMember({"name", "size", "date", "hash"}));
 
         cmd->add_flag("--reverse,-r", reverse_, "Reverse sort order");
-        cmd->add_option("--limit,-n", limit_, "Limit number of results")->default_val(100);
+        cmd->add_option("--limit,-n", limit_, "Limit number of results")->default_val(20);
         cmd->add_option("--offset", offset_, "Offset for pagination")->default_val(0);
         cmd->add_option("--recent", recentCount_, "Show N most recent documents");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
@@ -283,7 +283,8 @@ public:
     }
 
 private:
-    bool disableStreaming_ = false;
+    // Default to non-streaming for best-effort reliability; users can opt back in.
+    bool disableStreaming_ = true;
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();
@@ -1077,7 +1078,7 @@ private:
     std::string format_;
     std::string sortBy_;
     bool reverse_ = false;
-    int limit_ = 100;
+    int limit_ = 20;
     bool verbose_ = false;
     bool pathsOnly_ = false;
     int offset_ = 0;

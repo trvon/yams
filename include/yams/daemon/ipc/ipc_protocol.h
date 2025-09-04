@@ -37,7 +37,7 @@ concept IsDeserializer = requires(T& t) {
 
 struct SearchRequest {
     std::string query;
-    size_t limit = 10;
+    size_t limit = 20;
     bool fuzzy = false;
     bool literalText = false;
     double similarity = 0.7;

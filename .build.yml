@@ -25,16 +25,14 @@ environment:
 
 packages:
   # Install build dependencies. Arch Linux has up-to-date packages.
-  - base-devel  # Includes gcc, make, etc.
+  - base-devel # Includes gcc, make, etc.
   - cmake
-  - python-pip
+  - conan # Use distro-packaged Conan (v2) instead of pip to avoid PEP 668 issues
+  - ninja # Optional but recommended for CMake presets using Ninja
   - zip
 
 tasks:
   - setup: |
-      # Install Conan, similar to the GHA workflow.
-      pip install conan
-
       # Configure the Conan profile.
       conan profile detect --force
       sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
@@ -80,11 +78,8 @@ tasks:
       # Generate RPM package
       cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
 
-
 artifacts:
   # These are the files that will be available for download after the build.
   - "yams-*.tar.gz"
   - "build/yams-release/*.deb"
   - "build/yams-release/*.rpm"
-
-

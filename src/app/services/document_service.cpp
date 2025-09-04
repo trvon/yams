@@ -606,153 +606,170 @@ public:
         if (!req.tags.empty())
             out.filteredByTags = req.tags;
 
-        for (const auto& d : page) {
-            DocumentEntry e;
-
-            // Basic file information
-            e.name = d.fileName;
-            e.fileName = d.fileName; // Fix: populate fileName field
-            e.hash = d.sha256Hash;
-            e.path = d.filePath;
-            e.extension = d.fileExtension;
-            e.size = static_cast<uint64_t>(d.fileSize);
-            e.mimeType = d.mimeType;
-            e.fileType = toFileType(d.mimeType);
-
-            // Timestamps
-            e.created = toEpochSeconds(d.createdTime);
-            e.modified = toEpochSeconds(d.modifiedTime);
-            e.indexed = toEpochSeconds(d.indexedTime);
-
-            // Content and metadata (only fetch when needed to avoid performance impact)
-            std::optional<std::unordered_map<std::string, metadata::MetadataValue>> cachedMetadata;
-
-            // Add content snippets when requested
-            if (req.showSnippets && req.snippetLength > 0) {
-                spdlog::debug("DocumentService: Extracting snippet for document {} (length={})",
-                              d.sha256Hash.substr(0, 8), req.snippetLength);
-
-                auto contentResult = ctx_.metadataRepo->getContent(d.id);
-                if (contentResult) {
-                    spdlog::debug("DocumentService: getContent succeeded for document {}",
-                                  d.sha256Hash.substr(0, 8));
-
-                    // Fix: Properly check the nested optional
-                    const auto& optionalContent = contentResult.value();
-                    if (optionalContent.has_value()) {
-                        const auto& content = optionalContent.value();
-                        spdlog::debug("DocumentService: Content found, text length = {}",
-                                      content.contentText.length());
-
-                        // Validate that we have actual text content
-                        if (!content.contentText.empty() && content.contentText.length() > 3) {
-                            // Create snippet with word boundary preservation
-                            std::string snippet = content.contentText;
-                            if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
-                                snippet =
-                                    snippet.substr(0, static_cast<size_t>(req.snippetLength - 3));
-                                // Find last space to avoid cutting words
-                                size_t lastSpace = snippet.find_last_of(' ');
-                                if (lastSpace != std::string::npos &&
-                                    lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
-                                    snippet = snippet.substr(0, lastSpace);
-                                }
-                                snippet += "...";
-                            }
-                            // Clean up snippet (remove excessive whitespace)
-                            std::string cleanedSnippet;
-                            bool lastWasSpace = false;
-                            for (char c : snippet) {
-                                if (std::isspace(c)) {
-                                    if (!lastWasSpace) {
-                                        cleanedSnippet += ' ';
-                                        lastWasSpace = true;
+        // Build entries in parallel when large pages, else sequential
+        const bool useParallel = page.size() >= 200 || std::getenv("YAMS_LIST_CONCURRENCY");
+        if (useParallel) {
+            std::vector<DocumentEntry> tmp(page.size());
+            std::atomic<size_t> nextIdx{0};
+            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+            size_t workers = hw;
+            if (const char* env = std::getenv("YAMS_LIST_CONCURRENCY"); env && *env) {
+                try { auto v = static_cast<size_t>(std::stoul(env)); if (v > 0) workers = v; } catch (...) {}
+            }
+            workers = std::min(workers, page.size() > 0 ? page.size() : size_t{1});
+            auto buildOne = [&](size_t i) {
+                const auto& d = page[i];
+                DocumentEntry e;
+                e.name = d.fileName;
+                e.fileName = d.fileName;
+                e.hash = d.sha256Hash;
+                e.path = d.filePath;
+                e.extension = d.fileExtension;
+                e.size = static_cast<uint64_t>(d.fileSize);
+                e.mimeType = d.mimeType;
+                e.fileType = toFileType(d.mimeType);
+                e.created = toEpochSeconds(d.createdTime);
+                e.modified = toEpochSeconds(d.modifiedTime);
+                e.indexed = toEpochSeconds(d.indexedTime);
+                std::optional<std::unordered_map<std::string, metadata::MetadataValue>> cachedMetadata;
+                if (req.showSnippets && req.snippetLength > 0) {
+                    auto contentResult = ctx_.metadataRepo->getContent(d.id);
+                    if (contentResult) {
+                        const auto& optionalContent = contentResult.value();
+                        if (optionalContent.has_value()) {
+                            const auto& content = optionalContent.value();
+                            if (!content.contentText.empty() && content.contentText.length() > 3) {
+                                std::string snippet = content.contentText;
+                                if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
+                                    snippet = snippet.substr(0, static_cast<size_t>(req.snippetLength - 3));
+                                    size_t lastSpace = snippet.find_last_of(' ');
+                                    if (lastSpace != std::string::npos &&
+                                        lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
+                                        snippet = snippet.substr(0, lastSpace);
                                     }
-                                } else {
-                                    cleanedSnippet += c;
-                                    lastWasSpace = false;
+                                    snippet += "...";
                                 }
+                                std::string cleaned;
+                                cleaned.reserve(snippet.size());
+                                bool lastWasSpace = false;
+                                for (char c : snippet) {
+                                    if (std::isspace(static_cast<unsigned char>(c))) {
+                                        if (!lastWasSpace) { cleaned += ' '; lastWasSpace = true; }
+                                    } else { cleaned += c; lastWasSpace = false; }
+                                }
+                                e.snippet = std::move(cleaned);
+                            } else {
+                                e.snippet = "[No text content]";
                             }
-                            e.snippet = cleanedSnippet;
-                            spdlog::debug("DocumentService: Generated snippet: '{}'",
-                                          cleanedSnippet.substr(0, 30) + "...");
                         } else {
-                            e.snippet = "[No text content]";
-                            spdlog::debug(
-                                "DocumentService: No text content available for document {}",
-                                d.sha256Hash.substr(0, 8));
+                            e.snippet = "[Content not available]";
                         }
                     } else {
-                        e.snippet = "[Content not available]";
-                        spdlog::debug("DocumentService: Content optional is empty for document {}",
-                                      d.sha256Hash.substr(0, 8));
+                        e.snippet = "[Content extraction failed]";
                     }
-                } else {
-                    e.snippet = "[Content extraction failed]";
-                    spdlog::warn("DocumentService: getContent failed for document {}: {}",
-                                 d.sha256Hash.substr(0, 8), contentResult.error().message);
                 }
-            } else {
-                spdlog::debug("DocumentService: Skipping snippet extraction (showSnippets={}, "
-                              "snippetLength={})",
-                              req.showSnippets, req.snippetLength);
+                if (req.showTags || req.showMetadata) {
+                    if (!cachedMetadata) {
+                        auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
+                        if (metadataResult) cachedMetadata = metadataResult.value();
+                    }
+                    if (cachedMetadata) {
+                        if (req.showTags) {
+                            e.tags = extractTags(*cachedMetadata);
+                        }
+                        if (req.showMetadata) {
+                            for (const auto& [key, value] : *cachedMetadata) {
+                                e.metadata[key] = value.value;
+                            }
+                        }
+                    }
+                }
+                tmp[i] = std::move(e);
+            };
+            std::vector<std::thread> ths;
+            ths.reserve(workers);
+            for (size_t t = 0; t < workers; ++t) {
+                ths.emplace_back([&](){
+                    while (true) {
+                        size_t i = nextIdx.fetch_add(1);
+                        if (i >= page.size()) break;
+                        buildOne(i);
+                    }
+                });
             }
-
-            // Add tags when requested (not just when filtering)
-            if (req.showTags) {
-                spdlog::debug("DocumentService: Extracting tags for document {}",
-                              d.sha256Hash.substr(0, 8));
-
-                if (!cachedMetadata) {
-                    auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
-                    if (metadataResult) {
-                        cachedMetadata = metadataResult.value();
-                        spdlog::debug(
-                            "DocumentService: Retrieved {} metadata entries for document {}",
-                            cachedMetadata.value().size(), d.sha256Hash.substr(0, 8));
+            for (auto& th : ths) th.join();
+            for (size_t i = 0; i < page.size(); ++i) {
+                out.documents.push_back(std::move(tmp[i]));
+            }
+        } else {
+            for (const auto& d : page) {
+                DocumentEntry e;
+                e.name = d.fileName;
+                e.fileName = d.fileName;
+                e.hash = d.sha256Hash;
+                e.path = d.filePath;
+                e.extension = d.fileExtension;
+                e.size = static_cast<uint64_t>(d.fileSize);
+                e.mimeType = d.mimeType;
+                e.fileType = toFileType(d.mimeType);
+                e.created = toEpochSeconds(d.createdTime);
+                e.modified = toEpochSeconds(d.modifiedTime);
+                e.indexed = toEpochSeconds(d.indexedTime);
+                std::optional<std::unordered_map<std::string, metadata::MetadataValue>> cachedMetadata;
+                if (req.showSnippets && req.snippetLength > 0) {
+                    auto contentResult = ctx_.metadataRepo->getContent(d.id);
+                    if (contentResult) {
+                        const auto& optionalContent = contentResult.value();
+                        if (optionalContent.has_value()) {
+                            const auto& content = optionalContent.value();
+                            if (!content.contentText.empty() && content.contentText.length() > 3) {
+                                std::string snippet = content.contentText;
+                                if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
+                                    snippet = snippet.substr(0, static_cast<size_t>(req.snippetLength - 3));
+                                    size_t lastSpace = snippet.find_last_of(' ');
+                                    if (lastSpace != std::string::npos &&
+                                        lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
+                                        snippet = snippet.substr(0, lastSpace);
+                                    }
+                                    snippet += "...";
+                                }
+                                std::string cleaned;
+                                cleaned.reserve(snippet.size());
+                                bool lastWasSpace = false;
+                                for (char c : snippet) {
+                                    if (std::isspace(static_cast<unsigned char>(c))) {
+                                        if (!lastWasSpace) { cleaned += ' '; lastWasSpace = true; }
+                                    } else { cleaned += c; lastWasSpace = false; }
+                                }
+                                e.snippet = std::move(cleaned);
+                            } else {
+                                e.snippet = "[No text content]";
+                            }
+                        } else {
+                            e.snippet = "[Content not available]";
+                        }
                     } else {
-                        spdlog::warn("DocumentService: Failed to get metadata for document {}: {}",
-                                     d.sha256Hash.substr(0, 8), metadataResult.error().message);
+                        e.snippet = "[Content extraction failed]";
                     }
                 }
-                if (cachedMetadata) {
-                    e.tags = extractTags(cachedMetadata.value());
-                    spdlog::debug("DocumentService: Extracted {} tags for document {}: [{}]",
-                                  e.tags.size(), d.sha256Hash.substr(0, 8), [&e]() {
-                                      std::string tagStr;
-                                      for (size_t i = 0; i < e.tags.size(); ++i) {
-                                          if (i > 0)
-                                              tagStr += ", ";
-                                          tagStr += e.tags[i];
-                                      }
-                                      return tagStr;
-                                  }());
-                } else {
-                    spdlog::debug("DocumentService: No metadata available for tags extraction for "
-                                  "document {}",
-                                  d.sha256Hash.substr(0, 8));
+                if (req.showTags || req.showMetadata) {
+                    if (!cachedMetadata) {
+                        auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
+                        if (metadataResult) cachedMetadata = metadataResult.value();
+                    }
+                    if (cachedMetadata) {
+                        if (req.showTags) {
+                            e.tags = extractTags(*cachedMetadata);
+                        }
+                        if (req.showMetadata) {
+                            for (const auto& [key, value] : *cachedMetadata) {
+                                e.metadata[key] = value.value;
+                            }
+                        }
+                    }
                 }
-            } else {
-                spdlog::debug("DocumentService: Skipping tags extraction (showTags={})",
-                              req.showTags);
+                out.documents.push_back(std::move(e));
             }
-
-            // Add metadata when requested
-            if (req.showMetadata) {
-                if (!cachedMetadata) {
-                    auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
-                    if (metadataResult) {
-                        cachedMetadata = metadataResult.value();
-                    }
-                }
-                if (cachedMetadata) {
-                    for (const auto& [key, value] : cachedMetadata.value()) {
-                        e.metadata[key] = value.value;
-                    }
-                }
-            }
-
-            out.documents.push_back(std::move(e));
         }
 
         return out;

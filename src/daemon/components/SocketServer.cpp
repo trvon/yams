@@ -259,7 +259,9 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         // Persistent connections; client may issue multiple requests sequentially
         handlerConfig.close_after_response = false;
         handlerConfig.graceful_half_close = true;
-        handlerConfig.max_inflight_per_connection = 128;
+        // More aggressive multiplexing by default; env overrides still apply in RequestHandler
+        handlerConfig.max_inflight_per_connection = 1024;
+        handlerConfig.writer_budget_bytes_per_turn = 256 * 1024; // 256KB per turn for higher throughput
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestHandler handler(dispatcher_, handlerConfig);
         

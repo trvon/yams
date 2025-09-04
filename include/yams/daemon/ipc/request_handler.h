@@ -70,7 +70,7 @@ public:
     struct Config {
         bool enable_streaming = true;     // Use streaming response model
         bool enable_multiplexing = true;  // Default: allow multiple concurrent requests per connection
-        size_t chunk_size = 64 * 1024;    // Default chunk size (64KB)
+        size_t chunk_size = 256 * 1024;   // Default chunk size (256KB)
         size_t header_flush_delay_ms = 0; // Time to wait before flushing header (0 = immediate)
         size_t chunk_flush_delay_ms = 0;  // Time to wait before flushing chunks (0 = immediate)
         std::chrono::seconds write_timeout{30}; // Timeout for write operations
@@ -83,10 +83,10 @@ public:
         // Maximum allowed frame size (bytes) for inbound messages; must align with server limits
         size_t max_frame_size = 10 * 1024 * 1024; // 10MB default
         // Multiplexing limits (when enable_multiplexing=true)
-        size_t max_inflight_per_connection = 64;   // Cap concurrent in-flight request handlers per connection
-        size_t per_request_queue_cap = 64;         // Max frames queued per request
-        size_t total_queued_bytes_cap = 4 * 1024 * 1024; // Max bytes queued per connection
-        size_t writer_budget_bytes_per_turn = 64 * 1024; // Fair-writer byte budget per request turn
+        size_t max_inflight_per_connection = 1024;        // Higher concurrency per connection
+        size_t per_request_queue_cap = 256;               // More frames queued per request
+        size_t total_queued_bytes_cap = 16 * 1024 * 1024; // Max bytes queued per connection (16MB)
+        size_t writer_budget_bytes_per_turn = 256 * 1024; // Fair-writer byte budget per request turn
 
         // When closing after a response, attempt a graceful half-close (shutdown send) and briefly
         // drain the peer's read side to reduce the chance of truncation at the client. Has no

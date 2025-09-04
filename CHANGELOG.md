@@ -4,13 +4,25 @@ All notable changes to YAMS (Yet Another Memory System) will be documented in th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+SourceHut: https://sr.ht/~trvon/yams/
+
+## [v0.6.1] - 2025-01-03
+
+## Hot fixes
+- Docker and sourcehut build file updates
+- Daemon liveness checks on startup bug fix where daemon did not signal start
+- Added more aggressive parallelization for search now that it holds all resources (will make tunable)
+
+## Known Issues
+- MCP server init not working with some clients
+- CLI performance has been degraded as it creates socket to daemon each request, working on session mode
+- `yams stats -v` not working as expected
 
 ## [v0.6.0] - 2025-01-03
 
 ### Repository
 - **Will move all future development work to experimental branch so that main and releases become more stable**
   - I apologize for recent instabilities
-- SourceHut: https://sr.ht/~trvon/yams/
 
 ### Added
 - Server multiplexing: fair round-robin writer with per-turn byte budget and backpressure caps (default ON).

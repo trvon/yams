@@ -45,12 +45,13 @@ private:
     bool pathsOnly_ = false;
     bool literalText_ = false;
     bool regexOnly_ = false;
-    bool disableStreaming_ = false;
+    // Default to non-streaming for reliability; user can override with daemon flags later
+    bool disableStreaming_ = true;
     size_t semanticLimit_ = 3;
     std::string filterTags_;
     bool matchAllTags_ = false;
     std::string colorMode_ = "auto";
-    size_t maxCount_ = 0;
+    size_t maxCount_ = 20;
 
 public:
     std::string getName() const override { return "grep"; }
@@ -112,10 +113,11 @@ public:
             ->check(CLI::IsMember({"always", "never", "auto"}));
 
         cmd->add_option("-m,--max-count", maxCount_, "Stop after N matches per file")
-            ->default_val(0);
+            ->default_val(20);
 
         cmd->add_option("--limit", maxCount_,
-                        "Alias: stop after N matches per file (same as --max-count)");
+                        "Alias: stop after N matches per file (same as --max-count)")
+            ->default_val(20);
 
         // Streaming control
         cmd->add_flag("--no-streaming", disableStreaming_,

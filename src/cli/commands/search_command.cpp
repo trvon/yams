@@ -31,7 +31,8 @@ private:
     int headerTimeoutMs_ = 30000;
     int bodyTimeoutMs_ = 60000;
     int chunkSize_ = 64 * 1024;
-    bool disableStreaming_ = false;
+    // Default to non-streaming for best-effort reliability; users can opt back in
+    bool disableStreaming_ = true;
 
     YamsCLI* cli_ = nullptr;
     std::string query_;

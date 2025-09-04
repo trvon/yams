@@ -338,8 +338,23 @@ public:
                 return render(daemonResp);
             };
 
-            // Use daemon_first helper with enhanced request
-            return run_sync(async_daemon_first(dreq, fallback, render), std::chrono::seconds(30));
+            // Best-effort: simple direct daemon call with single-use connection,
+            // no streaming; fallback to services on any daemon error
+            yams::daemon::ClientConfig cfg;
+            cfg.enableChunkedResponses = false; // prefer reliability over streaming efficiency
+            cfg.singleUseConnections = true;
+            cfg.requestTimeout = std::chrono::milliseconds(30000);
+            yams::daemon::DaemonClient client(cfg);
+
+            auto dres = run_sync(client.call(dreq), std::chrono::seconds(30));
+            if (dres) {
+                auto r = render(dres.value());
+                if (!r) return r.error();
+                return Result<void>();
+            }
+
+            // Fallback to local services if daemon fails
+            return fallback();
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};
