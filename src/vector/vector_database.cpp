@@ -566,7 +566,8 @@ Result<void> VectorDatabase::updateEmbeddings(const std::vector<VectorRecord>& r
 }
 
 Result<std::vector<std::string>>
-VectorDatabase::getStaleEmbeddings(const std::string& model_id, const std::string& model_version) {
+VectorDatabase::getStaleEmbeddings(const std::string& /*model_id*/,
+                                   const std::string& /*model_version*/) {
     // TODO: Implement stale embedding detection
     return std::vector<std::string>{};
 }

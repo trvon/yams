@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 
 - [SourceHut](https://sr.ht/~trvon/yams/): https://sr.ht/~trvon/yams/
 
+
+## [v0.6.7] - 2025-09-04
+
+## CI bump
+- SourceHut build fixes
+- Github CI updates
+
 ## [v0.6.6] - 2025-09-04
 
 ## CI bump
@@ -15,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 
 ## Fixed
 - Search regression from adding query results. Querys will now be supported by default in the fallback path after expressions are extracted
+
+## Known Issues
+- Data directory path resolutions needs to be audited
 
 ## [v0.6.5] - 2025-09-04
 

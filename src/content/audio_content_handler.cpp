@@ -188,6 +188,8 @@ std::optional<AudioMetadata> extractUsingFFProbe(const std::filesystem::path& pa
 
         return metadata;
     }
+#else
+    (void)path; // suppress unused parameter warning when ffprobe is unavailable
 #endif
     return std::nullopt;
 }
@@ -231,6 +233,7 @@ bool AudioContentHandler::canHandle(const detection::FileSignature& signature) c
 
 Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& path,
                                                    const ContentConfig& config) {
+    (void)config;
     const auto startTime = std::chrono::steady_clock::now();
 
     try {
@@ -340,6 +343,9 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
 Result<ContentResult> AudioContentHandler::processBuffer(std::span<const std::byte> data,
                                                          const std::string& hint,
                                                          const ContentConfig& config) {
+    (void)data;
+    (void)hint;
+    (void)config;
     // For buffer processing, we'd need to write to temp file or use memory-based parsers
     // This is a more complex implementation - for now return not implemented
     return Error{ErrorCode::NotImplemented, "Buffer processing not yet implemented for audio"};

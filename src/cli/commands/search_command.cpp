@@ -171,7 +171,7 @@ public:
         cmd->add_option("-l,--limit", limit_, "Maximum number of results")->default_val(20);
 
         cmd->add_option("-t,--type", searchType_, "Search type (keyword, semantic, hybrid)")
-            ->default_val("keyword");
+            ->default_val("hybrid");
 
         cmd->add_flag("-f,--fuzzy", fuzzySearch_, "Enable fuzzy search for approximate matching");
         cmd->add_option("--similarity", minSimilarity_,
@@ -659,7 +659,24 @@ public:
                 }
             }
             if (daemonResult) {
-                auto r = render(daemonResult.value());
+                auto resp = daemonResult.value();
+                bool noResults = resp.results.empty() || resp.totalCount == 0;
+                if (noResults && !fuzzySearch_) {
+                    // Retry once with fuzzy enabled to provide true hybrid fallback behavior
+                    yams::daemon::SearchRequest retryReq = dreq;
+                    retryReq.fuzzy = true;
+                    auto fuzzyRetry =
+                        clientConfig.enableChunkedResponses
+                            ? run_sync(client.streamingSearch(retryReq), std::chrono::seconds(30))
+                            : run_sync(client.call(retryReq), std::chrono::seconds(30));
+                    if (fuzzyRetry) {
+                        auto rr = render(fuzzyRetry.value());
+                        if (!rr)
+                            return rr.error();
+                        return Result<void>();
+                    }
+                }
+                auto r = render(resp);
                 if (!r)
                     return r.error();
                 return Result<void>();

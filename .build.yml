@@ -1,40 +1,63 @@
 # .build.yml
 #
-# This is a SourceHut build manifest generated from your .github/workflows/release.yml.
-# It focuses on the core build and packaging steps for a single Linux target.
-#
-# Differences from the GitHub Actions workflow:
-# - No matrix builds: This manifest builds for a single Linux environment.
-# - No cross-platform support: macOS and Windows builds are not included.
-# - Self-contained: Does not download artifacts from other CI/workflow runs.
-# - Simplified release process: Creates a distributable tarball, but does not
-#   create a GitHub Release or generate detailed release notes with benchmark data.
+# SourceHut build manifest for YAMS (single Linux target).
+# Key points:
+# - Compute version from Git ref (GIT_REF) at runtime; no manifest expressions.
+# - Persist computed version into ~/.buildenv for subsequent tasks.
+# - Add static build tags for search/badges.
+# - Gate packaging steps so they only run on tag builds.
+# - Fix CMake configure line continuation.
 
 image: archlinux
-# You can also use other images like:
+# Other possible images:
 # image: ubuntu/22.04
 # image: debian/stable
 
+# Static metadata for search and badges (unrelated to Git tags)
+tags:
+  - linux
+  - release
+  - cmake
+  - conan
+  - yams
+
 environment:
-  # Define a consistent build directory, similar to the GHA workflow.
+  # Define consistent directories.
   BUILD_DIR: build/yams-release
   STAGE_DIR: stage
-  # Use git.tag() to dynamically set the version from the Git tag.
-  # If the build is not triggered by a tag, it defaults to "0.0.0-dev".
-  YAMS_VERSION: git.tag(default="0.0.0-dev")
 
 packages:
-  # Install build dependencies. Arch Linux has up-to-date packages.
-  - base-devel # Includes gcc, make, etc.
+  # Build dependencies. Arch Linux provides up-to-date toolchains.
+  - base-devel # gcc, make, etc.
   - cmake
-  - conan # Use distro-packaged Conan (v2) instead of pip to avoid PEP 668 issues
-  - ninja # Optional but recommended for CMake presets using Ninja
+  - conan # Conan v2 from distro package to avoid PEP 668 issues
+  - ninja
   - zip
   - lld
   - clang
   - llvm
 
 tasks:
+  # Determine version from the Git ref and persist to ~/.buildenv for later tasks.
+  - compute_version: |
+      set -e
+      # Move into repository directory (SourceHut clones into ./yams)
+      cd yams
+
+      # Prefer tag-triggered builds; fall back to latest tag or a default.
+      if [[ "${GIT_REF:-}" =~ ^refs/tags/ ]]; then
+        RAW_TAG="${GIT_REF#refs/tags/}"
+      else
+        RAW_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0-dev)"
+      fi
+
+      # Strip optional leading 'v' (e.g., v1.2.3 -> 1.2.3)
+      CLEAN_VERSION="${RAW_TAG#v}"
+
+      # Persist for subsequent tasks
+      echo "YAMS_VERSION=${CLEAN_VERSION}" >> ~/.buildenv
+      echo "Computed YAMS_VERSION=${CLEAN_VERSION} (GIT_REF=${GIT_REF:-n/a})"
+
   - setup: |
       # Move into repository directory (SourceHut clones into ./yams)
       cd yams
@@ -47,15 +70,13 @@ tasks:
 
   - build: |
       cd yams
-      # The YAMS_VERSION from git.tag() might include a 'v' prefix (e.g., "v1.2.3").
-      CLEAN_VERSION="${YAMS_VERSION#v}"
-      echo "Starting build for version $CLEAN_VERSION"
+      CLEAN_VERSION="${YAMS_VERSION}"
+      echo "Starting build for version ${CLEAN_VERSION}"
 
-      # Run conan install to fetch dependencies and generate CMake toolchain/deps.
-      # Use our host profile to enforce C++20 and libc++ on mac when relevant.
+      # Fetch dependencies and generate CMake toolchain/deps.
       # GCC 15 on Arch triggers upstream onnxruntime 1.18 build errors; disable ONNX here.
       conan install . \
-        -of ${BUILD_DIR} \
+        -of "${BUILD_DIR}" \
         -pr:h=./conan/profiles/host.jinja \
         -pr:b=default \
         -s build_type=Release \
@@ -65,7 +86,7 @@ tasks:
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
         -DYAMS_BUILD_PROFILE=release \
-        -DYAMS_VERSION="${CLEAN_VERSION}" \
+        -DYAMS_VERSION="${CLEAN_VERSION}"
 
       # Build the project.
       cmake --build --preset yams-release
@@ -74,16 +95,28 @@ tasks:
       cmake --install "${BUILD_DIR}" --config Release
 
   - package: |
+      # Only package on tag builds
+      if [[ "${GIT_REF:-}" != refs/tags/* ]]; then
+        echo "Skipping packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
+        exit 0
+      fi
+
       cd yams
-      CLEAN_VERSION="${YAMS_VERSION#v}"
+      CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging the release..."
       cd "${STAGE_DIR}"
       tar -czf "../yams-${CLEAN_VERSION}-linux-x86_64.tar.gz" .
       echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
 
   - package_cpack: |
+      # Only package on tag builds
+      if [[ "${GIT_REF:-}" != refs/tags/* ]]; then
+        echo "Skipping CPack packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
+        exit 0
+      fi
+
       cd yams
-      CLEAN_VERSION="${YAMS_VERSION#v}"
+      CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging with CPack..."
       cd "${BUILD_DIR}"
       # Generate DEB package
@@ -92,7 +125,7 @@ tasks:
       cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
 
 artifacts:
-  # These are the files that will be available for download after the build.
+  # Files available for download after a successful build.
   - "yams/yams-*.tar.gz"
   - "yams/build/yams-release/*.deb"
   - "yams/build/yams-release/*.rpm"

@@ -47,7 +47,7 @@ inline std::string sanitize_for_terminal(std::string_view in) {
 }
 
 #ifndef _WIN32
-bool canWriteToDirectory(const std::filesystem::path& dir) {
+[[maybe_unused]] bool canWriteToDirectory(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
     if (!fs::exists(dir))
         return false;
@@ -62,7 +62,7 @@ bool canWriteToDirectory(const std::filesystem::path& dir) {
     return false;
 }
 
-std::filesystem::path getXDGRuntimeDir() {
+[[maybe_unused]] std::filesystem::path getXDGRuntimeDir() {
     const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
     return xdgRuntime ? std::filesystem::path(xdgRuntime) : std::filesystem::path();
 }

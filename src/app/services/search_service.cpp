@@ -677,6 +677,7 @@ private:
             }
 
             const auto& res = r.value();
+
             SearchResponse resp;
             resp.total = res.totalCount;
             resp.type = "fuzzy";
@@ -823,6 +824,11 @@ private:
             }
 
             const auto& res = r.value();
+            if (!req.fuzzy && res.totalCount == 0) {
+                SearchRequest req2 = req;
+                req2.fuzzy = true;
+                return metadataSearch(req2);
+            }
             SearchResponse resp;
             resp.total = res.totalCount;
             resp.type = "full-text";

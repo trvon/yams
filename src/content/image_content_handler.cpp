@@ -238,6 +238,7 @@ Result<ContentResult> ImageContentHandler::process(const std::filesystem::path& 
 Result<ContentResult> ImageContentHandler::processBuffer(std::span<const std::byte> data,
                                                          const std::string& hint,
                                                          const ContentConfig& config) {
+    (void)hint; // suppress unused parameter warning on some platforms
     if (data.empty()) {
         return Error{ErrorCode::InvalidArgument, "Empty image data"};
     }
@@ -393,6 +394,7 @@ ImageContentHandler::extractExifMetadata(std::span<const std::byte> data,
 std::optional<std::vector<std::byte>>
 ImageContentHandler::generateThumbnail(std::span<const std::byte> data, ImageFormat format,
                                        uint32_t targetSize) const {
+    (void)format; // suppress unused parameter warning in placeholder implementation
     // Placeholder implementation
     // In a full implementation, this would use image processing libraries
     // like ImageMagick++, SFML, or similar
@@ -438,6 +440,7 @@ ContentResult ImageContentHandler::buildContentResult(
     const ExtendedImageMetadata& metadata, std::optional<std::string> extractedText,
     std::optional<std::vector<std::byte>> thumbnail, const detection::FileSignature& signature,
     const std::filesystem::path& path) const {
+    (void)path; // suppress unused parameter warning (path not needed here)
     ContentResult result;
 
     // Set basic content info

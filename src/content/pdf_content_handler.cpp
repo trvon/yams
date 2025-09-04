@@ -68,7 +68,7 @@ Result<ContentResult> PdfContentHandler::process(const std::filesystem::path& pa
 
     // Add file size and processing time to metadata for observability
     try {
-        const auto fileSize = std::filesystem::file_size(path);
+        // Reuse earlier computed fileSize (avoid shadowing warnings)
         result.metadata["file_size"] = std::to_string(fileSize);
     } catch (...) {
         // ignore file size errors

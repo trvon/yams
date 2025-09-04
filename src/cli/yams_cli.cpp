@@ -101,7 +101,7 @@ YamsCLI::YamsCLI() {
         defaultDataPath = std::filesystem::path(".") / "yams_data";
     }
 
-    // Try to load default data dir from config.toml (core.data_dir) when YAMS_STORAGE is not set
+    // Try to load default data dir from config.toml (core.data_dir)
     try {
         auto cfgPath = getConfigPath();
         if (std::filesystem::exists(cfgPath)) {
@@ -116,15 +116,17 @@ YamsCLI::YamsCLI() {
                     }
                 }
                 defaultDataPath = std::filesystem::path(p);
+                // Record that config provided a value to enforce precedence later
+                configProvidesDataDir_ = true;
             }
         }
     } catch (...) {
         // Ignore config errors and keep env-based fallback
     }
 
-    app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
-        ->envname("YAMS_STORAGE")
-        ->default_val(defaultDataPath);
+    // We intentionally do not bind envname() here so we can enforce precedence (config > env > CLI)
+    storageOpt_ = app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
+                      ->default_val(defaultDataPath);
 
     app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
     app_->add_flag("--json", jsonOutput_, "Output in JSON format");
@@ -265,6 +267,31 @@ int YamsCLI::run(int argc, char* argv[]) {
             spdlog::set_level(spdlog::level::debug);
         } else {
             spdlog::set_level(spdlog::level::warn);
+        }
+
+        // Enforce data directory precedence after parsing options
+        // Order: config (if present) > env (YAMS_STORAGE/YAMS_DATA_DIR) > CLI-provided > default
+        try {
+            // If config provided data dir, force it
+            if (configProvidesDataDir_) {
+                // Ensure dataPath_ reflects the config-derived default
+                // (already set via default_val in constructor)
+            } else {
+                // If no config value, allow environment to override
+                const char* envStorage = std::getenv("YAMS_STORAGE");
+                const char* envDataDir = std::getenv("YAMS_DATA_DIR");
+                if (envStorage && *envStorage) {
+                    dataPath_ = fs::path(envStorage);
+                } else if (envDataDir && *envDataDir) {
+                    dataPath_ = fs::path(envDataDir);
+                } else if (storageOpt_ && storageOpt_->count() > 0) {
+                    // CLI was explicitly provided; leave dataPath_ as set by CLI11
+                } else {
+                    // Keep constructor default (XDG/HOME-based)
+                }
+            }
+        } catch (...) {
+            // Non-fatal: keep whatever CLI11 assigned
         }
 
         // Check for config migration before storage initialization

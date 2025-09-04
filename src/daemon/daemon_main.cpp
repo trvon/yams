@@ -82,10 +82,13 @@ int main(int argc, char* argv[]) {
     // Configuration options
     yams::daemon::DaemonConfig config;
     std::string configPath;
+    // Capture CLI-provided data dir separately to enforce precedence (config > env > CLI)
+    std::filesystem::path cliDataDir;
 
     app.add_option("--config", configPath, "Configuration file path");
     app.add_option("--socket", config.socketPath, "Unix domain socket path");
-    app.add_option("--data-dir,--storage", config.dataDir, "Data directory for storage");
+    auto* dataDirOpt =
+        app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
 
     app.add_option("--pid-file", config.pidFile, "PID file path");
 
@@ -383,6 +386,11 @@ int main(int argc, char* argv[]) {
         } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
             config.dataDir = std::filesystem::path(dataEnv);
         }
+    }
+
+    // Lastly, if still not specified and CLI provided --data-dir, use it as the lowest priority
+    if (config.dataDir.empty() && dataDirOpt && dataDirOpt->count() > 0) {
+        config.dataDir = cliDataDir;
     }
 
     // Resolve log file path if not specified

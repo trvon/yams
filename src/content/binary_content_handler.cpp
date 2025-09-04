@@ -76,10 +76,7 @@ Result<ContentResult> BinaryContentHandler::process(const std::filesystem::path&
         // Process the buffer
         auto result = processBuffer(buffer, path.extension().string(), config);
 
-        // Update statistics
-        const auto endTime = std::chrono::steady_clock::now();
-        const auto duration =
-            std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        // Update statistics (timing currently unused for binary handler)
         ++processedFiles_;
         totalBytesProcessed_ += buffer.size();
         if (result.has_value()) {
