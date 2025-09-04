@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include "test_async_helpers.h"
 
 namespace yams::daemon::integration::test {
 
@@ -20,6 +21,8 @@ protected:
         socketPath_ = fs::temp_directory_path() / ("test_daemon_" + testId_ + ".sock");
         pidFile_ = fs::temp_directory_path() / ("test_daemon_" + testId_ + ".pid");
         logFile_ = fs::temp_directory_path() / ("test_daemon_" + testId_ + ".log");
+        dataDir_ = fs::temp_directory_path() / ("test_daemon_" + testId_ + ".data");
+        fs::create_directories(dataDir_);
 
         cleanupFiles();
 
@@ -28,6 +31,7 @@ protected:
         config_.logFile = logFile_;
         config_.workerThreads = 2;
         config_.maxMemoryGb = 1;
+        config_.dataDir = dataDir_;
 
         clientConfig_.socketPath = socketPath_;
         clientConfig_.autoStart = false;
@@ -53,6 +57,7 @@ protected:
         fs::remove(socketPath_, ec);
         fs::remove(pidFile_, ec);
         fs::remove(logFile_, ec);
+        fs::remove_all(dataDir_, ec);
     }
 
     void killOrphanedDaemon() {
@@ -93,6 +98,7 @@ protected:
     fs::path socketPath_;
     fs::path pidFile_;
     fs::path logFile_;
+    fs::path dataDir_;
     DaemonConfig config_;
     ClientConfig clientConfig_;
     std::unique_ptr<YamsDaemon> daemon_;
@@ -200,7 +206,7 @@ TEST_F(DaemonLifecycleIntegrationTest, GracefulShutdownWithConnections) {
     std::atomic<bool> requestsComplete{false};
     std::thread requestThread([&clients, &requestsComplete]() {
         for (auto& client : clients) {
-            client->ping();
+            (void)yams::test_async::ok(client->ping());
             std::this_thread::sleep_for(10ms);
         }
         requestsComplete = true;
@@ -304,8 +310,7 @@ TEST_F(DaemonLifecycleIntegrationTest, RapidConnectionCycles) {
         EXPECT_TRUE(connectResult) << "Failed on cycle " << i;
 
         if (connectResult) {
-            auto pingResult = client.ping();
-            EXPECT_TRUE(pingResult) << "Ping failed on cycle " << i;
+            EXPECT_TRUE(yams::test_async::ok(client.ping())) << "Ping failed on cycle " << i;
         }
 
         client.disconnect();
@@ -334,8 +339,8 @@ TEST_F(DaemonLifecycleIntegrationTest, ResourceCleanup) {
         // Create some clients
         for (int j = 0; j < 5; ++j) {
             DaemonClient client(clientConfig_);
-            client.connect();
-            client.status();
+            (void)client.connect();
+            (void)yams::test_async::ok(client.status());
         }
 
         daemon_->stop();
@@ -393,26 +398,26 @@ TEST_F(DaemonLifecycleIntegrationTest, ConcurrentOperations) {
             DaemonClient client(clientConfig_);
 
             for (int j = 0; j < 10; ++j) {
-                if (client.connect()) {
-                    // Mix different operations
-                    if (j % 3 == 0) {
-                        if (client.ping())
+            if (client.connect()) {
+                // Mix different operations
+                if (j % 3 == 0) {
+                        if (yams::test_async::ok(client.ping()))
                             successCount++;
                         else
                             errorCount++;
-                    } else if (j % 3 == 1) {
-                        if (client.status())
+                } else if (j % 3 == 1) {
+                        if (yams::test_async::ok(client.status()))
                             successCount++;
                         else
                             errorCount++;
-                    } else {
-                        SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
-                                          false,  false, false, false, 0,   0,  0,         ""};
-                        if (client.search(req) || true)
+                } else {
+                    SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
+                                      false,  false, false, false, 0,   0,  0,         ""};
+                        if (static_cast<bool>(yams::test_async::res(client.search(req))) || true)
                             successCount++; // May fail if no data
                         else
                             errorCount++;
-                    }
+                }
 
                     if (j % 5 == 0) {
                         client.disconnect();

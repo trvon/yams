@@ -4,6 +4,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
+#include "test_async_helpers.h"
 
 #include <cctype>
 #include <chrono>
@@ -82,7 +83,7 @@ protected:
         ClientConfig cfg;
         cfg.autoStart = false; // don't spawn a new one if not present
         DaemonClient client(cfg);
-        (void)client.shutdown(true);
+        (void)yams::test_async::ok(client.shutdown(true));
 
         // Best-effort cleanup of test storage directory
         if (const char* stor = std::getenv("YAMS_STORAGE")) {
@@ -113,7 +114,7 @@ TEST_F(DaemonDownloadIntegrationTest, EndToEnd_Download_Ingest_Metadata) {
     // (metadata repo and content store). Poll Status for up to ~10s.
     bool ready = false;
     for (int i = 0; i < 100; ++i) {
-        auto st = client.status();
+        auto st = yams::test_async::res(client.status());
         if (st) {
             const auto& r = st.value();
             auto itMeta = r.readinessStates.find("metadata_repo");
@@ -134,7 +135,7 @@ TEST_F(DaemonDownloadIntegrationTest, EndToEnd_Download_Ingest_Metadata) {
     dreq.outputPath = ""; // daemon chooses; we store/ingest via ContentStore anyway
     dreq.quiet = true;    // less log spam
 
-    auto dres = client.call<DownloadRequest>(dreq);
+    auto dres = yams::test_async::res(client.call<DownloadRequest>(dreq));
     ASSERT_TRUE(dres) << "Daemon download call failed: " << (dres ? "" : dres.error().message);
 
     const auto& resp = dres.value();
@@ -150,7 +151,7 @@ TEST_F(DaemonDownloadIntegrationTest, EndToEnd_Download_Ingest_Metadata) {
     // The daemon exposes high-level GetRequest APIs.
     GetRequest greq;
     greq.hash = resp.hash; // ContentStore hash
-    auto getRes = client.get(greq);
+    auto getRes = yams::test_async::res(client.get(greq));
 
     ASSERT_TRUE(getRes) << "Daemon get() failed for stored hash: "
                         << (getRes ? "" : getRes.error().message);
@@ -163,7 +164,7 @@ TEST_F(DaemonDownloadIntegrationTest, EndToEnd_Download_Ingest_Metadata) {
     // looking for a document with size > 0. If metadata repo is not available,
     // daemon handler is still correct because it ingested into ContentStore.
     ListRequest lreq;
-    auto lres = client.call<ListRequest>(lreq);
+    auto lres = yams::test_async::res(client.call<ListRequest>(lreq));
     ASSERT_TRUE(lres) << "Daemon list() failed: " << (lres ? "" : lres.error().message);
 
     // Not all environments will index immediately; we just ensure the call works.

@@ -53,7 +53,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.ACT != 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -74,14 +74,32 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ steps.version.outputs.version }}
 
+      - name: Compute tags (local fallback)
+        id: tags
+        shell: bash
+        run: |
+          if [[ "${ACT:-}" == "true" ]]; then
+            T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:local-amd64"
+          else
+            T="${{ steps.meta.outputs.tags }}"
+            # Guard against invalid tags generated under limited local metadata
+            if [[ -z "$T" || "$T" == *":-amd64" || "$T" =~ :$ ]]; then
+              V="${{ steps.version.outputs.version }}"
+              if [[ -z "$V" ]]; then V="dev-${GITHUB_SHA::7}"; fi
+              T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${V}-amd64"
+            fi
+          fi
+          echo "tags=$T" >> "$GITHUB_OUTPUT"
+
       - name: Build and push AMD64 Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ env.ACT != 'true' && github.event_name != 'pull_request' }}
+          load: ${{ env.ACT == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.title=YAMS
             org.opencontainers.image.description=Yet Another Memory System - High-performance content-addressed storage
@@ -136,7 +154,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.ACT != 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -157,14 +175,31 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ steps.version.outputs.version }}
 
+      - name: Compute tags (local fallback)
+        id: tags
+        shell: bash
+        run: |
+          if [[ "${ACT:-}" == "true" ]]; then
+            T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:local-arm64"
+          else
+            T="${{ steps.meta.outputs.tags }}"
+            if [[ -z "$T" || "$T" == *":-arm64" || "$T" =~ :$ ]]; then
+              V="${{ steps.version.outputs.version }}"
+              if [[ -z "$V" ]]; then V="dev-${GITHUB_SHA::7}"; fi
+              T="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${V}-arm64"
+            fi
+          fi
+          echo "tags=$T" >> "$GITHUB_OUTPUT"
+
       - name: Build and push ARM64 Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ env.ACT != 'true' && github.event_name != 'pull_request' }}
+          load: ${{ env.ACT == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.title=YAMS
             org.opencontainers.image.description=Yet Another Memory System - High-performance content-addressed storage

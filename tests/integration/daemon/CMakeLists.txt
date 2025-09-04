@@ -94,24 +94,28 @@ add_test(NAME daemon_delete_parity_integration_test COMMAND daemon_delete_parity
 set_tests_properties(daemon_delete_parity_integration_test PROPERTIES LABELS "daemon;integration")
 
 # Pooled request integration test (uses real daemon)
-add_executable(pooled_request_integration_test
-    pooled_request_integration_test.cpp
-)
-target_link_libraries(pooled_request_integration_test PRIVATE
-    test_utils
-    gtest_main
-    yams_mcp
-    yams_cli
-    yams_api
-    yams_search
-    yams_metadata
-    yams_downloader
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-    Threads::Threads
-)
-add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)
-set_tests_properties(pooled_request_integration_test PROPERTIES LABELS "daemon;integration")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pooled_request_integration_test.cpp")
+    add_executable(pooled_request_integration_test
+        pooled_request_integration_test.cpp
+    )
+    target_link_libraries(pooled_request_integration_test PRIVATE
+        test_utils
+        gtest_main
+        yams_mcp
+        yams_cli
+        yams_api
+        yams_search
+        yams_metadata
+        yams_downloader
+        spdlog::spdlog
+        nlohmann_json::nlohmann_json
+        Threads::Threads
+    )
+    add_test(NAME pooled_request_integration_test COMMAND pooled_request_integration_test)
+    set_tests_properties(pooled_request_integration_test PROPERTIES LABELS "daemon;integration")
+else()
+    message(STATUS "Skipping pooled_request_integration_test (source not present)")
+endif()
 
 # Protocol streaming/non-streaming behavioral tests
 add_executable(daemon_search_streaming_protocol_test

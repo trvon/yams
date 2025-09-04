@@ -37,6 +37,7 @@ add_library(yams_daemon_client STATIC
     ipc/ipc_protocol.cpp
     ipc/message_framing.cpp
 )
+set_target_properties(yams_daemon_client PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_daemon_client
     PUBLIC
@@ -79,7 +80,9 @@ add_library(yams_daemon_ipc STATIC
     ipc/connection_fsm.cpp
     ipc/retrieval_session.cpp
     ipc/thread_pool.cpp
+    ipc/socket_utils.cpp
 )
+set_target_properties(yams_daemon_ipc PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 # Install daemon IPC library and export with YamsTargets so dependents are satisfied
 install(TARGETS yams_daemon_ipc
@@ -260,6 +263,7 @@ if(Protobuf_FOUND)
         ipc/proto_serializer.cpp
         ${YAMS_IPC_PROTO_GEN_SRCS}
     )
+    set_target_properties(yams_ipc_proto PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
     target_include_directories(yams_ipc_proto
         PUBLIC
@@ -309,6 +313,9 @@ add_library(yams_daemon STATIC
     resource/mock_model_provider.cpp
     resource/plugin_loader.cpp
 )
+
+# Avoid LTO bitcode in the static daemon lib to prevent link failures when executables disable IPO
+set_target_properties(yams_daemon PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_daemon
     PUBLIC
@@ -384,11 +391,36 @@ add_executable(yams-daemon
 
 target_link_libraries(yams-daemon
     PRIVATE
-        yams::daemon
-        yams_config
+        "-Wl,--start-group"
+            yams::daemon
+            yams_config
+            yams::repair
+            yams_app_services
+            yams_downloader
+            yams_search
+            yams_vector
+            yams_api
+            yams_metadata
+            yams_indexing
+            yams_content
+            yams_detection
+            yams::storage_engine
+            yams::reference_counter
+            yams_compression
+            yams_manifest
+            yams_chunking
+            yams_crypto
+            yams_extraction
+            "-Wl,--whole-archive" lzma_sdk "-Wl,--no-whole-archive"
+        "-Wl,--end-group"
         CLI11::CLI11
         spdlog::spdlog
 )
+
+# Work around rare LTO toolchain issues that can drop 'main' in some environments
+set_target_properties(yams-daemon PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_link_options(yams-daemon PRIVATE -Wl,--no-gc-sections)
+target_link_options(yams-daemon PRIVATE -fuse-ld=bfd)
 
 # Export and install daemon client library
 install(TARGETS yams_daemon_client

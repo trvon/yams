@@ -3,6 +3,7 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
+#include <yams/daemon/ipc/connection_fsm.h>
 
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -85,7 +86,15 @@ public:
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
-        pImpl->config_.socketPath = resolveSocketPathConfigFirst();
+        pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+    }
+    // Optional env override for max inflight (load testing): YAMS_MAX_INFLIGHT
+    if (const char* mi = std::getenv("YAMS_MAX_INFLIGHT")) {
+        try {
+            auto v = std::stoul(mi);
+            if (v > 0) pImpl->config_.maxInflight = v;
+        } catch (...) {
+        }
     }
     spdlog::debug("DaemonClient init: resolved socket='{}'", pImpl->config_.socketPath.string());
 }
@@ -113,14 +122,23 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath,
                            std::chrono::milliseconds headerTimeout = std::chrono::milliseconds(250),
                            std::chrono::milliseconds bodyTimeout   = std::chrono::milliseconds(250)) {
     using namespace yams::daemon;
+    const bool client_debug = []{
+        if (const char* v = std::getenv("YAMS_CLIENT_DEBUG")) {
+            return std::strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 || strcasecmp(v, "on") == 0;
+        }
+        return false;
+    }();
     try {
         AsioTransportAdapter::Options opts{};
-        opts.socketPath     = socketPath.empty() ? DaemonClient::resolveSocketPath() : socketPath;
+        opts.socketPath     = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
         if (opts.socketPath.empty()) return false;
         opts.requestTimeout = requestTimeout;
         opts.headerTimeout  = headerTimeout;
         opts.bodyTimeout    = bodyTimeout;
-
+        if (client_debug) {
+            spdlog::debug("[ping] socket='{}' req={}ms hdr={}ms body={}ms", opts.socketPath.string(),
+                          (int)requestTimeout.count(), (int)headerTimeout.count(), (int)bodyTimeout.count());
+        }
         AsioTransportAdapter adapter(opts);
         
         // Create a synchronous wrapper for the async operation
@@ -150,6 +168,7 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath,
         auto deadline = std::chrono::steady_clock::now() + requestTimeout + headerTimeout + bodyTimeout;
         while (future.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
             if (std::chrono::steady_clock::now() > deadline) {
+                if (client_debug) spdlog::debug("[ping] timeout waiting for response");
                 return false;  // Timeout
             }
             io.run_one();
@@ -158,12 +177,19 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath,
         // Get the result
         try {
             auto result = future.get();
-            if (!result) return false;
-            return std::holds_alternative<PongResponse>(result.value());
+            if (!result) {
+                if (client_debug) spdlog::debug("[ping] error: {}", result.error().message);
+                return false;
+            }
+            bool ok = std::holds_alternative<PongResponse>(result.value());
+            if (client_debug) spdlog::debug("[ping] {}", ok ? "ok" : "unexpected payload");
+            return ok;
         } catch (...) {
+            if (client_debug) spdlog::debug("[ping] exception while waiting for future result");
             return false;
         }
     } catch (...) {
+        if (client_debug) spdlog::debug("[ping] exception setting up adapter/connect");
         return false;
     }
 }
@@ -361,6 +387,7 @@ Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     opts.headerTimeout = pImpl->headerTimeout_;
     opts.bodyTimeout = pImpl->bodyTimeout_;
     opts.requestTimeout = pImpl->config_.requestTimeout;
+    opts.maxInflight = pImpl->config_.maxInflight;
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(req);
     if (!r)
@@ -716,6 +743,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
     opts.headerTimeout = pImpl->headerTimeout_;
     opts.bodyTimeout = pImpl->bodyTimeout_;
     opts.requestTimeout = pImpl->config_.requestTimeout;
+    opts.maxInflight = pImpl->config_.maxInflight;
 
     auto onHeader = [handler](const Response& r) { handler->onHeaderReceived(r); };
     auto onChunk = [handler](const Response& r, bool last) {
@@ -860,102 +888,59 @@ Task<Result<ModelStatusResponse>> DaemonClient::getModelStatus(const ModelStatus
     co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
+Task<Result<GetStatsResponse>> DaemonClient::getStats(const GetStatsRequest& req) {
+    auto response = co_await sendRequest(req);
+    if (!response) {
+        co_return response.error();
+    }
+
+    if (auto* res = std::get_if<GetStatsResponse>(&response.value())) {
+        co_return *res;
+    }
+
+    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
+        co_return Error{err->code, err->message};
+    }
+
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+}
+
+Task<Result<UpdateDocumentResponse>> DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
+    auto response = co_await sendRequest(req);
+    if (!response) {
+        co_return response.error();
+    }
+
+    if (auto* res = std::get_if<UpdateDocumentResponse>(&response.value())) {
+        co_return *res;
+    }
+
+    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
+        co_return Error{err->code, err->message};
+    }
+
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+}
+
 std::filesystem::path DaemonClient::resolveSocketPath() {
 #ifdef _WIN32
     // Use temp directory on Windows; AF_UNIX is supported via afunix.h on recent Windows.
     return std::filesystem::temp_directory_path() / "yams-daemon.sock";
 #else
-    namespace fs = std::filesystem;
-
-    // 1. Prefer explicit override from environment variable
-    if (const char* env = std::getenv("YAMS_DAEMON_SOCKET")) {
-        return fs::path(env);
-    }
-
-    // 2. Check if running as root
-    bool isRoot = (geteuid() == 0);
-    if (isRoot) {
-        return fs::path("/var/run/yams-daemon.sock");
-    }
-
-    // 3. Check XDG_RUNTIME_DIR
-    if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg)) {
-        return xdg / "yams-daemon.sock";
-    }
-
-    // 4. Fallback to per-user socket under /tmp
-    uid_t uid = getuid();
-    return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".sock");
+    return yams::daemon::ConnectionFsm::resolve_socket_path();
 #endif
 }
 
 std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
 #ifndef _WIN32
-    namespace fs = std::filesystem;
-    if (const char* env = std::getenv("YAMS_DAEMON_SOCKET"); env && *env) {
-        return fs::path(env);
-    }
-    try {
-        fs::path cfgPath;
-        if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-            cfgPath = fs::path(xdg) / "yams" / "config.toml";
-        } else if (const char* home = std::getenv("HOME")) {
-            cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
-        }
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            // Lightweight scanner: find [daemon] section, then socket_path = "..."
-            std::ifstream in(cfgPath);
-            if (in) {
-                std::string line;
-                bool inDaemon = false;
-                while (std::getline(in, line)) {
-                    // strip spaces
-                    auto trim = [](std::string s) {
-                        auto issp = [](unsigned char c){ return std::isspace(c); };
-                        s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c){return !issp(c);}));
-                        s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c){return !issp(c);} ).base(), s.end());
-                        return s;
-                    };
-                    line = trim(line);
-                    if (line.empty() || line[0] == '#') continue;
-                    if (line.size() >= 9 && line.rfind("[daemon]", 0) == 0) { inDaemon = true; continue; }
-                    if (inDaemon && !line.empty() && line[0] == '[') { inDaemon = false; }
-                    if (inDaemon) {
-                        // look for socket_path = "..."
-                        const std::string key = "socket_path";
-                        auto pos = line.find(key);
-                        if (pos != std::string::npos) {
-                            auto eq = line.find('=', pos + key.size());
-                            if (eq != std::string::npos) {
-                                std::string rhs = trim(line.substr(eq + 1));
-                                // remove optional quotes
-                                if (!rhs.empty() && (rhs.front() == '"' || rhs.front() == '\'')) {
-                                    char q = rhs.front();
-                                    auto endq = rhs.find_last_of(q);
-                                    if (endq != std::string::npos && endq > 0) {
-                                        std::string val = rhs.substr(1, endq - 1);
-                                        if (!val.empty()) return fs::path(val);
-                                    }
-                                } else if (!rhs.empty()) {
-                                    return fs::path(rhs);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } catch (...) {
-        // ignore and fall back
-    }
-    return resolveSocketPath();
+    return yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
 #else
     return resolveSocketPath();
 #endif
 }
 
 bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
-    auto path = socketPath.empty() ? resolveSocketPath() : socketPath;
+    auto path = socketPath.empty() ? resolveSocketPathConfigFirst() : socketPath;
     // Lightweight readiness probe using real Ping via Asio transport
     return pingDaemonSync(path, std::chrono::milliseconds(400), std::chrono::milliseconds(200),
                           std::chrono::milliseconds(300));
@@ -967,8 +952,10 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 #else
     spdlog::info("Starting YAMS daemon...");
 
-    // Resolve socket path if not provided
-    auto socketPath = config.socketPath.empty() ? resolveSocketPath() : config.socketPath;
+    // Resolve socket path with unified precedence: explicit config > config.toml > env > defaults
+    auto socketPath = config.socketPath.empty()
+                          ? yams::daemon::ConnectionFsm::resolve_socket_path_config_first()
+                          : config.socketPath;
 
     // Determine data dir from config or environment (YAMS_STORAGE)
     std::filesystem::path dataDir = config.dataDir;
@@ -1039,6 +1026,11 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
                 // Fall back to PATH lookup
                 exePath = "yams-daemon";
             }
+        }
+
+        // Ensure child daemon inherits our resolved socket path for consistency
+        if (!socketPath.empty()) {
+            setenv("YAMS_DAEMON_SOCKET", socketPath.c_str(), 1);
         }
 
         // Use execlp to search PATH (or direct path if overridden) for yams-daemon

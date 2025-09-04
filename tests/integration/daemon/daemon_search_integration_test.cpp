@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include "test_async_helpers.h"
 #include <yams/indexing/document_indexer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_executor.h>
@@ -95,7 +96,7 @@ TEST_F(DaemonSearchIntegrationTest, BasicSearch) {
     req.limit = 10;
     req.fuzzy = false;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     // May fail if documents aren't indexed
     if (!result) {
@@ -129,7 +130,7 @@ TEST_F(DaemonSearchIntegrationTest, FuzzySearch) {
     req.fuzzy = true;
     req.similarity = 0.7;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     if (!result) {
         // Expected in test environment
@@ -157,7 +158,7 @@ TEST_F(DaemonSearchIntegrationTest, SearchWithLimit) {
     req.query = "test";
     req.limit = 3;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     if (!result) {
         return;
@@ -176,7 +177,7 @@ TEST_F(DaemonSearchIntegrationTest, EmptyQuery) {
     req.query = "";
     req.limit = 10;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     // Empty query might return error or empty results
     if (result) {
@@ -197,7 +198,7 @@ TEST_F(DaemonSearchIntegrationTest, SpecialCharacterSearch) {
         req.query = query;
         req.limit = 10;
 
-        auto result = client.search(req);
+        auto result = yams::test_async::res(client.search(req));
 
         // May succeed or fail depending on query parsing
         if (result) {
@@ -231,7 +232,7 @@ TEST_F(DaemonSearchIntegrationTest, ConcurrentSearches) {
                 req.limit = 10;
                 req.fuzzy = (i % 2 == 0);
 
-                auto result = client.search(req);
+                auto result = yams::test_async::res(client.search(req));
                 if (result || result.error().code == ErrorCode::NotFound) {
                     successCount++;
                 } else {
@@ -260,7 +261,7 @@ TEST_F(DaemonSearchIntegrationTest, SearchPerformance) {
     SearchRequest warmupReq;
     warmupReq.query = "test";
     warmupReq.limit = 1;
-    client.search(warmupReq);
+    (void)yams::test_async::res(client.search(warmupReq));
 
     // Measure search performance
     const int numSearches = 100;
@@ -271,7 +272,7 @@ TEST_F(DaemonSearchIntegrationTest, SearchPerformance) {
         SearchRequest req;
         req.query = "quick brown fox";
         req.limit = 10;
-        auto result = client.search(req);
+        auto result = yams::test_async::res(client.search(req));
         if (result || result.error().code == ErrorCode::NotFound) {
             successCount++;
         }
@@ -300,7 +301,7 @@ TEST_F(DaemonSearchIntegrationTest, SearchWithMetadata) {
     // Add metadata filters if supported
     // req.filters["extension"] = ".md";
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     if (result) {
         auto& response = result.value();
@@ -328,7 +329,7 @@ TEST_F(DaemonSearchIntegrationTest, LiteralTextSearch) {
     req.limit = 10;
     req.literalText = true;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     if (result) {
         auto& response = result.value();
@@ -355,7 +356,7 @@ TEST_F(DaemonSearchIntegrationTest, SearchResultRanking) {
     req.query = "quick";
     req.limit = 10;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     if (!result || result.value().results.size() < 2) {
         return;
@@ -385,7 +386,7 @@ TEST_F(DaemonSearchIntegrationTest, SearchTimeout) {
     req.limit = 100;
     req.fuzzy = true;
 
-    auto result = client.search(req);
+    auto result = yams::test_async::res(client.search(req));
 
     // Either succeeds or times out
     if (!result) {
@@ -407,7 +408,7 @@ TEST_F(DaemonSearchIntegrationTest, CompareDaemonVsDirect) {
     SearchRequest daemonReq;
     daemonReq.query = query;
     daemonReq.limit = 10;
-    auto daemonResult = client.search(daemonReq);
+    auto daemonResult = yams::test_async::res(client.search(daemonReq));
 
     // In a real test, we'd also search directly using SearchExecutor
     // and compare results

@@ -9,6 +9,9 @@ set(MCP_SOURCES
 # Create MCP library
 add_library(yams_mcp STATIC ${MCP_SOURCES})
 
+# Avoid LTO bitcode in this static lib to keep downstream linkers happy
+set_target_properties(yams_mcp PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+
 # Link dependencies
 target_link_libraries(yams_mcp
     PUBLIC

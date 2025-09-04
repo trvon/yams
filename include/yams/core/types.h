@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <string>
 #include <variant>
+#include <new>
+#include <type_traits>
 #include <vector>
 
 namespace yams {
@@ -165,7 +167,7 @@ struct Error {
 template <typename T> class Result {
 public:
     Result(T&& value) : data_(std::move(value)) {}
-    Result(const T& value) : data_(value) {}
+    Result(const T& value) requires std::is_copy_constructible_v<T> : data_(value) {}
     Result(ErrorCode error) : data_(Error{error}) {}
     Result(Error error) : data_(std::move(error)) {}
 
@@ -174,6 +176,13 @@ public:
     explicit operator bool() const noexcept { return has_value(); }
 
     const T& value() const& {
+        if (!has_value()) {
+            throw std::runtime_error("Result contains error");
+        }
+        return std::get<T>(data_);
+    }
+
+    T& value() & {
         if (!has_value()) {
             throw std::runtime_error("Result contains error");
         }

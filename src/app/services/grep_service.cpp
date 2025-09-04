@@ -7,6 +7,12 @@
 #include <cctype>
 #include <filesystem>
 #include <future>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <regex>
 #include <set>
 #include <sstream>
@@ -202,115 +208,95 @@ public:
         response.semanticMatches = 0;
 
         const auto& docs = docsRes.value();
-        for (const auto& doc : docs) {
-            // Apply path filters (if provided)
-            if (!pathFilterMatch(doc.filePath, req.paths)) {
-                continue;
-            }
+        response.filesSearched = docs.size();
 
-            // Apply include patterns filter
-            if (!req.includePatterns.empty()) {
-                bool matches = false;
-                for (const auto& pattern : req.includePatterns) {
-                    if (hasWildcard(pattern)) {
-                        if (wildcardMatch(doc.filePath, pattern)) {
-                            matches = true;
-                            break;
-                        }
-                    } else {
-                        // Simple substring match for non-wildcard patterns
-                        if (doc.filePath.find(pattern) != std::string::npos) {
-                            matches = true;
-                            break;
-                        }
-                    }
-                }
-                if (!matches) {
-                    continue;
-                }
-            }
-
-            // Apply tag filtering
-            if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) {
-                continue;
-            }
-
-            // Retrieve content
-            std::ostringstream oss;
-            auto rs = ctx_.store->retrieveStream(doc.sha256Hash, oss, nullptr);
-            if (!rs) {
-                // Skip unreadable file
-                continue;
-            }
-            const std::string content = oss.str();
-            auto lines = splitToLines(content);
-
-            GrepFileResult fileResult;
-            fileResult.file = doc.filePath;
-            fileResult.matchCount = 0;
-
-            // Scan lines
-            for (size_t i = 0; i < lines.size(); ++i) {
-                const std::string& line = lines[i];
-                bool matched = std::regex_search(line, re);
-                if (req.invert)
-                    matched = !matched;
-
-                if (!matched)
-                    continue;
-
-                fileResult.matchCount++;
-                response.totalMatches++;
-                response.regexMatches++;
-
-                if (!req.count) {
-                    GrepMatch gm;
-                    gm.matchType = "regex"; // Set match type for all regex matches
-                    gm.confidence = 1.0;    // Regex matches have full confidence
-                    if (req.lineNumbers)
-                        gm.lineNumber = i + 1;
-                    gm.line = line;
-                    // Best-effort column positions for first match (only if not inverted)
-                    if (!req.invert) {
-                        std::smatch sm;
-                        if (std::regex_search(line, sm, re)) {
-                            gm.columnStart = static_cast<size_t>(sm.position()) + 1; // 1-based
-                            gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length());
-                        }
-                    }
-
-                    // Context: before
-                    if (beforeContext > 0) {
-                        size_t start =
-                            (i > static_cast<size_t>(beforeContext)) ? (i - beforeContext) : 0;
-                        for (size_t j = start; j < i; ++j) {
-                            gm.before.push_back(lines[j]);
-                        }
-                    }
-                    // Context: after
-                    if (afterContext > 0) {
-                        size_t end =
-                            std::min(lines.size(), i + 1 + static_cast<size_t>(afterContext));
-                        for (size_t j = i + 1; j < end; ++j) {
-                            gm.after.push_back(lines[j]);
-                        }
-                    }
-
-                    fileResult.matches.push_back(std::move(gm));
-                }
-
-                if (req.maxCount > 0 && static_cast<int>(fileResult.matchCount) >= req.maxCount) {
-                    break;
-                }
-            }
-
-            if (fileResult.matchCount > 0) {
-                response.results.push_back(std::move(fileResult));
-                response.filesWith.push_back(doc.filePath);
-            } else {
-                response.filesWithout.push_back(doc.filePath);
-            }
+        // Dynamic, bounded parallelism
+        size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+        size_t rec = hw > 1 ? (hw - 1) : 1;
+#if !defined(_WIN32)
+        double loads[3] = {0, 0, 0};
+        if (getloadavg(loads, 3) == 3) {
+            double load1 = loads[0];
+            double capacity = std::max(0.0, static_cast<double>(hw) - load1);
+            rec = static_cast<size_t>(std::clamp(capacity, 1.0, static_cast<double>(hw)));
         }
+#endif
+        // Be more aggressive: ensure at least half of cores in use
+        rec = std::max(rec, hw / 2);
+        if (const char* env = std::getenv("YAMS_GREP_CONCURRENCY"); env && *env) {
+            try { auto v = static_cast<size_t>(std::stoul(env)); if (v > 0) rec = v; } catch (...) {}
+        }
+        size_t workers = std::clamp<size_t>(rec, 1, hw);
+        workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
+        if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
+            try { auto cap = static_cast<size_t>(std::stoul(gcap)); if (cap > 0) workers = std::min(workers, cap); } catch (...) {}
+        }
+
+        std::atomic<size_t> next{0};
+        std::mutex outMutex;
+        std::vector<GrepFileResult> outResults; outResults.reserve(docs.size());
+        std::vector<std::string> filesWith;
+        std::vector<std::string> filesWithout;
+        std::atomic<size_t> totalMatches{0};
+        std::atomic<size_t> regexMatches{0};
+
+        auto worker = [&]() {
+            while (true) {
+                size_t i = next.fetch_add(1);
+                if (i >= docs.size()) break;
+                const auto& doc = docs[i];
+
+                if (!pathFilterMatch(doc.filePath, req.paths)) continue;
+                if (!req.includePatterns.empty()) {
+                    bool ok = false;
+                    for (const auto& pattern : req.includePatterns) {
+                        if (hasWildcard(pattern)) { if (wildcardMatch(doc.filePath, pattern)) { ok = true; break; } }
+                        else { if (doc.filePath.find(pattern) != std::string::npos) { ok = true; break; } }
+                    }
+                    if (!ok) continue;
+                }
+                if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) continue;
+
+                std::ostringstream oss;
+                auto rs = ctx_.store->retrieveStream(doc.sha256Hash, oss, nullptr);
+                if (!rs) continue;
+                const std::string content = oss.str();
+                auto lines = splitToLines(content);
+
+                GrepFileResult fileResult; fileResult.file = doc.filePath; fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
+                fileResult.matchCount = 0;
+                for (size_t li = 0; li < lines.size(); ++li) {
+                    const std::string& line = lines[li];
+                    bool matched = std::regex_search(line, re); if (req.invert) matched = !matched; if (!matched) continue;
+                    fileResult.matchCount++;
+                    if (!req.count) {
+                        GrepMatch gm; gm.matchType = "regex"; gm.confidence = 1.0; if (req.lineNumbers) gm.lineNumber = li + 1; gm.line = line;
+                        if (!req.invert) { std::smatch sm; if (std::regex_search(line, sm, re)) { gm.columnStart = static_cast<size_t>(sm.position()) + 1; gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length()); } }
+                        if (beforeContext > 0) { size_t start = (li > static_cast<size_t>(beforeContext)) ? (li - beforeContext) : 0; for (size_t j = start; j < li; ++j) gm.before.push_back(lines[j]); }
+                        if (afterContext > 0) { size_t end = std::min(lines.size(), li + 1 + static_cast<size_t>(afterContext)); for (size_t j = li + 1; j < end; ++j) gm.after.push_back(lines[j]); }
+                        fileResult.matches.push_back(std::move(gm));
+                    }
+                    if (req.maxCount > 0 && static_cast<int>(fileResult.matchCount) >= req.maxCount) break;
+                }
+
+                std::lock_guard<std::mutex> lk(outMutex);
+                if (fileResult.matchCount > 0) { totalMatches += static_cast<size_t>(fileResult.matchCount); regexMatches += static_cast<size_t>(fileResult.matchCount); filesWith.push_back(fileResult.file); outResults.push_back(std::move(fileResult)); }
+                else { filesWithout.push_back(doc.filePath); }
+            }
+        };
+
+        std::vector<std::thread> ths; ths.reserve(workers);
+        for (size_t t = 0; t < workers; ++t) ths.emplace_back(worker);
+        for (auto& th : ths) th.join();
+
+        response.results = std::move(outResults);
+        response.filesWith = std::move(filesWith);
+        response.filesWithout = std::move(filesWithout);
+        response.totalMatches = totalMatches.load();
+        response.regexMatches = regexMatches.load();
+        response.queryInfo = "grep: parallel regex scan";
+        response.searchStats["workers"] = std::to_string(workers);
+        response.searchStats["files_scanned"] = std::to_string(response.filesSearched);
 
         // Perform semantic search unless disabled or incompatible output modes
         if (!req.regexOnly && !req.count && !req.filesWithMatches && !req.filesWithoutMatch &&

@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include "test_async_helpers.h"
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
@@ -120,7 +121,7 @@ TEST_F(DaemonResilienceTest, KillRecovery) {
     // Verify daemon is working
     DaemonClient client(clientConfig_);
     ASSERT_TRUE(client.connect());
-    ASSERT_TRUE(client.ping());
+    ASSERT_TRUE(yams::test_async::ok(client.ping()));
 
     // Kill daemon with SIGKILL (non-graceful)
     kill(daemonPid, SIGKILL);
@@ -137,7 +138,7 @@ TEST_F(DaemonResilienceTest, KillRecovery) {
     // Verify new daemon works
     DaemonClient client2(clientConfig_);
     ASSERT_TRUE(client2.connect());
-    ASSERT_TRUE(client2.ping());
+    ASSERT_TRUE(yams::test_async::ok(client2.ping()));
 }
 
 // Test file descriptor leak detection
@@ -154,8 +155,8 @@ TEST_F(DaemonResilienceTest, FileDescriptorLeak) {
         ASSERT_TRUE(client.connect());
 
         // Do some operations
-        client.ping();
-        client.status();
+        (void)yams::test_async::ok(client.ping());
+        (void)yams::test_async::ok(client.status());
 
         // Disconnect
         client.disconnect();
@@ -181,15 +182,15 @@ TEST_F(DaemonResilienceTest, MemoryGrowth) {
 
     const int numOperations = 100;
     for (int i = 0; i < numOperations; ++i) {
-        client.ping();
+        (void)yams::test_async::ok(client.ping());
 
         SearchRequest req{};
         req.query = "test";
         req.limit = 10;
-        client.search(req);
+        (void)yams::test_async::res(client.search(req));
 
         if (i % 10 == 0) {
-            client.status();
+            (void)yams::test_async::ok(client.status());
         }
     }
 
@@ -215,7 +216,7 @@ TEST_F(DaemonResilienceTest, ShutdownComparison) {
         // Start a long operation in background
         std::thread bgThread([&client]() {
             for (int i = 0; i < 100; ++i) {
-                client.ping();
+                (void)yams::test_async::ok(client.ping());
                 std::this_thread::sleep_for(10ms);
             }
         });
@@ -240,7 +241,7 @@ TEST_F(DaemonResilienceTest, ShutdownComparison) {
         ASSERT_TRUE(client.connect());
 
         // Forced shutdown via client
-        auto result = client.shutdown(false); // Not graceful
+        (void)yams::test_async::ok(client.shutdown(false)); // Not graceful
 
         // Daemon should stop quickly
         auto start = std::chrono::steady_clock::now();
@@ -262,7 +263,7 @@ TEST_F(DaemonResilienceTest, SignalHandling) {
     // Verify daemon is still running after various operations
     DaemonClient client(clientConfig_);
     ASSERT_TRUE(client.connect());
-    ASSERT_TRUE(client.ping());
+    ASSERT_TRUE(yams::test_async::ok(client.ping()));
 }
 
 // Test resource exhaustion recovery
@@ -307,7 +308,7 @@ TEST_F(DaemonResilienceTest, DaemonUpgrade) {
     DaemonClient client(clientConfig_);
     ASSERT_TRUE(client.connect());
 
-    auto statusBefore = client.status();
+    auto statusBefore = yams::test_async::res(client.status());
     ASSERT_TRUE(statusBefore);
 
     // Simulate upgrade: stop old daemon
@@ -325,7 +326,7 @@ TEST_F(DaemonResilienceTest, DaemonUpgrade) {
     DaemonClient newClient(clientConfig_);
     ASSERT_TRUE(newClient.connect());
 
-    auto statusAfter = newClient.status();
+    auto statusAfter = yams::test_async::res(newClient.status());
     ASSERT_TRUE(statusAfter);
 
     // New daemon should start fresh
@@ -364,16 +365,16 @@ TEST_F(DaemonResilienceTest, ConcurrentStress) {
                 bool success = false;
                 switch (i % 4) {
                     case 0:
-                        success = client.ping().has_value();
+                        success = yams::test_async::ok(client.ping());
                         break;
                     case 1:
-                        success = client.status().has_value();
+                        success = yams::test_async::ok(client.status());
                         break;
                     case 2: {
                         SearchRequest req{};
                         req.query = "test";
                         req.limit = 5;
-                        auto res = client.search(req);
+                        auto res = yams::test_async::res(client.search(req));
                         success = res.has_value() || res.error().code == ErrorCode::NotFound;
                         break;
                     }
@@ -406,7 +407,7 @@ TEST_F(DaemonResilienceTest, ConcurrentStress) {
     // Daemon should still be responsive
     DaemonClient finalClient(clientConfig_);
     ASSERT_TRUE(finalClient.connect()) << "Daemon should still work after stress";
-    ASSERT_TRUE(finalClient.ping());
+    ASSERT_TRUE(yams::test_async::ok(finalClient.ping()));
 
     // Most operations should succeed
     EXPECT_GT(successCount, errorCount) << "Most operations should succeed under stress";
@@ -426,19 +427,19 @@ TEST_F(DaemonResilienceTest, ErrorInjection) {
                                                          SearchRequest req{};
                                                          req.query = "";
                                                          req.limit = 0;
-                                                         client.search(req);
+                                                         (void)yams::test_async::res(client.search(req));
                                                      },
                                                      [&client]() {
                                                          // Invalid model
                                                          LoadModelRequest req{
                                                              "nonexistent-model-xyz"};
-                                                         client.loadModel(req);
+                                                         (void)yams::test_async::res(client.loadModel(req));
                                                      },
                                                      [&client]() {
                                                          // Invalid hash
                                                          GetRequest req{};
                                                          req.hash = "invalid-hash-123";
-                                                         client.get(req);
+                                                         (void)yams::test_async::res(client.get(req));
                                                      }};
 
     // Run error tests
@@ -446,7 +447,7 @@ TEST_F(DaemonResilienceTest, ErrorInjection) {
         test();
 
         // Daemon should still be responsive
-        EXPECT_TRUE(client.ping()) << "Daemon should recover from errors";
+        EXPECT_TRUE(yams::test_async::ok(client.ping())) << "Daemon should recover from errors";
     }
 }
 
@@ -462,10 +463,10 @@ TEST_F(DaemonResilienceTest, LongRunningStability) {
     const int numIterations = 50;
     for (int i = 0; i < numIterations; ++i) {
         // Check daemon is still responsive
-        ASSERT_TRUE(client.ping()) << "Failed at iteration " << i;
+        ASSERT_TRUE(yams::test_async::ok(client.ping())) << "Failed at iteration " << i;
 
         // Get status
-        auto status = client.status();
+        auto status = yams::test_async::res(client.status());
         ASSERT_TRUE(status) << "Status failed at iteration " << i;
 
         // Verify uptime is increasing
@@ -477,7 +478,7 @@ TEST_F(DaemonResilienceTest, LongRunningStability) {
     }
 
     // Final health check
-    auto finalStatus = client.status();
+    auto finalStatus = yams::test_async::res(client.status());
     ASSERT_TRUE(finalStatus);
     EXPECT_TRUE(finalStatus.value().running);
 }
@@ -552,8 +553,8 @@ TEST_F(DaemonResilienceTest, AbruptClientDisconnect) {
                                << "Failed to reconnect: " << connectResult.error().message;
 
     if (connectResult) {
-        auto pingResult = client.ping();
-        EXPECT_TRUE(pingResult) << "Daemon is unresponsive after abrupt client disconnect.";
+        EXPECT_TRUE(yams::test_async::ok(client.ping()))
+            << "Daemon is unresponsive after abrupt client disconnect.";
     }
 }
 

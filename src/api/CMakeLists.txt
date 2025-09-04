@@ -9,6 +9,7 @@ add_library(yams_api
     semantic_search_api.cpp
     raw_text_storage.cpp
 )
+set_target_properties(yams_api PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_api
     PUBLIC

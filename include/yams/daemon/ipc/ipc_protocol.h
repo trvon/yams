@@ -1194,6 +1194,21 @@ struct StatusRequest {
     }
 };
 
+struct CancelRequest {
+    uint64_t targetRequestId{0};
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const { ser << targetRequestId; }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<CancelRequest> deserialize(Deserializer& deser) {
+        CancelRequest r; auto v = deser.template read<uint64_t>();
+        if (!v) return v.error();
+        r.targetRequestId = v.value();
+        return r;
+    }
+};
+
 struct PingRequest {
     std::chrono::steady_clock::time_point timestamp;
 
@@ -1813,7 +1828,7 @@ using Request =
                  GetEndRequest, DeleteRequest, ListRequest, ShutdownRequest, StatusRequest,
                  PingRequest, GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
                  UnloadModelRequest, ModelStatusRequest, AddDocumentRequest, GrepRequest,
-                 UpdateDocumentRequest, DownloadRequest, GetStatsRequest>;
+                 UpdateDocumentRequest, DownloadRequest, GetStatsRequest, CancelRequest>;
 
 // ============================================================================
 // Response Types
@@ -2194,6 +2209,10 @@ struct StatusResponse {
     uint64_t fsmPayloadWrites = 0;
     uint64_t fsmBytesSent = 0;
     uint64_t fsmBytesReceived = 0;
+    // Multiplexing metrics (transport fairness/queues)
+    uint64_t muxActiveHandlers = 0;
+    int64_t muxQueuedBytes = 0;
+    uint64_t muxWriterBudgetBytes = 0;
     std::map<std::string, size_t> requestCounts;
 
     // Readiness state tracking (new fields)
@@ -2252,7 +2271,9 @@ struct StatusResponse {
             << memoryUsageMb << cpuUsagePercent << version
             << static_cast<uint64_t>(fsmTransitions) << static_cast<uint64_t>(fsmHeaderReads)
             << static_cast<uint64_t>(fsmPayloadReads) << static_cast<uint64_t>(fsmPayloadWrites)
-            << static_cast<uint64_t>(fsmBytesSent) << static_cast<uint64_t>(fsmBytesReceived);
+            << static_cast<uint64_t>(fsmBytesSent) << static_cast<uint64_t>(fsmBytesReceived)
+            << static_cast<uint64_t>(muxActiveHandlers) << static_cast<int64_t>(muxQueuedBytes)
+            << static_cast<uint64_t>(muxWriterBudgetBytes);
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -2356,6 +2377,22 @@ struct StatusResponse {
         if (!fsmBytesReceivedResult)
             return fsmBytesReceivedResult.error();
         res.fsmBytesReceived = fsmBytesReceivedResult.value();
+
+        // Multiplexing metrics
+        auto muxActiveHandlersResult = deser.template read<uint64_t>();
+        if (!muxActiveHandlersResult)
+            return muxActiveHandlersResult.error();
+        res.muxActiveHandlers = muxActiveHandlersResult.value();
+
+        auto muxQueuedBytesResult = deser.template read<int64_t>();
+        if (!muxQueuedBytesResult)
+            return muxQueuedBytesResult.error();
+        res.muxQueuedBytes = muxQueuedBytesResult.value();
+
+        auto muxWriterBudgetBytesResult = deser.template read<uint64_t>();
+        if (!muxWriterBudgetBytesResult)
+            return muxWriterBudgetBytesResult.error();
+        res.muxWriterBudgetBytes = muxWriterBudgetBytesResult.value();
 
         // Deserialize request counts
         auto countsCountResult = deser.template read<uint32_t>();
@@ -3260,6 +3297,7 @@ enum class MessageType : uint8_t {
     GrepRequest = 19,
     UpdateDocumentRequest = 20,
     GetStatsRequest = 21,
+    CancelRequest = 22,
 
     // Responses
     SearchResponse = 128,

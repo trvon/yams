@@ -8,6 +8,9 @@ set(CONFIG_SOURCES
 # Create config library
 add_library(yams_config STATIC ${CONFIG_SOURCES})
 
+# Avoid LTO bitcode in this static lib to keep downstream links stable without IPO
+set_target_properties(yams_config PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+
 # Link dependencies
 target_link_libraries(yams_config
     PUBLIC

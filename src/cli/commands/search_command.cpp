@@ -304,6 +304,29 @@ public:
                     output["method"] = "daemon";
                     output["total_results"] = items.size();
                     output["returned"] = items.size();
+                    // Enrich with extraction progress indicator
+                    try {
+                        yams::daemon::GetStatsRequest sreq;
+                        auto sres = run_sync(client.getStats(sreq), std::chrono::seconds(5));
+                        if (sres) {
+                            const auto& s = sres.value();
+                            size_t total = s.totalDocuments;
+                            // Prefer detailed additionalStats if present
+                            size_t indexed = 0;
+                            if (s.additionalStats.count("meta_indexed_documents")) {
+                                indexed = std::stoull(s.additionalStats.at("meta_indexed_documents"));
+                            } else {
+                                indexed = s.indexedDocuments;
+                            }
+                            if (total >= indexed) {
+                                output["extraction_pending"] = static_cast<uint64_t>(total - indexed);
+                                output["documents_total"] = static_cast<uint64_t>(total);
+                                output["documents_extracted"] = static_cast<uint64_t>(indexed);
+                            }
+                        }
+                    } catch (...) {
+                        // Best-effort diagnostics only
+                    }
                     json results = json::array();
                     for (const auto& r : items) {
                         json doc;
@@ -428,6 +451,27 @@ public:
                     output["method"] = resp.type;
                     output["total_results"] = resp.total;
                     output["execution_time_ms"] = resp.executionTimeMs;
+                    // Extraction progress indicator from stats
+                    try {
+                        yams::daemon::GetStatsRequest sreq;
+                        auto sres = run_sync(client.getStats(sreq), std::chrono::seconds(5));
+                        if (sres) {
+                            const auto& s = sres.value();
+                            size_t total = s.totalDocuments;
+                            size_t indexed = 0;
+                            if (s.additionalStats.count("meta_indexed_documents")) {
+                                indexed = std::stoull(s.additionalStats.at("meta_indexed_documents"));
+                            } else {
+                                indexed = s.indexedDocuments;
+                            }
+                            if (total >= indexed) {
+                                output["extraction_pending"] = static_cast<uint64_t>(total - indexed);
+                                output["documents_total"] = static_cast<uint64_t>(total);
+                                output["documents_extracted"] = static_cast<uint64_t>(indexed);
+                            }
+                        }
+                    } catch (...) {
+                    }
 
                     json results = json::array();
                     for (const auto& item : resp.results) {

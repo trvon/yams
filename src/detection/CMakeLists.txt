@@ -16,6 +16,7 @@ endif()
 add_library(yams_detection STATIC
     file_type_detector.cpp
 )
+set_target_properties(yams_detection PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_detection
     PUBLIC

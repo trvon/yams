@@ -455,7 +455,7 @@ private:
         // Client-side diagnostics for quick validation
         output["client"] = {
             {"ipc_pool_enabled", true},
-            {"daemon_socket", yams::daemon::DaemonClient::resolveSocketPath().string()},
+            {"daemon_socket", yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string()},
             {"version", YAMS_VERSION_STRING}};
 
         std::cout << output.dump(2) << std::endl;
@@ -791,7 +791,7 @@ private:
         yams::cli::ui::render_rows(std::cout, {{"Client", YAMS_VERSION_STRING, ""}});
         yams::cli::ui::render_rows(std::cout,
                                    {{"Client IPC", "Pool: enabled",
-                                     yams::daemon::DaemonClient::resolveSocketPath().string()}});
+                                     yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string()}});
 
         std::cout << "\n";
 

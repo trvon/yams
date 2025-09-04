@@ -28,6 +28,7 @@ endif()
 list(APPEND CONTENT_SOURCES archive_content_handler.cpp)
 
 add_library(yams_content STATIC ${CONTENT_SOURCES})
+set_target_properties(yams_content PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_content
     PUBLIC

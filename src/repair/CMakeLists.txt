@@ -2,6 +2,7 @@
 add_library(yams_repair STATIC
     embedding_repair_util.cpp
 )
+set_target_properties(yams_repair PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_repair PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

@@ -2,6 +2,8 @@
 #include <yams/daemon/ipc/fsm_helpers.h>
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/ipc/streaming_processor.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 
@@ -13,7 +15,10 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/strand.hpp>
 #include <spdlog/spdlog.h>
 #include <array>
 #include <chrono>
@@ -63,6 +68,19 @@ RequestHandler::RequestHandler(std::shared_ptr<RequestProcessor> processor, Conf
 
 RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
     : dispatcher_(dispatcher), config_(std::move(config)) {
+    // Read environment knobs for server multiplexing caps
+    if (const char* s = std::getenv("YAMS_SERVER_MAX_INFLIGHT")) {
+        try { auto v = std::stoul(s); if (v > 0) config_.max_inflight_per_connection = v; } catch (...) {}
+    }
+    if (const char* s = std::getenv("YAMS_SERVER_QUEUE_FRAMES_CAP")) {
+        try { auto v = std::stoul(s); if (v > 0) config_.per_request_queue_cap = v; } catch (...) {}
+    }
+    if (const char* s = std::getenv("YAMS_SERVER_QUEUE_BYTES_CAP")) {
+        try { auto v = std::stoul(s); if (v > 1024) config_.total_queued_bytes_cap = v; } catch (...) {}
+    }
+    if (const char* s = std::getenv("YAMS_SERVER_WRITER_BUDGET_BYTES")) {
+        try { auto v = std::stoul(s); if (v >= 4096) config_.writer_budget_bytes_per_turn = v; } catch (...) {}
+    }
     // Create a processor adapter that wraps the dispatcher
     if (dispatcher_) {
         auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
@@ -171,10 +189,23 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
     try {
         spdlog::debug("RequestHandler::handle_connection coroutine started");
         spdlog::debug("New connection established");
+        // Wrap socket in shared_ptr so per-request coroutines can safely reference it
+        using socket_t = boost::asio::local::stream_protocol::socket;
+        auto sock = std::make_shared<socket_t>(std::move(socket));
         // Initialize per-connection FSM (adapter kept internal to source file)
         ConnectionFsm fsm;
         fsm.enable_metrics(true);
-        fsm.on_connect(socket.native_handle());
+        fsm.on_connect(sock->native_handle());
+        // Prepare write serialization for multiplexing
+        if (config_.enable_multiplexing) {
+            conn_write_mtx_ = std::make_shared<std::mutex>();
+            write_strand_exec_.emplace(boost::asio::make_strand(sock->get_executor()));
+            inflight_.store(0, std::memory_order_relaxed);
+        } else {
+            conn_write_mtx_.reset();
+            write_strand_exec_.reset();
+            inflight_.store(0, std::memory_order_relaxed);
+        }
         // Note: downstream clients may close early (e.g., pager exits). Treat write-side resets
         // as non-fatal for the daemon; logs will be at debug level when detected.
 
@@ -183,7 +214,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
         FrameReader reader(MAX_MESSAGE_SIZE);
         bool should_exit = false;
 
-        while (!token.stop_requested() && socket.is_open()) {
+        while (!token.stop_requested() && sock->is_open()) {
             // Read as much as is available (up to 4096), do not block for exact size
             std::array<uint8_t, 4096> buf{};
             spdlog::debug("About to co_await socket.async_read");
@@ -196,7 +227,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 fsm.on_response_complete(config_.close_after_response);
                 if (config_.close_after_response) {
                     boost::system::error_code ignore_ec;
-                    socket.close(ignore_ec);
+                    sock->close(ignore_ec);
                     break;
                 }
                 // In persistent mode, continue loop to try reading next request
@@ -211,7 +242,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             // Race the read against the timer
             auto read_or_timeout = co_await (
                 boost::asio::async_read(
-                    socket,
+                    *sock,
                     boost::asio::buffer(buf),
                     boost::asio::transfer_at_least(1),
                     boost::asio::use_awaitable) ||
@@ -220,7 +251,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
                 // Idle persistent connection; downgrade to debug to avoid noisy logs
-                spdlog::debug("Read timeout on socket {} after {} ms", socket.native_handle(),
+                spdlog::debug("Read timeout on socket {} after {} ms", sock->native_handle(),
                               std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout).count());
                 fsm.on_timeout(ConnectionFsm::Operation::Read);
                 break;
@@ -249,7 +280,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             } else {
                 spdlog::debug("FSM not alive during read; closing connection");
                 boost::system::error_code ignore_ec;
-                socket.close(ignore_ec);
+                sock->close(ignore_ec);
                 break;
             }
 
@@ -263,19 +294,19 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
                 spdlog::error("Invalid frame received");
                 // Fatal framing error: close to avoid poisoning persistent streams
-                (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                           "Invalid frame format");
                 boost::system::error_code ignore_ec;
-                socket.close(ignore_ec);
+                sock->close(ignore_ec);
                 break;
             }
 
             if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
                 spdlog::error("Frame too large");
-                (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                           "Frame exceeds maximum size");
                 boost::system::error_code ignore_ec;
-                socket.close(ignore_ec);
+                sock->close(ignore_ec);
                 break;
             }
 
@@ -284,10 +315,10 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 auto frame_result = reader.get_frame();
                 if (!frame_result) {
                     spdlog::error("Failed to get frame: {}", frame_result.error().message);
-                    (void)co_await send_error(socket, ErrorCode::SerializationError,
+                    (void)co_await send_error(*sock, ErrorCode::SerializationError,
                                               "Failed to get frame");
                     boost::system::error_code ignore_ec;
-                    socket.close(ignore_ec);
+                    sock->close(ignore_ec);
                     should_exit = true;
                     break;
                 }
@@ -312,10 +343,10 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                             correlated_id = 0;
                         }
                     }
-                    (void)co_await send_error(socket, message_result.error().code,
+                    (void)co_await send_error(*sock, message_result.error().code,
                                               message_result.error().message, correlated_id);
                     boost::system::error_code ignore_ec;
-                    socket.close(ignore_ec);
+                    sock->close(ignore_ec);
                     should_exit = true;
                     break;
                 }
@@ -326,10 +357,10 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 if (!request_ptr) {
                     spdlog::error("Received non-request message");
                     // Correlate error with the observed message requestId and close
-                    (void)co_await send_error(socket, ErrorCode::InvalidArgument,
+                    (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Expected request message", message.requestId);
                     boost::system::error_code ignore_ec;
-                    socket.close(ignore_ec);
+                    sock->close(ignore_ec);
                     should_exit = true;
                     break;
                 }
@@ -346,22 +377,64 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 // Route through streaming-aware path so FSM transitions are captured
                 spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with expectsStreamingResponse={}",
                               message.requestId, message.expectsStreamingResponse);
-                auto handle_result = co_await handle_streaming_request(socket, *request_ptr,
-                                                                       message.requestId, &fsm,
-                                                                       message.expectsStreamingResponse);
-                if (!handle_result) {
-                    // Downgrade common client-initiated close errors to debug to avoid noisy logs
-                    const auto& msg = handle_result.error().message;
-                    if (msg.find("Connection reset by peer") != std::string::npos ||
-                        msg.find("Broken pipe") != std::string::npos ||
-                        msg.find("EPIPE") != std::string::npos ||
-                        msg.find("ECONNRESET") != std::string::npos) {
-                        spdlog::debug("Request handling ended by client: {}", msg);
+                if (config_.enable_multiplexing) {
+                    auto cur = inflight_.load(std::memory_order_relaxed);
+                    if (cur >= config_.max_inflight_per_connection) {
+                        (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
+                                                  "Too many in-flight requests", message.requestId);
                     } else {
-                        spdlog::error("Request handling failed: {}", msg);
+                        inflight_.fetch_add(1, std::memory_order_relaxed);
+                        // Create per-request context
+                        {
+                            std::lock_guard<std::mutex> lk(ctx_mtx_);
+                            auto ctx = std::make_shared<RequestContext>();
+                            ctx->start = std::chrono::steady_clock::now();
+                            contexts_[message.requestId] = ctx;
+                            RequestContextRegistry::instance().register_context(message.requestId, ctx);
+                        }
+                        MuxMetricsRegistry::instance().incrementActiveHandlers(1);
+                        boost::asio::co_spawn(
+                            sock->get_executor(),
+                            [this, sock, req = *request_ptr, req_id = message.requestId,
+                             expects = message.expectsStreamingResponse]() -> boost::asio::awaitable<void> {
+                                auto r = co_await handle_streaming_request(*sock, req, req_id, nullptr, expects);
+                                if (!r) {
+                                    spdlog::debug("Multiplexed request failed (requestId={}): {}", req_id, r.error().message);
+                                }
+                                inflight_.fetch_sub(1, std::memory_order_relaxed);
+                                MuxMetricsRegistry::instance().incrementActiveHandlers(-1);
+                                // Mark context completed and erase
+                                {
+                                    std::lock_guard<std::mutex> lk(ctx_mtx_);
+                                    auto it = contexts_.find(req_id);
+                                    if (it != contexts_.end()) {
+                                        it->second->completed.store(true, std::memory_order_relaxed);
+                                        contexts_.erase(it);
+                                    }
+                                }
+                                RequestContextRegistry::instance().deregister_context(req_id);
+                                co_return;
+                            },
+                            boost::asio::detached);
                     }
-                    should_exit = true;
-                    break;
+                } else {
+                    auto handle_result = co_await handle_streaming_request(*sock, *request_ptr,
+                                                                           message.requestId, &fsm,
+                                                                           message.expectsStreamingResponse);
+                    if (!handle_result) {
+                        // Downgrade common client-initiated close errors to debug to avoid noisy logs
+                        const auto& msg = handle_result.error().message;
+                        if (msg.find("Connection reset by peer") != std::string::npos ||
+                            msg.find("Broken pipe") != std::string::npos ||
+                            msg.find("EPIPE") != std::string::npos ||
+                            msg.find("ECONNRESET") != std::string::npos) {
+                            spdlog::debug("Request handling ended by client: {}", msg);
+                        } else {
+                            spdlog::error("Request handling failed: {}", msg);
+                        }
+                        should_exit = true;
+                        break;
+                    }
                 }
 
                 // Defensive: ensure FSM is ready to read the next request on persistent
@@ -512,97 +585,110 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         spdlog::debug("write_message: socket is not open, aborting write");
         co_return Error{ErrorCode::NetworkError, "Socket is closed"};
     }
+    if (config_.enable_multiplexing) {
+        // Frame entire message and enqueue for fair writer; treat as last
+        auto framed = framer_.frame_message(message);
+        if (!framed) co_return framed.error();
+        if (write_strand_exec_) co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        auto enq = co_await enqueue_frame(message.requestId, std::move(framed.value()), true);
+        if (!enq) co_return enq.error();
+        if (!writer_running_) {
+            writer_running_ = true;
+            co_await writer_drain(socket);
+        }
+        co_return Result<void>();
+    } else {
+        // Frame once
+        auto frame_result = framer_.frame_message(message);
+        if (!frame_result) {
+            co_return frame_result.error();
+        }
+        auto& frame = frame_result.value();
 
-    // Frame once
-    auto frame_result = framer_.frame_message(message);
-    if (!frame_result) {
-        co_return frame_result.error();
-    }
-    auto& frame = frame_result.value();
+        // Check frame size doesn't exceed reasonable limits
+        constexpr size_t MAX_FRAME_SIZE = 100 * 1024 * 1024; // 100MB
+        if (frame.size() > MAX_FRAME_SIZE) {
+            spdlog::error("write_message: frame size {} exceeds maximum {}", frame.size(), MAX_FRAME_SIZE);
+            co_return Error{ErrorCode::InvalidArgument, "Response too large to send"};
+        }
 
-    // Check frame size doesn't exceed reasonable limits
-    constexpr size_t MAX_FRAME_SIZE = 100 * 1024 * 1024; // 100MB
-    if (frame.size() > MAX_FRAME_SIZE) {
-        spdlog::error("write_message: frame size {} exceeds maximum {}", frame.size(), MAX_FRAME_SIZE);
-        co_return Error{ErrorCode::InvalidArgument, "Response too large to send"};
-    }
+        stats_.bytes_sent += frame.size();
 
-    stats_.bytes_sent += frame.size();
+        const auto msgType =
+            std::holds_alternative<Request>(message.payload)
+                ? static_cast<int>(getMessageType(std::get<Request>(message.payload)))
+                : static_cast<int>(getMessageType(std::get<Response>(message.payload)));
+        spdlog::debug(
+            "write_message: framed message type={} request_id={} frame_size={} header_size={}", msgType,
+            message.requestId, frame.size(), sizeof(MessageFramer::FrameHeader));
 
-    const auto msgType =
-        std::holds_alternative<Request>(message.payload)
-            ? static_cast<int>(getMessageType(std::get<Request>(message.payload)))
-            : static_cast<int>(getMessageType(std::get<Response>(message.payload)));
-    spdlog::debug(
-        "write_message: framed message type={} request_id={} frame_size={} header_size={}", msgType,
-        message.requestId, frame.size(), sizeof(MessageFramer::FrameHeader));
+        // Always send the frame header immediately to unblock clients waiting for it
+        if (frame.size() < sizeof(MessageFramer::FrameHeader)) {
+            co_return Error{ErrorCode::SerializationError, "Framed message smaller than header"};
+        }
 
-    // Always send the frame header immediately to unblock clients waiting for it
-    if (frame.size() < sizeof(MessageFramer::FrameHeader)) {
-        co_return Error{ErrorCode::SerializationError, "Framed message smaller than header"};
-    }
+        constexpr std::size_t headerSize = sizeof(MessageFramer::FrameHeader);
 
-    constexpr std::size_t headerSize = sizeof(MessageFramer::FrameHeader);
-
-    // 1) Send header first
-    {
-        std::span<const uint8_t> header{frame.data(), headerSize};
-        spdlog::debug("write_message: writing header {} bytes (request_id={})", header.size(),
-                      message.requestId);
-        boost::system::error_code ec;
-        co_await boost::asio::async_write(socket, boost::asio::buffer(header),
-                                          boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        if (ec) {
-            const auto& msg = ec.message();
-            if (msg.find("Connection reset by peer") != std::string::npos ||
-                msg.find("Broken pipe") != std::string::npos ||
-                msg.find("EPIPE") != std::string::npos ||
-                msg.find("ECONNRESET") != std::string::npos) {
-                spdlog::debug("Client closed during header write: {}", msg);
+        // 1) Send header first
+        {
+            std::span<const uint8_t> header{frame.data(), headerSize};
+            spdlog::debug("write_message: writing header {} bytes (request_id={})", header.size(),
+                          message.requestId);
+            boost::system::error_code ec;
+            co_await boost::asio::async_write(socket, boost::asio::buffer(header),
+                                              boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+            if (ec) {
+                const auto& msg = ec.message();
+                if (msg.find("Connection reset by peer") != std::string::npos ||
+                    msg.find("Broken pipe") != std::string::npos ||
+                    msg.find("EPIPE") != std::string::npos ||
+                    msg.find("ECONNRESET") != std::string::npos) {
+                    spdlog::debug("Client closed during header write: {}", msg);
+                }
+                co_return Error{ErrorCode::NetworkError, msg};
             }
-            co_return Error{ErrorCode::NetworkError, msg};
+            spdlog::debug("write_message: header write complete (request_id={})", message.requestId);
         }
-        spdlog::debug("write_message: header write complete (request_id={})", message.requestId);
-    }
 
-    // 2) Stream the payload in chunks; this allows the client to start reading immediately
-    const std::size_t kChunk = std::max<std::size_t>(4096, config_.chunk_size);
-    std::size_t offset = headerSize;
-    std::size_t payload_written = 0;
-    while (offset < frame.size()) {
-        std::size_t to_write = std::min<std::size_t>(kChunk, frame.size() - offset);
-        std::span<const uint8_t> chunk{frame.data() + offset, to_write};
-        spdlog::debug("write_message: writing payload chunk {} bytes (request_id={})", to_write,
-                      message.requestId);
-        boost::system::error_code ec;
-        co_await boost::asio::async_write(socket, boost::asio::buffer(chunk),
-                                          boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        if (ec) {
-            const auto& msg = ec.message();
-            if (msg.find("Connection reset by peer") != std::string::npos ||
-                msg.find("Broken pipe") != std::string::npos ||
-                msg.find("EPIPE") != std::string::npos ||
-                msg.find("ECONNRESET") != std::string::npos) {
-                spdlog::debug("Client closed during payload write: {}", msg);
+        // 2) Stream the payload in chunks; this allows the client to start reading immediately
+        const std::size_t kChunk = std::max<std::size_t>(4096, config_.chunk_size);
+        std::size_t offset = headerSize;
+        std::size_t payload_written = 0;
+        while (offset < frame.size()) {
+            std::size_t to_write = std::min<std::size_t>(kChunk, frame.size() - offset);
+            std::span<const uint8_t> chunk{frame.data() + offset, to_write};
+            spdlog::debug("write_message: writing payload chunk {} bytes (request_id={})", to_write,
+                          message.requestId);
+            boost::system::error_code ec;
+            co_await boost::asio::async_write(socket, boost::asio::buffer(chunk),
+                                              boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+            if (ec) {
+                const auto& msg = ec.message();
+                if (msg.find("Connection reset by peer") != std::string::npos ||
+                    msg.find("Broken pipe") != std::string::npos ||
+                    msg.find("EPIPE") != std::string::npos ||
+                    msg.find("ECONNRESET") != std::string::npos) {
+                    spdlog::debug("Client closed during payload write: {}", msg);
+                }
+                co_return Error{ErrorCode::NetworkError, msg};
             }
-            co_return Error{ErrorCode::NetworkError, msg};
-        }
-        payload_written += to_write;
-        if (to_write == 0) {
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(1ms);
-        } else if (config_.chunk_flush_delay_ms > 0) {
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(std::chrono::milliseconds(config_.chunk_flush_delay_ms));
+            payload_written += to_write;
+            if (to_write == 0) {
+                using namespace std::chrono_literals;
+                std::this_thread::sleep_for(1ms);
+            } else if (config_.chunk_flush_delay_ms > 0) {
+                using namespace std::chrono_literals;
+                std::this_thread::sleep_for(std::chrono::milliseconds(config_.chunk_flush_delay_ms));
+            }
+
+            offset += to_write;
         }
 
-        offset += to_write;
+        spdlog::debug("write_message: payload write complete ({} bytes) request_id={}", payload_written,
+                      message.requestId);
+
+        co_return Result<void>();
     }
-
-    spdlog::debug("write_message: payload write complete ({} bytes) request_id={}", payload_written,
-                  message.requestId);
-
-    co_return Result<void>();
 }
 
 boost::asio::awaitable<Response> RequestHandler::process_request(const Request& request) {
@@ -1036,8 +1122,22 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     response_msg.requestId = request_id;
     response_msg.timestamp = std::chrono::steady_clock::now();
     response_msg.payload = response;
-
-    return write_header_frame(socket, response_msg, flush);
+    if (config_.enable_multiplexing) {
+        // Frame and enqueue for fair writer
+        auto framed = framer_.frame_message_header(response_msg);
+        if (!framed) co_return framed.error();
+        if (write_strand_exec_) co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        auto enq = co_await enqueue_frame(request_id, std::move(framed.value()), false);
+        if (!enq) co_return enq.error();
+        if (!writer_running_) {
+            writer_running_ = true;
+            co_await writer_drain(socket);
+        }
+        co_return Result<void>{};
+    } else {
+        if (write_strand_exec_) co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        co_return co_await write_header_frame(socket, response_msg, flush);
+    }
 }
 
 boost::asio::awaitable<Result<void>>
@@ -1051,8 +1151,90 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
     response_msg.requestId = request_id;
     response_msg.timestamp = std::chrono::steady_clock::now();
     response_msg.payload = response;
+    if (config_.enable_multiplexing) {
+        auto framed = framer_.frame_message_chunk(response_msg, last_chunk);
+        if (!framed) co_return framed.error();
+        if (write_strand_exec_) co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        auto enq = co_await enqueue_frame(request_id, std::move(framed.value()), last_chunk);
+        if (!enq) co_return enq.error();
+        if (!writer_running_) {
+            writer_running_ = true;
+            co_await writer_drain(socket);
+        }
+        co_return Result<void>{};
+    } else {
+        if (write_strand_exec_) co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        co_return co_await write_chunk_frame(socket, response_msg, last_chunk, flush);
+    }
+}
 
-    return write_chunk_frame(socket, response_msg, last_chunk, flush);
+boost::asio::awaitable<Result<void>>
+RequestHandler::enqueue_frame(uint64_t request_id, std::vector<uint8_t> frame, bool last) {
+    // Enforce caps
+    auto& q = rr_queues_[request_id];
+    if (q.size() >= config_.per_request_queue_cap ||
+        total_queued_bytes_ + frame.size() > config_.total_queued_bytes_cap) {
+        co_return Error{ErrorCode::ResourceExhausted, "Server write queue saturated"};
+    }
+    bool was_empty = q.empty();
+    auto sz = frame.size();
+    q.push_back(FrameItem{.data = std::move(frame), .last = last});
+    total_queued_bytes_ += sz;
+    if (was_empty) {
+        rr_active_.push_back(request_id);
+    }
+    // Update per-request context counters
+    {
+        std::lock_guard<std::mutex> lk(ctx_mtx_);
+        auto it = contexts_.find(request_id);
+        if (it != contexts_.end()) {
+            it->second->frames_enqueued.fetch_add(1, std::memory_order_relaxed);
+            it->second->bytes_enqueued.fetch_add(sz, std::memory_order_relaxed);
+        }
+    }
+    co_return Result<void>{};
+}
+
+boost::asio::awaitable<void> RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket) {
+    using boost::asio::use_awaitable;
+    // Must be called on write strand
+    while (!rr_active_.empty()) {
+        auto rid = rr_active_.front();
+        rr_active_.pop_front();
+        auto it = rr_queues_.find(rid);
+        if (it == rr_queues_.end() || it->second.empty()) {
+            continue;
+        }
+        // Drain up to budget bytes for this request turn
+        size_t budget = config_.writer_budget_bytes_per_turn;
+        while (budget > 0 && it != rr_queues_.end() && !it->second.empty()) {
+            FrameItem item = std::move(it->second.front());
+            it->second.pop_front();
+            total_queued_bytes_ -= item.data.size();
+            MuxMetricsRegistry::instance().addQueuedBytes(-static_cast<int64_t>(item.data.size()));
+            // Adjust budget; allow single oversized frame to pass
+            if (item.data.size() >= budget) budget = 0; else budget -= item.data.size();
+            // Write the frame
+            boost::system::error_code ec;
+            co_await boost::asio::async_write(socket, boost::asio::buffer(item.data), boost::asio::redirect_error(use_awaitable, ec));
+            if (ec) {
+                spdlog::debug("writer_drain: write error: {}", ec.message());
+                rr_active_.clear();
+                break;
+            }
+            if (item.last && it->second.empty()) {
+                rr_queues_.erase(it);
+                break;
+            }
+        }
+        // Re-enqueue if still has frames
+        it = rr_queues_.find(rid);
+        if (it != rr_queues_.end() && !it->second.empty()) {
+            rr_active_.push_back(rid);
+        }
+    }
+    writer_running_ = false;
+    co_return;
 }
 
 boost::asio::awaitable<Result<void>>
@@ -1119,6 +1301,13 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     while (!last_chunk_received) {
         spdlog::debug("stream_chunks: preparing chunk #{} (request_id={})", chunk_count + 1,
                       request_id);
+        {
+            std::lock_guard<std::mutex> lk(ctx_mtx_);
+            auto it = contexts_.find(request_id);
+            if (it != contexts_.end() && it->second->canceled.load(std::memory_order_relaxed)) {
+                co_return Error{ErrorCode::OperationCancelled, "Request canceled"};
+            }
+        }
         auto chunk_result = co_await processor->next_chunk();
         last_chunk_received = chunk_result.is_last_chunk;
 

@@ -26,6 +26,7 @@ add_library(yams_vector
     # Compile sqlite-vec directly into the library
     ${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
 )
+set_target_properties(yams_vector PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 # Disable clang-tidy on this target to avoid third-party C lint errors
 set_target_properties(yams_vector PROPERTIES C_CLANG_TIDY "")

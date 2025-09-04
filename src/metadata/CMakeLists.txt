@@ -6,6 +6,7 @@ add_library(yams_metadata STATIC
     metadata_repository.cpp
     knowledge_graph_store_sqlite.cpp
 )
+set_target_properties(yams_metadata PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_metadata PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>

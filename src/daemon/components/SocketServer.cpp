@@ -3,6 +3,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/request_handler.h>
+#include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -15,6 +16,9 @@
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
+#ifndef _WIN32
+#include <sys/un.h>
+#endif
 #include <memory>
 
 namespace yams::daemon {
@@ -58,6 +62,23 @@ Result<void> SocketServer::start() {
         }
         
         // Create acceptor and bind
+#ifndef _WIN32
+        // Guard against AF_UNIX sun_path length limit (~108 bytes on Linux)
+        {
+            std::string sp = config_.socketPath.string();
+            if (sp.size() >= sizeof(sockaddr_un::sun_path)) {
+                running_ = false;
+                return Error{ErrorCode::InvalidArgument,
+                             std::string("Socket path too long for AF_UNIX (") +
+                                 std::to_string(sp.size()) + "/" +
+                                 std::to_string(sizeof(sockaddr_un::sun_path)) + ") : '" + sp + "'"};
+            }
+        }
+#endif
+        // Ensure io_context is fresh and kept alive while we spin up threads
+        io_context_.restart();
+        work_guard_.emplace(io_context_.get_executor());
+
         acceptor_ = std::make_unique<local::acceptor>(io_context_);
         local::endpoint endpoint(config_.socketPath.string());
         acceptor_->open(endpoint.protocol());
@@ -72,9 +93,12 @@ Result<void> SocketServer::start() {
         
         actualSocketPath_ = config_.socketPath;
         
+        // Start accept loop before spawning worker threads to ensure pending work exists
+        co_spawn(io_context_, accept_loop(), detached);
+
         // Start worker threads
         for (size_t i = 0; i < config_.workerThreads; ++i) {
-            workers_.emplace_back([this] { 
+            workers_.emplace_back([this] {
                 try {
                     io_context_.run();
                 } catch (const std::exception& e) {
@@ -82,9 +106,6 @@ Result<void> SocketServer::start() {
                 }
             });
         }
-        
-        // Start accept loop
-        co_spawn(io_context_, accept_loop(), detached);
         
         // Update state if available
         if (state_) {
@@ -118,7 +139,7 @@ Result<void> SocketServer::stop() {
         }
     }
     
-    // Stop io_context
+    // Stop io_context and release work guard so threads can exit
     io_context_.stop();
     
     // Join all worker threads
@@ -128,6 +149,7 @@ Result<void> SocketServer::stop() {
         }
     }
     workers_.clear();
+    work_guard_.reset();
     
     // Update state
     if (state_) {
@@ -232,9 +254,13 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         // Create request handler for this connection with streaming support
         RequestHandler::Config handlerConfig;
         handlerConfig.enable_streaming = true;
+        handlerConfig.enable_multiplexing = true; // Default: multiplex per connection
         handlerConfig.chunk_size = 64 * 1024; // 64KB chunks
-        // Keep connections open; let clients close when done (stable default)
+        // Persistent connections; client may issue multiple requests sequentially
         handlerConfig.close_after_response = false;
+        handlerConfig.graceful_half_close = true;
+        handlerConfig.max_inflight_per_connection = 128;
+        MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestHandler handler(dispatcher_, handlerConfig);
         
         // Create a stop_source for this connection

@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <filesystem>
 // Intentionally avoid heavy project headers here to keep adapter minimal.
 
 namespace yams {
@@ -111,6 +112,10 @@ public:
 
     // Debugging helper
     static const char* to_string(State s) noexcept;
+
+    // Centralized socket path resolution (unified for client/server/CLI)
+    static std::filesystem::path resolve_socket_path();
+    static std::filesystem::path resolve_socket_path_config_first();
 
 private:
     // Internal access for the tinyfsm-backed implementation (kept private API stable)

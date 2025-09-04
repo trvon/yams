@@ -3,7 +3,7 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/core/types.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/tool_registry.h>
@@ -40,7 +40,9 @@ public:
 };
 
 /**
- * Standard I/O transport (default for MCP) with atomic state management
+ * Standard I/O transport (default for MCP) with atomic state management.
+ * Output uses strict LSP/MCP framing (Content-Length and Content-Type headers) with no
+ * trailing newline after the JSON payload. Input reads are non-locking.
  */
 class StdioTransport : public ITransport {
 public:
@@ -59,8 +61,8 @@ private:
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
 
-    // Mutex for thread-safe I/O operations
-    static std::mutex io_mutex_;
+    // Mutex for thread-safe output operations (sending only)
+    static std::mutex out_mutex_;
 
     // Capture the stream buffers at construction to respect caller redirections (e.g., tests)
     std::streambuf* outbuf_{nullptr};
@@ -97,34 +99,8 @@ private:
     std::unique_ptr<ToolRegistry> toolRegistry_;
     std::atomic<bool>* externalShutdown_;
 
-    // New PooledRequestManager for daemon communication
-    std::unique_ptr<
-        cli::PooledRequestManager<yams::daemon::SearchRequest, yams::daemon::SearchResponse>>
-        search_req_manager_;
-    std::unique_ptr<
-        cli::PooledRequestManager<yams::daemon::GrepRequest, yams::daemon::GrepResponse>>
-        grep_req_manager_;
-    std::unique_ptr<
-        cli::PooledRequestManager<yams::daemon::DownloadRequest, yams::daemon::DownloadResponse>>
-        download_req_manager_;
-    std::unique_ptr<cli::PooledRequestManager<yams::daemon::AddDocumentRequest,
-                                              yams::daemon::AddDocumentResponse>>
-        store_req_manager_;
-    std::unique_ptr<cli::PooledRequestManager<yams::daemon::GetRequest, yams::daemon::GetResponse>>
-        retrieve_req_manager_;
-    std::unique_ptr<
-        cli::PooledRequestManager<yams::daemon::ListRequest, yams::daemon::ListResponse>>
-        list_req_manager_;
-    std::unique_ptr<
-        cli::PooledRequestManager<yams::daemon::GetStatsRequest, yams::daemon::GetStatsResponse>>
-        stats_req_manager_;
-    std::unique_ptr<
-        cli::PooledRequestManager<yams::daemon::DeleteRequest, yams::daemon::DeleteResponse>>
-        delete_req_manager_;
-    std::unique_ptr<cli::PooledRequestManager<yams::daemon::UpdateDocumentRequest,
-                                              yams::daemon::UpdateDocumentResponse>>
-        update_req_manager_;
-
+    // Single multiplexed daemon client (replaces legacy pool/managers)
+    std::shared_ptr<yams::daemon::DaemonClient> daemon_client_;
     struct ClientInfo {
         std::string name;
         std::string version;

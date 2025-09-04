@@ -29,6 +29,7 @@ struct ClientConfig {
     bool enableCircuitBreaker = true;
     bool enableChunkedResponses = true;
     size_t maxChunkSize = 256 * 1024;
+    size_t maxInflight = 128; // multiplexing: cap concurrent in-flight requests per connection
     bool progressiveOutput = true;
     bool singleUseConnections = true;
     bool disableStreamingForLargeQueries = false;
@@ -72,6 +73,8 @@ public:
     Task<Result<GrepResponse>> grep(const GrepRequest& req);
     // Streaming path for AddDocument (header-first, final-only chunk)
     Task<Result<AddDocumentResponse>> streamingAddDocument(const AddDocumentRequest& req);
+    Task<Result<GetStatsResponse>> getStats(const GetStatsRequest& req);
+    Task<Result<UpdateDocumentResponse>> updateDocument(const UpdateDocumentRequest& req);
 
     // High-level streaming helpers
     Task<Result<void>> getToStdout(const GetInitRequest& req) {

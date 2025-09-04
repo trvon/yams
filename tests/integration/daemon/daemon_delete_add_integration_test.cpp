@@ -10,6 +10,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include "test_async_helpers.h"
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -163,7 +164,7 @@ protected:
         yams::daemon::ListRequest req;
         req.limit = limit;
         req.recent = false;
-        auto lr = client.call<yams::daemon::ListRequest>(req);
+        auto lr = yams::test_async::res(client.call<yams::daemon::ListRequest>(req));
         if (!lr) {
             yams::daemon::ListResponse empty{};
             return empty;
@@ -207,7 +208,7 @@ TEST_F(DaemonAddDeleteIntegrationTest, DeleteByHash_DaemonOnly) {
     yams::daemon::AddDocumentRequest addReq;
     addReq.path = f.string();
     addReq.recursive = false;
-    auto addRes = client.call<yams::daemon::AddDocumentRequest>(addReq);
+    auto addRes = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
     ASSERT_TRUE(addRes) << "Add via daemon failed: " << addRes.error().message;
 
     std::string hash = addRes.value().hash;
@@ -234,7 +235,7 @@ TEST_F(DaemonAddDeleteIntegrationTest, OrphanCleanupWithDaemon) {
     writeFile(f, "orphan content");
     yams::daemon::AddDocumentRequest addReq;
     addReq.path = f.string();
-    auto addRes = client.call<yams::daemon::AddDocumentRequest>(addReq);
+    auto addRes = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
     ASSERT_TRUE(addRes);
     std::string hash = addRes.value().hash;
 
@@ -289,26 +290,26 @@ TEST_F(DaemonAddDeleteIntegrationTest, DeleteByNamePatternDirectoryIncludingHidd
     {
         yams::daemon::AddDocumentRequest addReq;
         addReq.path = f1.string();
-        auto r = client.call<yams::daemon::AddDocumentRequest>(addReq);
+        auto r = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
         ASSERT_TRUE(r);
     }
     {
         yams::daemon::AddDocumentRequest addReq;
         addReq.path = p1.string();
-        auto r = client.call<yams::daemon::AddDocumentRequest>(addReq);
+        auto r = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
         ASSERT_TRUE(r);
         addReq.path = p2.string();
-        r = client.call<yams::daemon::AddDocumentRequest>(addReq);
+        r = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
         ASSERT_TRUE(r);
         addReq.path = p3.string();
-        r = client.call<yams::daemon::AddDocumentRequest>(addReq);
+        r = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
         ASSERT_TRUE(r);
     }
     {
         yams::daemon::AddDocumentRequest addReq;
         addReq.path = dir.string();
         addReq.recursive = true;
-        auto r = client.call<yams::daemon::AddDocumentRequest>(addReq);
+        auto r = yams::test_async::res(client.call<yams::daemon::AddDocumentRequest>(addReq));
         ASSERT_TRUE(r);
     }
 

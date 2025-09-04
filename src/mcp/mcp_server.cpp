@@ -43,7 +43,7 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
     (void)req;
     (void)fallback;
     (void)render;
-    return Error{ErrorCode::NotImplemented, 
+    return Error{ErrorCode::NotImplemented,
                  "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
 }
 
@@ -52,7 +52,7 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 } // namespace
 
 // Define static mutex for StdioTransport
-std::mutex StdioTransport::io_mutex_;
+std::mutex StdioTransport::out_mutex_;
 
 // StdioTransport implementation
 StdioTransport::StdioTransport() {
@@ -65,29 +65,26 @@ StdioTransport::StdioTransport() {
     // Capture current stream buffers so we honor caller redirections (tests set rdbuf)
     outbuf_ = std::cout.rdbuf();
     inbuf_ = std::cin.rdbuf();
+    state_.store(TransportState::Connected);
 }
 
 void StdioTransport::send(const json& message) {
     auto currentState = state_.load();
     if (currentState == TransportState::Connected) {
-        // Lock mutex to ensure atomic write
-        std::lock_guard<std::mutex> lock(io_mutex_);
+        std::lock_guard<std::mutex> lock(out_mutex_);
         const std::string payload = message.dump();
-        // Write to std::cout so tests that redirect cout capture output deterministically.
-        // If we captured a custom outbuf_ at construction, ensure std::cout uses it.
+
         if (outbuf_ && std::cout.rdbuf() != outbuf_) {
-            std::streambuf* old = std::cout.rdbuf(outbuf_);
-            (void)old; // suppress unused warning
+            (void)std::cout.rdbuf(outbuf_);
         }
-        // Emit JSON-RPC over stdio with LSP-style framing for MCP clients:
-        //   Content-Length: <len>\r\n\r\n<payload>
-        // Also append a terminal newline for line-delimited clients.
+
+        // Minimal LSP/MCP framing: only Content-Length header is required
         std::cout << "Content-Length: " << payload.size() << "\r\n\r\n";
         std::cout << payload;
-        std::cout << '\n';
         std::cout.flush();
     }
 }
+
 
 bool StdioTransport::isInputAvailable(int timeoutMs) const {
 #ifdef _WIN32
@@ -99,7 +96,7 @@ bool StdioTransport::isInputAvailable(int timeoutMs) const {
     // Unix/Linux/macOS implementation using poll
     struct pollfd fds;
     fds.fd = STDIN_FILENO;
-    fds.events = POLLIN;
+    fds.events = POLLIN | POLLHUP;
     fds.revents = 0;
 
     int result = poll(&fds, 1, timeoutMs);
@@ -119,7 +116,7 @@ bool StdioTransport::isInputAvailable(int timeoutMs) const {
         }
     }
 
-    return result > 0 && (fds.revents & POLLIN);
+    return result > 0 && (fds.revents & (POLLIN | POLLHUP));
 #endif
 }
 
@@ -148,22 +145,19 @@ MessageResult StdioTransport::receive() {
             in.clear();
 
             // Lock mutex for thread-safe reads
-            {
-                std::lock_guard<std::mutex> lock(io_mutex_);
-                if (!std::getline(in, firstLine)) {
-                    if (in.eof()) {
-                        spdlog::debug("EOF on stdin, closing transport");
-                        state_.store(TransportState::Disconnected);
-                        return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
-                    }
-                    // Clear error and retry if we should
-                    in.clear();
-                    if (!shouldRetryAfterError()) {
-                        state_.store(TransportState::Error);
-                        return Error{ErrorCode::NetworkError, "Too many consecutive I/O errors"};
-                    }
-                    continue;
+            if (!std::getline(in, firstLine)) {
+                if (in.eof()) {
+                    spdlog::debug("EOF on stdin, closing transport");
+                    state_.store(TransportState::Disconnected);
+                    return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
                 }
+                // Clear error and retry if we should
+                in.clear();
+                if (!shouldRetryAfterError()) {
+                    state_.store(TransportState::Error);
+                    return Error{ErrorCode::NetworkError, "Too many consecutive I/O errors"};
+                }
+                continue;
             }
 
             // Handle CRLF: strip trailing '\r' if present
@@ -194,23 +188,22 @@ MessageResult StdioTransport::receive() {
 
                 // Expect an empty line next (CRLF)
                 std::string blank;
-                {
-                    std::lock_guard<std::mutex> lock(io_mutex_);
-                    (void)std::getline(in, blank);
-                }
+                (void)std::getline(in, blank);
                 if (!blank.empty() && blank.back() == '\r')
                     blank.pop_back();
 
                 // Read exact number of bytes
                 std::string payload;
                 payload.resize(len);
-                {
-                    std::lock_guard<std::mutex> lock(io_mutex_);
-                    in.read(payload.data(), static_cast<std::streamsize>(len));
-                    if (in.gcount() != static_cast<std::streamsize>(len)) {
-                        recordError();
-                        return Error{ErrorCode::NetworkError, "Short read on Content-Length payload"};
-                    }
+                in.read(payload.data(), static_cast<std::streamsize>(len));
+                if (in.gcount() != static_cast<std::streamsize>(len)) {
+                    recordError();
+                    return Error{ErrorCode::NetworkError, "Short read on Content-Length payload"};
+                }
+                // Compatibility: consume a single trailing newline after framed payload, if present
+                if (in.rdbuf() && in.rdbuf()->in_avail() > 0) {
+                    int c = in.peek();
+                    if (c == '\n') { (void)in.get(); }
                 }
 
                 // Parse JSON message using safe parser
@@ -296,57 +289,18 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize the daemon client pool configuration (new DaemonClientPool)
-    yams::cli::DaemonClientPool::Config pool_config;
-    pool_config.max_clients = 10; // Cap clients to the daemon
-    // MCP: enable streaming to avoid header timeouts on large queries and to support
-    // progressive output in tools that can consume it. The pool uses DaemonClient
-    // which will choose streaming for Search/List/Grep when enabled here.
-    pool_config.client_config.enableChunkedResponses = true;
-    // Align with server's close_after_response during stabilization
-    pool_config.client_config.singleUseConnections = true;
-    // Be conservative but practical with timeouts for MCP tools
-    pool_config.client_config.requestTimeout = std::chrono::seconds(30);
-    pool_config.client_config.headerTimeout = std::chrono::seconds(30);
-    pool_config.client_config.bodyTimeout = std::chrono::seconds(120);
-    pool_config.idle_timeout = std::chrono::minutes(1);
-
-    // Construct pooled request managers; internal DaemonClientPool handles clients
-    search_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::SearchRequest, yams::daemon::SearchResponse>>(
-        pool_config);
-
-    grep_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::GrepRequest, yams::daemon::GrepResponse>>(
-        pool_config);
-
-    download_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::DownloadRequest, yams::daemon::DownloadResponse>>(
-        pool_config);
-
-    store_req_manager_ =
-        std::make_unique<cli::PooledRequestManager<yams::daemon::AddDocumentRequest,
-                                                   yams::daemon::AddDocumentResponse>>(pool_config);
-
-    retrieve_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::GetRequest, yams::daemon::GetResponse>>(
-        pool_config);
-
-    list_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::ListRequest, yams::daemon::ListResponse>>(
-        pool_config);
-
-    stats_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::GetStatsRequest, yams::daemon::GetStatsResponse>>(
-        pool_config);
-
-    delete_req_manager_ = std::make_unique<
-        cli::PooledRequestManager<yams::daemon::DeleteRequest, yams::daemon::DeleteResponse>>(
-        pool_config);
-
-    update_req_manager_ = std::make_unique<cli::PooledRequestManager<
-        yams::daemon::UpdateDocumentRequest, yams::daemon::UpdateDocumentResponse>>(pool_config);
-
+    // Initialize a single multiplexed daemon client (replaces legacy pool/managers)
+    {
+        yams::daemon::ClientConfig cfg;
+        cfg.enableChunkedResponses = true;
+        cfg.singleUseConnections = false;
+        cfg.requestTimeout = std::chrono::seconds(30);
+        cfg.headerTimeout = std::chrono::seconds(30);
+        cfg.bodyTimeout = std::chrono::seconds(120);
+        cfg.maxInflight = 128;
+        daemon_client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
+    }
+    // Legacy pool config removed
     // Quick daemon health probe via DaemonClient (prefer ping; fallback to status)
     {
         yams::daemon::DaemonClient probe{};
@@ -410,6 +364,13 @@ void MCPServer::start() {
         // Async dispatch is now the default for all MCP handlers
         {
             std::string method = request.value("method", "");
+            // Accept tool requests before notifications/initialized (compat)
+            if (method == "notifications/initialized") {
+                // Client signals readiness; record and do not respond (notification)
+                initialized_.exchange(true);
+                spdlog::info("MCP client sent notifications/initialized");
+                continue;
+            }
             if (method == "search") {
                 auto id = request.value("id", json{});
                 auto params = request.value("params", json::object());
@@ -533,7 +494,7 @@ void MCPServer::start() {
                         }
 
                         auto toolResult = co_await toolRegistry_->callTool(toolName, toolArgs);
-                        
+
                         // Wrap non-MCP-shaped results into MCP content format for compatibility with MCP clients
                         if (toolResult.contains("content") && toolResult["content"].is_array()) {
                             auto resp = createResponse(id, toolResult);
@@ -560,6 +521,9 @@ void MCPServer::start() {
             // Do not send a response for notifications (no id)
             if (!(resp.contains("id") && resp["id"].is_null())) {
                 transport_->send(resp);
+
+                // Initialize acknowledged; per MCP spec the client will send notifications/initialized.
+                // Do not emit server-side "ready" notifications; wait for the client signal.
             } else {
                 spdlog::debug("Notification processed without response");
             }
@@ -1239,147 +1203,75 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
 
 // Modern C++20 tool handler implementations
 yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
-    // This function will now be a client to the daemon.
-    // It converts the MCP request to a daemon request, sends it, and converts the response.
+    yams::daemon::SearchRequest dreq;
+    dreq.query = req.query;
+    dreq.limit = req.limit;
+    dreq.fuzzy = req.fuzzy;
+    dreq.similarity = static_cast<double>(req.similarity);
+    dreq.hashQuery = req.hash;
+    dreq.searchType = req.type;
+    dreq.verbose = req.verbose;
+    dreq.pathsOnly = req.pathsOnly;
+    dreq.showLineNumbers = req.lineNumbers;
+    dreq.beforeContext = req.beforeContext;
+    dreq.afterContext = req.afterContext;
+    dreq.context = req.context;
 
-    // 1. Convert MCP request to daemon IPC request
-    daemon::SearchRequest daemon_req;
-    daemon_req.query = req.query;
-    daemon_req.limit = req.limit;
-    daemon_req.fuzzy = req.fuzzy;
-    daemon_req.similarity = static_cast<double>(req.similarity);
-    daemon_req.hashQuery = req.hash;
-    daemon_req.searchType = req.type;
-    daemon_req.verbose = req.verbose;
-    daemon_req.pathsOnly = req.pathsOnly;
-    daemon_req.showLineNumbers = req.lineNumbers;
-    daemon_req.beforeContext = req.beforeContext;
-    daemon_req.afterContext = req.afterContext;
-    daemon_req.context = req.context;
-
-    // daemon_req.tags = req.tags; // Tags need to be handled if protocol supports it
-    // daemon_req.matchAllTags = req.matchAllTags;
-
-    // 2. Execute request via pooled DaemonClient (stream-aware)
-    spdlog::debug("[MCP] Search: dispatch via DaemonClientPool (stream-aware), query='{}' limit={} pathsOnly={}",
-                  daemon_req.query, daemon_req.limit, daemon_req.pathsOnly);
-    MCPSearchResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::SearchResponse& resp) -> Result<void> {
-        spdlog::debug("[MCP] Search: received daemon response totalCount={} results={} elapsed={}ms",
-                      resp.totalCount, resp.results.size(), resp.elapsed.count());
-        // 3. Convert daemon response to MCP response
-        mcp_response.total = resp.totalCount;
-        mcp_response.type = "daemon"; // Indicate response came from daemon
-        mcp_response.executionTimeMs = resp.elapsed.count();
-
-        for (const auto& item : resp.results) {
-            MCPSearchResponse::Result mcp_result;
-            mcp_result.id = item.id;
-            mcp_result.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
-            mcp_result.title = item.title;
-            mcp_result.path = item.path;
-            mcp_result.score = item.score;
-            mcp_result.snippet = item.snippet;
-            mcp_response.results.push_back(mcp_result);
-        }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error = Error{ErrorCode::NetworkError,
-                                "Daemon not available or failed to respond. Try restarting the "
-                                "daemon (yams daemon start) and re-run the command."};
-        return Result<void>();
-    };
-
-    if (!search_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Search request manager not initialized"};
+    MCPSearchResponse out;
+    auto res = co_await daemon_client_->streamingSearch(dreq);
+    if (!res) co_return res.error();
+    const auto& r = res.value();
+    out.total = r.totalCount;
+    out.type = "daemon";
+    out.executionTimeMs = r.elapsed.count();
+    for (const auto& item : r.results) {
+        MCPSearchResponse::Result m;
+        m.id = item.id;
+        m.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
+        m.title = item.title;
+        m.path = item.path;
+        m.score = item.score;
+        m.snippet = item.snippet;
+        out.results.push_back(std::move(m));
     }
-    {
-        auto exec = co_await search_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    co_return mcp_response;
+    co_return out;
 }
+
 
 yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
-    // Convert MCP request to daemon request
-    daemon::GrepRequest daemon_req;
-    daemon_req.pattern = req.pattern;
-    daemon_req.paths = req.paths;
-    daemon_req.caseInsensitive = req.ignoreCase;
-    daemon_req.wholeWord = req.word;
-    daemon_req.invertMatch = req.invert;
-    daemon_req.showLineNumbers = req.lineNumbers;
-    daemon_req.showFilename = req.withFilename;
-    daemon_req.countOnly = req.count;
-    daemon_req.filesOnly = req.filesWithMatches;
-    daemon_req.filesWithoutMatch = req.filesWithoutMatch;
-    daemon_req.afterContext = req.afterContext;
-    daemon_req.beforeContext = req.beforeContext;
-    daemon_req.contextLines = req.context;
-    daemon_req.colorMode = req.color;
-    if (req.maxCount) {
-        daemon_req.maxMatches = *req.maxCount;
+    yams::daemon::GrepRequest dreq;
+    dreq.pattern = req.pattern;
+    dreq.paths = req.paths;
+    dreq.caseInsensitive = req.ignoreCase;
+    dreq.wholeWord = req.word;
+    dreq.invertMatch = req.invert;
+    dreq.showLineNumbers = req.lineNumbers;
+    dreq.showFilename = req.withFilename;
+    dreq.countOnly = req.count;
+    dreq.filesOnly = req.filesWithMatches;
+    dreq.filesWithoutMatch = req.filesWithoutMatch;
+    dreq.afterContext = req.afterContext;
+    dreq.beforeContext = req.beforeContext;
+    dreq.contextLines = req.context;
+    dreq.colorMode = req.color;
+    if (req.maxCount) dreq.maxMatches = *req.maxCount;
+
+    MCPGrepResponse out;
+    auto res = co_await daemon_client_->streamingGrep(dreq);
+    if (!res) co_return res.error();
+    const auto& r = res.value();
+    out.matchCount = r.totalMatches;
+    out.fileCount = r.filesSearched;
+    std::ostringstream oss;
+    for (const auto& m : r.matches) {
+        if (out.fileCount > 1 || req.withFilename) oss << m.file << ":";
+        if (req.lineNumbers) oss << m.lineNumber << ":";
+        oss << m.line << "\n";
     }
-
-    MCPGrepResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::GrepResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.matchCount = resp.totalMatches;
-        mcp_response.fileCount = resp.filesSearched;
-
-        std::ostringstream oss;
-        for (const auto& match : resp.matches) {
-            if (mcp_response.fileCount > 1 || req.withFilename) {
-                oss << match.file << ":";
-            }
-            if (req.lineNumbers) {
-                oss << match.lineNumber << ":";
-            }
-            oss << match.line << "\n";
-        }
-        mcp_response.output = oss.str();
-
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (stream-aware)
-    spdlog::debug("[MCP] Grep: dispatch via DaemonClientPool (stream-aware), pattern='{}' paths={} filesOnly={}",
-                  daemon_req.pattern, daemon_req.paths.size(), daemon_req.filesOnly);
-    if (!grep_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Grep request manager not initialized"};
-    }
-    {
-        auto exec = co_await grep_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    co_return mcp_response;
+    out.output = oss.str();
+    co_return out;
 }
+
 
 yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownloadRequest& req) {
     const bool verbose =
@@ -1460,74 +1352,98 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
     yams::downloader::StorageConfig storage{};
     yams::downloader::DownloaderConfig cfg{};
 
-    // Reuse existing ConfigMigrator to read config.v2 values (downloader.*)
+    // Read config and resolve storage path to match CLI behavior
     try {
         namespace fs = std::filesystem;
-        // Resolve default config path like daemon does
-        std::string cfgPath;
+
+        // Load config.toml if present
+        fs::path configPath;
         if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-            cfgPath = (fs::path(xdgConfigHome) / "yams" / "config.toml").string();
+            configPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
         } else if (const char* homeEnv = std::getenv("HOME")) {
-            cfgPath = (fs::path(homeEnv) / ".config" / "yams" / "config.toml").string();
+            configPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
         }
 
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+        std::map<std::string, std::map<std::string, std::string>> toml;
+        if (!configPath.empty() && fs::exists(configPath)) {
             yams::config::ConfigMigrator migrator;
-            auto parsed = migrator.parseTomlConfig(cfgPath);
-            if (parsed) {
-                const auto& toml = parsed.value();
-                if (toml.find("downloader") != toml.end()) {
-                    const auto& dl = toml.at("downloader");
-                    if (dl.find("default_concurrency") != dl.end()) {
-                        try {
-                            cfg.defaultConcurrency = std::stoi(dl.at("default_concurrency"));
-                        } catch (...) {
+            if (auto parsed = migrator.parseTomlConfig(configPath)) {
+                toml = std::move(parsed.value());
+            }
+        }
+
+        // Downloader defaults from config
+        if (auto it = toml.find("downloader"); it != toml.end()) {
+            const auto& dl = it->second;
+            if (auto f = dl.find("default_concurrency"); f != dl.end()) {
+                try { cfg.defaultConcurrency = std::stoi(f->second); } catch (...) {}
+            }
+            if (auto f = dl.find("default_chunk_size_bytes"); f != dl.end()) {
+                try { cfg.defaultChunkSizeBytes = static_cast<std::size_t>(std::stoull(f->second)); } catch (...) {}
+            }
+            if (auto f = dl.find("default_timeout_ms"); f != dl.end()) {
+                try { cfg.defaultTimeout = std::chrono::milliseconds(std::stoll(f->second)); } catch (...) {}
+            }
+            if (auto f = dl.find("follow_redirects"); f != dl.end()) {
+                cfg.followRedirects = (f->second == "true");
+            }
+            if (auto f = dl.find("resume"); f != dl.end()) {
+                cfg.resume = (f->second == "true");
+            }
+            if (auto f = dl.find("store_only"); f != dl.end()) {
+                cfg.storeOnly = (f->second == "true");
+            }
+            if (auto f = dl.find("max_file_bytes"); f != dl.end()) {
+                try { cfg.maxFileBytes = static_cast<std::uint64_t>(std::stoull(f->second)); } catch (...) {}
+            }
+        }
+
+        // Determine data root (env > core.data_dir > XDG_DATA_HOME > ~/.local/share/yams)
+        fs::path dataRoot;
+        if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
+            if (envStorage && *envStorage) dataRoot = fs::path(envStorage);
+        }
+        if (dataRoot.empty()) {
+            if (auto it = toml.find("core"); it != toml.end()) {
+                const auto& core = it->second;
+                if (auto f = core.find("data_dir"); f != core.end() && !f->second.empty()) {
+                    std::string p = f->second;
+                    if (!p.empty() && p.front() == '~') {
+                        if (const char* home = std::getenv("HOME")) {
+                            p = std::string(home) + p.substr(1);
                         }
                     }
-                    if (dl.find("default_chunk_size_bytes") != dl.end()) {
-                        try {
-                            cfg.defaultChunkSizeBytes = static_cast<std::size_t>(
-                                std::stoull(dl.at("default_chunk_size_bytes")));
-                        } catch (...) {
-                        }
-                    }
-                    if (dl.find("default_timeout_ms") != dl.end()) {
-                        try {
-                            cfg.defaultTimeout =
-                                std::chrono::milliseconds(std::stoll(dl.at("default_timeout_ms")));
-                        } catch (...) {
-                        }
-                    }
-                    if (dl.find("follow_redirects") != dl.end()) {
-                        cfg.followRedirects = (dl.at("follow_redirects") == "true");
-                    }
-                    if (dl.find("resume") != dl.end()) {
-                        cfg.resume = (dl.at("resume") == "true");
-                    }
-                    if (dl.find("store_only") != dl.end()) {
-                        cfg.storeOnly = (dl.at("store_only") == "true");
-                    }
-                    if (dl.find("max_file_bytes") != dl.end()) {
-                        try {
-                            cfg.maxFileBytes =
-                                static_cast<std::uint64_t>(std::stoull(dl.at("max_file_bytes")));
-                        } catch (...) {
-                        }
-                    }
-                    // rate limits and checksum algo are present in config; if needed later, map
-                    // similarly
-                }
-                if (toml.find("storage") != toml.end()) {
-                    const auto& st = toml.at("storage");
-                    if (st.find("objects_dir") != st.end()) {
-                        storage.objectsDir = fs::path(st.at("objects_dir"));
-                    }
-                    if (st.find("staging_dir") != st.end()) {
-                        storage.stagingDir = fs::path(st.at("staging_dir"));
-                    }
+                    dataRoot = fs::path(p);
                 }
             }
         }
+        if (dataRoot.empty()) {
+            if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+                dataRoot = fs::path(xdgDataHome) / "yams";
+            } else if (const char* homeEnv = std::getenv("HOME")) {
+                dataRoot = fs::path(homeEnv) / ".local" / "share" / "yams";
+            } else {
+                dataRoot = fs::current_path() / "yams_data";
+            }
+        }
+
+        // Allow explicit overrides via [storage] objects_dir/staging_dir
+        fs::path objectsDir;
+        fs::path stagingDir;
+        if (auto it = toml.find("storage"); it != toml.end()) {
+            const auto& st = it->second;
+            if (auto f = st.find("objects_dir"); f != st.end() && !f->second.empty()) {
+                objectsDir = fs::path(f->second);
+            }
+            if (auto f = st.find("staging_dir"); f != st.end() && !f->second.empty()) {
+                stagingDir = fs::path(f->second);
+            }
+        }
+        if (objectsDir.empty()) objectsDir = dataRoot / "storage" / "objects";
+        if (stagingDir.empty()) stagingDir = dataRoot / "storage" / "staging";
+        storage.objectsDir = std::move(objectsDir);
+        storage.stagingDir = std::move(stagingDir);
+
     } catch (...) {
         // Use defaults silently if config parsing fails
     }
@@ -1697,33 +1613,15 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         for (const auto& [k, v] : req.metadata)
             addReq.metadata[k] = v;
 
-        std::optional<Error> add_error;
-        auto renderAdd = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
-            (void)resp;
-            return Result<void>();
-        };
-        // Use pooled DaemonClient for post-index
-        if (!store_req_manager_) {
-            co_return Error{ErrorCode::NotInitialized, "Store request manager not initialized"};
-        }
-        auto result = store_req_manager_->pool().acquire();
-        if (!result) {
-            if (verbose) spdlog::debug("[MCP] post-index: pool acquire failed: {}", result.error().message);
+        // Call daemon to add/index the downloaded document
+        auto addres = co_await daemon_client_->streamingAddDocument(addReq);
+        if (!addres) {
+            if (verbose) {
+                spdlog::debug("[MCP] post-index: daemon call failed error='{}'", addres.error().message);
+            }
             mcp_response.indexed = false;
         } else {
-            auto lease = std::move(result).value();
-            auto addres = co_await lease->call<daemon::AddDocumentRequest>(addReq);
-            if (!addres) {
-                if (verbose) {
-                    spdlog::debug("[MCP] post-index: daemon call failed error='{}'", addres.error().message);
-                }
-                mcp_response.indexed = false;
-            } else {
-                auto renderResult = renderAdd(addres.value());
-                if (!renderResult) {
-                    mcp_response.indexed = false;
-                }
-            }
+            mcp_response.indexed = true;
         }
     }
 
@@ -1740,7 +1638,27 @@ yams::Task<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
-    daemon_req.path = req.path;
+    // Normalize path: expand '~' and make absolute using PWD for relative paths
+    {
+        std::string _p = req.path;
+        if (!_p.empty() && _p.front() == '~') {
+            if (const char* home = std::getenv("HOME")) {
+                _p = std::string(home) + _p.substr(1);
+            }
+        }
+        if (!_p.empty() && _p.front() != '/') {
+            if (const char* pwd = std::getenv("PWD")) {
+                if (pwd && *pwd) {
+                    if (_p.rfind("./", 0) == 0) {
+                        _p = std::string(pwd) + "/" + _p.substr(2);
+                    } else {
+                        _p = std::string(pwd) + "/" + _p;
+                    }
+                }
+            }
+        }
+        daemon_req.path = _p;
+    }
     daemon_req.content = req.content;
     daemon_req.name = req.name;
     daemon_req.mimeType = req.mimeType;
@@ -1752,44 +1670,30 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             daemon_req.metadata[key] = value.dump();
         }
     }
-
-    MCPStoreDocumentResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.hash = resp.hash;
-        // Note: The daemon AddDocumentResponse doesn't have bytesStored/bytesDeduped.
-        // We can leave them as 0 or enhance the daemon protocol later.
-        mcp_response.bytesStored = 0;
-        mcp_response.bytesDeduped = 0;
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (stream-aware for AddDocument final response)
-    if (!store_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Store request manager not initialized"};
-    }
-    {
-        auto exec = co_await store_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
+    // Increase daemon timeouts for potentially long single-file adds
+    daemon_client_->setHeaderTimeout(std::chrono::seconds(60));
+    daemon_client_->setBodyTimeout(std::chrono::seconds(300));
+    // Validate that the target file path exists and is not a directory
+    if (!daemon_req.path.empty()) {
+        std::error_code __ec;
+        if (!std::filesystem::exists(daemon_req.path, __ec)) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            std::string("Path does not exist: ") + daemon_req.path};
+        }
+        if (std::filesystem::is_directory(daemon_req.path, __ec)) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            std::string("Path is a directory (use add_directory): ") + daemon_req.path};
         }
     }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    co_return mcp_response;
+    auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
+    if (!dres) co_return dres.error();
+    MCPStoreDocumentResponse out;
+    const auto& add = dres.value();
+    out.hash = add.hash;
+    out.bytesStored = 0;
+    out.bytesDeduped = 0;
+    co_return out;
 }
-
 
 
 yams::Task<Result<MCPRetrieveDocumentResponse>>
@@ -1802,57 +1706,31 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.graphDepth = req.depth;
     daemon_req.metadataOnly = !req.includeContent;
 
+    auto dres = co_await daemon_client_->get(daemon_req);
+    if (!dres) co_return dres.error();
     MCPRetrieveDocumentResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::GetResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.hash = resp.hash;
-        mcp_response.path = resp.path;
-        mcp_response.name = resp.name;
-        mcp_response.size = resp.size;
-        mcp_response.mimeType = resp.mimeType;
-        if (resp.hasContent) {
-            mcp_response.content = resp.content;
-        }
-        mcp_response.graphEnabled = resp.graphEnabled;
-        for (const auto& rel : resp.related) {
-            json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
-            mcp_response.related.push_back(std::move(relatedJson));
-        }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (unary)
-    if (!retrieve_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Retrieve request manager not initialized"};
+    const auto& resp = dres.value();
+    mcp_response.hash = resp.hash;
+    mcp_response.path = resp.path;
+    mcp_response.name = resp.name;
+    mcp_response.size = resp.size;
+    mcp_response.mimeType = resp.mimeType;
+    if (resp.hasContent) {
+        mcp_response.content = resp.content;
     }
-    {
-        auto exec = co_await retrieve_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
+    mcp_response.graphEnabled = resp.graphEnabled;
+    for (const auto& rel : resp.related) {
+        json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
+        mcp_response.related.push_back(relatedJson);
     }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
     co_return mcp_response;
 }
 
 
 
-yams::Task<Result<MCPListDocumentsResponse>>
-MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
-    // Convert MCP request to daemon request
+yams::Task<Result<MCPListDocumentsResponse>> MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
+    // Map MCP filters to daemon ListRequest
     daemon_req.namePattern = req.pattern;
     daemon_req.tags = req.tags;
     daemon_req.fileType = req.type;
@@ -1860,214 +1738,135 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon_req.extensions = req.extension;
     daemon_req.binaryOnly = req.binary;
     daemon_req.textOnly = req.text;
-    daemon_req.recentCount = req.recent;
-    daemon_req.sortBy = req.sortBy;
-    daemon_req.reverse = (req.sortOrder == "desc");
-    daemon_req.limit = req.limit;
-    daemon_req.offset = req.offset;
+    daemon_req.recentCount = req.recent > 0 ? req.recent : 0;
+    daemon_req.limit = req.limit > 0 ? static_cast<size_t>(req.limit) : daemon_req.limit;
+    daemon_req.offset = req.offset > 0 ? req.offset : 0;
+    daemon_req.sortBy = req.sortBy.empty() ? daemon_req.sortBy : req.sortBy;
+    daemon_req.reverse = (req.sortOrder == "asc") ? true : false; // ascending means reverse order in server
 
-    MCPListDocumentsResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::ListResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.total = resp.totalCount;
-        for (const auto& item : resp.items) {
-            json docJson = {{"hash", item.hash},          {"path", item.path},
-                            {"name", item.name},          {"size", item.size},
-                            {"mime_type", item.mimeType}, {"created", item.created},
-                            {"modified", item.modified},  {"indexed", item.indexed}};
-            mcp_response.documents.push_back(std::move(docJson));
-        }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (stream-aware for list)
-    if (!list_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "List request manager not initialized"};
+    auto dres = co_await daemon_client_->list(daemon_req);
+    if (!dres) co_return dres.error();
+    MCPListDocumentsResponse out;
+    const auto& lr = dres.value();
+    out.total = lr.totalCount;
+    for (const auto& item : lr.items) {
+        json docJson;
+        docJson["hash"] = item.hash;
+        docJson["path"] = item.path;
+        docJson["name"] = item.name;
+        docJson["size"] = item.size;
+        docJson["mime_type"] = item.mimeType;
+        docJson["created"] = item.created;
+        docJson["modified"] = item.modified;
+        docJson["indexed"] = item.indexed;
+        out.documents.push_back(std::move(docJson));
     }
-    {
-        auto exec = co_await list_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    co_return mcp_response;
+    co_return out;
 }
 
 yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsRequest& req) {
-    // Convert MCP request to daemon request
     daemon::GetStatsRequest daemon_req;
     daemon_req.showFileTypes = req.fileTypes;
     daemon_req.detailed = req.verbose;
-
-    MCPStatsResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::GetStatsResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.totalObjects = resp.totalDocuments;
-        mcp_response.totalBytes = resp.totalSize;
-        mcp_response.uniqueHashes = resp.additionalStats.count("unique_hashes")
-                                        ? std::stoull(resp.additionalStats.at("unique_hashes"))
-                                        : 0;
-        mcp_response.deduplicationSavings =
-            resp.additionalStats.count("deduplicated_bytes")
-                ? std::stoull(resp.additionalStats.at("deduplicated_bytes"))
-                : 0;
-
-        for (const auto& [key, value] : resp.documentsByType) {
-            json ftJson;
-            ftJson["extension"] = key;
-            ftJson["count"] = value;
-            mcp_response.fileTypes.push_back(ftJson);
-        }
-
-        mcp_response.additionalStats = resp.additionalStats;
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (unary)
-    if (!stats_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Stats request manager not initialized"};
+    auto dres = co_await daemon_client_->getStats(daemon_req);
+    if (!dres) co_return dres.error();
+    MCPStatsResponse out;
+    const auto& resp = dres.value();
+    out.totalObjects = resp.totalDocuments;
+    out.totalBytes = resp.totalSize;
+    out.uniqueHashes = resp.additionalStats.count("unique_hashes")
+                           ? std::stoull(resp.additionalStats.at("unique_hashes"))
+                           : 0;
+    out.deduplicationSavings = resp.additionalStats.count("deduplicated_bytes")
+                                   ? std::stoull(resp.additionalStats.at("deduplicated_bytes"))
+                                   : 0;
+    for (const auto& [key, value] : resp.documentsByType) {
+        json ftJson;
+        ftJson["extension"] = key;
+        ftJson["count"] = value;
+        out.fileTypes.push_back(ftJson);
     }
-    {
-        auto exec = co_await stats_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    
-
-    co_return mcp_response;
+    out.additionalStats = resp.additionalStats;
+    co_return out;
 }
 
 yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
-    // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
-    daemon_req.path = req.directoryPath;
+    // Normalize directory path: expand '~' and make absolute using PWD for relative paths
+    {
+        std::string _p = req.directoryPath;
+        if (!_p.empty() && _p.front() == '~') {
+            if (const char* home = std::getenv("HOME")) {
+                _p = std::string(home) + _p.substr(1);
+            }
+        }
+        if (!_p.empty() && _p.front() != '/') {
+            if (const char* pwd = std::getenv("PWD")) {
+                if (pwd && *pwd) {
+                    if (_p.rfind("./", 0) == 0) {
+                        _p = std::string(pwd) + "/" + _p.substr(2);
+                    } else {
+                        _p = std::string(pwd) + "/" + _p;
+                    }
+                }
+            }
+        }
+        daemon_req.path = _p;
+    }
     daemon_req.collection = req.collection;
     daemon_req.includePatterns = req.includePatterns;
     daemon_req.excludePatterns = req.excludePatterns;
     daemon_req.recursive = req.recursive;
     for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string()) {
-            daemon_req.metadata[key] = value.get<std::string>();
-        } else {
-            daemon_req.metadata[key] = value.dump();
+        if (value.is_string()) daemon_req.metadata[key] = value.get<std::string>();
+        else daemon_req.metadata[key] = value.dump();
+    }
+    // Increase daemon timeouts for long-running directory indexing
+    daemon_client_->setHeaderTimeout(std::chrono::seconds(120));
+    daemon_client_->setBodyTimeout(std::chrono::seconds(600));
+    // Validate that the directory path exists and is a directory
+    if (!daemon_req.path.empty()) {
+        std::error_code __ec;
+        if (!std::filesystem::exists(daemon_req.path, __ec)) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            std::string("Directory does not exist: ") + daemon_req.path};
+        }
+        if (!std::filesystem::is_directory(daemon_req.path, __ec)) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            std::string("Path is not a directory: ") + daemon_req.path};
         }
     }
-
-    MCPAddDirectoryResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::AddDocumentResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.directoryPath = resp.path;
-        mcp_response.collection =
-            daemon_req.collection; // Not in daemon response, use request value
-        mcp_response.filesIndexed = resp.documentsAdded;
-        // Other fields are not in the daemon response, so we leave them default.
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (stream-aware)
-    if (!store_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Store request manager not initialized"};
-    }
-    {
-        auto exec = co_await store_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    
-
-    co_return mcp_response;
+    auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
+    if (!dres) co_return dres.error();
+    MCPAddDirectoryResponse out;
+    const auto& add = dres.value();
+    out.directoryPath = add.path;
+    out.collection = daemon_req.collection;
+    // Populate counts so clients can infer success
+    out.filesIndexed = add.documentsAdded;
+    out.filesProcessed = add.documentsAdded;
+    out.filesSkipped = 0;
+    out.filesFailed = 0;
+    co_return out;
 }
 
 yams::Task<Result<MCPUpdateMetadataResponse>>
 MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
-    // Convert MCP request to daemon request
     daemon::UpdateDocumentRequest daemon_req;
     daemon_req.hash = req.hash;
     daemon_req.name = req.name;
     daemon_req.addTags = req.tags;
     for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string()) {
-            daemon_req.metadata[key] = value.get<std::string>();
-        } else {
-            daemon_req.metadata[key] = value.dump();
-        }
+        if (value.is_string()) daemon_req.metadata[key] = value.get<std::string>();
+        else daemon_req.metadata[key] = value.dump();
     }
-
-    MCPUpdateMetadataResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::UpdateDocumentResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.success = resp.metadataUpdated || resp.tagsUpdated || resp.contentUpdated;
-        mcp_response.message = "Update successful";
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (unary is fine here)
-    if (!update_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Update request manager not initialized"};
-    }
-    {
-        auto exec = co_await update_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    
-
-    co_return mcp_response;
+    auto dres = co_await daemon_client_->updateDocument(daemon_req);
+    if (!dres) co_return dres.error();
+    MCPUpdateMetadataResponse out;
+    const auto& ur = dres.value();
+    out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
+    out.message = out.success ? "Update successful" : "No changes applied";
+    co_return out;
 }
 
 void MCPServer::initializeToolRegistry() {
@@ -2375,22 +2174,12 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI robustness
     MCPGetByNameResponse mcp_response;
 
-    // Prepare pooled daemon client for streaming calls
-    if (!retrieve_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Get request manager not initialized"};
-    }
-
     daemon::GetInitRequest init{};
     init.name = req.name;
     init.byName = true;
     // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
 
-    auto initResult = retrieve_req_manager_->pool().acquire();
-    if (!initResult) {
-        co_return initResult.error();
-    }
-    auto lease = std::move(initResult).value();
-    auto initCall = co_await lease->call<daemon::GetInitRequest>(init);
+    auto initCall = co_await daemon_client_->getInit(init);
     if (!initCall) {
         co_return initCall.error();
     }
@@ -2418,7 +2207,6 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
     buffer.reserve(std::min<std::size_t>(MAX_BYTES, static_cast<std::size_t>(initVal.totalSize)));
 
     std::uint64_t offset = 0;
-    bool truncated = false;
 
     while (offset < initVal.totalSize) {
         daemon::GetChunkRequest c{};
@@ -2426,12 +2214,12 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
         c.offset = offset;
         c.length =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = co_await lease->call<daemon::GetChunkRequest>(c);
+        auto cRes = co_await daemon_client_->getChunk(c);
         if (!cRes) {
             // Attempt to close the transfer before returning error
             daemon::GetEndRequest e{};
             e.transferId = initVal.transferId;
-            (void)co_await lease->call<daemon::GetEndRequest>(e);
+            (void)co_await daemon_client_->getEnd(e);
             co_return cRes.error();
         }
         const auto& chunk = cRes.value();
@@ -2441,7 +2229,6 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
             } else {
                 auto remaining = MAX_BYTES - buffer.size();
                 buffer.append(chunk.data.data(), remaining);
-                truncated = true;
                 offset += chunk.data.size();
                 break;
             }
@@ -2452,7 +2239,7 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
     // End transfer regardless
     daemon::GetEndRequest end{};
     end.transferId = initVal.transferId;
-    (void)co_await lease->call<daemon::GetEndRequest>(end);
+    (void)co_await daemon_client_->getEnd(end);
 
     mcp_response.content = std::move(buffer);
     // If truncated, we simply return the capped content; no extra flags in response type.
@@ -2460,131 +2247,42 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
 }
 
 yams::Task<Result<MCPDeleteByNameResponse>> MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
-    // Convert MCP request to daemon request
     daemon::DeleteRequest daemon_req;
     daemon_req.name = req.name;
     daemon_req.names = req.names;
     daemon_req.pattern = req.pattern;
     daemon_req.dryRun = req.dryRun;
-
-    MCPDeleteByNameResponse mcp_response;
-    std::optional<Error> execution_error;
-
-    auto render = [&](const daemon::DeleteResponse& resp) -> Result<void> {
-        // Convert daemon response to MCP response
-        mcp_response.count = resp.results.size();
-        mcp_response.dryRun = resp.dryRun;
-        for (const auto& result : resp.results) {
-            if (result.success) {
-                mcp_response.deleted.push_back(result.name);
-            }
-        }
-        return Result<void>();
-    };
-
-    auto fallback = [&]() -> Result<void> {
-        execution_error =
-            Error{ErrorCode::NetworkError, "Daemon not available or failed to respond"};
-        return Result<void>();
-    };
-
-    // Use pooled DaemonClient (unary)
-    if (!delete_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Delete request manager not initialized"};
-    }
-    {
-        auto exec = co_await delete_req_manager_->execute_async(daemon_req, fallback, render);
-        if (!exec) {
-            execution_error = exec.error();
-        }
-    }
-
-    if (execution_error) {
-        co_return execution_error.value();
-    }
-
-    
-
-    co_return mcp_response;
+    auto dres = co_await daemon_client_->remove(daemon_req);
+    if (!dres) co_return dres.error();
+    MCPDeleteByNameResponse out;
+    out.count = 0; // Protocol returns SuccessResponse; detailed per-item results unavailable here
+    out.dryRun = req.dryRun;
+    co_return out;
 }
 
-yams::Task<Result<MCPCatDocumentResponse>> MCPServer::handleCatDocument(const MCPCatDocumentRequest& req) {
-    // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI behavior for large content
-    MCPCatDocumentResponse mcp_response;
-
-    if (!retrieve_req_manager_) {
-        co_return Error{ErrorCode::NotInitialized, "Get request manager not initialized"};
+yams::Task<yams::Result<yams::mcp::MCPCatDocumentResponse>> yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
+    MCPCatDocumentResponse out;
+    yams::daemon::GetRequest dreq;
+    dreq.hash = req.hash;
+    dreq.name = req.name;
+    dreq.byName = !req.name.empty();
+    dreq.metadataOnly = false;
+    auto dres = co_await daemon_client_->get(dreq);
+    if (!dres) co_return dres.error();
+    const auto& r = dres.value();
+    out.size = r.size;
+    out.hash = r.hash;
+    out.name = r.name;
+    if (!r.content.empty()) {
+        constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+        out.content = r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
     }
-
-    daemon::GetInitRequest init{};
-    init.hash = req.hash;
-    init.name = req.name;
-    init.byName = !req.name.empty();
-    // GetInitRequest no longer supports raw/extract flags; server determines mode
-
-    auto leaseRes2 = retrieve_req_manager_->pool().acquire();
-    if (!leaseRes2) co_return leaseRes2.error();
-    auto lease2 = std::move(leaseRes2).value();
-    auto initRes = co_await lease2->call<daemon::GetInitRequest>(init);
-    if (!initRes) co_return initRes.error();
-    const auto& initVal = initRes.value();
-    // Map GetInitResponse fields and metadata into MCP response
-    mcp_response.size = initVal.totalSize;
-    if (auto it = initVal.metadata.find("hash"); it != initVal.metadata.end()) {
-        mcp_response.hash = it->second;
-    }
-    if (auto it = initVal.metadata.find("fileName"); it != initVal.metadata.end()) {
-        mcp_response.name = it->second;
-    }
-
-    static constexpr std::size_t CHUNK = 64 * 1024;
-    static constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024; // 1 MiB cap
-    std::string buffer;
-    buffer.reserve(std::min<std::size_t>(MAX_BYTES, static_cast<std::size_t>(initVal.totalSize)));
-
-    std::uint64_t offset = 0;
-    bool truncated = false;
-
-    while (offset < initVal.totalSize) {
-        daemon::GetChunkRequest c{};
-        c.transferId = initVal.transferId;
-        c.offset = offset;
-        c.length =
-            static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = co_await lease2->call<daemon::GetChunkRequest>(c);
-        if (!cRes) {
-            daemon::GetEndRequest e{};
-            e.transferId = initVal.transferId;
-            (void)co_await lease2->call<daemon::GetEndRequest>(e);
-            co_return cRes.error();
-        }
-        const auto& chunk = cRes.value();
-        if (!chunk.data.empty()) {
-            if (buffer.size() + chunk.data.size() <= MAX_BYTES) {
-                buffer.append(chunk.data.data(), chunk.data.size());
-            } else {
-                auto remaining = MAX_BYTES - buffer.size();
-                buffer.append(chunk.data.data(), remaining);
-                truncated = true;
-                offset += chunk.data.size();
-                break;
-            }
-        }
-        offset += chunk.data.size();
-    }
-
-    daemon::GetEndRequest end{};
-    end.transferId = initVal.transferId;
-    (void)co_await lease2->call<daemon::GetEndRequest>(end);
-
-    mcp_response.content = std::move(buffer);
-    // If truncated, we simply return the capped content; response type has no truncated flag.
-    co_return mcp_response;
+    co_return out;
 }
 
 // Implementation of collection restore
-yams::Task<Result<MCPRestoreCollectionResponse>>
-MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
+yams::Task<yams::Result<yams::mcp::MCPRestoreCollectionResponse>>
+yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollectionRequest& req) {
     try {
         if (!metadataRepo_) {
             co_return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
@@ -2769,8 +2467,8 @@ MCPServer::handleRestoreCollection(const MCPRestoreCollectionRequest& req) {
     }
 }
 
-yams::Task<Result<MCPRestoreSnapshotResponse>>
-MCPServer::handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req) {
+yams::Task<yams::Result<yams::mcp::MCPRestoreSnapshotResponse>>
+yams::mcp::MCPServer::handleRestoreSnapshot(const yams::mcp::MCPRestoreSnapshotRequest& req) {
     co_return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
 }
 

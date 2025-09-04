@@ -100,6 +100,8 @@ public:
     virtual Result<int64_t> getDocumentCount() = 0;
     virtual Result<int64_t> getIndexedDocumentCount() = 0;
     virtual Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() = 0;
+    // Count documents by extraction status
+    virtual Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) = 0;
 };
 
 /**
@@ -189,6 +191,7 @@ public:
     Result<int64_t> getDocumentCount() override;
     Result<int64_t> getIndexedDocumentCount() override;
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
+    Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
 
 private:
     ConnectionPool& pool_;

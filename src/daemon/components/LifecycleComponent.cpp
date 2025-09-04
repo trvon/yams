@@ -47,6 +47,22 @@ Result<void> LifecycleComponent::initialize() {
         }
     }
 
+    // Proactively remove a stale socket file left by a previous crash before binding.
+    try {
+        const auto& sock = daemon_->config_.socketPath;
+        if (!sock.empty() && std::filesystem::exists(sock)) {
+            std::error_code ec;
+            std::filesystem::remove(sock, ec);
+            if (ec) {
+                spdlog::warn("Failed to remove stale socket '{}': {}", sock.string(), ec.message());
+            } else {
+                spdlog::debug("Removed stale socket file: {}", sock.string());
+            }
+        }
+    } catch (...) {
+        // best effort
+    }
+
     if (auto result = createPidFile(); !result) {
         return result;
     }

@@ -15,6 +15,7 @@ endif()
 add_library(yams_extraction STATIC
     ${EXTRACTION_SOURCES}
 )
+set_target_properties(yams_extraction PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_extraction
     PUBLIC

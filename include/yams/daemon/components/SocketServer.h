@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/awaitable.hpp>
 
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <filesystem>
 #include <memory>
 #include <thread>
+#include <optional>
 #include <vector>
 
 namespace yams::daemon {
@@ -63,6 +65,8 @@ private:
     boost::asio::io_context io_context_;
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
     std::vector<std::thread> workers_;
+    // Keep io_context_ alive while running to avoid race where threads exit
+    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;

@@ -6,6 +6,11 @@
 #include <cstddef>
 #include <optional>
 #include <variant>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/system_executor.hpp>
+#include <boost/asio/use_future.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 
 namespace yams::daemon {
 
@@ -69,6 +74,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         // Emit a tiny heartbeat chunk immediately after header to keep client alive
         if (pending_request_.has_value() && !heartbeat_sent_) {
             heartbeat_sent_ = true;
+            last_keepalive_ = std::chrono::steady_clock::now();
             // Synthesize an empty chunk matching the selected mode
             switch (mode_) {
                 case Mode::Search: {
@@ -102,26 +108,67 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
         }
 
-        // Lazy computation on first real chunk to ensure header already went out immediately
+        // Start background compute after first heartbeat
         if (pending_request_.has_value()) {
-            auto req = *pending_request_;
-            pending_request_.reset();
-            auto t0 = std::chrono::steady_clock::now();
-            
+            if (!compute_future_.has_value()) {
+                auto req = *pending_request_;
+                // Spawn background compute; future will become ready when done
+                compute_future_.emplace(
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor(),
+                        delegate_->process(req),
+                        boost::asio::use_future));
+                // Do not clear pending yet; we may need the request type
+            }
+            // Throttle keepalives
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_keepalive_ < keepalive_interval_) {
+                // Sleep until next keepalive interval
+                auto exec = co_await boost::asio::this_coro::executor;
+                boost::asio::steady_timer timer(exec);
+                auto delta = keepalive_interval_ - (now - last_keepalive_);
+                timer.expires_after(delta);
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            }
+            last_keepalive_ = std::chrono::steady_clock::now();
+            // Emit periodic keepalive matching mode
+            switch (mode_) {
+                case Mode::Search: {
+                    SearchResponse r; r.totalCount = 0; r.elapsed = std::chrono::milliseconds(0);
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+                }
+                case Mode::List: {
+                    ListResponse r; r.totalCount = 0;
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+                }
+                case Mode::Grep: {
+                    GrepResponse r; r.totalMatches = 0; r.filesSearched = 0;
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+                }
+                case Mode::None:
+                default: {
+                    SuccessResponse ok{"Streaming in progress"};
+                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = false};
+                }
+            }
+        }
+
+        // Background compute completion: build state when future is ready
+        if (compute_future_.has_value() && compute_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
             Response full;
             try {
-                full = co_await delegate_->process(req);
+                full = compute_future_->get();
             } catch (const std::exception& e) {
-                spdlog::error("StreamingRequestProcessor: delegate_->process() threw exception: {}", e.what());
-                ErrorResponse err{ErrorCode::InternalError, 
-                                std::string("Failed to process request: ") + e.what()};
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
-                                                          .is_last_chunk = true};
+                spdlog::error("StreamingRequestProcessor: background compute failed: {}", e.what());
+                ErrorResponse err{ErrorCode::InternalError, std::string("Failed to process request: ") + e.what()};
+                compute_future_.reset();
+                pending_request_.reset();
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
             }
-            
-            auto t1 = std::chrono::steady_clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+            compute_future_.reset();
+            pending_request_.reset();
 
+            // Populate chunking state
             if (auto* s = std::get_if<SearchResponse>(&full)) {
                 search_ = SearchState{};
                 search_->totalCount = s->totalCount;
@@ -137,9 +184,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     search_->results.resize(MAX_RESULTS);
                 }
                 
-                spdlog::debug(
-                    "StreamingRequestProcessor(Search): computed full response in {} ms ({} results)",
-                    ms, search_->results.size());
+                spdlog::debug("StreamingRequestProcessor(Search): background compute completed ({} results)", search_->results.size());
             } else if (auto* l = std::get_if<ListResponse>(&full)) {
                 list_ = ListState{};
                 list_->totalCount = l->totalCount;
@@ -154,9 +199,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     list_->items.resize(MAX_ITEMS);
                 }
                 
-                spdlog::debug(
-                    "StreamingRequestProcessor(List): computed full response in {} ms ({} items)", ms,
-                    list_->items.size());
+                spdlog::debug("StreamingRequestProcessor(List): background compute completed ({} items)", list_->items.size());
             } else if (auto* g = std::get_if<GrepResponse>(&full)) {
                 grep_ = GrepState{};
                 grep_->totalMatches = g->totalMatches;
@@ -172,9 +215,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     grep_->matches.resize(MAX_MATCHES);
                 }
                 
-                spdlog::debug("StreamingRequestProcessor(Grep): computed full response in {} ms ({} "
-                              "matches across {} files)",
-                              ms, grep_->matches.size(), grep_->filesSearched);
+                spdlog::debug("StreamingRequestProcessor(Grep): background compute completed ({} matches across {} files)", grep_->matches.size(), grep_->filesSearched);
             } else {
                 // Not a chunkable type; return as a single last chunk
                 co_return RequestProcessor::ResponseChunk{.data = std::move(full),
@@ -184,6 +225,11 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
 
     switch (mode_) {
         case Mode::Search: {
+            if (!search_.has_value()) {
+                // Compute still in progress; keepalive throttle handled above
+                SearchResponse r; r.totalCount = 0; r.elapsed = std::chrono::milliseconds(0);
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
             auto& st = *search_;
             const std::size_t total = st.results.size();
             const std::size_t n = compute_item_chunk_count(512); // ~512B per result
@@ -205,6 +251,10 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                                                       .is_last_chunk = last};
         }
         case Mode::List: {
+            if (!list_.has_value()) {
+                ListResponse r; r.totalCount = 0;
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
             auto& st = *list_;
             const std::size_t total = st.items.size();
             const std::size_t n =
@@ -226,6 +276,10 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                                                       .is_last_chunk = last};
         }
         case Mode::Grep: {
+            if (!grep_.has_value()) {
+                GrepResponse r; r.totalMatches = 0; r.filesSearched = 0;
+                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
             auto& st = *grep_;
             const std::size_t total = st.matches.size();
             const std::size_t n =

@@ -8,9 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.6.0] - 2025-01-03
 
 ### Repository
+- **Will move all future development work to experimental branch so that main and releases become more stable**
+  - I apologize for recent instabilities
 - SourceHut: https://sr.ht/~trvon/yams/
 
 ### Added
+- Server multiplexing: fair round-robin writer with per-turn byte budget and backpressure caps (default ON).
+- Status: exposes multiplexing metrics (active handlers, queued bytes, writer budget).
+- Cancel control frame: request type added and server-side cancel scaffolding (per-request contexts).
 - **Development Changes**
   - Updated tasks for vscode and zed tasks
   - Enforcing clang-tidy warnings as errors
@@ -18,14 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Daemon Logging Rotation**
   - Use rotating file sink to preserve logs across crashes
   - Log rotation info: `Log rotation enabled: /path/to/logfile.log (max 10MB x 5 files)`
-- **Asynchronous Daemon Client Architecture**
-  - Complete async/await infrastructure for daemon communication
-  - Coroutine-based `AsioClientPool` with `async_call()`, `async_ping()`, `async_status()`
-  - Non-blocking `PooledRequestManager` with retry logic and connection leasing
-  - Removed all synchronous APIs - fully async pipeline end-to-end
-  - `run_sync()` bridge for CLI commands using `co_spawn`/`use_future`
-  - Async sleep implementation via `steady_timer` with cancellation support
-  - Connection pooling with automatic retry and backoff strategies
 
 - **Connection State Machine**
   - Deterministic `ConnectionFsm` for IPC connection lifecycle management

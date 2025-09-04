@@ -13,6 +13,7 @@ add_library(yams_compression STATIC
     recovery_manager.cpp
     transaction_manager.cpp
 )
+set_target_properties(yams_compression PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_compression
     PUBLIC

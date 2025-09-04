@@ -6,6 +6,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
+#include "test_async_helpers.h"
 #include <yams/metadata/metadata_repository.h>
 
 namespace yams::daemon::integration::test {
@@ -94,7 +95,7 @@ TEST_F(DaemonStreamingTest, BasicStreaming) {
     initReq.chunkSize = 1024; // 1KB chunks
     initReq.metadataOnly = false;
 
-    auto initResult = client.getInit(initReq);
+    auto initResult = yams::test_async::res(client.getInit(initReq));
 
     if (!initResult) {
         // Expected in test environment without proper setup
@@ -116,7 +117,7 @@ TEST_F(DaemonStreamingTest, BasicStreaming) {
         chunkReq.offset = offset;
         chunkReq.length = std::min<uint32_t>(1024, initRes.totalSize - offset);
 
-        auto chunkResult = client.getChunk(chunkReq);
+        auto chunkResult = yams::test_async::res(client.getChunk(chunkReq));
         ASSERT_TRUE(chunkResult) << "Failed to get chunk at offset " << offset;
 
         auto& chunkRes = chunkResult.value();
@@ -130,7 +131,7 @@ TEST_F(DaemonStreamingTest, BasicStreaming) {
 
     // End streaming
     GetEndRequest endReq{initRes.transferId};
-    auto endResult = client.getEnd(endReq);
+    auto endResult = yams::test_async::res(client.getEnd(endReq));
     EXPECT_TRUE(endResult);
 
     // Verify content matches
@@ -147,7 +148,7 @@ TEST_F(DaemonStreamingTest, MetadataOnly) {
     initReq.byName = true;
     initReq.metadataOnly = true;
 
-    auto initResult = client.getInit(initReq);
+    auto initResult = yams::test_async::res(client.getInit(initReq));
 
     if (!initResult) {
         // Expected without proper setup
@@ -171,7 +172,7 @@ TEST_F(DaemonStreamingTest, StreamingWithMaxBytes) {
     initReq.chunkSize = 512;
     initReq.maxBytes = 2048; // Limit to 2KB
 
-    auto initResult = client.getInit(initReq);
+    auto initResult = yams::test_async::res(client.getInit(initReq));
 
     if (!initResult) {
         // Expected without proper setup
@@ -190,7 +191,7 @@ TEST_F(DaemonStreamingTest, StreamingWithMaxBytes) {
         chunkReq.offset = offset;
         chunkReq.length = std::min<uint32_t>(512, initReq.maxBytes - totalRead);
 
-        auto chunkResult = client.getChunk(chunkReq);
+        auto chunkResult = yams::test_async::res(client.getChunk(chunkReq));
         if (!chunkResult)
             break;
 
@@ -203,7 +204,7 @@ TEST_F(DaemonStreamingTest, StreamingWithMaxBytes) {
 
     // Cleanup
     GetEndRequest endReq{initRes.transferId};
-    client.getEnd(endReq);
+    (void)yams::test_async::res(client.getEnd(endReq));
 }
 
 // Test concurrent streaming sessions
@@ -226,7 +227,7 @@ TEST_F(DaemonStreamingTest, ConcurrentSessions) {
             initReq.byName = true;
             initReq.chunkSize = 256;
 
-            auto initResult = client.getInit(initReq);
+            auto initResult = yams::test_async::res(client.getInit(initReq));
             if (!initResult) {
                 // Expected in test environment
                 errorCount++;
@@ -242,7 +243,7 @@ TEST_F(DaemonStreamingTest, ConcurrentSessions) {
                 chunkReq.offset = j * 256;
                 chunkReq.length = 256;
 
-                auto chunkResult = client.getChunk(chunkReq);
+                auto chunkResult = yams::test_async::res(client.getChunk(chunkReq));
                 if (!chunkResult) {
                     errorCount++;
                     break;
@@ -251,7 +252,7 @@ TEST_F(DaemonStreamingTest, ConcurrentSessions) {
 
             // End session
             GetEndRequest endReq{initRes.transferId};
-            if (client.getEnd(endReq)) {
+            if (yams::test_async::ok(client.getEnd(endReq))) {
                 successCount++;
             } else {
                 errorCount++;
@@ -281,7 +282,7 @@ TEST_F(DaemonStreamingTest, GetToStdoutHelper) {
     std::stringstream buffer;
     std::streambuf* old = std::cout.rdbuf(buffer.rdbuf());
 
-    auto result = client.getToStdout(req);
+    auto result = yams::test_async::res(client.getToStdout(req));
 
     // Restore stdout
     std::cout.rdbuf(old);
@@ -306,7 +307,7 @@ TEST_F(DaemonStreamingTest, GetToFileHelper) {
 
     fs::path outputFile = testDir_ / "output.txt";
 
-    auto result = client.getToFile(req, outputFile);
+    auto result = yams::test_async::res(client.getToFile(req, outputFile));
 
     if (!result) {
         // Expected in test environment
@@ -329,7 +330,7 @@ TEST_F(DaemonStreamingTest, LargeFileStreaming) {
     initReq.chunkSize = 64 * 1024;  // 64KB chunks
     initReq.maxBytes = 1024 * 1024; // Limit to 1MB
 
-    auto initResult = client.getInit(initReq);
+    auto initResult = yams::test_async::res(client.getInit(initReq));
 
     if (!initResult) {
         // Expected in test environment
@@ -351,7 +352,7 @@ TEST_F(DaemonStreamingTest, LargeFileStreaming) {
         chunkReq.offset = offset;
         chunkReq.length = initReq.chunkSize;
 
-        auto chunkResult = client.getChunk(chunkReq);
+        auto chunkResult = yams::test_async::res(client.getChunk(chunkReq));
         if (!chunkResult)
             break;
 
@@ -378,7 +379,7 @@ TEST_F(DaemonStreamingTest, LargeFileStreaming) {
 
     // Cleanup
     GetEndRequest endReq{initRes.transferId};
-    client.getEnd(endReq);
+    (void)yams::test_async::res(client.getEnd(endReq));
 }
 
 // Test error handling during streaming
@@ -392,12 +393,12 @@ TEST_F(DaemonStreamingTest, StreamingErrorHandling) {
     badChunkReq.offset = 0;
     badChunkReq.length = 1024;
 
-    auto chunkResult = client.getChunk(badChunkReq);
+    auto chunkResult = yams::test_async::res(client.getChunk(badChunkReq));
     EXPECT_FALSE(chunkResult) << "Should fail with invalid transfer ID";
 
     // Test ending non-existent session
     GetEndRequest badEndReq{999999};
-    auto endResult = client.getEnd(badEndReq);
+    auto endResult = yams::test_async::res(client.getEnd(badEndReq));
     // Should succeed (idempotent) or fail gracefully
 }
 
@@ -411,7 +412,7 @@ TEST_F(DaemonStreamingTest, ChunkBoundaries) {
     initReq.byName = true;
     initReq.chunkSize = 1; // Tiny chunks for testing
 
-    auto initResult = client.getInit(initReq);
+    auto initResult = yams::test_async::res(client.getInit(initReq));
 
     if (!initResult) {
         return;
@@ -433,7 +434,7 @@ TEST_F(DaemonStreamingTest, ChunkBoundaries) {
         chunkReq.offset = offset;
         chunkReq.length = length;
 
-        auto chunkResult = client.getChunk(chunkReq);
+        auto chunkResult = yams::test_async::res(client.getChunk(chunkReq));
         // May succeed or fail depending on file size
         if (chunkResult) {
             auto& chunkRes = chunkResult.value();
@@ -443,7 +444,7 @@ TEST_F(DaemonStreamingTest, ChunkBoundaries) {
 
     // Cleanup
     GetEndRequest endReq{initRes.transferId};
-    client.getEnd(endReq);
+    (void)yams::test_async::res(client.getEnd(endReq));
 }
 
 } // namespace yams::daemon::integration::test

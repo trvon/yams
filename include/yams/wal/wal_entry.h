@@ -67,7 +67,8 @@ struct WALEntry {
                                                .count()),
                  .transactionId = txnId,
                  .operation = op,
-                 .dataSize = static_cast<uint32_t>(payload.size())},
+                 .dataSize = static_cast<uint32_t>(payload.size()),
+                 .checksum = 0},
           data(payload.begin(), payload.end()) {
         updateChecksum();
     }

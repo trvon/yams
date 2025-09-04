@@ -15,6 +15,7 @@ add_library(yams_search
     search_engine_builder.cpp
     bk_tree.cpp
 )
+set_target_properties(yams_search PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_search
     PUBLIC

@@ -10,6 +10,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/components/SocketServer.h>
+#include <yams/daemon/ipc/connection_fsm.h>
 // IPC server implementation removed in PBI-007; client uses Boost.Asio path.
 
 namespace yams::daemon {
@@ -17,7 +18,9 @@ namespace yams::daemon {
 YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     // Resolve paths if not explicitly set
     if (config_.socketPath.empty()) {
-        config_.socketPath = resolveSystemPath(PathType::Socket);
+        // Prefer config-first resolution to stay consistent with client/CLI
+        // Honors [daemon].socket_path in config.toml and env overrides.
+        config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
     if (config_.pidFile.empty()) {
         config_.pidFile = resolveSystemPath(PathType::PidFile);
@@ -60,6 +63,18 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     spdlog::info("  Socket: {}", config_.socketPath.string());
     spdlog::info("  PID file: {}", config_.pidFile.string());
     spdlog::info("  Log file: {}", config_.logFile.string());
+
+    // Seed process-wide socket override so any code paths that rely on centralized
+    // resolution (FSM helpers) observe the same socket path chosen here.
+    // This prevents divergence between server-held state and late resolvers.
+    if (!config_.socketPath.empty()) {
+#ifndef _WIN32
+        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);
+#else
+        _putenv_s("YAMS_DAEMON_SOCKET", config_.socketPath.string().c_str());
+#endif
+        spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
+    }
 }
 
 YamsDaemon::~YamsDaemon() {
@@ -246,11 +261,8 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
 
     switch (type) {
         case PathType::Socket:
-            if (isRoot)
-                return fs::path("/var/run/yams-daemon.sock");
-            if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
-                return xdg / "yams-daemon.sock";
-            return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".sock");
+            // Delegate to centralized FSM resolver for consistency
+            return yams::daemon::ConnectionFsm::resolve_socket_path();
         case PathType::PidFile:
             if (isRoot)
                 return fs::path("/var/run/yams-daemon.pid");

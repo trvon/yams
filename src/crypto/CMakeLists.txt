@@ -1,6 +1,7 @@
 add_library(yams_crypto
     sha256_hasher.cpp
 )
+set_target_properties(yams_crypto PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(yams_crypto
     PUBLIC

@@ -1,0 +1,90 @@
+# .build.yml
+#
+# This is a SourceHut build manifest generated from your .github/workflows/release.yml.
+# It focuses on the core build and packaging steps for a single Linux target.
+#
+# Differences from the GitHub Actions workflow:
+# - No matrix builds: This manifest builds for a single Linux environment.
+# - No cross-platform support: macOS and Windows builds are not included.
+# - Self-contained: Does not download artifacts from other CI/workflow runs.
+# - Simplified release process: Creates a distributable tarball, but does not
+#   create a GitHub Release or generate detailed release notes with benchmark data.
+
+image: archlinux
+# You can also use other images like:
+# image: ubuntu/22.04
+# image: debian/stable
+
+environment:
+  # Define a consistent build directory, similar to the GHA workflow.
+  BUILD_DIR: build/yams-release
+  STAGE_DIR: stage
+  # Use git.tag() to dynamically set the version from the Git tag.
+  # If the build is not triggered by a tag, it defaults to "0.0.0-dev".
+  YAMS_VERSION: git.tag(default="0.0.0-dev")
+
+packages:
+  # Install build dependencies. Arch Linux has up-to-date packages.
+  - base-devel  # Includes gcc, make, etc.
+  - cmake
+  - python-pip
+  - zip
+
+tasks:
+  - setup: |
+      # Install Conan, similar to the GHA workflow.
+      pip install conan
+
+      # Configure the Conan profile.
+      conan profile detect --force
+      sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default
+      echo "Conan profile configured:"
+      conan profile show
+
+  - build: |
+      # The YAMS_VERSION from git.tag() might include a 'v' prefix (e.g., "v1.2.3").
+      # This line removes the 'v' to get just the version number, matching the GHA workflow.
+      CLEAN_VERSION="${YAMS_VERSION#v}"
+      echo "Starting build for version $CLEAN_VERSION"
+
+      # Run conan install to fetch dependencies.
+      conan install . --output-folder=${BUILD_DIR} -s build_type=Release --build=missing
+
+      # Configure with CMake.
+      cmake --preset yams-release \
+        -DYAMS_BUILD_PROFILE=release \
+        -DYAMS_VERSION="${CLEAN_VERSION}" \
+        -DCMAKE_INSTALL_PREFIX="$PWD/${STAGE_DIR}"
+
+      # Build the project.
+      cmake --build --preset yams-release --parallel
+
+      # Install the built artifacts into the staging directory.
+      cmake --install "${BUILD_DIR}" --config Release
+
+  - package: |
+      # This replicates the "Package" step.
+      CLEAN_VERSION="${YAMS_VERSION#v}"
+      echo "Packaging the release..."
+      cd "${STAGE_DIR}"
+      tar -czf "../yams-${CLEAN_VERSION}-linux-x86_64.tar.gz" .
+      echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
+
+  - package_cpack: |
+      # This replicates the "Build Linux packages (DEB/RPM)" step.
+      CLEAN_VERSION="${YAMS_VERSION#v}"
+      echo "Packaging with CPack..."
+      cd "${BUILD_DIR}"
+      # Generate DEB package
+      cpack -G DEB -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
+      # Generate RPM package
+      cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
+
+
+artifacts:
+  # These are the files that will be available for download after the build.
+  - "yams-*.tar.gz"
+  - "build/yams-release/*.deb"
+  - "build/yams-release/*.rpm"
+
+

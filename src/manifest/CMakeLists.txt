@@ -9,6 +9,7 @@ file(MAKE_DIRECTORY ${PROTO_OUT_DIR})
 add_library(yams_manifest
     manifest_manager.cpp
 )
+set_target_properties(yams_manifest PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(yams_manifest
     PUBLIC

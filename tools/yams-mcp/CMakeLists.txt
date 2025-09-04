@@ -19,6 +19,10 @@ target_include_directories(yams-mcp-server
 
 target_compile_features(yams-mcp-server PRIVATE cxx_std_20)
 
+# Avoid rare LTO + GC issues where 'main' can be dropped by the toolchain
+set_target_properties(yams-mcp-server PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_link_options(yams-mcp-server PRIVATE -Wl,--no-gc-sections)
+
 # Installation
 install(TARGETS yams-mcp-server
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

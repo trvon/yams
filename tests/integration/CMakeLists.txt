@@ -14,28 +14,20 @@ include(GoogleTest)
 set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
 include(${CMAKE_SOURCE_DIR}/cmake/boost_test_shim.cmake)
 
+add_executable(daemon_server_multiplex_integration_test daemon/daemon_server_multiplex_integration_test.cpp)
+target_link_libraries(daemon_server_multiplex_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_server_multiplex_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+
+add_executable(daemon_search_multiplex_integration_test daemon/daemon_search_multiplex_integration_test.cpp)
+target_link_libraries(daemon_search_multiplex_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_search_multiplex_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+
+
+
 # pooled_request_integration_test removed - API changed with Boost.ASIO migration
 
 # Boundary IPC tests for pool/daemon/client interactions
-if(NOT TARGET boundary_ipc_pool_tests)
-    add_executable(boundary_ipc_pool_tests
-        daemon/boundary_ipc_pool_tests.cpp
-    )
-    target_link_libraries(boundary_ipc_pool_tests PRIVATE
-        test_utils
-        gtest_main
-        yams_cli
-        yams_api
-        yams_search
-        yams_metadata
-        spdlog::spdlog
-        nlohmann_json::nlohmann_json
-        Threads::Threads
-        yams::boost_test_shim
-    )
-    add_test(NAME boundary_ipc_pool_tests COMMAND boundary_ipc_pool_tests)
-    set_tests_properties(boundary_ipc_pool_tests PROPERTIES LABELS "daemon;integration")
-endif()
+## Removed legacy pool tests
 # mcp_downloader_integration_test removed - API changed with Boost.ASIO migration
 
 
@@ -45,30 +37,10 @@ endif()
 # New comprehensive integration tests: removed for stabilization (will be reintroduced after porting)
 
 # Streaming concurrency test: ensure stream returns while data is being added (always build)
-if(NOT TARGET stream_return_while_adding_test)
-    add_executable(stream_return_while_adding_test
-        daemon/stream_return_while_adding_test.cpp
-    )
-    target_link_libraries(stream_return_while_adding_test PRIVATE
-        test_utils
-        gtest_main
-        yams_mcp
-        yams_cli
-        yams_api
-        yams_search
-        yams_metadata
-        spdlog::spdlog
-        nlohmann_json::nlohmann_json
-        Threads::Threads
-        yams::boost_test_shim
-    )
-    gtest_discover_tests(stream_return_while_adding_test
-        DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
-        PROPERTIES
-            LABELS "daemon;integration"
-            TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
-    )
-endif()
+add_executable(daemon_interleaving_integration_test
+    daemon/daemon_interleaving_integration_test.cpp)
+target_link_libraries(daemon_interleaving_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_interleaving_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
 
 # Discover legacy tests only if enabled and target exists
 if(YAMS_BUILD_LEGACY_INTEGRATION_TESTS)
@@ -84,3 +56,15 @@ endif()
 # Discover new integration tests
 if(YAMS_ENABLE_NEW_INTEGRATION_TESTS)
 endif()
+
+add_executable(daemon_mux_metrics_integration_test daemon/daemon_mux_metrics_integration_test.cpp)
+target_link_libraries(daemon_mux_metrics_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_mux_metrics_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+
+add_executable(daemon_writer_budget_integration_test daemon/daemon_writer_budget_integration_test.cpp)
+target_link_libraries(daemon_writer_budget_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_writer_budget_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+
+add_executable(daemon_mux_active_handlers_integration_test daemon/daemon_mux_active_handlers_integration_test.cpp)
+target_link_libraries(daemon_mux_active_handlers_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_mux_active_handlers_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})

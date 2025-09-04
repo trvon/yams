@@ -1063,6 +1063,27 @@ Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
     });
 }
 
+Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult = db.prepare(R"(
+            SELECT COUNT(*) FROM documents WHERE extraction_status = ?
+        )");
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, ExtractionStatusUtils::toString(status));
+        if (!bindResult)
+            return bindResult.error();
+
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+
+        return stmt.getInt64(0);
+    });
+}
+
 Result<std::unordered_map<std::string, int64_t>>
 MetadataRepository::getDocumentCountsByExtension() {
     return executeQuery<std::unordered_map<std::string, int64_t>>(

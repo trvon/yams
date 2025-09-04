@@ -48,6 +48,9 @@ endif()
 # Create CLI library
 add_library(yams_cli STATIC ${CLI_SOURCES})
 
+# Avoid LTO bitcode in this static lib to prevent link-time unresolveds in final executables
+set_target_properties(yams_cli PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+
 # Link dependencies
 target_link_libraries(yams_cli
     PUBLIC

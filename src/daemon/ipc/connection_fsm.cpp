@@ -1,5 +1,6 @@
 // Adapter implementation kept private; headers remain minimal and 3P-free.
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/socket_utils.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -583,3 +584,15 @@ const char* ConnectionFsm::to_string(State s) noexcept {
 
 } // namespace daemon
 } // namespace yams
+
+namespace yams::daemon {
+
+std::filesystem::path ConnectionFsm::resolve_socket_path() {
+    return socket_utils::resolve_socket_path();
+}
+
+std::filesystem::path ConnectionFsm::resolve_socket_path_config_first() {
+    return socket_utils::resolve_socket_path_config_first();
+}
+
+} // namespace yams::daemon

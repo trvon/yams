@@ -225,6 +225,9 @@ public:
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<int64_t> getDocumentCountByExtractionStatus(yams::metadata::ExtractionStatus) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
 };
 
 TEST(ResolverFilesystemBackend, ResolveNameToAbsoluteFilePath) {

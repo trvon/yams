@@ -74,6 +74,9 @@ public:
                         j["fsmPayloadWrites"] = s.fsmPayloadWrites;
                         j["fsmBytesSent"] = s.fsmBytesSent;
                         j["fsmBytesReceived"] = s.fsmBytesReceived;
+                        j["muxActiveHandlers"] = s.muxActiveHandlers;
+                        j["muxQueuedBytes"] = s.muxQueuedBytes;
+                        j["muxWriterBudgetBytes"] = s.muxWriterBudgetBytes;
                         if (!s.readinessStates.empty()) {
                             nlohmann::json rj = nlohmann::json::object();
                             for (const auto& [k, v] : s.readinessStates)
@@ -103,6 +106,9 @@ public:
                                   << ", payload_writes=" << s.fsmPayloadWrites << "\n";
                         std::cout << "     bytes_sent=" << s.fsmBytesSent
                                   << ", bytes_recv=" << s.fsmBytesReceived << "\n";
+                        std::cout << "MUX: active_handlers=" << s.muxActiveHandlers
+                                  << ", queued_bytes=" << s.muxQueuedBytes
+                                  << ", writer_budget=" << s.muxWriterBudgetBytes << "\n";
                     }
                     return Result<void>();
                 }

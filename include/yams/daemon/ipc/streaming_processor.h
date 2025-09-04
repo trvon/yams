@@ -7,6 +7,8 @@
 #include <vector>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/request_handler.h>
+#include <future>
+#include <chrono>
 
 namespace yams::daemon {
 
@@ -68,6 +70,11 @@ private:
     std::optional<SearchState> search_;
     std::optional<ListState> list_;
     std::optional<GrepState> grep_;
+
+    // Background compute support and keepalive
+    std::optional<std::future<Response>> compute_future_;
+    std::chrono::steady_clock::time_point last_keepalive_{};
+    std::chrono::milliseconds keepalive_interval_{500};
 };
 
 } // namespace yams::daemon

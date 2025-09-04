@@ -22,6 +22,7 @@ set(DOWNLOADER_SOURCES
     download_manager.cpp
 )
 add_library(yams_downloader STATIC ${DOWNLOADER_SOURCES})
+set_target_properties(yams_downloader PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 # Public include directories (future headers under include/ will be visible)
 target_include_directories(yams_downloader

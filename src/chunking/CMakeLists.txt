@@ -2,6 +2,7 @@ add_library(yams_chunking
     rabin_chunker.cpp
     streaming_chunker.cpp
 )
+set_target_properties(yams_chunking PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(yams_chunking
     PUBLIC

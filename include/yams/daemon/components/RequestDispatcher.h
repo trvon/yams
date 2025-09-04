@@ -32,6 +32,7 @@ private:
     // One handler for each request type
     Response handleStatusRequest(const StatusRequest& req);
     Response handleShutdownRequest(const ShutdownRequest& req);
+    Response handleCancelRequest(const CancelRequest& req);
     Response handleSearchRequest(const SearchRequest& req);
     Response handleGetRequest(const GetRequest& req);
     Response handleGetInitRequest(const GetInitRequest& req);

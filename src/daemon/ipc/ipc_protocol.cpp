@@ -49,6 +49,8 @@ MessageType getMessageType(const Request& req) {
                 return MessageType::DownloadRequest;
             } else if constexpr (std::is_same_v<T, GetStatsRequest>) {
                 return MessageType::GetStatsRequest;
+            } else if constexpr (std::is_same_v<T, CancelRequest>) {
+                return MessageType::CancelRequest;
             }
             return MessageType::StatusRequest; // Default
         },

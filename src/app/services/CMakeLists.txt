@@ -12,6 +12,7 @@ set(APP_SERVICES_SOURCES
 )
 
 add_library(yams_app_services STATIC ${APP_SERVICES_SOURCES})
+set_target_properties(yams_app_services PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(yams_app_services
     PUBLIC

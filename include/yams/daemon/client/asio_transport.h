@@ -19,11 +19,14 @@ namespace yams::daemon {
 // and receive framed responses (unary and streaming).
 class AsioTransportAdapter {
 public:
+    // Multiplexing: per-socket connection shared across requests
+    struct Connection;
     struct Options {
         std::filesystem::path socketPath;
         std::chrono::milliseconds headerTimeout{30000};
         std::chrono::milliseconds bodyTimeout{60000};
         std::chrono::milliseconds requestTimeout{5000};
+        std::size_t maxInflight{128};
     };
 
     explicit AsioTransportAdapter(const Options& opts);
@@ -49,6 +52,9 @@ public:
     ConnectionFsm::State fsmState() const noexcept { return fsm_.state(); }
 
 private:
+    // Multiplexing: per-socket connection shared across requests
+    static std::shared_ptr<Connection> get_or_create_connection(const Options& opts);
+
     // Helper to connect with timeout
     boost::asio::awaitable<Result<std::unique_ptr<boost::asio::local::stream_protocol::socket>>>
     async_connect_with_timeout(const std::filesystem::path& path, 

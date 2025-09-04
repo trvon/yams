@@ -101,6 +101,27 @@ YamsCLI::YamsCLI() {
         defaultDataPath = std::filesystem::path(".") / "yams_data";
     }
 
+    // Try to load default data dir from config.toml (core.data_dir) when YAMS_STORAGE is not set
+    try {
+        auto cfgPath = getConfigPath();
+        if (std::filesystem::exists(cfgPath)) {
+            auto cfg = parseSimpleToml(cfgPath);
+            auto it = cfg.find("core.data_dir");
+            if (it != cfg.end() && !it->second.empty()) {
+                std::string p = it->second;
+                // Expand leading ~ to HOME
+                if (!p.empty() && p.front() == '~') {
+                    if (const char* home = std::getenv("HOME")) {
+                        p = std::string(home) + p.substr(1);
+                    }
+                }
+                defaultDataPath = std::filesystem::path(p);
+            }
+        }
+    } catch (...) {
+        // Ignore config errors and keep env-based fallback
+    }
+
     app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
         ->envname("YAMS_STORAGE")
         ->default_val(defaultDataPath);

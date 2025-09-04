@@ -10,8 +10,12 @@
 #include <optional>
 #include <stop_token>
 #include <unordered_map>
+#include <deque>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+// New: shared request context
+#include <yams/daemon/ipc/request_context.h>
 
 namespace yams::daemon {
 
@@ -65,6 +69,7 @@ public:
 
     struct Config {
         bool enable_streaming = true;     // Use streaming response model
+        bool enable_multiplexing = true;  // Default: allow multiple concurrent requests per connection
         size_t chunk_size = 64 * 1024;    // Default chunk size (64KB)
         size_t header_flush_delay_ms = 0; // Time to wait before flushing header (0 = immediate)
         size_t chunk_flush_delay_ms = 0;  // Time to wait before flushing chunks (0 = immediate)
@@ -77,6 +82,11 @@ public:
                                           // (one-request-per-connection)
         // Maximum allowed frame size (bytes) for inbound messages; must align with server limits
         size_t max_frame_size = 10 * 1024 * 1024; // 10MB default
+        // Multiplexing limits (when enable_multiplexing=true)
+        size_t max_inflight_per_connection = 64;   // Cap concurrent in-flight request handlers per connection
+        size_t per_request_queue_cap = 64;         // Max frames queued per request
+        size_t total_queued_bytes_cap = 4 * 1024 * 1024; // Max bytes queued per connection
+        size_t writer_budget_bytes_per_turn = 64 * 1024; // Fair-writer byte budget per request turn
 
         // When closing after a response, attempt a graceful half-close (shutdown send) and briefly
         // drain the peer's read side to reduce the chance of truncation at the client. Has no
@@ -84,7 +94,7 @@ public:
         bool graceful_half_close = false;
         std::chrono::milliseconds graceful_drain_timeout{200};
 
-        Config();
+    Config();
     };
 
     explicit RequestHandler(std::shared_ptr<RequestProcessor> processor = nullptr,
@@ -236,6 +246,33 @@ private:
     MessageFramer framer_;
     Config config_;
     mutable InternalStats stats_;
+
+    // Per-connection write serialization when multiplexing is enabled
+    std::shared_ptr<std::mutex> conn_write_mtx_;
+    std::optional<boost::asio::any_io_executor> write_strand_exec_;
+    std::atomic<size_t> inflight_{0};
+
+    // Fair writer (multiplexing): per-request queues and round-robin scheduler
+    struct FrameItem { std::vector<uint8_t> data; bool last{false}; };
+    std::unordered_map<uint64_t, std::deque<FrameItem>> rr_queues_; // reqId -> frames
+    std::deque<uint64_t> rr_active_; // rotation of active reqIds
+    bool writer_running_{false};
+    size_t total_queued_bytes_{0};
+
+    // Per-request lifecycle/metrics
+    /* moved to request_context.h */ struct RequestContext_REMOVED {
+        std::chrono::steady_clock::time_point start;
+        std::atomic<bool> completed{false};
+        std::atomic<bool> canceled{false};
+        std::atomic<size_t> frames_enqueued{0};
+        std::atomic<size_t> bytes_enqueued{0};
+    };
+    std::mutex ctx_mtx_;
+    std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> contexts_;
+
+    // Queue a frame for fair writing; must be called on write strand when present
+    boost::asio::awaitable<Result<void>> enqueue_frame(uint64_t request_id, std::vector<uint8_t> frame, bool last);
+    boost::asio::awaitable<void> writer_drain(boost::asio::local::stream_protocol::socket& socket);
 };
 
 inline RequestHandler::Config::Config() = default;

@@ -18,6 +18,7 @@ add_library(yams_storage_engine
     object_storage_plugin_loader.cpp
     ${PLATFORM_SOURCES}
 )
+set_target_properties(yams_storage_engine PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(yams_storage_engine
     PUBLIC
@@ -56,6 +57,7 @@ add_library(yams_reference_counter
     reference_counter.cpp
     garbage_collector.cpp
 )
+set_target_properties(yams_reference_counter PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(yams_reference_counter
     PUBLIC

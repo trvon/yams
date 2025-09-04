@@ -17,6 +17,8 @@
 #include <yams/common/name_resolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
@@ -172,6 +174,8 @@ Response RequestDispatcher::dispatch(const Request& req) {
                 return handleGrepRequest(arg);
             } else if constexpr (std::is_same_v<T, DownloadRequest>) {
                 return handleDownloadRequest(arg);
+            } else if constexpr (std::is_same_v<T, CancelRequest>) {
+                return handleCancelRequest(arg);
             } else {
                 return ErrorResponse{ErrorCode::NotImplemented, "Request type not yet implemented"};
             }
@@ -198,6 +202,13 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
         res.fsmPayloadWrites = snap.payloadWrites;
         res.fsmBytesSent = snap.bytesSent;
         res.fsmBytesReceived = snap.bytesReceived;
+    }
+    // Multiplexing metrics (aggregated)
+    {
+        auto msnap = MuxMetricsRegistry::instance().snapshot();
+        res.muxActiveHandlers = msnap.activeHandlers;
+        res.muxQueuedBytes = msnap.queuedBytes;
+        res.muxWriterBudgetBytes = msnap.writerBudgetBytes;
     }
 
     // Overall readiness (backward compatibility)
@@ -854,27 +865,20 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
                                       const AddDocumentRequest& req,
                                       std::shared_ptr<api::IContentStore> contentStore,
                                       std::shared_ptr<metadata::MetadataRepository> metadataRepo) {
-    size_t filesAdded = 0;
-
-    // TODO: Implement pattern matching with req.includePatterns and req.excludePatterns
-    // For now, add all files in directory
-
+    // Collect files first to enable parallel processing and deterministic counts
+    std::vector<std::filesystem::path> files;
     try {
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(dirPath)) {
-            if (entry.is_regular_file()) {
-                // Create a request for this individual file
-                AddDocumentRequest fileReq = req;
-                fileReq.path = entry.path().string();
-                fileReq.content.clear(); // Force path-based processing
-
-                auto result =
-                    handleSingleFileAdd(entry.path(), fileReq, contentStore, metadataRepo);
-                if (result) {
-                    filesAdded++;
-                } else {
-                    // Log error but continue with other files
-                    spdlog::warn("Failed to add file {}: {}", entry.path().string(),
-                                 result.error().message);
+        auto opts = std::filesystem::directory_options::skip_permission_denied;
+        if (req.recursive) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(dirPath, opts)) {
+                if (entry.is_regular_file()) {
+                    files.push_back(entry.path());
+                }
+            }
+        } else {
+            for (const auto& entry : std::filesystem::directory_iterator(dirPath, opts)) {
+                if (entry.is_regular_file()) {
+                    files.push_back(entry.path());
                 }
             }
         }
@@ -883,7 +887,96 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
                      "Filesystem error during directory traversal: " + std::string(e.what())};
     }
 
-    return filesAdded;
+    if (files.empty()) {
+        return static_cast<size_t>(0);
+    }
+
+    // Very simple glob-like filter for include/exclude patterns (*)
+    auto matches_any = [](const std::string& text, const std::vector<std::string>& patterns) {
+        if (patterns.empty()) return true; // no include patterns => include all
+        for (const auto& pat : patterns) {
+            // Convert '*' to '.*' regex; escape dots
+            std::string rx;
+            rx.reserve(pat.size() * 2);
+            for (char c : pat) {
+                if (c == '*') rx += ".*";
+                else if (c == '.') rx += "\\.";
+                else rx += c;
+            }
+            try {
+                if (std::regex_match(text, std::regex(rx))) return true;
+            } catch (...) {
+                // On invalid pattern, skip
+            }
+        }
+        return false;
+    };
+
+    auto matches_none = [&](const std::string& text, const std::vector<std::string>& patterns) {
+        for (const auto& pat : patterns) {
+            std::string rx;
+            rx.reserve(pat.size() * 2);
+            for (char c : pat) {
+                if (c == '*') rx += ".*";
+                else if (c == '.') rx += "\\.";
+                else rx += c;
+            }
+            try {
+                if (std::regex_match(text, std::regex(rx))) return false;
+            } catch (...) {
+            }
+        }
+        return true;
+    };
+
+    // Filter files based on patterns
+    std::vector<std::filesystem::path> filtered;
+    filtered.reserve(files.size());
+    for (const auto& p : files) {
+        const std::string name = p.filename().string();
+        if (!matches_any(name, req.includePatterns)) continue; // if includePatterns present
+        if (!matches_none(name, req.excludePatterns)) continue; // excluded
+        filtered.push_back(p);
+    }
+
+    if (filtered.empty()) {
+        return static_cast<size_t>(0);
+    }
+
+    // Parallel add with a simple worker pool
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned workers = std::min<unsigned>(hw, 8); // cap to avoid I/O saturation
+
+    std::atomic<size_t> index{0};
+    std::atomic<size_t> added{0};
+
+    auto worker = [&]() {
+        for (;;) {
+            size_t i = index.fetch_add(1);
+            if (i >= filtered.size()) break;
+            const auto& path = filtered[i];
+
+            AddDocumentRequest fileReq = req;
+            fileReq.path = path.string();
+            fileReq.content.clear();
+
+            auto res = handleSingleFileAdd(path, fileReq, contentStore, metadataRepo);
+            if (res) {
+                added.fetch_add(1);
+            } else {
+                spdlog::warn("Failed to add file {}: {}", path.string(), res.error().message);
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (unsigned i = 0; i < workers; ++i) {
+        threads.emplace_back(worker);
+    }
+    for (auto& t : threads) t.join();
+
+    return static_cast<size_t>(added.load());
 }
 
 void RequestDispatcher::addTagsAndMetadata(
@@ -1236,6 +1329,29 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
 
         response.vectorIndexSize = vectorDbSize;
         response.compressionRatio = storeStats.dedupRatio();
+
+        // Extraction progress indicators
+        if (response.totalDocuments >= response.indexedDocuments) {
+            size_t pending = response.totalDocuments - response.indexedDocuments;
+            response.additionalStats["extraction_pending"] = std::to_string(pending);
+            response.additionalStats["documents_total"] = std::to_string(response.totalDocuments);
+            response.additionalStats["documents_extracted"] = std::to_string(response.indexedDocuments);
+        }
+        // Precise counts by extraction status (if available)
+        try {
+            auto pendingCount = metadataRepo->getDocumentCountByExtractionStatus(
+                metadata::ExtractionStatus::Pending);
+            if (pendingCount) {
+                response.additionalStats["extraction_queue_size"] = std::to_string(pendingCount.value());
+            }
+            auto failedCount = metadataRepo->getDocumentCountByExtractionStatus(
+                metadata::ExtractionStatus::Failed);
+            if (failedCount) {
+                response.additionalStats["extraction_failed_count"] = std::to_string(failedCount.value());
+            }
+        } catch (...) {
+            // best effort
+        }
 
         // Always include basic additional stats
         response.additionalStats["store_objects"] = std::to_string(storeStats.totalObjects);
@@ -1904,6 +2020,14 @@ Response RequestDispatcher::handleMetadataSearch(
         return ErrorResponse{ErrorCode::InternalError,
                              std::string("Metadata search failed: ") + e.what()};
     }
+}
+
+Response RequestDispatcher::handleCancelRequest(const CancelRequest& req) {
+    bool ok = RequestContextRegistry::instance().cancel(req.targetRequestId);
+    if (ok) {
+        return SuccessResponse{"Cancel accepted"};
+    }
+    return ErrorResponse{ErrorCode::NotFound, "RequestId not found or already completed"};
 }
 
 } // namespace yams::daemon

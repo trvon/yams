@@ -17,6 +17,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
+#include "test_async_helpers.h"
 
 namespace yams::daemon::integration::test {
 
@@ -112,8 +113,7 @@ protected:
     void assertDaemonHealthy() {
         DaemonClient client(clientConfig_);
         ASSERT_TRUE(client.connect());
-        auto pong = client.ping();
-        ASSERT_TRUE(pong);
+        ASSERT_TRUE(yams::test_async::ok(client.ping()));
     }
 
     fs::path testDir_;
@@ -152,9 +152,8 @@ TEST_F(DaemonAbruptDisconnectTest, MixedAbruptAndNormalRequests) {
             sendStatusRequestAndClose();
         } else {
             // Normal request via DaemonClient
-            auto pong = clientOK.ping();
-            ASSERT_TRUE(pong);
-            auto status = clientOK.status();
+            ASSERT_TRUE(yams::test_async::ok(clientOK.ping()));
+            auto status = yams::test_async::res(clientOK.status());
             // Status may be small, but still exercises server payload write path
             ASSERT_TRUE(status);
         }

@@ -3,6 +3,7 @@ add_library(yams_indexing STATIC
     document_indexer.cpp
     indexing_pipeline.cpp
 )
+set_target_properties(yams_indexing PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_include_directories(yams_indexing PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
