@@ -154,7 +154,8 @@ int main(int argc, char* argv[]) {
                 if (config.dataDir.empty()) {
                     if (auto it = daemonSection.find("data_dir"); it != daemonSection.end()) {
                         config.dataDir = fs::path(it->second);
-                    } else if (auto it2 = daemonSection.find("storage"); it2 != daemonSection.end()) {
+                    } else if (auto it2 = daemonSection.find("storage");
+                               it2 != daemonSection.end()) {
                         config.dataDir = fs::path(it2->second);
                     } else if (auto it3 = daemonSection.find("storage_path");
                                it3 != daemonSection.end()) {
@@ -399,7 +400,7 @@ int main(int argc, char* argv[]) {
     try {
         // Use rotating file sink to preserve logs across crashes
         const size_t max_size = 10 * 1024 * 1024; // 10MB per file
-        const size_t max_files = 5; // Keep 5 rotated files
+        const size_t max_files = 5;               // Keep 5 rotated files
         auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             config.logFile.string(), max_size, max_files);
         auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
@@ -407,8 +408,8 @@ int main(int argc, char* argv[]) {
         spdlog::flush_on(spdlog::level::info);
 
         // Log rotation info
-        spdlog::info("Log rotation enabled: {} (max {}MB x {} files)",
-                     config.logFile.string(), max_size / (1024*1024), max_files);
+        spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", config.logFile.string(),
+                     max_size / (1024 * 1024), max_files);
     } catch (...) {
         // Fallback silently to default logger
     }

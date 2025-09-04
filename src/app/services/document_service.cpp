@@ -512,8 +512,10 @@ public:
         if (const char* m = std::getenv("YAMS_RETRIEVAL_MODE")) {
             std::string v(m);
             std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-            if (v == "hot_only" || v == "hot") mode = Mode::HotOnly;
-            else if (v == "cold_only" || v == "cold") mode = Mode::ColdOnly;
+            if (v == "hot_only" || v == "hot")
+                mode = Mode::HotOnly;
+            else if (v == "cold_only" || v == "cold")
+                mode = Mode::ColdOnly;
         }
 
         // Honor per-document force_cold tag/metadata
@@ -523,7 +525,10 @@ public:
             auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
             if (docsRes) {
                 for (const auto& d : docsRes.value()) {
-                    if (d.sha256Hash == hash) { targetDoc = d; break; }
+                    if (d.sha256Hash == hash) {
+                        targetDoc = d;
+                        break;
+                    }
                 }
             }
             if (targetDoc) {
@@ -533,10 +538,12 @@ public:
                     auto it = all.find("force_cold");
                     if (it != all.end()) {
                         auto v = it->second.asString();
-                        std::string lv = v; std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
+                        std::string lv = v;
+                        std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
                         forceCold = (lv == "1" || lv == "true" || lv == "yes");
                     }
-                    if (!forceCold && all.find("tag:force_cold") != all.end()) forceCold = true;
+                    if (!forceCold && all.find("tag:force_cold") != all.end())
+                        forceCold = true;
                 }
             }
         }
@@ -721,7 +728,12 @@ public:
             size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
             size_t workers = hw;
             if (const char* env = std::getenv("YAMS_LIST_CONCURRENCY"); env && *env) {
-                try { auto v = static_cast<size_t>(std::stoul(env)); if (v > 0) workers = v; } catch (...) {}
+                try {
+                    auto v = static_cast<size_t>(std::stoul(env));
+                    if (v > 0)
+                        workers = v;
+                } catch (...) {
+                }
             }
             workers = std::min(workers, page.size() > 0 ? page.size() : size_t{1});
             auto buildOne = [&](size_t i) {
@@ -738,7 +750,8 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
-                std::optional<std::unordered_map<std::string, metadata::MetadataValue>> cachedMetadata;
+                std::optional<std::unordered_map<std::string, metadata::MetadataValue>>
+                    cachedMetadata;
                 if (req.showSnippets && req.snippetLength > 0) {
                     auto contentResult = ctx_.metadataRepo->getContent(d.id);
                     if (contentResult) {
@@ -748,7 +761,8 @@ public:
                             if (!content.contentText.empty() && content.contentText.length() > 3) {
                                 std::string snippet = content.contentText;
                                 if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
-                                    snippet = snippet.substr(0, static_cast<size_t>(req.snippetLength - 3));
+                                    snippet = snippet.substr(
+                                        0, static_cast<size_t>(req.snippetLength - 3));
                                     size_t lastSpace = snippet.find_last_of(' ');
                                     if (lastSpace != std::string::npos &&
                                         lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
@@ -761,8 +775,14 @@ public:
                                 bool lastWasSpace = false;
                                 for (char c : snippet) {
                                     if (std::isspace(static_cast<unsigned char>(c))) {
-                                        if (!lastWasSpace) { cleaned += ' '; lastWasSpace = true; }
-                                    } else { cleaned += c; lastWasSpace = false; }
+                                        if (!lastWasSpace) {
+                                            cleaned += ' ';
+                                            lastWasSpace = true;
+                                        }
+                                    } else {
+                                        cleaned += c;
+                                        lastWasSpace = false;
+                                    }
                                 }
                                 e.snippet = std::move(cleaned);
                             } else {
@@ -778,7 +798,8 @@ public:
                 if (req.showTags || req.showMetadata) {
                     if (!cachedMetadata) {
                         auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
-                        if (metadataResult) cachedMetadata = metadataResult.value();
+                        if (metadataResult)
+                            cachedMetadata = metadataResult.value();
                     }
                     if (cachedMetadata) {
                         if (req.showTags) {
@@ -796,15 +817,17 @@ public:
             std::vector<std::thread> ths;
             ths.reserve(workers);
             for (size_t t = 0; t < workers; ++t) {
-                ths.emplace_back([&](){
+                ths.emplace_back([&]() {
                     while (true) {
                         size_t i = nextIdx.fetch_add(1);
-                        if (i >= page.size()) break;
+                        if (i >= page.size())
+                            break;
                         buildOne(i);
                     }
                 });
             }
-            for (auto& th : ths) th.join();
+            for (auto& th : ths)
+                th.join();
             for (size_t i = 0; i < page.size(); ++i) {
                 out.documents.push_back(std::move(tmp[i]));
             }
@@ -822,7 +845,8 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
-                std::optional<std::unordered_map<std::string, metadata::MetadataValue>> cachedMetadata;
+                std::optional<std::unordered_map<std::string, metadata::MetadataValue>>
+                    cachedMetadata;
                 if (req.showSnippets && req.snippetLength > 0) {
                     auto contentResult = ctx_.metadataRepo->getContent(d.id);
                     if (contentResult) {
@@ -832,7 +856,8 @@ public:
                             if (!content.contentText.empty() && content.contentText.length() > 3) {
                                 std::string snippet = content.contentText;
                                 if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
-                                    snippet = snippet.substr(0, static_cast<size_t>(req.snippetLength - 3));
+                                    snippet = snippet.substr(
+                                        0, static_cast<size_t>(req.snippetLength - 3));
                                     size_t lastSpace = snippet.find_last_of(' ');
                                     if (lastSpace != std::string::npos &&
                                         lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
@@ -845,8 +870,14 @@ public:
                                 bool lastWasSpace = false;
                                 for (char c : snippet) {
                                     if (std::isspace(static_cast<unsigned char>(c))) {
-                                        if (!lastWasSpace) { cleaned += ' '; lastWasSpace = true; }
-                                    } else { cleaned += c; lastWasSpace = false; }
+                                        if (!lastWasSpace) {
+                                            cleaned += ' ';
+                                            lastWasSpace = true;
+                                        }
+                                    } else {
+                                        cleaned += c;
+                                        lastWasSpace = false;
+                                    }
                                 }
                                 e.snippet = std::move(cleaned);
                             } else {
@@ -862,7 +893,8 @@ public:
                 if (req.showTags || req.showMetadata) {
                     if (!cachedMetadata) {
                         auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
-                        if (metadataResult) cachedMetadata = metadataResult.value();
+                        if (metadataResult)
+                            cachedMetadata = metadataResult.value();
                     }
                     if (cachedMetadata) {
                         if (req.showTags) {

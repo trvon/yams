@@ -2,11 +2,11 @@
 #include <csignal>
 #include <filesystem>
 #include <thread>
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
 #include <sys/wait.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
-#include "test_async_helpers.h"
 
 namespace yams::daemon::integration::test {
 
@@ -398,26 +398,26 @@ TEST_F(DaemonLifecycleIntegrationTest, ConcurrentOperations) {
             DaemonClient client(clientConfig_);
 
             for (int j = 0; j < 10; ++j) {
-            if (client.connect()) {
-                // Mix different operations
-                if (j % 3 == 0) {
+                if (client.connect()) {
+                    // Mix different operations
+                    if (j % 3 == 0) {
                         if (yams::test_async::ok(client.ping()))
                             successCount++;
                         else
                             errorCount++;
-                } else if (j % 3 == 1) {
+                    } else if (j % 3 == 1) {
                         if (yams::test_async::ok(client.status()))
                             successCount++;
                         else
                             errorCount++;
-                } else {
-                    SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
-                                      false,  false, false, false, 0,   0,  0,         ""};
+                    } else {
+                        SearchRequest req{"test", 5,     false, false, 0.7, {}, "keyword", false,
+                                          false,  false, false, false, 0,   0,  0,         ""};
                         if (static_cast<bool>(yams::test_async::res(client.search(req))) || true)
                             successCount++; // May fail if no data
                         else
                             errorCount++;
-                }
+                    }
 
                     if (j % 5 == 0) {
                         client.disconnect();

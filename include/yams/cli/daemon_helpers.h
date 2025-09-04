@@ -305,13 +305,13 @@ private:
             client_cfg.bodyTimeout = std::chrono::milliseconds(300000);
         }
         auto client = std::make_unique<yams::daemon::DaemonClient>(client_cfg);
-        
+
         // Connect the client before adding to pool
         auto connect_result = client->connect();
         if (!connect_result) {
             if (cfg_.verbose) {
-                spdlog::error("[DaemonClientPool] Failed to connect client: {}", 
-                             connect_result.error().message);
+                spdlog::error("[DaemonClientPool] Failed to connect client: {}",
+                              connect_result.error().message);
             }
             return npos;
         }
@@ -324,7 +324,8 @@ private:
 
         entries_.emplace_back(e);
         if (cfg_.verbose) {
-            spdlog::debug("[DaemonClientPool] Created and connected client {}", entries_.back()->id);
+            spdlog::debug("[DaemonClientPool] Created and connected client {}",
+                          entries_.back()->id);
         }
         return entries_.size() - 1;
     }
@@ -455,7 +456,6 @@ inline bool should_stream(const yams::daemon::GrepRequest& r) {
            (!r.paths.empty() && r.paths.size() >= file_hint_threshold) || r.recursive;
 }
 
-
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>>
 class PooledRequestManager {
 public:
@@ -551,7 +551,8 @@ public:
             }
 
             if (attempt < kMaxAttempts && is_transient(last_err)) {
-                // Tiny jittered backoff (can't mix Task with boost::asio::awaitable, use sync sleep)
+                // Tiny jittered backoff (can't mix Task with boost::asio::awaitable, use sync
+                // sleep)
                 auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
                 std::this_thread::sleep_for(backoff + jitter);
                 backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
@@ -619,12 +620,11 @@ private:
 // Convenience shims
 // ============================================================================
 
-
-
 // Async version of daemon_first that can be used with run_sync bridge
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>,
           typename Fallback, typename Render>
-inline yams::Task<Result<void>> async_daemon_first(const TRequest& req, Fallback&& fallback, Render&& render) {
+inline yams::Task<Result<void>> async_daemon_first(const TRequest& req, Fallback&& fallback,
+                                                   Render&& render) {
     // Static pool with basic defaults. Tunable via env if desired.
     static DaemonClientPool::Config cfg = [] {
         DaemonClientPool::Config c;
@@ -645,7 +645,8 @@ inline yams::Task<Result<void>> async_daemon_first(const TRequest& req, Fallback
     }();
 
     static PooledRequestManager<TRequest, TResponse> manager(cfg);
-    auto result = co_await manager.execute_async(req, std::forward<Fallback>(fallback), std::forward<Render>(render));
+    auto result = co_await manager.execute_async(req, std::forward<Fallback>(fallback),
+                                                 std::forward<Render>(render));
     co_return result;
 }
 

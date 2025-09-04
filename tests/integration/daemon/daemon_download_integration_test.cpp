@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
+#include "test_async_helpers.h"
 #include <yams/api/content_store.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
-#include "test_async_helpers.h"
 
 #include <cctype>
 #include <chrono>

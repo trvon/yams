@@ -6,14 +6,16 @@
 #include <thread>
 #include <vector>
 
-#include <yams/daemon/client/daemon_client.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;
 
 namespace {
-bool daemon_available() { return yams::daemon::DaemonClient::isDaemonRunning(); }
+bool daemon_available() {
+    return yams::daemon::DaemonClient::isDaemonRunning();
 }
+} // namespace
 
 TEST(ServerMultiplexIntegrationTest, ManyParallelStreamingSearches) {
     if (!daemon_available()) {
@@ -43,8 +45,8 @@ TEST(ServerMultiplexIntegrationTest, ManyParallelStreamingSearches) {
 
     int ok = 0;
     for (auto& f : futs) {
-        if (f.get()) ok++;
+        if (f.get())
+            ok++;
     }
     EXPECT_EQ(ok, N);
 }
-

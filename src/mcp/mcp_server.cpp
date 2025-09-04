@@ -12,8 +12,8 @@
 
 #include <mutex>
 
-#include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -36,7 +36,6 @@
 #include <unistd.h>
 #endif
 
-
 namespace yams::mcp {
 namespace {
 // Synchronous pooled_execute is deprecated and returns NotImplemented
@@ -48,8 +47,9 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
     (void)req;
     (void)fallback;
     (void)render;
-    return Error{ErrorCode::NotImplemented,
-                 "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
+    return Error{
+        ErrorCode::NotImplemented,
+        "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
 }
 
 // Async variant to be used once MCP handlers become coroutine-based.
@@ -92,7 +92,8 @@ void StdioTransport::writerLoop() {
 
         if (!message.is_null()) {
             auto currentState = state_.load();
-            if (currentState == TransportState::Connected || currentState == TransportState::Closing) {
+            if (currentState == TransportState::Connected ||
+                currentState == TransportState::Closing) {
                 std::lock_guard<std::mutex> lock(out_mutex_);
                 const std::string payload = message.dump();
 
@@ -159,7 +160,6 @@ void StdioTransport::send(const json& message) {
         std::cout.flush();
     }
 }
-
 
 bool StdioTransport::isInputAvailable(int timeoutMs) const {
 #ifdef _WIN32
@@ -283,8 +283,11 @@ MessageResult StdioTransport::receive() {
                 if (in.rdbuf() && in.rdbuf()->in_avail() > 0) {
                     while (in.rdbuf()->in_avail() > 0) {
                         int c = in.peek();
-                        if (c == '\r' || c == '\n') { (void)in.get(); }
-                        else { break; }
+                        if (c == '\r' || c == '\n') {
+                            (void)in.get();
+                        } else {
+                            break;
+                        }
                     }
                 }
 
@@ -391,7 +394,6 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     }
     // Legacy pool config removed
 
-
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
 }
@@ -409,7 +411,8 @@ void MCPServer::start() {
     // Start a small fixed thread pool for request handling (avoid unbounded detached threads)
     {
         size_t hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 2;
+        if (hc == 0)
+            hc = 2;
         size_t threads = std::min<size_t>(4, std::max<size_t>(2, hc));
         startThreadPool(threads);
     }
@@ -466,14 +469,26 @@ void MCPServer::start() {
                         auto result = co_await handleSearchDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         } else {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
+                            auto err =
+                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(err);
+                            } else {
+                                transport_->send(err);
+                            }
                         }
                         co_return;
                     }();
-                    try { task.get(); } catch (...) {}
+                    try {
+                        task.get();
+                    } catch (...) {
+                    }
                 });
 
                 continue;
@@ -487,14 +502,26 @@ void MCPServer::start() {
                         auto result = co_await handleGrepDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         } else {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
+                            auto err =
+                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(err);
+                            } else {
+                                transport_->send(err);
+                            }
                         }
                         co_return;
                     }();
-                    try { task.get(); } catch (...) {}
+                    try {
+                        task.get();
+                    } catch (...) {
+                    }
                 });
 
                 continue;
@@ -508,14 +535,26 @@ void MCPServer::start() {
                         auto result = co_await handleListDocuments(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         } else {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
+                            auto err =
+                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(err);
+                            } else {
+                                transport_->send(err);
+                            }
                         }
                         co_return;
                     }();
-                    try { task.get(); } catch (...) {}
+                    try {
+                        task.get();
+                    } catch (...) {
+                    }
                 });
 
                 continue;
@@ -529,14 +568,26 @@ void MCPServer::start() {
                         auto result = co_await handleRetrieveDocument(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         } else {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
+                            auto err =
+                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(err);
+                            } else {
+                                transport_->send(err);
+                            }
                         }
                         co_return;
                     }();
-                    try { task.get(); } catch (...) {}
+                    try {
+                        task.get();
+                    } catch (...) {
+                    }
                 });
 
                 continue;
@@ -550,14 +601,26 @@ void MCPServer::start() {
                         auto result = co_await handleStoreDocument(mcpReq);
                         if (result) {
                             auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         } else {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
+                            auto err =
+                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(err);
+                            } else {
+                                transport_->send(err);
+                            }
                         }
                         co_return;
                     }();
-                    try { task.get(); } catch (...) {}
+                    try {
+                        task.get();
+                    } catch (...) {
+                    }
                 });
 
                 continue;
@@ -570,26 +633,44 @@ void MCPServer::start() {
                 enqueueTask([this, id, toolName, toolArgs]() mutable {
                     auto task = [this, id, toolName, toolArgs]() -> yams::Task<void> {
                         if (!toolRegistry_) {
-                            auto err = createError(id, protocol::INTERNAL_ERROR, "Tool registry not initialized");
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(err); } else { transport_->send(err); }
+                            auto err = createError(id, protocol::INTERNAL_ERROR,
+                                                   "Tool registry not initialized");
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(err);
+                            } else {
+                                transport_->send(err);
+                            }
                             co_return;
                         }
 
                         auto toolResult = co_await toolRegistry_->callTool(toolName, toolArgs);
 
-                        // Wrap non-MCP-shaped results into MCP content format for compatibility with MCP clients
+                        // Wrap non-MCP-shaped results into MCP content format for compatibility
+                        // with MCP clients
                         if (toolResult.contains("content") && toolResult["content"].is_array()) {
                             auto resp = createResponse(id, toolResult);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         } else {
                             json wrapped = {
-                                {"content", json::array({json{{"type", "text"}, {"text", toolResult.dump(2)}}})}};
+                                {"content", json::array({json{{"type", "text"},
+                                                              {"text", toolResult.dump(2)}}})}};
                             auto resp = createResponse(id, wrapped);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) { stdio->sendAsync(resp); } else { transport_->send(resp); }
+                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+                                stdio->sendAsync(resp);
+                            } else {
+                                transport_->send(resp);
+                            }
                         }
                         co_return;
                     }();
-                    try { task.get(); } catch (...) {}
+                    try {
+                        task.get();
+                    } catch (...) {
+                    }
                 });
 
                 continue;
@@ -652,7 +733,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
             response = listTools();
         } else if (method == "tools/call") {
             // Tool calls are handled asynchronously in the start() method
-            return Error{ErrorCode::InvalidOperation, "Tool calls must be made through async message handling"};
+            return Error{ErrorCode::InvalidOperation,
+                         "Tool calls must be made through async message handling"};
         } else if (method == "resources/list") {
             response = listResources();
         } else if (method == "resources/read") {
@@ -703,8 +785,8 @@ json MCPServer::initialize(const json& params) {
         }
     }
     if (requestedVersion != negotiatedVersion) {
-        spdlog::warn("Negotiated protocolVersion: requested='{}' -> using='{}'",
-                     requestedVersion, negotiatedVersion);
+        spdlog::warn("Negotiated protocolVersion: requested='{}' -> using='{}'", requestedVersion,
+                     negotiatedVersion);
     }
 
     // Compose capabilities (minimal, conservative defaults)
@@ -743,7 +825,10 @@ json MCPServer::readResource(const std::string& uri) {
     if (uri == "yams://stats") {
         // Get storage statistics
         if (!store_) {
-            return {{"contents", {{{"uri", uri}, {"mimeType", "application/json"}, {"text", json({{"error", "Storage not initialized"}}).dump()}}}}};
+            return {{"contents",
+                     {{{"uri", uri},
+                       {"mimeType", "application/json"},
+                       {"text", json({{"error", "Storage not initialized"}}).dump()}}}}};
         }
         auto stats = store_->getStats();
         auto health = store_->checkHealth();
@@ -765,7 +850,11 @@ json MCPServer::readResource(const std::string& uri) {
     } else if (uri == "yams://recent") {
         // Get recent documents
         if (!metadataRepo_) {
-            return {{"contents", {{{"uri", uri}, {"mimeType", "application/json"}, {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}};
+            return {
+                {"contents",
+                 {{{"uri", uri},
+                   {"mimeType", "application/json"},
+                   {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}};
         }
         auto docsResult = metadataRepo_->findDocumentsByPath("%");
         if (!docsResult) {
@@ -1308,16 +1397,20 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
 
     // For now, return a simple response indicating the tool call was received
     // Full async implementation can be added later when async infrastructure is stable
-    return {{"content", json::array({json{{"type", "text"}, {"text", "Tool call received: " + name + " with arguments: " + arguments.dump()}}})}};
+    return {{"content", json::array({json{{"type", "text"},
+                                          {"text", "Tool call received: " + name +
+                                                       " with arguments: " + arguments.dump()}}})}};
 }
 
 // Modern C++20 tool handler implementations
-yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
+yams::Task<Result<MCPSearchResponse>>
+MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::daemon::SearchRequest dreq;
     // Build query with optional path qualifier so daemon-side path filters work via qualifiers.
     std::string _query = req.query;
     if (!req.pathPattern.empty()) {
-        if (!_query.empty()) _query += " ";
+        if (!_query.empty())
+            _query += " ";
         _query += "name:" + req.pathPattern;
     }
     dreq.query = _query;
@@ -1336,7 +1429,8 @@ yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCP
 
     MCPSearchResponse out;
     auto res = co_await daemon_client_->streamingSearch(dreq);
-    if (!res) co_return res.error();
+    if (!res)
+        co_return res.error();
     const auto& r = res.value();
     out.total = r.totalCount;
     out.type = "daemon";
@@ -1354,7 +1448,6 @@ yams::Task<Result<MCPSearchResponse>> MCPServer::handleSearchDocuments(const MCP
     co_return out;
 }
 
-
 yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     yams::daemon::GrepRequest dreq;
     dreq.pattern = req.pattern;
@@ -1371,24 +1464,27 @@ yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrep
     dreq.beforeContext = req.beforeContext;
     dreq.contextLines = req.context;
     dreq.colorMode = req.color;
-    if (req.maxCount) dreq.maxMatches = *req.maxCount;
+    if (req.maxCount)
+        dreq.maxMatches = *req.maxCount;
 
     MCPGrepResponse out;
     auto res = co_await daemon_client_->streamingGrep(dreq);
-    if (!res) co_return res.error();
+    if (!res)
+        co_return res.error();
     const auto& r = res.value();
     out.matchCount = r.totalMatches;
     out.fileCount = r.filesSearched;
     std::ostringstream oss;
     for (const auto& m : r.matches) {
-        if (out.fileCount > 1 || req.withFilename) oss << m.file << ":";
-        if (req.lineNumbers) oss << m.lineNumber << ":";
+        if (out.fileCount > 1 || req.withFilename)
+            oss << m.file << ":";
+        if (req.lineNumbers)
+            oss << m.lineNumber << ":";
         oss << m.line << "\n";
     }
     out.output = oss.str();
     co_return out;
 }
-
 
 yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownloadRequest& req) {
     const bool verbose =
@@ -1493,13 +1589,22 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         if (auto it = toml.find("downloader"); it != toml.end()) {
             const auto& dl = it->second;
             if (auto f = dl.find("default_concurrency"); f != dl.end()) {
-                try { cfg.defaultConcurrency = std::stoi(f->second); } catch (...) {}
+                try {
+                    cfg.defaultConcurrency = std::stoi(f->second);
+                } catch (...) {
+                }
             }
             if (auto f = dl.find("default_chunk_size_bytes"); f != dl.end()) {
-                try { cfg.defaultChunkSizeBytes = static_cast<std::size_t>(std::stoull(f->second)); } catch (...) {}
+                try {
+                    cfg.defaultChunkSizeBytes = static_cast<std::size_t>(std::stoull(f->second));
+                } catch (...) {
+                }
             }
             if (auto f = dl.find("default_timeout_ms"); f != dl.end()) {
-                try { cfg.defaultTimeout = std::chrono::milliseconds(std::stoll(f->second)); } catch (...) {}
+                try {
+                    cfg.defaultTimeout = std::chrono::milliseconds(std::stoll(f->second));
+                } catch (...) {
+                }
             }
             if (auto f = dl.find("follow_redirects"); f != dl.end()) {
                 cfg.followRedirects = (f->second == "true");
@@ -1511,14 +1616,18 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
                 cfg.storeOnly = (f->second == "true");
             }
             if (auto f = dl.find("max_file_bytes"); f != dl.end()) {
-                try { cfg.maxFileBytes = static_cast<std::uint64_t>(std::stoull(f->second)); } catch (...) {}
+                try {
+                    cfg.maxFileBytes = static_cast<std::uint64_t>(std::stoull(f->second));
+                } catch (...) {
+                }
             }
         }
 
         // Determine data root (env > core.data_dir > XDG_DATA_HOME > ~/.local/share/yams)
         fs::path dataRoot;
         if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
-            if (envStorage && *envStorage) dataRoot = fs::path(envStorage);
+            if (envStorage && *envStorage)
+                dataRoot = fs::path(envStorage);
         }
         if (dataRoot.empty()) {
             if (auto it = toml.find("core"); it != toml.end()) {
@@ -1556,8 +1665,10 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
                 stagingDir = fs::path(f->second);
             }
         }
-        if (objectsDir.empty()) objectsDir = dataRoot / "storage" / "objects";
-        if (stagingDir.empty()) stagingDir = dataRoot / "storage" / "staging";
+        if (objectsDir.empty())
+            objectsDir = dataRoot / "storage" / "objects";
+        if (stagingDir.empty())
+            stagingDir = dataRoot / "storage" / "staging";
         storage.objectsDir = std::move(objectsDir);
         storage.stagingDir = std::move(stagingDir);
 
@@ -1601,8 +1712,9 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
             storage.stagingDir = staging;
         }
         if (!ensure_dir(storage.stagingDir)) {
-            co_return Error{ErrorCode::InternalError, std::string("Failed to create staging dir: ") +
-                                                       storage.stagingDir.string()};
+            co_return Error{ErrorCode::InternalError,
+                            std::string("Failed to create staging dir: ") +
+                                storage.stagingDir.string()};
         }
 
         // Optionally ensure objectsDir if provided
@@ -1611,7 +1723,7 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         }
     } catch (const std::exception& e) {
         co_return Error{ErrorCode::InternalError,
-                     std::string("Failed to prepare staging dir: ") + e.what()};
+                        std::string("Failed to prepare staging dir: ") + e.what()};
     }
 
     if (verbose) {
@@ -1673,7 +1785,8 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
             std::filesystem::path __base;
             if (const char* envStorage = std::getenv("YAMS_STORAGE"); envStorage && *envStorage) {
                 __base = std::filesystem::path(envStorage);
-            } else if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME"); xdgDataHome && *xdgDataHome) {
+            } else if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+                       xdgDataHome && *xdgDataHome) {
                 __base = std::filesystem::path(xdgDataHome) / "yams";
             } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
                 __base = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
@@ -1688,7 +1801,8 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
             __abs = __canon;
         }
         if (verbose) {
-            spdlog::debug("[MCP] post-index: resolved stored path: '{}' -> '{}'", mcp_response.storedPath, __abs.string());
+            spdlog::debug("[MCP] post-index: resolved stored path: '{}' -> '{}'",
+                          mcp_response.storedPath, __abs.string());
         }
         addReq.path = __abs.string(); // normalized absolute path
         addReq.collection = req.collection;
@@ -1756,7 +1870,8 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         // Call daemon to add/index the downloaded document
         auto addres = co_await daemon_client_->streamingAddDocument(addReq);
         if (!addres) {
-            spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'", addReq.path, addres.error().message);
+            spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
+                          addReq.path, addres.error().message);
             mcp_response.indexed = false;
         } else {
             mcp_response.indexed = true;
@@ -1767,12 +1882,6 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
 
     co_return mcp_response;
 }
-
-
-
-
-
-
 
 yams::Task<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
@@ -1822,11 +1931,13 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         }
         if (std::filesystem::is_directory(daemon_req.path, __ec)) {
             co_return Error{ErrorCode::InvalidArgument,
-                            std::string("Path is a directory (use add_directory): ") + daemon_req.path};
+                            std::string("Path is a directory (use add_directory): ") +
+                                daemon_req.path};
         }
     }
     auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPStoreDocumentResponse out;
     const auto& add = dres.value();
     out.hash = add.hash;
@@ -1834,7 +1945,6 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     out.bytesDeduped = 0;
     co_return out;
 }
-
 
 yams::Task<Result<MCPRetrieveDocumentResponse>>
 MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
@@ -1847,7 +1957,8 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.metadataOnly = !req.includeContent;
 
     auto dres = co_await daemon_client_->get(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPRetrieveDocumentResponse mcp_response;
     const auto& resp = dres.value();
     mcp_response.hash = resp.hash;
@@ -1866,9 +1977,8 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     co_return mcp_response;
 }
 
-
-
-yams::Task<Result<MCPListDocumentsResponse>> MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
+yams::Task<Result<MCPListDocumentsResponse>>
+MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
     daemon_req.namePattern = req.pattern;
@@ -1882,10 +1992,12 @@ yams::Task<Result<MCPListDocumentsResponse>> MCPServer::handleListDocuments(cons
     daemon_req.limit = req.limit > 0 ? static_cast<size_t>(req.limit) : daemon_req.limit;
     daemon_req.offset = req.offset > 0 ? req.offset : 0;
     daemon_req.sortBy = req.sortBy.empty() ? daemon_req.sortBy : req.sortBy;
-    daemon_req.reverse = (req.sortOrder == "asc") ? true : false; // ascending means reverse order in server
+    daemon_req.reverse =
+        (req.sortOrder == "asc") ? true : false; // ascending means reverse order in server
 
     auto dres = co_await daemon_client_->list(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPListDocumentsResponse out;
     const auto& lr = dres.value();
     out.total = lr.totalCount;
@@ -1909,7 +2021,8 @@ yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsReq
     daemon_req.showFileTypes = req.fileTypes;
     daemon_req.detailed = req.verbose;
     auto dres = co_await daemon_client_->getStats(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPStatsResponse out;
     const auto& resp = dres.value();
     out.totalObjects = resp.totalDocuments;
@@ -1930,7 +2043,8 @@ yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsReq
     co_return out;
 }
 
-yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
+yams::Task<Result<MCPAddDirectoryResponse>>
+MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
     daemon::AddDocumentRequest daemon_req;
     // Normalize directory path: expand '~' and make absolute using PWD for relative paths
     {
@@ -1958,8 +2072,10 @@ yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const 
     daemon_req.excludePatterns = req.excludePatterns;
     daemon_req.recursive = req.recursive;
     for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string()) daemon_req.metadata[key] = value.get<std::string>();
-        else daemon_req.metadata[key] = value.dump();
+        if (value.is_string())
+            daemon_req.metadata[key] = value.get<std::string>();
+        else
+            daemon_req.metadata[key] = value.dump();
     }
     // Increase daemon timeouts for long-running directory indexing
     daemon_client_->setHeaderTimeout(std::chrono::seconds(120));
@@ -1977,7 +2093,8 @@ yams::Task<Result<MCPAddDirectoryResponse>> MCPServer::handleAddDirectory(const 
         }
     }
     auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPAddDirectoryResponse out;
     const auto& add = dres.value();
     out.directoryPath = add.path;
@@ -1997,11 +2114,14 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     daemon_req.name = req.name;
     daemon_req.addTags = req.tags;
     for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string()) daemon_req.metadata[key] = value.get<std::string>();
-        else daemon_req.metadata[key] = value.dump();
+        if (value.is_string())
+            daemon_req.metadata[key] = value.get<std::string>();
+        else
+            daemon_req.metadata[key] = value.dump();
     }
     auto dres = co_await daemon_client_->updateDocument(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPUpdateMetadataResponse out;
     const auto& ur = dres.value();
     out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
@@ -2316,11 +2436,9 @@ json MCPServer::createReadyNotification() {
                          {"prompts", json({{"listChanged", false}})},
                          {"resources", json({{"subscribe", false}, {"listChanged", false}})},
                          {"logging", json::object()}};
-    json params = {
-        {"protocolVersion", negotiatedProtocolVersion_},
-        {"capabilities", capabilities},
-        {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}}
-    };
+    json params = {{"protocolVersion", negotiatedProtocolVersion_},
+                   {"capabilities", capabilities},
+                   {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}}};
     return json{{"jsonrpc", "2.0"}, {"method", "notifications/ready"}, {"params", params}};
 }
 
@@ -2330,7 +2448,8 @@ static json createLogNotification(const std::string& level, const std::string& m
     return json{{"jsonrpc", "2.0"}, {"method", "notifications/log"}, {"params", params}};
 }
 
-yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
+yams::Task<Result<MCPGetByNameResponse>>
+MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI robustness
     MCPGetByNameResponse mcp_response;
 
@@ -2406,21 +2525,24 @@ yams::Task<Result<MCPGetByNameResponse>> MCPServer::handleGetByName(const MCPGet
     co_return mcp_response;
 }
 
-yams::Task<Result<MCPDeleteByNameResponse>> MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
+yams::Task<Result<MCPDeleteByNameResponse>>
+MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
     daemon::DeleteRequest daemon_req;
     daemon_req.name = req.name;
     daemon_req.names = req.names;
     daemon_req.pattern = req.pattern;
     daemon_req.dryRun = req.dryRun;
     auto dres = co_await daemon_client_->remove(daemon_req);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     MCPDeleteByNameResponse out;
     out.count = 0; // Protocol returns SuccessResponse; detailed per-item results unavailable here
     out.dryRun = req.dryRun;
     co_return out;
 }
 
-yams::Task<yams::Result<yams::mcp::MCPCatDocumentResponse>> yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
+yams::Task<yams::Result<yams::mcp::MCPCatDocumentResponse>>
+yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
     MCPCatDocumentResponse out;
     yams::daemon::GetRequest dreq;
     dreq.hash = req.hash;
@@ -2428,7 +2550,8 @@ yams::Task<yams::Result<yams::mcp::MCPCatDocumentResponse>> yams::mcp::MCPServer
     dreq.byName = !req.name.empty();
     dreq.metadataOnly = false;
     auto dres = co_await daemon_client_->get(dreq);
-    if (!dres) co_return dres.error();
+    if (!dres)
+        co_return dres.error();
     const auto& r = dres.value();
     out.size = r.size;
     out.hash = r.hash;
@@ -2462,7 +2585,7 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
         auto docsResult = metadataRepo_->findDocumentsByCollection(req.collection);
         if (!docsResult) {
             co_return Error{ErrorCode::InternalError,
-                         "Failed to find collection documents: " + docsResult.error().message};
+                            "Failed to find collection documents: " + docsResult.error().message};
         }
 
         const auto& documents = docsResult.value();
@@ -2485,7 +2608,7 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
             std::filesystem::create_directories(outputDir, ec);
             if (ec) {
                 co_return Error{ErrorCode::IOError,
-                             "Failed to create output directory: " + ec.message()};
+                                "Failed to create output directory: " + ec.message()};
             }
         }
 
@@ -2623,7 +2746,7 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
     } catch (const std::exception& e) {
         spdlog::error("MCP handleRestoreCollection exception: {}", e.what());
         co_return Error{ErrorCode::InternalError,
-                     std::string("Restore collection failed: ") + e.what()};
+                        std::string("Restore collection failed: ") + e.what()};
     }
 }
 
@@ -2655,9 +2778,8 @@ void MCPServer::startThreadPool(std::size_t threads) {
                 std::function<void()> task;
                 {
                     std::unique_lock<std::mutex> lk(taskMutex_);
-                    taskCv_.wait(lk, [this]() {
-                        return stopWorkers_.load() || !taskQueue_.empty();
-                    });
+                    taskCv_.wait(lk,
+                                 [this]() { return stopWorkers_.load() || !taskQueue_.empty(); });
                     if (stopWorkers_.load() && taskQueue_.empty()) {
                         return;
                     }

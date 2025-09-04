@@ -40,8 +40,8 @@
 #include <future>
 #include <memory>
 #include <string>
-#include <type_traits>
 #include <thread>
+#include <type_traits>
 
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -60,7 +60,8 @@ namespace detail {
 // Map exceptions to a generic InternalError for plain Task<T> bridges.
 // For Task<Result<T>> bridges, we rely on the Result surface returned by the task.
 inline Error to_internal_error_from_exception(const char* what) {
-    return Error{ErrorCode::InternalError, what ? std::string(what) : std::string("Internal error")};
+    return Error{ErrorCode::InternalError,
+                 what ? std::string(what) : std::string("Internal error")};
 }
 
 } // namespace detail
@@ -73,7 +74,8 @@ template <typename T>
 inline Result<T> run_sync(Task<Result<T>> task,
                           std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
     struct TaskRunner {
-        static Task<void> run(std::shared_ptr<Task<Result<T>>> task, std::shared_ptr<std::promise<Result<T>>> promise) {
+        static Task<void> run(std::shared_ptr<Task<Result<T>>> task,
+                              std::shared_ptr<std::promise<Result<T>>> promise) {
             try {
                 auto result = co_await std::move(*task);
                 promise->set_value(std::move(result));
@@ -85,7 +87,7 @@ inline Result<T> run_sync(Task<Result<T>> task,
             co_return;
         }
     };
-    
+
     auto promise = std::make_shared<std::promise<Result<T>>>();
     auto future = promise->get_future();
     auto task_ptr = std::make_shared<Task<Result<T>>>(std::move(task));
@@ -120,10 +122,10 @@ inline Result<T> run_sync(Task<Result<T>> task,
 
 // Bridge specialization for Task<Result<void>> to make call sites simpler.
 template <>
-inline Result<void> run_sync<void>(Task<Result<void>> task,
-                                   std::chrono::milliseconds timeout) {
+inline Result<void> run_sync<void>(Task<Result<void>> task, std::chrono::milliseconds timeout) {
     struct TaskRunner {
-        static Task<void> run(std::shared_ptr<Task<Result<void>>> task, std::shared_ptr<std::promise<Result<void>>> promise) {
+        static Task<void> run(std::shared_ptr<Task<Result<void>>> task,
+                              std::shared_ptr<std::promise<Result<void>>> promise) {
             try {
                 auto result = co_await std::move(*task);
                 promise->set_value(std::move(result));
@@ -135,7 +137,7 @@ inline Result<void> run_sync<void>(Task<Result<void>> task,
             co_return;
         }
     };
-    
+
     auto promise = std::make_shared<std::promise<Result<void>>>();
     auto future = promise->get_future();
     auto task_ptr = std::make_shared<Task<Result<void>>>(std::move(task));

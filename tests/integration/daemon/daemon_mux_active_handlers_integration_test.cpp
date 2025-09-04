@@ -1,11 +1,15 @@
-#include <gtest/gtest.h>
-#include <yams/daemon/client/daemon_client.h>
-#include <yams/cli/async_bridge.h>
-#include <future>
 #include <chrono>
+#include <future>
+#include <gtest/gtest.h>
+#include <yams/cli/async_bridge.h>
+#include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;
-namespace { bool daemon_available() { return yams::daemon::DaemonClient::isDaemonRunning(); } }
+namespace {
+bool daemon_available() {
+    return yams::daemon::DaemonClient::isDaemonRunning();
+}
+} // namespace
 
 TEST(ServerMultiplexIntegrationTest, MuxActiveHandlersDuringStream) {
     if (!daemon_available()) {
@@ -18,12 +22,17 @@ TEST(ServerMultiplexIntegrationTest, MuxActiveHandlersDuringStream) {
     }
 
     yams::daemon::ClientConfig cfg;
-    cfg.requestTimeout = 10s; cfg.headerTimeout = 5s; cfg.bodyTimeout = 10s; cfg.maxInflight = 64;
+    cfg.requestTimeout = 10s;
+    cfg.headerTimeout = 5s;
+    cfg.bodyTimeout = 10s;
+    cfg.maxInflight = 64;
     yams::daemon::DaemonClient client(cfg);
 
     // Start a streaming search
     auto fut = std::async(std::launch::async, [&]() {
-        yams::daemon::SearchRequest req; req.query = "test"; req.limit = 2000;
+        yams::daemon::SearchRequest req;
+        req.query = "test";
+        req.limit = 2000;
         return yams::cli::run_sync(client.streamingSearch(req), 30s);
     });
 

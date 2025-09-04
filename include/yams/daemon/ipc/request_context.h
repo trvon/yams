@@ -3,7 +3,8 @@
 #include <atomic>
 #include <chrono>
 
-namespace yams { namespace daemon {
+namespace yams {
+namespace daemon {
 
 struct RequestContext {
     std::chrono::steady_clock::time_point start{};
@@ -13,5 +14,5 @@ struct RequestContext {
     std::atomic<size_t> bytes_enqueued{0};
 };
 
-}} // namespace yams::daemon
-
+} // namespace daemon
+} // namespace yams

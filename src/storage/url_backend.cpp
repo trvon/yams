@@ -23,7 +23,7 @@ constexpr long HTTP_NOT_FOUND = 404;
 constexpr long HTTP_CLIENT_ERROR_LO = 400;
 constexpr long HTTP_SUCCESS_LO = 200;
 constexpr long HTTP_SUCCESS_HI = 299; // inclusive upper bound
-}
+} // namespace
 
 // LRU cache for remote reads
 class LRUCache {
@@ -35,8 +35,7 @@ public:
     };
 
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    explicit LRUCache(size_t maxSize, size_t ttlSeconds)
-        : maxSize_(maxSize), ttl_(ttlSeconds) {}
+    explicit LRUCache(size_t maxSize, size_t ttlSeconds) : maxSize_(maxSize), ttl_(ttlSeconds) {}
 
     auto get(const std::string& key) -> std::optional<std::vector<std::byte>> {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -84,8 +83,8 @@ public:
         }
 
         // Add new entry
-        cache_[key] =
-            CacheEntry{.data = data, .timestamp = std::chrono::steady_clock::now(), .size = data.size()};
+        cache_[key] = CacheEntry{
+            .data = data, .timestamp = std::chrono::steady_clock::now(), .size = data.size()};
         currentSize_ += data.size();
         accessOrder_.push_front(key);
     }
@@ -145,7 +144,9 @@ public:
     std::string lastError;
 
     // Retry helpers
-    static auto isRetryable(const Error& err) -> bool { return err.code == ErrorCode::NetworkError; }
+    static auto isRetryable(const Error& err) -> bool {
+        return err.code == ErrorCode::NetworkError;
+    }
 
     void backoff(int attempt) const {
         int delay = static_cast<int>(config.baseRetryMs) * (1 << attempt);
@@ -531,8 +532,7 @@ auto URLBackend::exists(std::string_view key) const -> Result<bool> {
     if (status >= HTTP_SUCCESS_LO && status <= HTTP_SUCCESS_HI) {
         return true;
     }
-    return {Error{ErrorCode::NetworkError,
-                  "HEAD unexpected status: " + std::to_string(status)}};
+    return {Error{ErrorCode::NetworkError, "HEAD unexpected status: " + std::to_string(status)}};
 }
 
 auto URLBackend::remove(std::string_view key) -> Result<void> {
@@ -557,8 +557,8 @@ auto URLBackend::getStats() const -> Result<::yams::StorageStats> {
     return stats;
 }
 
-auto URLBackend::storeAsync(std::string_view key,
-                            std::span<const std::byte> data) -> std::future<Result<void>> {
+auto URLBackend::storeAsync(std::string_view key, std::span<const std::byte> data)
+    -> std::future<Result<void>> {
     return std::async(
         std::launch::async,
         [this, key = std::string(key), data = std::vector<std::byte>(data.begin(), data.end())]() {

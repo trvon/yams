@@ -467,11 +467,13 @@ private:
         if (const char* s = std::getenv("YAMS_COMPRESSION_WORKERS")) {
             try {
                 long v = std::strtol(s, nullptr, 10);
-                if (v > 0) numWorkers = static_cast<size_t>(v);
+                if (v > 0)
+                    numWorkers = static_cast<size_t>(v);
             } catch (...) {
             }
         }
-        if (numWorkers > 64) numWorkers = 64;
+        if (numWorkers > 64)
+            numWorkers = 64;
 
         for (size_t i = 0; i < numWorkers; ++i) {
             workers_.emplace_back([this] { asyncWorker(); });

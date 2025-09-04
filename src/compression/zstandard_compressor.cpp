@@ -92,11 +92,11 @@ public:
         compResult.compressedSize = result;
         compResult.duration = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
 
-        spdlog::debug("Zstandard compressed {} bytes to {} bytes (ratio: {:.2f}x) in {}μs",
-                      data.size(), result,
-                      (result > 0 ? static_cast<double>(data.size()) / static_cast<double>(result)
-                                   : 0.0),
-                      duration.count());
+        spdlog::debug(
+            "Zstandard compressed {} bytes to {} bytes (ratio: {:.2f}x) in {}μs", data.size(),
+            result,
+            (result > 0 ? static_cast<double>(data.size()) / static_cast<double>(result) : 0.0),
+            duration.count());
 
         return compResult;
     }
@@ -221,8 +221,8 @@ public:
         }
 
         // Initialize stream
-        const size_t initResult = ZSTD_initCStream(
-            cstream.get(), level_ == 0 ? ZSTD_DEFAULT_COMPRESSION_LEVEL : level_);
+        const size_t initResult =
+            ZSTD_initCStream(cstream.get(), level_ == 0 ? ZSTD_DEFAULT_COMPRESSION_LEVEL : level_);
         if (ZSTD_isError(initResult)) {
             spdlog::error("Failed to initialize compression stream: {}",
                           ZSTD_getErrorName(initResult));

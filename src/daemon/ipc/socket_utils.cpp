@@ -1,10 +1,10 @@
 #include <yams/daemon/ipc/socket_utils.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <algorithm>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -16,17 +16,20 @@ namespace fs = std::filesystem;
 
 static inline fs::path get_xdg_runtime_dir() {
     if (const char* p = std::getenv("XDG_RUNTIME_DIR")) {
-        if (*p) return fs::path(p);
+        if (*p)
+            return fs::path(p);
     }
     return {};
 }
 
 static inline bool can_write_dir(const fs::path& dir) {
-    if (!fs::exists(dir)) return false;
+    if (!fs::exists(dir))
+        return false;
     std::error_code ec;
     auto probe = dir / ".yams-writable-probe";
     std::ofstream f(probe);
-    if (!f.good()) return false;
+    if (!f.good())
+        return false;
     f << "ok";
     f.close();
     fs::remove(probe, ec);
@@ -39,7 +42,8 @@ std::filesystem::path resolve_socket_path() {
 #else
     // 1) Explicit environment override
     if (const char* env = std::getenv("YAMS_DAEMON_SOCKET")) {
-        if (*env) return fs::path(env);
+        if (*env)
+            return fs::path(env);
     }
     // 2) Root vs user defaults
     bool is_root = (::geteuid() == 0);
@@ -61,7 +65,8 @@ std::filesystem::path resolve_socket_path_config_first() {
 #else
     // 1) Env override wins
     if (const char* env = std::getenv("YAMS_DAEMON_SOCKET")) {
-        if (*env) return fs::path(env);
+        if (*env)
+            return fs::path(env);
     }
     // 2) config.toml if present
     try {
@@ -78,28 +83,42 @@ std::filesystem::path resolve_socket_path_config_first() {
                 bool inDaemon = false;
                 auto trim = [](std::string s) {
                     auto issp = [](unsigned char c) { return std::isspace(c); };
-                    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c) { return !issp(c); }));
-                    s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c) { return !issp(c); }).base(), s.end());
+                    s.erase(s.begin(), std::find_if(s.begin(), s.end(),
+                                                    [&](unsigned char c) { return !issp(c); }));
+                    s.erase(std::find_if(s.rbegin(), s.rend(),
+                                         [&](unsigned char c) { return !issp(c); })
+                                .base(),
+                            s.end());
                     return s;
                 };
                 while (std::getline(in, line)) {
                     line = trim(line);
-                    if (line.empty() || line[0] == '#') continue;
-                    if (line.rfind("[daemon]", 0) == 0) { inDaemon = true; continue; }
-                    if (inDaemon && !line.empty() && line[0] == '[') { inDaemon = false; }
-                    if (!inDaemon) continue;
+                    if (line.empty() || line[0] == '#')
+                        continue;
+                    if (line.rfind("[daemon]", 0) == 0) {
+                        inDaemon = true;
+                        continue;
+                    }
+                    if (inDaemon && !line.empty() && line[0] == '[') {
+                        inDaemon = false;
+                    }
+                    if (!inDaemon)
+                        continue;
                     const std::string key = "socket_path";
                     auto pos = line.find(key);
-                    if (pos == std::string::npos) continue;
+                    if (pos == std::string::npos)
+                        continue;
                     auto eq = line.find('=', pos + key.size());
-                    if (eq == std::string::npos) continue;
+                    if (eq == std::string::npos)
+                        continue;
                     std::string rhs = trim(line.substr(eq + 1));
                     if (!rhs.empty() && (rhs.front() == '"' || rhs.front() == '\'')) {
                         char q = rhs.front();
                         auto endq = rhs.find_last_of(q);
                         if (endq != std::string::npos && endq > 0) {
                             std::string val = rhs.substr(1, endq - 1);
-                            if (!val.empty()) return fs::path(val);
+                            if (!val.empty())
+                                return fs::path(val);
                         }
                     } else if (!rhs.empty()) {
                         return fs::path(rhs);
@@ -116,4 +135,3 @@ std::filesystem::path resolve_socket_path_config_first() {
 }
 
 } // namespace yams::daemon::socket_utils
-

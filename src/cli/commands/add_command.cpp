@@ -17,8 +17,8 @@
 // App services for service-based architecture
 #include <yams/app/services/services.hpp>
 // Daemon client API for daemon-first add
-#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -161,7 +161,8 @@ public:
                         auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
                         if (result) {
                             auto r = render(result.value());
-                            if (!r) return r.error();
+                            if (!r)
+                                return r.error();
                             any_daemon_ok = true;
                             continue;
                         }
@@ -169,8 +170,8 @@ public:
                         // fall through to fallback
                     }
                 }
-                if (any_daemon_ok && (targetPaths_.empty() ||
-                                      (targetPaths_.size() == 1 && targetPaths_[0].string() != "-"))) {
+                if (any_daemon_ok && (targetPaths_.empty() || (targetPaths_.size() == 1 &&
+                                                               targetPaths_[0].string() != "-"))) {
                     return Result<void>();
                 }
             }

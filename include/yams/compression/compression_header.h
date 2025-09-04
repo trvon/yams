@@ -107,8 +107,8 @@ struct CompressionHeader {
      * @param compressedCRC CRC32 of compressed data
      * @return Initialized header
      */
-    [[nodiscard]] static CompressionHeader
-    fromResult(const CompressionResult& result, std::pair<uint32_t, uint32_t> crcs);
+    [[nodiscard]] static CompressionHeader fromResult(const CompressionResult& result,
+                                                      std::pair<uint32_t, uint32_t> crcs);
 };
 #pragma pack(pop) // Restore default packing
 

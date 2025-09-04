@@ -1,14 +1,15 @@
+#include <sstream>
 #include <gtest/gtest.h>
 #include <yams/chunking/chunker.h>
 #include <yams/chunking/streaming_chunker.h>
-#include <sstream>
 
 using namespace yams::chunking;
 
 static std::vector<std::byte> make_bytes(size_t n, uint8_t value = 0xAB) {
     std::vector<std::byte> v;
     v.resize(n);
-    for (size_t i = 0; i < n; ++i) v[i] = std::byte{value};
+    for (size_t i = 0; i < n; ++i)
+        v[i] = std::byte{value};
     return v;
 }
 
@@ -92,10 +93,11 @@ TEST(RabinChunkerTest, StreamingMatchesNonStreamingForFixedSize) {
     std::vector<ChunkRef> refs;
     std::string s(reinterpret_cast<const char*>(data.data()), data.size());
     std::istringstream iss(s);
-    auto res = static_cast<StreamingChunker*>(streamer.get())->processStream(
-        iss,
-        data.size(),
-        [&](const ChunkRef& ref, std::span<const std::byte>) { refs.push_back(ref); });
+    auto res =
+        static_cast<StreamingChunker*>(streamer.get())
+            ->processStream(iss, data.size(), [&](const ChunkRef& ref, std::span<const std::byte>) {
+                refs.push_back(ref);
+            });
     ASSERT_TRUE(res.has_value());
 
     ASSERT_EQ(refs.size(), nonstream.size());

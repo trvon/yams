@@ -474,7 +474,9 @@ public:
     }
 
     std::string
-    exportTransactionLog([[maybe_unused]] std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point> range) const {
+    exportTransactionLog([[maybe_unused]] std::pair<std::chrono::system_clock::time_point,
+                                                    std::chrono::system_clock::time_point>
+                             range) const {
         std::shared_lock lock(txMutex_);
 
         std::ostringstream oss;
@@ -765,8 +767,9 @@ void TransactionManager::resetStats() {
     pImpl->resetStats();
 }
 
-std::string
-TransactionManager::exportTransactionLog(std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point> range) const {
+std::string TransactionManager::exportTransactionLog(
+    std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point> range)
+    const {
     return pImpl->exportTransactionLog(range);
 }
 

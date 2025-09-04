@@ -1194,7 +1194,8 @@ public:
                 return false;
             }
 
-            // Verify daemon is responsive via DaemonClient, then request model preload (non-fatal on error)
+            // Verify daemon is responsive via DaemonClient, then request model preload (non-fatal
+            // on error)
             auto st = yams::cli::run_sync(daemon_client_->status(), std::chrono::seconds(5));
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
@@ -1204,7 +1205,8 @@ public:
                 daemon::LoadModelRequest req;
                 req.modelName = config_.model_name;
                 req.preload = true;
-                auto lm = yams::cli::run_sync(daemon_client_->loadModel(req), std::chrono::seconds(10));
+                auto lm =
+                    yams::cli::run_sync(daemon_client_->loadModel(req), std::chrono::seconds(10));
                 if (!lm) {
                     spdlog::warn("Failed to preload model in daemon: {}", lm.error().message);
                 }

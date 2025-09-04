@@ -11,8 +11,8 @@ namespace yamsfmt = fmt;
 
 #include <algorithm>
 #include <fstream>
-#include <unordered_set>
 #include <limits>
+#include <unordered_set>
 
 namespace yams::chunking {
 
@@ -42,8 +42,12 @@ struct RabinTables {
     }
 
 private:
-    struct ExpTag { size_t v; };
-    struct PolyTag { uint64_t v; };
+    struct ExpTag {
+        size_t v;
+    };
+    struct PolyTag {
+        uint64_t v;
+    };
     static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
         uint64_t result = 1;
         base %= poly.v;
@@ -133,7 +137,7 @@ std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
         chunk.offset = pos;
         chunk.size = chunkSize;
         chunk.data.assign(data.begin() + static_cast<std::ptrdiff_t>(pos),
-                           data.begin() + static_cast<std::ptrdiff_t>(chunkEnd));
+                          data.begin() + static_cast<std::ptrdiff_t>(chunkEnd));
         chunk.hash = pImpl->hasher->hash(chunk.data);
 
         chunks.push_back(std::move(chunk));

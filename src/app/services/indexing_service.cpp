@@ -26,11 +26,13 @@ public:
             std::vector<std::filesystem::directory_entry> entries;
             if (req.recursive) {
                 for (const auto& entry : std::filesystem::recursive_directory_iterator(dirPath)) {
-                    if (entry.is_regular_file()) entries.push_back(entry);
+                    if (entry.is_regular_file())
+                        entries.push_back(entry);
                 }
             } else {
                 for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
-                    if (entry.is_regular_file()) entries.push_back(entry);
+                    if (entry.is_regular_file())
+                        entries.push_back(entry);
                 }
             }
 
@@ -42,7 +44,8 @@ public:
             auto workerFn = [&]() {
                 while (true) {
                     size_t i = idx.fetch_add(1);
-                    if (i >= entries.size()) break;
+                    if (i >= entries.size())
+                        break;
                     AddDirectoryResponse localResp; // partial counts
                     processDirectoryEntry(entries[i], req, localResp);
                     // Merge local results into shared response
@@ -51,12 +54,16 @@ public:
                     response.filesIndexed += localResp.filesIndexed;
                     response.filesSkipped += localResp.filesSkipped;
                     response.filesFailed += localResp.filesFailed;
-                    for (auto& r : localResp.results) response.results.push_back(std::move(r));
+                    for (auto& r : localResp.results)
+                        response.results.push_back(std::move(r));
                 }
             };
-            std::vector<std::thread> threads; threads.reserve(workers);
-            for (size_t t = 0; t < workers; ++t) threads.emplace_back(workerFn);
-            for (auto& th : threads) th.join();
+            std::vector<std::thread> threads;
+            threads.reserve(workers);
+            for (size_t t = 0; t < workers; ++t)
+                threads.emplace_back(workerFn);
+            for (auto& th : threads)
+                th.join();
 
             return response;
         } catch (const std::exception& e) {

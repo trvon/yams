@@ -50,10 +50,10 @@ struct CompressionResult {
      * @return Percentage of space saved
      */
     [[nodiscard]] double spaceSaved() const noexcept {
-        return originalSize > 0
-                   ? (1.0 - static_cast<double>(compressedSize) / static_cast<double>(originalSize)) *
-                         100.0
-                   : 0.0;
+        return originalSize > 0 ? (1.0 - static_cast<double>(compressedSize) /
+                                             static_cast<double>(originalSize)) *
+                                      100.0
+                                : 0.0;
     }
 };
 

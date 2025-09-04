@@ -4,8 +4,8 @@
 #include <string>
 #include <variant>
 
-#include <yams/plugins/object_storage_v1.h>
 #include <yams/plugins/object_storage_iface.hpp>
+#include <yams/plugins/object_storage_v1.h>
 
 namespace yams::plugins::adapter {
 
@@ -14,7 +14,8 @@ std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* v1_ifa
 
 // Expose a C ABI v1 struct from a C++ IObjectStorageBackend implementation.
 // The returned struct holds function pointers that forward into the C++ object.
-// Lifetime: caller owns the returned struct; destroy() will delete the wrapper and release the impl.
+// Lifetime: caller owns the returned struct; destroy() will delete the wrapper and release the
+// impl.
 yams_object_storage_v1* expose_as_c_abi(std::shared_ptr<IObjectStorageBackend> impl);
 
 // Utility: serialize/deserialize options/metadata to/from JSON for C ABI calls.
@@ -27,4 +28,3 @@ PutOptions parse_put_options(const char* json);
 GetOptions parse_get_options(const char* json);
 
 } // namespace yams::plugins::adapter
-

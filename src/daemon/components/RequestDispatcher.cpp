@@ -17,13 +17,13 @@
 #include <yams/common/name_resolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
-#include <yams/daemon/ipc/mux_metrics_registry.h>
-#include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
-#include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/ipc/request_context_registry.h>
+#include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/document_metadata.h>
@@ -111,9 +111,9 @@ RequestDispatcher::~RequestDispatcher() = default;
 
 Response RequestDispatcher::dispatch(const Request& req) {
     // Check lifecycle state for all non-status requests
-    bool is_status_or_ping = std::holds_alternative<StatusRequest>(req) ||
-                            std::holds_alternative<PingRequest>(req);
-    
+    bool is_status_or_ping =
+        std::holds_alternative<StatusRequest>(req) || std::holds_alternative<PingRequest>(req);
+
     if (!is_status_or_ping) {
         auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
         if (lifecycleSnapshot.state != LifecycleState::Ready &&
@@ -125,7 +125,7 @@ Response RequestDispatcher::dispatch(const Request& req) {
             return handleStatusRequest(statusReq);
         }
     }
-    
+
     // For requests that need services, check readiness.
     bool needs_services = !std::holds_alternative<StatusRequest>(req) &&
                           !std::holds_alternative<ShutdownRequest>(req) &&
@@ -676,8 +676,8 @@ Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& r
             response.path = req.path;
             response.documentsAdded = static_cast<size_t>(serviceResp.filesProcessed);
 
-            // Note: For directory operations, individual files are notified via the indexing service
-            // No need to notify here as it would be redundant
+            // Note: For directory operations, individual files are notified via the indexing
+            // service No need to notify here as it would be redundant
 
             return response;
         } else {
@@ -894,18 +894,23 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
 
     // Very simple glob-like filter for include/exclude patterns (*)
     auto matches_any = [](const std::string& text, const std::vector<std::string>& patterns) {
-        if (patterns.empty()) return true; // no include patterns => include all
+        if (patterns.empty())
+            return true; // no include patterns => include all
         for (const auto& pat : patterns) {
             // Convert '*' to '.*' regex; escape dots
             std::string rx;
             rx.reserve(pat.size() * 2);
             for (char c : pat) {
-                if (c == '*') rx += ".*";
-                else if (c == '.') rx += "\\.";
-                else rx += c;
+                if (c == '*')
+                    rx += ".*";
+                else if (c == '.')
+                    rx += "\\.";
+                else
+                    rx += c;
             }
             try {
-                if (std::regex_match(text, std::regex(rx))) return true;
+                if (std::regex_match(text, std::regex(rx)))
+                    return true;
             } catch (...) {
                 // On invalid pattern, skip
             }
@@ -918,12 +923,16 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
             std::string rx;
             rx.reserve(pat.size() * 2);
             for (char c : pat) {
-                if (c == '*') rx += ".*";
-                else if (c == '.') rx += "\\.";
-                else rx += c;
+                if (c == '*')
+                    rx += ".*";
+                else if (c == '.')
+                    rx += "\\.";
+                else
+                    rx += c;
             }
             try {
-                if (std::regex_match(text, std::regex(rx))) return false;
+                if (std::regex_match(text, std::regex(rx)))
+                    return false;
             } catch (...) {
             }
         }
@@ -935,8 +944,10 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
     filtered.reserve(files.size());
     for (const auto& p : files) {
         const std::string name = p.filename().string();
-        if (!matches_any(name, req.includePatterns)) continue; // if includePatterns present
-        if (!matches_none(name, req.excludePatterns)) continue; // excluded
+        if (!matches_any(name, req.includePatterns))
+            continue; // if includePatterns present
+        if (!matches_none(name, req.excludePatterns))
+            continue; // excluded
         filtered.push_back(p);
     }
 
@@ -954,7 +965,8 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
     auto worker = [&]() {
         for (;;) {
             size_t i = index.fetch_add(1);
-            if (i >= filtered.size()) break;
+            if (i >= filtered.size())
+                break;
             const auto& path = filtered[i];
 
             AddDocumentRequest fileReq = req;
@@ -975,7 +987,8 @@ RequestDispatcher::handleDirectoryAdd(const std::filesystem::path& dirPath,
     for (unsigned i = 0; i < workers; ++i) {
         threads.emplace_back(worker);
     }
-    for (auto& t : threads) t.join();
+    for (auto& t : threads)
+        t.join();
 
     return static_cast<size_t>(added.load());
 }
@@ -1269,7 +1282,8 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         auto indexedCountResult = metadataRepo->getIndexedDocumentCount();
         size_t indexedCount = indexedCountResult ? indexedCountResult.value() : 0;
 
-        // Create stats response. Prefer content store object count when available; fall back to metadata.
+        // Create stats response. Prefer content store object count when available; fall back to
+        // metadata.
         GetStatsResponse response;
         const size_t storeDocCount = static_cast<size_t>(storeStats.totalObjects);
         response.totalDocuments = (storeDocCount > 0) ? storeDocCount : metaDocCount;
@@ -1362,19 +1376,22 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             size_t pending = response.totalDocuments - response.indexedDocuments;
             response.additionalStats["extraction_pending"] = std::to_string(pending);
             response.additionalStats["documents_total"] = std::to_string(response.totalDocuments);
-            response.additionalStats["documents_extracted"] = std::to_string(response.indexedDocuments);
+            response.additionalStats["documents_extracted"] =
+                std::to_string(response.indexedDocuments);
         }
         // Precise counts by extraction status (if available)
         try {
             auto pendingCount = metadataRepo->getDocumentCountByExtractionStatus(
                 metadata::ExtractionStatus::Pending);
             if (pendingCount) {
-                response.additionalStats["extraction_queue_size"] = std::to_string(pendingCount.value());
+                response.additionalStats["extraction_queue_size"] =
+                    std::to_string(pendingCount.value());
             }
             auto failedCount = metadataRepo->getDocumentCountByExtractionStatus(
                 metadata::ExtractionStatus::Failed);
             if (failedCount) {
-                response.additionalStats["extraction_failed_count"] = std::to_string(failedCount.value());
+                response.additionalStats["extraction_failed_count"] =
+                    std::to_string(failedCount.value());
             }
         } catch (...) {
             // best effort
@@ -1605,7 +1622,8 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         {
             auto ssnap = StreamMetricsRegistry::instance().snapshot();
             response.additionalStats["stream_total_streams"] = std::to_string(ssnap.totalStreams);
-            response.additionalStats["stream_batches_emitted"] = std::to_string(ssnap.batchesEmitted);
+            response.additionalStats["stream_batches_emitted"] =
+                std::to_string(ssnap.batchesEmitted);
             response.additionalStats["stream_keepalives"] = std::to_string(ssnap.keepalives);
             uint64_t avg = (ssnap.ttfbCount > 0) ? (ssnap.ttfbSumMs / ssnap.ttfbCount) : 0;
             response.additionalStats["stream_ttfb_avg_ms"] = std::to_string(avg);
@@ -1727,7 +1745,9 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
         // Map app::services::GrepResponse to daemon GrepResponse with default cap
         const std::size_t defaultCap = 20;
         // Do not cap when special output modes are requested; emit full set (including semantic)
-        const bool applyDefaultCap = !(req.countOnly || req.filesOnly || req.filesWithoutMatch || req.pathsOnly) && req.maxMatches == 0;
+        const bool applyDefaultCap =
+            !(req.countOnly || req.filesOnly || req.filesWithoutMatch || req.pathsOnly) &&
+            req.maxMatches == 0;
 
         GrepResponse response;
         response.filesSearched = serviceResp.filesSearched;
@@ -1735,7 +1755,8 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
 
         for (const auto& fileResult : serviceResp.results) {
             for (const auto& match : fileResult.matches) {
-                if (applyDefaultCap && emitted >= defaultCap) break;
+                if (applyDefaultCap && emitted >= defaultCap)
+                    break;
                 GrepMatch daemonMatch;
                 daemonMatch.file = fileResult.file;
                 daemonMatch.lineNumber = match.lineNumber;
@@ -1747,7 +1768,8 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
                 response.matches.push_back(std::move(daemonMatch));
                 emitted++;
             }
-            if (applyDefaultCap && emitted >= defaultCap) break;
+            if (applyDefaultCap && emitted >= defaultCap)
+                break;
         }
 
         // Totals: reflect emitted matches if default cap applied

@@ -3,7 +3,8 @@
 #include <atomic>
 #include <cstdint>
 
-namespace yams { namespace daemon {
+namespace yams {
+namespace daemon {
 
 class StreamMetricsRegistry {
 public:
@@ -20,9 +21,15 @@ public:
         return g;
     }
 
-    inline void incStreams(uint64_t n = 1) noexcept { totalStreams_.fetch_add(n, std::memory_order_relaxed); }
-    inline void incBatches(uint64_t n = 1) noexcept { batchesEmitted_.fetch_add(n, std::memory_order_relaxed); }
-    inline void incKeepalive(uint64_t n = 1) noexcept { keepalives_.fetch_add(n, std::memory_order_relaxed); }
+    inline void incStreams(uint64_t n = 1) noexcept {
+        totalStreams_.fetch_add(n, std::memory_order_relaxed);
+    }
+    inline void incBatches(uint64_t n = 1) noexcept {
+        batchesEmitted_.fetch_add(n, std::memory_order_relaxed);
+    }
+    inline void incKeepalive(uint64_t n = 1) noexcept {
+        keepalives_.fetch_add(n, std::memory_order_relaxed);
+    }
     inline void addTtfb(uint64_t ms) noexcept {
         ttfbSumMs_.fetch_add(ms, std::memory_order_relaxed);
         ttfbCount_.fetch_add(1, std::memory_order_relaxed);
@@ -54,5 +61,5 @@ private:
     std::atomic<uint64_t> ttfbSumMs_{0};
 };
 
-}} // namespace yams::daemon
-
+} // namespace daemon
+} // namespace yams

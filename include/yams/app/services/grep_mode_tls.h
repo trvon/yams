@@ -14,4 +14,3 @@ void set_grep_mode_tls(GrepExecMode mode) noexcept;
 GrepExecMode get_grep_mode_tls() noexcept;
 
 } // namespace yams::app::services
-

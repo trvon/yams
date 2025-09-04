@@ -3,8 +3,8 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/daemon/client/daemon_client.h>
 #include <yams/core/types.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/tool_registry.h>
 #include <yams/metadata/metadata_repository.h>
@@ -14,12 +14,12 @@
 
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <iosfwd>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
-#include <deque>
 #include <regex>
 #include <string>
 #include <thread>
@@ -149,7 +149,8 @@ public:
     testHandleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         return handleRetrieveDocument(req);
     }
-    yams::Task<Result<MCPListDocumentsResponse>> testHandleListDocuments(const MCPListDocumentsRequest& req) {
+    yams::Task<Result<MCPListDocumentsResponse>>
+    testHandleListDocuments(const MCPListDocumentsRequest& req) {
         return handleListDocuments(req);
     }
     yams::Task<Result<MCPStatsResponse>> testHandleGetStats(const MCPStatsRequest& req) {
@@ -162,22 +163,30 @@ private:
     yams::Task<Result<MCPSearchResponse>> handleSearchDocuments(const MCPSearchRequest& req);
     yams::Task<Result<MCPGrepResponse>> handleGrepDocuments(const MCPGrepRequest& req);
     yams::Task<Result<MCPDownloadResponse>> handleDownload(const MCPDownloadRequest& req);
-    yams::Task<Result<MCPStoreDocumentResponse>> handleStoreDocument(const MCPStoreDocumentRequest& req);
+    yams::Task<Result<MCPStoreDocumentResponse>>
+    handleStoreDocument(const MCPStoreDocumentRequest& req);
     yams::Task<Result<MCPRetrieveDocumentResponse>>
     handleRetrieveDocument(const MCPRetrieveDocumentRequest& req);
-    yams::Task<Result<MCPListDocumentsResponse>> handleListDocuments(const MCPListDocumentsRequest& req);
+    yams::Task<Result<MCPListDocumentsResponse>>
+    handleListDocuments(const MCPListDocumentsRequest& req);
     yams::Task<Result<MCPStatsResponse>> handleGetStats(const MCPStatsRequest& req);
-    yams::Task<Result<MCPAddDirectoryResponse>> handleAddDirectory(const MCPAddDirectoryRequest& req);
+    yams::Task<Result<MCPAddDirectoryResponse>>
+    handleAddDirectory(const MCPAddDirectoryRequest& req);
 
     yams::Task<Result<MCPGetByNameResponse>> handleGetByName(const MCPGetByNameRequest& req);
-    yams::Task<Result<MCPDeleteByNameResponse>> handleDeleteByName(const MCPDeleteByNameRequest& req);
+    yams::Task<Result<MCPDeleteByNameResponse>>
+    handleDeleteByName(const MCPDeleteByNameRequest& req);
     yams::Task<Result<MCPCatDocumentResponse>> handleCatDocument(const MCPCatDocumentRequest& req);
-    yams::Task<Result<MCPUpdateMetadataResponse>> handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
+    yams::Task<Result<MCPUpdateMetadataResponse>>
+    handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
     yams::Task<Result<MCPRestoreCollectionResponse>>
     handleRestoreCollection(const MCPRestoreCollectionRequest& req);
-    yams::Task<Result<MCPRestoreSnapshotResponse>> handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
-    yams::Task<Result<MCPListCollectionsResponse>> handleListCollections(const MCPListCollectionsRequest& req);
-    yams::Task<Result<MCPListSnapshotsResponse>> handleListSnapshots(const MCPListSnapshotsRequest& req);
+    yams::Task<Result<MCPRestoreSnapshotResponse>>
+    handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
+    yams::Task<Result<MCPListCollectionsResponse>>
+    handleListCollections(const MCPListCollectionsRequest& req);
+    yams::Task<Result<MCPListSnapshotsResponse>>
+    handleListSnapshots(const MCPListSnapshotsRequest& req);
 
     // Legacy JSON-based tool implementations (for gradual migration)
     json storeDocument(const json& args);

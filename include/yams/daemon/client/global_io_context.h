@@ -1,8 +1,8 @@
 #pragma once
 
 #include <thread>
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
 
 namespace yams::daemon {
 

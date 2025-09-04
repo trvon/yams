@@ -27,10 +27,10 @@ TEST(RepairCoordinatorTest, ProcessesDocumentEventsWhenEnabled) {
     // Simulate document additions
     RepairCoordinator::DocumentAddedEvent event1{"hash1", "/path/to/doc1"};
     RepairCoordinator::DocumentAddedEvent event2{"hash2", "/path/to/doc2"};
-    
+
     rc.onDocumentAdded(event1);
     rc.onDocumentAdded(event2);
-    
+
     // Give the coordinator time to process
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -60,7 +60,7 @@ TEST(RepairCoordinatorTest, DoesNothingWhenDisabled) {
     // Try to add documents - should be ignored
     RepairCoordinator::DocumentAddedEvent event{"hash1", "/path/to/doc1"};
     rc.onDocumentAdded(event);
-    
+
     // Give a moment to ensure nothing happens
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 

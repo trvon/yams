@@ -189,9 +189,10 @@ public:
             result.type = type;
             result.originalSize = decompressed.size();
             result.compressedSize = compressed.size();
-            result.compressionRatio =
-                decompressed.empty() ? 0.0
-                                     : static_cast<double>(decompressed.size()) / static_cast<double>(compressed.size());
+            result.compressionRatio = decompressed.empty()
+                                          ? 0.0
+                                          : static_cast<double>(decompressed.size()) /
+                                                static_cast<double>(compressed.size());
 
             uint32_t decompressedChecksum = calculateChecksum(decompressed);
             result.validationChecksum = decompressedChecksum;
@@ -367,7 +368,8 @@ public:
         for (const auto& [type, count] : validationStats_) {
             total += count;
         }
-        return total > 0 ? static_cast<double>(validationFailures_) / static_cast<double>(total) : 0.0;
+        return total > 0 ? static_cast<double>(validationFailures_) / static_cast<double>(total)
+                         : 0.0;
     }
 
     void resetStats() {

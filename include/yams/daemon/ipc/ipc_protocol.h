@@ -884,9 +884,10 @@ struct ListRequest {
     std::string sortBy = "date";  // "name" | "size" | "date" | "hash"
 
     // File type filters
-    std::string fileType;    // "image" | "document" | "archive" | "audio" | "video" | "text" | "executable" | "binary"
-    std::string mimeType;    // MIME type filter
-    std::string extensions;  // comma-separated extensions
+    std::string fileType;   // "image" | "document" | "archive" | "audio" | "video" | "text" |
+                            // "executable" | "binary"
+    std::string mimeType;   // MIME type filter
+    std::string extensions; // comma-separated extensions
 
     // Time filters (ISO 8601, relative, or natural language)
     std::string createdAfter;
@@ -901,18 +902,18 @@ struct ListRequest {
     std::string changeWindow = "24h";
 
     // Tag filtering (continued)
-    std::string filterTags;    // comma-separated tag filter
+    std::string filterTags; // comma-separated tag filter
 
     // Name pattern filtering
     std::string namePattern; // glob pattern for file name/path matching
 
     // 32-bit integral fields
     int offset = 0;
-    int recentCount = 0;   // 0 means not set, show all
+    int recentCount = 0; // 0 means not set, show all
     int snippetLength = 50;
 
     // Booleans last
-    bool recent = true;        // backward compatibility
+    bool recent = true; // backward compatibility
     bool reverse = false;
     bool verbose = false;
     bool showSnippets = true;
@@ -920,7 +921,7 @@ struct ListRequest {
     bool showTags = true;
     bool groupBySession = false;
     bool noSnippets = false;
-    bool pathsOnly = false;    // Output only file paths
+    bool pathsOnly = false; // Output only file paths
     bool binaryOnly = false;
     bool textOnly = false;
     bool showChanges = false;
@@ -1198,12 +1199,16 @@ struct CancelRequest {
     uint64_t targetRequestId{0};
     template <typename Serializer>
     requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const { ser << targetRequestId; }
+    void serialize(Serializer& ser) const {
+        ser << targetRequestId;
+    }
     template <typename Deserializer>
     requires IsDeserializer<Deserializer>
     static Result<CancelRequest> deserialize(Deserializer& deser) {
-        CancelRequest r; auto v = deser.template read<uint64_t>();
-        if (!v) return v.error();
+        CancelRequest r;
+        auto v = deser.template read<uint64_t>();
+        if (!v)
+            return v.error();
         r.targetRequestId = v.value();
         return r;
     }
@@ -2268,12 +2273,11 @@ struct StatusResponse {
     void serialize(Serializer& ser) const {
         ser << running << ready << static_cast<uint64_t>(uptimeSeconds)
             << static_cast<uint64_t>(requestsProcessed) << static_cast<uint64_t>(activeConnections)
-            << memoryUsageMb << cpuUsagePercent << version
-            << static_cast<uint64_t>(fsmTransitions) << static_cast<uint64_t>(fsmHeaderReads)
-            << static_cast<uint64_t>(fsmPayloadReads) << static_cast<uint64_t>(fsmPayloadWrites)
-            << static_cast<uint64_t>(fsmBytesSent) << static_cast<uint64_t>(fsmBytesReceived)
-            << static_cast<uint64_t>(muxActiveHandlers) << static_cast<int64_t>(muxQueuedBytes)
-            << static_cast<uint64_t>(muxWriterBudgetBytes);
+            << memoryUsageMb << cpuUsagePercent << version << static_cast<uint64_t>(fsmTransitions)
+            << static_cast<uint64_t>(fsmHeaderReads) << static_cast<uint64_t>(fsmPayloadReads)
+            << static_cast<uint64_t>(fsmPayloadWrites) << static_cast<uint64_t>(fsmBytesSent)
+            << static_cast<uint64_t>(fsmBytesReceived) << static_cast<uint64_t>(muxActiveHandlers)
+            << static_cast<int64_t>(muxQueuedBytes) << static_cast<uint64_t>(muxWriterBudgetBytes);
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -3260,7 +3264,7 @@ struct Message {
     // Optional fields
     std::optional<std::string> sessionId;
     std::optional<std::string> clientVersion;
-    
+
     // Streaming preference - client indicates if it expects chunked/streaming response
     bool expectsStreamingResponse = false;
 };
@@ -3270,8 +3274,9 @@ struct Message {
 // ============================================================================
 
 constexpr uint32_t PROTOCOL_VERSION = 1;
-constexpr size_t MAX_MESSAGE_SIZE = static_cast<size_t>(16) * static_cast<size_t>(1024) * static_cast<size_t>(1024); // 16MB
-constexpr size_t HEADER_SIZE = 16;                    // version(4) + size(4) + requestId(8)
+constexpr size_t MAX_MESSAGE_SIZE =
+    static_cast<size_t>(16) * static_cast<size_t>(1024) * static_cast<size_t>(1024); // 16MB
+constexpr size_t HEADER_SIZE = 16; // version(4) + size(4) + requestId(8)
 
 // Message type tags for serialization
 enum class MessageType : uint8_t {

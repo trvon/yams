@@ -1,10 +1,10 @@
-#include <gtest/gtest.h>
 #include <chrono>
 #include <thread>
+#include <gtest/gtest.h>
 
+#include <yams/cli/async_bridge.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
-#include <yams/cli/async_bridge.h>
 using yams::cli::run_sync;
 
 using namespace std::chrono_literals;

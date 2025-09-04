@@ -4,15 +4,15 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
 #include <unordered_map>
-#include <deque>
-#include <boost/asio/awaitable.hpp>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 // New: shared request context
 #include <yams/daemon/ipc/request_context.h>
@@ -31,7 +31,8 @@ public:
     [[nodiscard]] virtual boost::asio::awaitable<Response> process(const Request& request) = 0;
 
     // Process a request with streaming response support
-    [[nodiscard]] virtual boost::asio::awaitable<std::optional<Response>> process_streaming(const Request& request) {
+    [[nodiscard]] virtual boost::asio::awaitable<std::optional<Response>>
+    process_streaming(const Request& request) {
         // Default implementation wraps the normal process method
         auto response = co_await process(request);
         co_return response;
@@ -68,8 +69,9 @@ public:
     using ProcessorFunc = std::function<boost::asio::awaitable<Response>(const Request&)>;
 
     struct Config {
-        bool enable_streaming = true;     // Use streaming response model
-        bool enable_multiplexing = true;  // Default: allow multiple concurrent requests per connection
+        bool enable_streaming = true; // Use streaming response model
+        bool enable_multiplexing =
+            true; // Default: allow multiple concurrent requests per connection
         size_t chunk_size = 256 * 1024;   // Default chunk size (256KB)
         size_t header_flush_delay_ms = 0; // Time to wait before flushing header (0 = immediate)
         size_t chunk_flush_delay_ms = 0;  // Time to wait before flushing chunks (0 = immediate)
@@ -86,7 +88,8 @@ public:
         size_t max_inflight_per_connection = 1024;        // Higher concurrency per connection
         size_t per_request_queue_cap = 256;               // More frames queued per request
         size_t total_queued_bytes_cap = 16 * 1024 * 1024; // Max bytes queued per connection (16MB)
-        size_t writer_budget_bytes_per_turn = 256 * 1024; // Fair-writer byte budget per request turn
+        size_t writer_budget_bytes_per_turn =
+            256 * 1024; // Fair-writer byte budget per request turn
 
         // When closing after a response, attempt a graceful half-close (shutdown send) and briefly
         // drain the peer's read side to reduce the chance of truncation at the client. Has no
@@ -94,15 +97,15 @@ public:
         bool graceful_half_close = false;
         std::chrono::milliseconds graceful_drain_timeout{200};
 
-    Config();
+        Config();
     };
 
     explicit RequestHandler(std::shared_ptr<RequestProcessor> processor = nullptr,
                             Config config = Config{});
-    
+
     // Constructor for direct RequestDispatcher usage (simplified interface)
     explicit RequestHandler(RequestDispatcher* dispatcher, Config config = Config{});
-    
+
     ~RequestHandler();
 
     // Set the request processor
@@ -118,44 +121,38 @@ public:
     }
 
     // Handle a connection with coroutines using native boost::asio socket
-    [[nodiscard]] boost::asio::awaitable<void> 
-    handle_connection(boost::asio::local::stream_protocol::socket socket,
-                      std::stop_token token);
+    [[nodiscard]] boost::asio::awaitable<void>
+    handle_connection(boost::asio::local::stream_protocol::socket socket, std::stop_token token);
 
     // Handle a single request-response cycle (internal use)
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    handle_request(boost::asio::local::stream_protocol::socket& socket,
-                   const Request& request, uint64_t request_id);
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    handle_request(boost::asio::local::stream_protocol::socket& socket, const Request& request,
+                   uint64_t request_id);
 
     // Simple interface for handling raw request data (for use with native Boost.ASIO)
-    [[nodiscard]] boost::asio::awaitable<std::vector<uint8_t>> 
+    [[nodiscard]] boost::asio::awaitable<std::vector<uint8_t>>
     handle_request(const std::vector<uint8_t>& request_data, std::stop_token token);
 
     // Handle a streaming response
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
     handle_streaming_request(boost::asio::local::stream_protocol::socket& socket,
-                            const Request& request,
-                            uint64_t request_id,
-                            ConnectionFsm* fsm = nullptr,
-                            bool client_expects_streaming = false);
+                             const Request& request, uint64_t request_id,
+                             ConnectionFsm* fsm = nullptr, bool client_expects_streaming = false);
 
     // Write a header frame and optionally flush
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    write_header(boost::asio::local::stream_protocol::socket& socket,
-                 const Response& response, uint64_t request_id,
-                 bool flush = true);
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    write_header(boost::asio::local::stream_protocol::socket& socket, const Response& response,
+                 uint64_t request_id, bool flush = true);
 
     // Write a chunk frame and optionally flush
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    write_chunk(boost::asio::local::stream_protocol::socket& socket,
-                const Response& response, uint64_t request_id,
-                bool last_chunk = false, bool flush = true);
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    write_chunk(boost::asio::local::stream_protocol::socket& socket, const Response& response,
+                uint64_t request_id, bool last_chunk = false, bool flush = true);
 
     // Stream chunks from a processor
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    stream_chunks(boost::asio::local::stream_protocol::socket& socket,
-                  const Request& request, uint64_t request_id,
-                  std::shared_ptr<RequestProcessor> processor,
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    stream_chunks(boost::asio::local::stream_protocol::socket& socket, const Request& request,
+                  uint64_t request_id, std::shared_ptr<RequestProcessor> processor,
                   ConnectionFsm* fsm = nullptr);
 
     // Determine if a request should be streamed based on config and request type
@@ -204,45 +201,42 @@ private:
         std::chrono::nanoseconds min_latency{std::chrono::nanoseconds::max()};
         std::chrono::nanoseconds max_latency{0};
     };
-    [[nodiscard]] boost::asio::awaitable<Result<Message>> 
-    read_message(boost::asio::local::stream_protocol::socket& socket,
-                 FrameReader& reader);
+    [[nodiscard]] boost::asio::awaitable<Result<Message>>
+    read_message(boost::asio::local::stream_protocol::socket& socket, FrameReader& reader);
 
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    write_message(boost::asio::local::stream_protocol::socket& socket,
-                  const Message& message);
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    write_message(boost::asio::local::stream_protocol::socket& socket, const Message& message);
 
     // Streaming write operations
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    write_header_frame(boost::asio::local::stream_protocol::socket& socket,
-                       const Message& message, bool flush = true);
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
-    write_chunk_frame(boost::asio::local::stream_protocol::socket& socket,
-                      const Message& message,
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    write_header_frame(boost::asio::local::stream_protocol::socket& socket, const Message& message,
+                       bool flush = true);
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    write_chunk_frame(boost::asio::local::stream_protocol::socket& socket, const Message& message,
                       bool last_chunk = false, bool flush = true);
 
     [[nodiscard]] boost::asio::awaitable<Response> process_request(const Request& request);
 
     // Process request with streaming support
-    [[nodiscard]] boost::asio::awaitable<std::optional<Response>> process_streaming_request(const Request& request);
+    [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
+    process_streaming_request(const Request& request);
 
     // Check if the processor can handle streaming for this request
     [[nodiscard]] bool can_stream_request(const Request& request) const;
 
     // Helper method to accumulate chunks for bounded memory usage
-    [[nodiscard]] boost::asio::awaitable<std::vector<Response>> collect_limited_chunks(const Request& request,
-                                                                     size_t max_chunks = 1000);
+    [[nodiscard]] boost::asio::awaitable<std::vector<Response>>
+    collect_limited_chunks(const Request& request, size_t max_chunks = 1000);
 
     // Send an error response. If request_id is provided, the error will be correlated
     // with that request; otherwise 0 indicates an out-of-band error and callers should
     // generally close the connection to avoid desynchronization in persistent mode.
-    [[nodiscard]] boost::asio::awaitable<Result<void>> 
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
     send_error(boost::asio::local::stream_protocol::socket& socket, ErrorCode code,
-               const std::string& message,
-               uint64_t request_id = 0);
+               const std::string& message, uint64_t request_id = 0);
 
     std::shared_ptr<RequestProcessor> processor_;
-    RequestDispatcher* dispatcher_ = nullptr;  // Alternative to processor_
+    RequestDispatcher* dispatcher_ = nullptr; // Alternative to processor_
     MessageFramer framer_;
     Config config_;
     mutable InternalStats stats_;
@@ -253,9 +247,12 @@ private:
     std::atomic<size_t> inflight_{0};
 
     // Fair writer (multiplexing): per-request queues and round-robin scheduler
-    struct FrameItem { std::vector<uint8_t> data; bool last{false}; };
+    struct FrameItem {
+        std::vector<uint8_t> data;
+        bool last{false};
+    };
     std::unordered_map<uint64_t, std::deque<FrameItem>> rr_queues_; // reqId -> frames
-    std::deque<uint64_t> rr_active_; // rotation of active reqIds
+    std::deque<uint64_t> rr_active_;                                // rotation of active reqIds
     bool writer_running_{false};
     size_t total_queued_bytes_{0};
 
@@ -271,7 +268,8 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> contexts_;
 
     // Queue a frame for fair writing; must be called on write strand when present
-    boost::asio::awaitable<Result<void>> enqueue_frame(uint64_t request_id, std::vector<uint8_t> frame, bool last);
+    boost::asio::awaitable<Result<void>> enqueue_frame(uint64_t request_id,
+                                                       std::vector<uint8_t> frame, bool last);
     boost::asio::awaitable<void> writer_drain(boost::asio::local::stream_protocol::socket& socket);
 };
 
@@ -302,7 +300,8 @@ public:
 
     using Next = std::function<boost::asio::awaitable<Response>(const Request&)>;
 
-    [[nodiscard]] virtual boost::asio::awaitable<Response> process(const Request& request, Next next) = 0;
+    [[nodiscard]] virtual boost::asio::awaitable<Response> process(const Request& request,
+                                                                   Next next) = 0;
 };
 
 // Pipeline of middleware
@@ -326,7 +325,8 @@ private:
 // Logging middleware
 class LoggingMiddleware : public RequestMiddleware {
 public:
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request, Next next) override;
+    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request,
+                                                           Next next) override;
 };
 
 // Rate limiting middleware
@@ -341,7 +341,8 @@ public:
 
     explicit RateLimitMiddleware(Config config = {});
 
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request, Next next) override;
+    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request,
+                                                           Next next) override;
 
 private:
     Config config_;
@@ -357,7 +358,8 @@ public:
 
     explicit AuthMiddleware(Validator validator) : validator_(std::move(validator)) {}
 
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request, Next next) override;
+    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request,
+                                                           Next next) override;
 
 private:
     Validator validator_;

@@ -5,9 +5,9 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -42,8 +42,7 @@ public:
                       "Show comprehensive technical details and diagnostics");
         cmd->add_flag("--color", forceColor_, "Force-enable ANSI colors in output");
         cmd->add_flag("--no-color", noColor_, "Disable ANSI colors in output");
-        cmd->add_flag("--daemon-only", daemonOnly_,
-                      "Use daemon results only (no local fallback)");
+        cmd->add_flag("--daemon-only", daemonOnly_, "Use daemon results only (no local fallback)");
 
         // Nested subcommand: yams stats vectors
         auto* vectors = cmd->add_subcommand("vectors", "Show vector database statistics");
@@ -63,9 +62,7 @@ public:
 
         // System help: explain fields/metrics shown by stats
         auto* helpCmd = cmd->add_subcommand("help", "Show system metrics help for stats output");
-        helpCmd->callback([this]() {
-            renderSystemHelp();
-        });
+        helpCmd->callback([this]() { renderSystemHelp(); });
 
         cmd->callback([this]() {
             auto result = execute();
@@ -159,7 +156,8 @@ private:
         std::cout << "  - YAMS_KEEPALIVE_MS: Streaming keepalive cadence\n";
         std::cout << "  - YAMS_GREP_FIRST_BATCH_MAX_WAIT_MS: Grep first-burst window\n";
         std::cout << "  - YAMS_GREP_BATCH_SIZE: Grep chunk batch size override\n";
-        std::cout << "  - YAMS_LIST_MODE, YAMS_GREP_MODE, YAMS_RETRIEVAL_MODE: hot_only|cold_only|auto\n\n";
+        std::cout << "  - YAMS_LIST_MODE, YAMS_GREP_MODE, YAMS_RETRIEVAL_MODE: "
+                     "hot_only|cold_only|auto\n\n";
         std::cout << "Per-document Overrides:\n";
         std::cout << "  - Tag/metadata force_cold=true: Force cold path for a document\n\n";
         std::cout << "Tips:\n";
@@ -225,10 +223,10 @@ private:
                 return render(result.value());
             }
             return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) unavailable"}
-                              : fallback();
+                               : fallback();
         } catch (...) {
             return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) exception"}
-                              : fallback();
+                               : fallback();
         }
     }
 
@@ -813,10 +811,16 @@ private:
         auto keepalives = resp.additionalStats.find("stream_keepalives");
         if (ttfb != resp.additionalStats.end() || streams != resp.additionalStats.end() ||
             batches != resp.additionalStats.end() || keepalives != resp.additionalStats.end()) {
-            rows.push_back({"Streaming TTFB (avg)", (ttfb!=resp.additionalStats.end()? ttfb->second : "0" ) + std::string(" ms"), ""});
-            if (streams!=resp.additionalStats.end()) rows.push_back({"Streams", streams->second, ""});
-            if (batches!=resp.additionalStats.end()) rows.push_back({"Batches Emitted", batches->second, ""});
-            if (keepalives!=resp.additionalStats.end()) rows.push_back({"Keepalives", keepalives->second, ""});
+            rows.push_back(
+                {"Streaming TTFB (avg)",
+                 (ttfb != resp.additionalStats.end() ? ttfb->second : "0") + std::string(" ms"),
+                 ""});
+            if (streams != resp.additionalStats.end())
+                rows.push_back({"Streams", streams->second, ""});
+            if (batches != resp.additionalStats.end())
+                rows.push_back({"Batches Emitted", batches->second, ""});
+            if (keepalives != resp.additionalStats.end())
+                rows.push_back({"Keepalives", keepalives->second, ""});
         }
 
         yams::cli::ui::render_rows(std::cout, rows);
@@ -883,9 +887,9 @@ private:
 
         // Client/IPC self-check diagnostics
         yams::cli::ui::render_rows(std::cout, {{"Client", YAMS_VERSION_STRING, ""}});
-        yams::cli::ui::render_rows(std::cout,
-                                   {{"Client IPC", "Pool: enabled",
-                                     yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string()}});
+        yams::cli::ui::render_rows(
+            std::cout, {{"Client IPC", "Pool: enabled",
+                         yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string()}});
 
         std::cout << "\n";
 

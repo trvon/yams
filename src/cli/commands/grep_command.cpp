@@ -15,8 +15,8 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first grep
-#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -175,7 +175,8 @@ public:
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
                     // Handle different output modes
                     if (pathsOnly_ || filesOnly_) {
-                        // Show files from regex and semantic results (semantic marked with confidence when no regex)
+                        // Show files from regex and semantic results (semantic marked with
+                        // confidence when no regex)
                         std::set<std::string> files;
                         std::map<std::string, bool> hasRegex;
                         std::map<std::string, double> semOnlyConf;
@@ -198,15 +199,18 @@ public:
                             for (const auto& file : files) {
                                 auto itR = hasRegex.find(file);
                                 auto itS = semOnlyConf.find(file);
-                                if ((itR == hasRegex.end() || !itR->second) && itS != semOnlyConf.end()) {
-                                    std::cout << "[S:" << std::fixed << std::setprecision(2) << itS->second << "] " << file << std::endl;
+                                if ((itR == hasRegex.end() || !itR->second) &&
+                                    itS != semOnlyConf.end()) {
+                                    std::cout << "[S:" << std::fixed << std::setprecision(2)
+                                              << itS->second << "] " << file << std::endl;
                                 } else {
                                     std::cout << file << std::endl;
                                 }
                             }
                         }
                     } else if (countOnly_) {
-                        // Count regex matches per file; also surface semantic suggestions separately
+                        // Count regex matches per file; also surface semantic suggestions
+                        // separately
                         std::map<std::string, size_t> fileCounts;
                         std::set<std::string> regexFiles;
                         std::map<std::string, double> semanticOnly;
@@ -222,7 +226,8 @@ public:
                             } else {
                                 regexFiles.insert(match.file);
                                 fileCounts[match.file]++;
-                                // If this file was previously marked as semantic-only, it is no longer semantic-only
+                                // If this file was previously marked as semantic-only, it is no
+                                // longer semantic-only
                                 semanticOnly.erase(match.file);
                             }
                         }
@@ -239,7 +244,8 @@ public:
                             if (!semanticOnly.empty()) {
                                 std::cout << "Semantic suggestions:" << std::endl;
                                 for (const auto& [file, conf] : semanticOnly) {
-                                    std::cout << "[S:" << std::fixed << std::setprecision(2) << conf << "] " << file << std::endl;
+                                    std::cout << "[S:" << std::fixed << std::setprecision(2) << conf
+                                              << "] " << file << std::endl;
                                 }
                             }
                         }
@@ -319,7 +325,8 @@ public:
                                   : run_sync(client.call(dreq), std::chrono::seconds(30));
                 if (result) {
                     auto r = render(result.value());
-                    if (!r) return r.error();
+                    if (!r)
+                        return r.error();
                     return Result<void>();
                 }
             }
@@ -566,7 +573,8 @@ private:
             }
         }
 
-        // If not regex-only mode, also perform semantic search (even in files-only/paths-only/count modes)
+        // If not regex-only mode, also perform semantic search (even in files-only/paths-only/count
+        // modes)
         std::vector<search::HybridSearchResult> semanticResults;
         if (!regexOnly_) {
             try {
@@ -627,7 +635,8 @@ private:
 
         // Output results based on mode
         if (filesOnly_ || pathsOnly_) {
-            // Show files from regex and semantic results (semantic marked with confidence when no regex)
+            // Show files from regex and semantic results (semantic marked with confidence when no
+            // regex)
             std::set<std::string> files(matchingFiles.begin(), matchingFiles.end());
             std::map<std::string, double> semOnlyConf;
 
@@ -637,7 +646,8 @@ private:
                 if (pathIt != result.metadata.end()) {
                     const std::string& p = pathIt->second;
                     if (files.find(p) == files.end()) {
-                        double conf = result.hybrid_score > 0 ? result.hybrid_score : result.vector_score;
+                        double conf =
+                            result.hybrid_score > 0 ? result.hybrid_score : result.vector_score;
                         auto itc = semOnlyConf.find(p);
                         if (itc == semOnlyConf.end() || conf > itc->second) {
                             semOnlyConf[p] = conf;
@@ -653,7 +663,8 @@ private:
                 for (const auto& file : files) {
                     auto itc = semOnlyConf.find(file);
                     if (itc != semOnlyConf.end()) {
-                        std::cout << "[S:" << std::fixed << std::setprecision(2) << itc->second << "] " << file << std::endl;
+                        std::cout << "[S:" << std::fixed << std::setprecision(2) << itc->second
+                                  << "] " << file << std::endl;
                     } else {
                         std::cout << file << std::endl;
                     }

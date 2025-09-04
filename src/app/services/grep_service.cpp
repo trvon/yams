@@ -1,14 +1,14 @@
-#include <yams/app/services/services.hpp>
 #include <yams/app/services/grep_mode_tls.h>
+#include <yams/app/services/services.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <future>
-#include <atomic>
 #include <mutex>
 #include <thread>
 #ifndef _WIN32
@@ -216,14 +216,20 @@ public:
         Mode mode = Mode::Auto;
         // Thread-local override from streaming fast/full execution, if set
         switch (get_grep_mode_tls()) {
-            case GrepExecMode::HotOnly: mode = Mode::HotOnly; break;
-            case GrepExecMode::ColdOnly: mode = Mode::ColdOnly; break;
+            case GrepExecMode::HotOnly:
+                mode = Mode::HotOnly;
+                break;
+            case GrepExecMode::ColdOnly:
+                mode = Mode::ColdOnly;
+                break;
             default: {
                 if (const char* m = std::getenv("YAMS_GREP_MODE")) {
                     std::string v(m);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                    if (v == "hot_only" || v == "hot") mode = Mode::HotOnly;
-                    else if (v == "cold_only" || v == "cold") mode = Mode::ColdOnly;
+                    if (v == "hot_only" || v == "hot")
+                        mode = Mode::HotOnly;
+                    else if (v == "cold_only" || v == "cold")
+                        mode = Mode::ColdOnly;
                 }
                 break;
             }
@@ -243,17 +249,28 @@ public:
         // Be more aggressive: ensure at least half of cores in use
         rec = std::max(rec, hw / 2);
         if (const char* env = std::getenv("YAMS_GREP_CONCURRENCY"); env && *env) {
-            try { auto v = static_cast<size_t>(std::stoul(env)); if (v > 0) rec = v; } catch (...) {}
+            try {
+                auto v = static_cast<size_t>(std::stoul(env));
+                if (v > 0)
+                    rec = v;
+            } catch (...) {
+            }
         }
         size_t workers = std::clamp<size_t>(rec, 1, hw);
         workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
         if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
-            try { auto cap = static_cast<size_t>(std::stoul(gcap)); if (cap > 0) workers = std::min(workers, cap); } catch (...) {}
+            try {
+                auto cap = static_cast<size_t>(std::stoul(gcap));
+                if (cap > 0)
+                    workers = std::min(workers, cap);
+            } catch (...) {
+            }
         }
 
         std::atomic<size_t> next{0};
         std::mutex outMutex;
-        std::vector<GrepFileResult> outResults; outResults.reserve(docs.size());
+        std::vector<GrepFileResult> outResults;
+        outResults.reserve(docs.size());
         std::vector<std::string> filesWith;
         std::vector<std::string> filesWithout;
         std::atomic<size_t> totalMatches{0};
@@ -262,19 +279,32 @@ public:
         auto worker = [&]() {
             while (true) {
                 size_t i = next.fetch_add(1);
-                if (i >= docs.size()) break;
+                if (i >= docs.size())
+                    break;
                 const auto& doc = docs[i];
 
-                if (!pathFilterMatch(doc.filePath, req.paths)) continue;
+                if (!pathFilterMatch(doc.filePath, req.paths))
+                    continue;
                 if (!req.includePatterns.empty()) {
                     bool ok = false;
                     for (const auto& pattern : req.includePatterns) {
-                        if (hasWildcard(pattern)) { if (wildcardMatch(doc.filePath, pattern)) { ok = true; break; } }
-                        else { if (doc.filePath.find(pattern) != std::string::npos) { ok = true; break; } }
+                        if (hasWildcard(pattern)) {
+                            if (wildcardMatch(doc.filePath, pattern)) {
+                                ok = true;
+                                break;
+                            }
+                        } else {
+                            if (doc.filePath.find(pattern) != std::string::npos) {
+                                ok = true;
+                                break;
+                            }
+                        }
                     }
-                    if (!ok) continue;
+                    if (!ok)
+                        continue;
                 }
-                if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) continue;
+                if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags))
+                    continue;
 
                 // Respect per-document force_cold (metadata key or tag)
                 bool forceCold = false;
@@ -295,7 +325,8 @@ public:
                     }
                 }
 
-                auto literalMatch = [&](const std::string& line, const std::string& needle) -> bool {
+                auto literalMatch = [&](const std::string& line,
+                                        const std::string& needle) -> bool {
                     return line.find(needle) != std::string::npos;
                 };
                 auto evalMatch = [&](const std::string& line) -> bool {
@@ -305,23 +336,39 @@ public:
                     return std::regex_search(line, re);
                 };
 
-                GrepFileResult fileResult; fileResult.file = doc.filePath; fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
+                GrepFileResult fileResult;
+                fileResult.file = doc.filePath;
+                fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
                 fileResult.matchCount = 0;
                 size_t ln_counter = 0;
                 auto onLine = [&](const std::string& line) {
                     ++ln_counter;
                     bool matched = evalMatch(line);
-                    if (req.invert) matched = !matched;
-                    if (!matched) return;
+                    if (req.invert)
+                        matched = !matched;
+                    if (!matched)
+                        return;
                     fileResult.matchCount++;
-                    if (req.count) return;
-                    GrepMatch gm; gm.matchType = req.literalText ? std::string("literal") : std::string("regex"); gm.confidence = 1.0;
-                    if (req.lineNumbers) gm.lineNumber = ln_counter;
+                    if (req.count)
+                        return;
+                    GrepMatch gm;
+                    gm.matchType = req.literalText ? std::string("literal") : std::string("regex");
+                    gm.confidence = 1.0;
+                    if (req.lineNumbers)
+                        gm.lineNumber = ln_counter;
                     gm.line = line;
                     if (!req.invert && !req.literalText) {
-                        std::smatch sm; if (std::regex_search(line, sm, re)) { gm.columnStart = static_cast<size_t>(sm.position()) + 1; gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length()); }
+                        std::smatch sm;
+                        if (std::regex_search(line, sm, re)) {
+                            gm.columnStart = static_cast<size_t>(sm.position()) + 1;
+                            gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length());
+                        }
                     } else if (!req.invert && req.literalText) {
-                        auto pos = line.find(pat); if (pos != std::string::npos) { gm.columnStart = pos + 1; gm.columnEnd = gm.columnStart + pat.size(); }
+                        auto pos = line.find(pat);
+                        if (pos != std::string::npos) {
+                            gm.columnStart = pos + 1;
+                            gm.columnEnd = gm.columnStart + pat.size();
+                        }
                     }
                     fileResult.matches.push_back(std::move(gm));
                 };
@@ -332,9 +379,21 @@ public:
                         auto c = ctx_.metadataRepo->getContent(doc.id);
                         if (c && c.value().has_value()) {
                             std::istringstream iss(c.value()->contentText);
-                            std::string line; while (std::getline(iss, line)) { if (!line.empty() && line.back()=='\r') line.pop_back(); onLine(line); if (req.maxCount>0 && static_cast<int>(fileResult.matchCount)>=req.maxCount) break; }
-                        } else { continue; }
-                    } else { continue; }
+                            std::string line;
+                            while (std::getline(iss, line)) {
+                                if (!line.empty() && line.back() == '\r')
+                                    line.pop_back();
+                                onLine(line);
+                                if (req.maxCount > 0 &&
+                                    static_cast<int>(fileResult.matchCount) >= req.maxCount)
+                                    break;
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
                 } else {
                     // Cold path: stream content and scan lines incrementally
                     struct LineScanBuf : public std::streambuf {
@@ -360,10 +419,13 @@ public:
                             return n;
                         }
                     };
-                    LineScanBuf sb(onLine); std::ostream os(&sb);
-                    auto rs = ctx_.store->retrieveStream(doc.sha256Hash, os, nullptr); if (!rs) continue;
+                    LineScanBuf sb(onLine);
+                    std::ostream os(&sb);
+                    auto rs = ctx_.store->retrieveStream(doc.sha256Hash, os, nullptr);
+                    if (!rs)
+                        continue;
                 }
-                
+
                 // Early exit shaping for files-only/paths-only
                 if (req.filesWithMatches || req.pathsOnly || req.filesWithoutMatch) {
                     // Defer formatting to caller; we just track counts and file sets below
@@ -382,9 +444,12 @@ public:
             }
         };
 
-        std::vector<std::thread> ths; ths.reserve(workers);
-        for (size_t t = 0; t < workers; ++t) ths.emplace_back(worker);
-        for (auto& th : ths) th.join();
+        std::vector<std::thread> ths;
+        ths.reserve(workers);
+        for (size_t t = 0; t < workers; ++t)
+            ths.emplace_back(worker);
+        for (auto& th : ths)
+            th.join();
 
         response.results = std::move(outResults);
         response.filesWith = std::move(filesWith);

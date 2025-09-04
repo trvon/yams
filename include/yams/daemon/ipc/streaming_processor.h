@@ -1,14 +1,13 @@
 #pragma once
 
 #include <chrono>
+#include <future>
 #include <memory>
 #include <optional>
 #include <variant>
 #include <vector>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/request_handler.h>
-#include <future>
-#include <chrono>
 
 namespace yams::daemon {
 
@@ -26,7 +25,8 @@ public:
 
     // Returns std::nullopt to signal chunked streaming; stores internal state
     // and serves chunks from next_chunk(). When not recognized, delegates.
-    [[nodiscard]] boost::asio::awaitable<std::optional<Response>> process_streaming(const Request& request) override;
+    [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
+    process_streaming(const Request& request) override;
 
     [[nodiscard]] bool supports_streaming(const Request& request) const override;
 

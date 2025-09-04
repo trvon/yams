@@ -5,8 +5,8 @@
 #include <yams/cli/commands/update_command.h>
 #include <yams/cli/yams_cli.h>
 // Daemon client API for daemon-first update
-#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -97,7 +97,8 @@ Result<void> UpdateCommand::execute() {
                 auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
                 if (result) {
                     auto r = render(result.value());
-                    if (!r) return r.error();
+                    if (!r)
+                        return r.error();
                     return Result<void>();
                 }
             } catch (...) {

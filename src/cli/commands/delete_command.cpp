@@ -5,9 +5,9 @@
 #include <sstream>
 #include <type_traits>
 #include <vector>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -52,7 +52,8 @@ public:
         group->add_option("--pattern", pattern_, "Delete documents matching pattern (e.g., *.log)");
         group->add_option("--directory", directory_, "Directory to delete (requires --recursive)");
         group->require_option(0);
-        auto* positional = cmd->add_option("targets", targets_, "Targets to delete (name/path/pattern)");
+        auto* positional =
+            cmd->add_option("targets", targets_, "Targets to delete (name/path/pattern)");
         positional->expected(-1);
 
         // Flags (can be combined with any deletion method)
@@ -75,20 +76,25 @@ public:
     Result<void> execute() override {
         try {
             // Infer deletion mode from positional targets if no explicit selector is provided
-            if (hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() && directory_.empty() && !targets_.empty()) {
+            if (hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() &&
+                directory_.empty() && !targets_.empty()) {
                 auto has_wildcard = [](const std::string& s) {
                     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
                 };
-                // Heuristic: treat strings containing a '/' (and not wildcards) as paths (name or directory)
+                // Heuristic: treat strings containing a '/' (and not wildcards) as paths (name or
+                // directory)
                 auto looks_like_directory = [](const std::string& s) {
-                    if (s.empty()) return false;
-                    if (s.back() == '/') return true;
+                    if (s.empty())
+                        return false;
+                    if (s.back() == '/')
+                        return true;
                     return s.find('/') != std::string::npos;
                 };
 
                 if (targets_.size() == 1) {
                     const std::string& t = targets_.front();
-                    // If -r is set, treat single target as a directory even without slashes or wildcards
+                    // If -r is set, treat single target as a directory even without slashes or
+                    // wildcards
                     if (recursive_) {
                         directory_ = t;
                     } else if (has_wildcard(t)) {
@@ -102,7 +108,8 @@ public:
                     // Multiple targets: treat as names list to mirror rm behavior
                     std::ostringstream oss;
                     for (size_t i = 0; i < targets_.size(); ++i) {
-                        if (i > 0) oss << ",";
+                        if (i > 0)
+                            oss << ",";
                         oss << targets_[i];
                     }
                     names_ = oss.str();
@@ -202,7 +209,8 @@ public:
                 auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
                 if (result) {
                     auto r = render(result.value());
-                    if (!r) return r.error();
+                    if (!r)
+                        return r.error();
                     return Result<void>();
                 }
             } catch (...) {

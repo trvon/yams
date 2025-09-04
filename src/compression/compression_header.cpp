@@ -78,8 +78,8 @@ bool CompressionHeader::validate() const noexcept {
     return true;
 }
 
-CompressionHeader CompressionHeader::fromResult(
-    const CompressionResult& result, std::pair<uint32_t, uint32_t> crcs) {
+CompressionHeader CompressionHeader::fromResult(const CompressionResult& result,
+                                                std::pair<uint32_t, uint32_t> crcs) {
     CompressionHeader header;
     header.magic = MAGIC;
     header.version = VERSION;

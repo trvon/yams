@@ -175,7 +175,9 @@ struct CompressionStats {
     [[nodiscard]] double overallCompressionRatio() const noexcept {
         uint64_t saved = totalSpaceSaved.load();
         uint64_t original = totalUncompressedBytes.load() + saved;
-        return original > 0 ? static_cast<double>(original) / static_cast<double>(totalCompressedBytes.load()) : 0.0;
+        return original > 0 ? static_cast<double>(original) /
+                                  static_cast<double>(totalCompressedBytes.load())
+                            : 0.0;
     }
 
     /**

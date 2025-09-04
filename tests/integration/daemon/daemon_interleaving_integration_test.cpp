@@ -6,14 +6,16 @@
 #include <future>
 #include <thread>
 
-#include <yams/daemon/client/daemon_client.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;
 
 namespace {
-bool daemon_available() { return yams::daemon::DaemonClient::isDaemonRunning(); }
+bool daemon_available() {
+    return yams::daemon::DaemonClient::isDaemonRunning();
 }
+} // namespace
 
 // This test is optional and requires an environment-provided path that will
 // produce a long-running streaming grep. Set:
@@ -58,8 +60,9 @@ TEST(ServerMultiplexIntegrationTest, Interleaving_LongStreamPlusShortUnary) {
     auto t0 = std::chrono::steady_clock::now();
     yams::daemon::StatusRequest sreq;
     auto sres = yams::cli::run_sync(client.status(), 5s);
-    auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
+    auto dt_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
 
     ASSERT_TRUE(sres);
     (void)sres.value();
@@ -70,4 +73,3 @@ TEST(ServerMultiplexIntegrationTest, Interleaving_LongStreamPlusShortUnary) {
     auto stream_res = long_stream.get();
     (void)stream_res;
 }
-

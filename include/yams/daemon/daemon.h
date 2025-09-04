@@ -48,7 +48,6 @@ struct DaemonConfig {
     std::chrono::milliseconds heartbeatInterval{500}; // default 500ms
     std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
 
-
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
     struct DownloadPolicy {
         bool enable{false};                               // feature gate
@@ -81,10 +80,10 @@ public:
     const StateComponent& getState() const { return state_; }
     // Lifecycle FSM accessor
     const DaemonLifecycleFsm& getLifecycle() const { return lifecycleFsm_; }
-    
+
     // Socket server accessor (for testing)
     SocketServer* getSocketServer() const { return socketServer_.get(); }
-    
+
     // Document event notifications - forwarded to RepairCoordinator
     void onDocumentAdded(const std::string& hash, const std::string& path);
     void onDocumentRemoved(const std::string& hash);

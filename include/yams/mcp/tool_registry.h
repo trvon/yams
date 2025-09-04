@@ -9,9 +9,8 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <yams/core/types.h>
 #include <yams/core/task.h>
-#include <concepts>
+#include <yams/core/types.h>
 
 namespace yams::mcp {
 
@@ -570,22 +569,23 @@ public:
             if (!result) {
                 // Return structured error with code for consistency
                 co_return json{{"error",
-                             {{"code", -32603}, // Internal error
-                              {"message", result.error().message}}}};
+                                {{"code", -32603}, // Internal error
+                                 {"message", result.error().message}}}};
             }
 
-            // Wrap response in content field as per MCP protocol (content must be an array per MCP spec)
+            // Wrap response in content field as per MCP protocol (content must be an array per MCP
+            // spec)
             auto responseJson = result.value().toJson();
             co_return json{
                 {"content", json::array({json{{"type", "text"}, {"text", responseJson.dump()}}})}};
         } catch (const json::exception& e) {
             co_return json{{"error",
-                         {{"code", -32700}, // Parse error
-                          {"message", "JSON error: " + std::string(e.what())}}}};
+                            {{"code", -32700}, // Parse error
+                             {"message", "JSON error: " + std::string(e.what())}}}};
         } catch (const std::exception& e) {
             co_return json{{"error",
-                         {{"code", -32603}, // Internal error
-                          {"message", "Error: " + std::string(e.what())}}}};
+                            {{"code", -32603}, // Internal error
+                             {"message", "Error: " + std::string(e.what())}}}};
         }
     }
 
@@ -596,7 +596,8 @@ private:
 // Async tool registry for coroutine-based handlers
 class ToolRegistry {
 public:
-    using AsyncHandlerMap = std::unordered_map<std::string, std::function<yams::Task<json>(const json&)>>;
+    using AsyncHandlerMap =
+        std::unordered_map<std::string, std::function<yams::Task<json>(const json&)>>;
 
     ToolRegistry() {
         handlers_.reserve(32); // Pre-allocate for performance
@@ -608,7 +609,8 @@ public:
                       std::function<yams::Task<Result<ResponseType>>(const RequestType&)> handler,
                       json schema = {}, std::string_view description = {}) {
         auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::move(handler));
-        auto handlerFn = [wrapper = std::move(wrapper)](const json& args) mutable -> yams::Task<json> {
+        auto handlerFn = [wrapper =
+                              std::move(wrapper)](const json& args) mutable -> yams::Task<json> {
             return wrapper(args);
         };
 
@@ -647,8 +649,9 @@ private:
         json schema;
         std::string_view description;
 
-        AsyncToolDescriptor(std::string_view n, const std::function<yams::Task<json>(const json&)>& h,
-                           json s, std::string_view d)
+        AsyncToolDescriptor(std::string_view n,
+                            const std::function<yams::Task<json>(const json&)>& h, json s,
+                            std::string_view d)
             : name(n), handler(h), schema(std::move(s)), description(d) {}
     };
 

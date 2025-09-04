@@ -3,7 +3,8 @@
 #include <atomic>
 #include <cstdint>
 
-namespace yams { namespace daemon {
+namespace yams {
+namespace daemon {
 
 class MuxMetricsRegistry {
 public:
@@ -42,5 +43,5 @@ private:
     std::atomic<uint64_t> writerBudgetBytes_{0};
 };
 
-}} // namespace yams::daemon
-
+} // namespace daemon
+} // namespace yams

@@ -1,10 +1,10 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
-#include "test_async_helpers.h"
 #include <yams/indexing/document_indexer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_executor.h>

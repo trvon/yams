@@ -6,8 +6,8 @@
 #include <thread>
 #include <vector>
 
-#include <yams/daemon/client/daemon_client.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;
 
@@ -36,7 +36,8 @@ TEST(MultiplexClientTest, ConcurrentUnaryOutOfOrder) {
     for (int i = 0; i < N; ++i) {
         yams::daemon::StatusRequest req;
         auto res = yams::cli::run_sync(client.status(), 2s);
-        if (res && std::holds_alternative<yams::daemon::StatusResponse>(res.value())) ok++;
+        if (res && std::holds_alternative<yams::daemon::StatusResponse>(res.value()))
+            ok++;
     }
     EXPECT_EQ(ok, N);
 }
@@ -67,7 +68,8 @@ TEST(MultiplexClientTest, ConcurrentUnaryParallel) {
 
     int ok = 0;
     for (auto& f : futs) {
-        if (f.get()) ok++;
+        if (f.get())
+            ok++;
     }
     EXPECT_EQ(ok, N);
 }
@@ -148,5 +150,6 @@ TEST(MultiplexClientTest, ConnectionDropFailsAllInFlight) {
         GTEST_SKIP() << "Daemon not available for multiplex tests";
     }
     // Hard to deterministically drop connection from here; add placeholder.
-    GTEST_SKIP() << "Connection drop simulation is environment-specific; implement with controlled kill in integration tests.";
+    GTEST_SKIP() << "Connection drop simulation is environment-specific; implement with controlled "
+                    "kill in integration tests.";
 }

@@ -18,8 +18,8 @@
 #undef resize
 #endif
 
-#include <yams/daemon/client/daemon_client.h>
 #include <yams/cli/async_bridge.h>
+#include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;
 
@@ -56,7 +56,8 @@ TEST(ServerMultiplexIntegrationTest, ManyParallelStatusRequests) {
 
     int ok = 0;
     for (auto& f : futs) {
-        if (f.get()) ok++;
+        if (f.get())
+            ok++;
     }
     EXPECT_EQ(ok, N);
 }

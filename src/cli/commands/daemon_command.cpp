@@ -79,7 +79,8 @@ public:
         restart->callback([this]() { restartDaemon(); });
 
         // Doctor subcommand
-        auto* doctor = daemon->add_subcommand("doctor", "Diagnose daemon IPC and environment issues");
+        auto* doctor =
+            daemon->add_subcommand("doctor", "Diagnose daemon IPC and environment issues");
         doctor->callback([this]() { doctorDaemon(); });
     }
 
@@ -423,8 +424,8 @@ private:
             bool became_ready = false;
             // Poll status (even failures should keep the spinner visible)
             while (std::chrono::steady_clock::now() - t0 < timeout) {
-            yams::daemon::DaemonClient probe{};
-            auto statusRes = run_sync(probe.status(), std::chrono::seconds(2));
+                yams::daemon::DaemonClient probe{};
+                auto statusRes = run_sync(probe.status(), std::chrono::seconds(2));
                 if (statusRes) {
                     const auto& s = statusRes.value();
                     // TODO(PBI-007-06): Prefer StatusResponse.lifecycle_state/last_error when
@@ -504,19 +505,20 @@ private:
             daemon::ShutdownRequest sreq;
             sreq.graceful = !force_;
             {
-                auto shutdownResult = run_sync(shut.shutdown(sreq.graceful), std::chrono::seconds(10));
+                auto shutdownResult =
+                    run_sync(shut.shutdown(sreq.graceful), std::chrono::seconds(10));
                 if (shutdownResult) {
                     spdlog::info("Sent shutdown request to daemon");
 
                     // Wait for daemon to stop
-            for (int i = 0; i < 30; i++) {
-                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                    stopped = true;
-                    spdlog::info("Daemon stopped successfully");
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+                    for (int i = 0; i < 30; i++) {
+                        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                            stopped = true;
+                            spdlog::info("Daemon stopped successfully");
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
 
                     // If we sent the shutdown successfully, consider it stopped
                     // even if we can't immediately verify
@@ -619,7 +621,8 @@ private:
             std::cout << "Socket: " << effectiveSocket << "\n";
         }
         if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile).string();
+            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
+                           .string();
         }
         std::cout << "PID file: " << pidFile_ << "\n";
         // Helper: interactive confirm when on a TTY
@@ -629,11 +632,14 @@ private:
 #else
             bool interactive = true;
 #endif
-            if (!interactive) return false;
+            if (!interactive)
+                return false;
             std::cout << q << " [y/N]: " << std::flush;
             std::string ans;
-            if (!std::getline(std::cin, ans)) return false;
-            if (ans.size() == 0) return false;
+            if (!std::getline(std::cin, ans))
+                return false;
+            if (ans.size() == 0)
+                return false;
             char c = static_cast<char>(std::tolower(ans[0]));
             return c == 'y';
         };
@@ -647,7 +653,8 @@ private:
                 std::cout << "[FAIL] Socket path too long for AF_UNIX (" << effectiveSocket.size()
                           << "/" << maxlen << ")\n";
                 ok = false;
-                std::cout << "      Suggestion: export YAMS_DAEMON_SOCKET=/tmp/yams-daemon-$(id -u).sock\n";
+                std::cout << "      Suggestion: export YAMS_DAEMON_SOCKET=/tmp/yams-daemon-$(id "
+                             "-u).sock\n";
             } else {
                 std::cout << "[OK] Socket path length within limit\n";
             }
@@ -657,7 +664,8 @@ private:
         if (!effectiveSocket.empty()) {
             fs::path parent = fs::path(effectiveSocket).parent_path();
             std::error_code ec;
-            if (parent.empty()) parent = ".";
+            if (parent.empty())
+                parent = ".";
             fs::create_directories(parent, ec); // best effort
             fs::path probe = parent / ".yams-doctor-probe";
             std::ofstream f(probe);
@@ -719,7 +727,8 @@ private:
         }
 #endif
         if (!ok) {
-            std::cout << "One or more checks failed. Consider setting YAMS_DAEMON_SOCKET to a short path (e.g., /tmp/yams-daemon-$(id -u).sock) and retry.\n";
+            std::cout << "One or more checks failed. Consider setting YAMS_DAEMON_SOCKET to a "
+                         "short path (e.g., /tmp/yams-daemon-$(id -u).sock) and retry.\n";
         }
     }
 
@@ -732,8 +741,9 @@ private:
         if (detailed_) {
             std::cout << "Socket: " << socketPath_ << "\n";
             if (pidFile_.empty()) {
-                pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                               .string();
+                pidFile_ =
+                    daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
+                        .string();
             }
             std::cout << "PID file: " << pidFile_ << "\n";
             // Enable client debug logging for ping/connect path
@@ -877,11 +887,13 @@ std::unique_ptr<ICommand> createDaemonCommand() {
 }
 
 } // namespace yams::cli
-    static pid_t readPidFromFile(const std::string& path) {
-        pid_t pid = 0;
-        if (path.empty()) return pid;
-        std::ifstream in(path);
-        if (!in) return pid;
-        in >> pid;
+static pid_t readPidFromFile(const std::string& path) {
+    pid_t pid = 0;
+    if (path.empty())
         return pid;
-    }
+    std::ifstream in(path);
+    if (!in)
+        return pid;
+    in >> pid;
+    return pid;
+}

@@ -8,8 +8,8 @@
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
-#include <yams/daemon/daemon.h>
 #include <yams/daemon/components/SocketServer.h>
+#include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 // IPC server implementation removed in PBI-007; client uses Boost.Asio path.
 
@@ -35,7 +35,7 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
         if (!existing) {
             // Use rotating file sink to preserve logs across crashes
             const size_t max_size = 10 * 1024 * 1024; // 10MB per file
-            const size_t max_files = 5; // Keep 5 rotated files
+            const size_t max_files = 5;               // Keep 5 rotated files
             auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 config_.logFile.string(), max_size, max_files);
             auto logger = std::make_shared<spdlog::logger>("daemon", rotating_sink);
@@ -118,24 +118,22 @@ Result<void> YamsDaemon::start() {
     }
 
     // Initialize request dispatcher
-    requestDispatcher_ = std::make_unique<RequestDispatcher>(
-        this, serviceManager_.get(), &state_);
+    requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_);
 
     // Start integrated socket server
     SocketServer::Config socketConfig;
     socketConfig.socketPath = config_.socketPath;
     socketConfig.workerThreads = config_.workerThreads;
-    socketConfig.maxConnections = 100;  // TODO: make configurable
-    
-    socketServer_ = std::make_unique<SocketServer>(
-        socketConfig, requestDispatcher_.get(), &state_);
-    
+    socketConfig.maxConnections = 100; // TODO: make configurable
+
+    socketServer_ = std::make_unique<SocketServer>(socketConfig, requestDispatcher_.get(), &state_);
+
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
         serviceManager_->shutdown();
         lifecycleManager_->shutdown();
-        return Error{ErrorCode::IOError, 
-                    "Failed to start socket server: " + result.error().message};
+        return Error{ErrorCode::IOError,
+                     "Failed to start socket server: " + result.error().message};
     }
 
     // Mark IPC as ready now that socket server is running

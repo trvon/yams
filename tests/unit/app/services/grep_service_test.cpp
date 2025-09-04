@@ -144,8 +144,9 @@ TEST_F(GrepServiceTest, CountModeAllowsSemanticSuggestions) {
     EXPECT_GE(r.semanticMatches, 0u);
     // If semantic suggestions exist, they should appear in results
     bool hasSemantic = std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
-        return fr.wasSemanticSearch || std::any_of(fr.matches.begin(), fr.matches.end(),
-                                                   [](const auto& m) { return m.matchType == "semantic"; });
+        return fr.wasSemanticSearch ||
+               std::any_of(fr.matches.begin(), fr.matches.end(),
+                           [](const auto& m) { return m.matchType == "semantic"; });
     });
     // Allow either presence or absence based on data, but ensure no crash/suppression path
     SUCCEED();
@@ -163,8 +164,9 @@ TEST_F(GrepServiceTest, FilesOnlyModeAllowsSemanticSuggestions) {
     // Semantic suggestions should not be suppressed in files-only mode (may be zero if no sem hits)
     EXPECT_GE(r.semanticMatches, 0u);
     bool hasSemantic = std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
-        return fr.wasSemanticSearch || std::any_of(fr.matches.begin(), fr.matches.end(),
-                                                   [](const auto& m) { return m.matchType == "semantic"; });
+        return fr.wasSemanticSearch ||
+               std::any_of(fr.matches.begin(), fr.matches.end(),
+                           [](const auto& m) { return m.matchType == "semantic"; });
     });
     SUCCEED();
 }
@@ -181,8 +183,9 @@ TEST_F(GrepServiceTest, PathsOnlyModeAllowsSemanticSuggestions) {
     // Semantic suggestions should not be suppressed in paths-only mode (may be zero if no sem hits)
     EXPECT_GE(r.semanticMatches, 0u);
     bool hasSemantic = std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
-        return fr.wasSemanticSearch || std::any_of(fr.matches.begin(), fr.matches.end(),
-                                                   [](const auto& m) { return m.matchType == "semantic"; });
+        return fr.wasSemanticSearch ||
+               std::any_of(fr.matches.begin(), fr.matches.end(),
+                           [](const auto& m) { return m.matchType == "semantic"; });
     });
     SUCCEED();
 }

@@ -1,15 +1,15 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
-#include <yams/daemon/ipc/connection_fsm.h>
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -93,7 +93,8 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
     if (const char* mi = std::getenv("YAMS_MAX_INFLIGHT")) {
         try {
             auto v = std::stoul(mi);
-            if (v > 0) pImpl->config_.maxInflight = v;
+            if (v > 0)
+                pImpl->config_.maxInflight = v;
         } catch (...) {
         }
     }
@@ -118,14 +119,16 @@ void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
 }
 
 // New: lightweight readiness probe that sends a real Ping and waits briefly
-static bool pingDaemonSync(const std::filesystem::path& socketPath,
-                           std::chrono::milliseconds /*requestTimeout*/ = std::chrono::milliseconds(500),
-                           std::chrono::milliseconds /*headerTimeout*/ = std::chrono::milliseconds(250),
-                           std::chrono::milliseconds /*bodyTimeout*/   = std::chrono::milliseconds(250)) {
+static bool
+pingDaemonSync(const std::filesystem::path& socketPath,
+               std::chrono::milliseconds /*requestTimeout*/ = std::chrono::milliseconds(500),
+               std::chrono::milliseconds /*headerTimeout*/ = std::chrono::milliseconds(250),
+               std::chrono::milliseconds /*bodyTimeout*/ = std::chrono::milliseconds(250)) {
     // Best-effort synchronous connectivity probe: try to synchronously connect to the UNIX socket.
     try {
         auto path = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
-        if (path.empty()) return false;
+        if (path.empty())
+            return false;
         boost::asio::io_context io;
         boost::asio::local::stream_protocol::socket sock(io);
         boost::system::error_code ec;
@@ -187,10 +190,8 @@ void DaemonClient::disconnect() {
 
 bool DaemonClient::isConnected() const {
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
-    return pingDaemonSync(pImpl->config_.socketPath,
-                          std::chrono::milliseconds(250),
-                          std::chrono::milliseconds(150),
-                          std::chrono::milliseconds(300));
+    return pingDaemonSync(pImpl->config_.socketPath, std::chrono::milliseconds(250),
+                          std::chrono::milliseconds(150), std::chrono::milliseconds(300));
 }
 
 Task<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
@@ -323,11 +324,12 @@ Task<Result<void>> DaemonClient::ping() {
 }
 
 Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
-    spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req), false, pImpl->config_.socketPath.string());
+    spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
+                  false, pImpl->config_.socketPath.string());
     // Skip the legacy connect() call when using AsioTransportAdapter
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
-    
+
     AsioTransportAdapter::Options opts;
     opts.socketPath = pImpl->config_.socketPath;
     opts.headerTimeout = pImpl->headerTimeout_;
@@ -340,7 +342,6 @@ Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
         co_return r.error();
     co_return r.value();
 }
-
 
 // StreamingListHandler implementation
 void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& headerResponse) {
@@ -679,11 +680,12 @@ Task<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
 Task<Result<void>>
 DaemonClient::sendRequestStreaming(const Request& req,
                                    std::shared_ptr<ChunkedResponseHandler> handler) {
-    spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'", getRequestName(req), true, pImpl->config_.socketPath.string());
+    spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'",
+                  getRequestName(req), true, pImpl->config_.socketPath.string());
     // Skip the legacy connect() call when using AsioTransportAdapter
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
-    
+
     AsioTransportAdapter::Options opts;
     opts.socketPath = pImpl->config_.socketPath;
     opts.headerTimeout = pImpl->headerTimeout_;
@@ -851,7 +853,8 @@ Task<Result<GetStatsResponse>> DaemonClient::getStats(const GetStatsRequest& req
     co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
 
-Task<Result<UpdateDocumentResponse>> DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
+Task<Result<UpdateDocumentResponse>>
+DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
     auto response = co_await sendRequest(req);
     if (!response) {
         co_return response.error();
@@ -1001,17 +1004,17 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             }
         } else if (ll && *ll) {
             if (dataArg) {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--log-level",
-                       ll, "--data-dir", dataArg, nullptr);
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
+                       "--log-level", ll, "--data-dir", dataArg, nullptr);
             } else {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--log-level",
-                       ll, nullptr);
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
+                       "--log-level", ll, nullptr);
             }
         } else {
             // Basic args
             if (dataArg) {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--data-dir",
-                       dataArg, nullptr);
+                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
+                       "--data-dir", dataArg, nullptr);
             } else {
                 execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
             }

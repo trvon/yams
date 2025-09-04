@@ -81,7 +81,8 @@ std::string SHA256Hasher::finalize() {
 
     // Convert to hex string
     std::string result;
-    result.reserve(static_cast<std::string::size_type>(hashLen) * static_cast<std::string::size_type>(2));
+    result.reserve(static_cast<std::string::size_type>(hashLen) *
+                   static_cast<std::string::size_type>(2));
 
     for (unsigned int i = 0; i < hashLen; ++i) {
         result += yamsfmt::format("{:02x}", hash[i]);

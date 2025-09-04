@@ -93,7 +93,7 @@ static ISzAlloc g_Alloc = {LzmaAlloc, LzmaFree};
             break;
         default:
             break;
-}
+    }
     return Error{ErrorCode::CompressionError, fmt::format("{} failed: {}", operation, errorMsg)};
 }
 } // namespace
@@ -215,7 +215,8 @@ private:
 
         spdlog::debug("LZMA compressed {} bytes to {} bytes (ratio: {:.2f}x) in {}μs", data.size(),
                       result.compressedSize,
-                      static_cast<double>(data.size()) / static_cast<double>(result.compressedSize), duration.count());
+                      static_cast<double>(data.size()) / static_cast<double>(result.compressedSize),
+                      duration.count());
 
         return result;
     }
@@ -293,7 +294,8 @@ private:
 
         spdlog::debug("LZMA2 compressed {} bytes to {} bytes (ratio: {:.2f}x) in {}μs", data.size(),
                       result.compressedSize,
-                      static_cast<double>(data.size()) / static_cast<double>(result.compressedSize), duration.count());
+                      static_cast<double>(data.size()) / static_cast<double>(result.compressedSize),
+                      duration.count());
 
         return result;
     }

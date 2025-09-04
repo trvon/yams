@@ -858,7 +858,8 @@ void RecoveryScope::setData(std::span<const std::byte> data) {
     request_.data.assign(data.begin(), data.end());
 }
 
-void RecoveryScope::setAlgorithms(CompressionAlgorithm original, std::optional<CompressionAlgorithm> fallback) {
+void RecoveryScope::setAlgorithms(CompressionAlgorithm original,
+                                  std::optional<CompressionAlgorithm> fallback) {
     request_.originalAlgorithm = original;
     request_.fallbackAlgorithm = fallback.value_or(CompressionAlgorithm::None);
 }
@@ -889,7 +890,7 @@ CompressionAlgorithm selectFallbackAlgorithm(CompressionAlgorithm failedAlgorith
         return CompressionAlgorithm::Zstandard;
     } else if (failedAlgorithm == CompressionAlgorithm::Zstandard) {
         // Zstandard failed, try LZMA for better compression
-        if (dataSize < 1024ULL * 1024ULL) {          // Small data
+        if (dataSize < 1024ULL * 1024ULL) {    // Small data
             return CompressionAlgorithm::None; // Store uncompressed
         }
         return CompressionAlgorithm::LZMA;

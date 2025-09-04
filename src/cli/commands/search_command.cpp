@@ -14,11 +14,11 @@
 #include <yams/search/search_executor.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first search
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
-#include <yams/cli/async_bridge.h>
 
 namespace yams::cli {
 
@@ -315,12 +315,14 @@ public:
                             // Prefer detailed additionalStats if present
                             size_t indexed = 0;
                             if (s.additionalStats.count("meta_indexed_documents")) {
-                                indexed = std::stoull(s.additionalStats.at("meta_indexed_documents"));
+                                indexed =
+                                    std::stoull(s.additionalStats.at("meta_indexed_documents"));
                             } else {
                                 indexed = s.indexedDocuments;
                             }
                             if (total >= indexed) {
-                                output["extraction_pending"] = static_cast<uint64_t>(total - indexed);
+                                output["extraction_pending"] =
+                                    static_cast<uint64_t>(total - indexed);
                                 output["documents_total"] = static_cast<uint64_t>(total);
                                 output["documents_extracted"] = static_cast<uint64_t>(indexed);
                             }
@@ -461,12 +463,14 @@ public:
                             size_t total = s.totalDocuments;
                             size_t indexed = 0;
                             if (s.additionalStats.count("meta_indexed_documents")) {
-                                indexed = std::stoull(s.additionalStats.at("meta_indexed_documents"));
+                                indexed =
+                                    std::stoull(s.additionalStats.at("meta_indexed_documents"));
                             } else {
                                 indexed = s.indexedDocuments;
                             }
                             if (total >= indexed) {
-                                output["extraction_pending"] = static_cast<uint64_t>(total - indexed);
+                                output["extraction_pending"] =
+                                    static_cast<uint64_t>(total - indexed);
                                 output["documents_total"] = static_cast<uint64_t>(total);
                                 output["documents_extracted"] = static_cast<uint64_t>(indexed);
                             }
@@ -529,36 +533,42 @@ public:
                 return Result<void>();
             };
             // Call daemon directly; stream when enabled, otherwise unary.
-            auto daemonResult = clientConfig.enableChunkedResponses
-                                    ? run_sync(client.streamingSearch(dreq), std::chrono::seconds(30))
-                                    : run_sync(client.call(dreq), std::chrono::seconds(30));
-            
+            auto daemonResult =
+                clientConfig.enableChunkedResponses
+                    ? run_sync(client.streamingSearch(dreq), std::chrono::seconds(30))
+                    : run_sync(client.call(dreq), std::chrono::seconds(30));
+
             if (!daemonResult && clientConfig.enableChunkedResponses) {
                 // Transitional fallback: if streaming timed out waiting for header/chunks,
                 // retry a unary call with a longer header timeout to allow full compute.
                 const auto& err = daemonResult.error();
-                if (err.code == ErrorCode::Timeout && err.message.find("Read timeout") != std::string::npos) {
-                    spdlog::warn("Streaming search timed out; retrying unary path with extended header timeout");
+                if (err.code == ErrorCode::Timeout &&
+                    err.message.find("Read timeout") != std::string::npos) {
+                    spdlog::warn("Streaming search timed out; retrying unary path with extended "
+                                 "header timeout");
                     // Bump header timeout to body timeout for unary retry
                     client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs_));
                     auto unaryRetry = run_sync(client.call(dreq), std::chrono::seconds(60));
                     if (unaryRetry) {
                         auto r = render(unaryRetry.value());
-                        if (!r) return r.error();
+                        if (!r)
+                            return r.error();
                         return Result<void>();
                     }
                 }
             }
             if (daemonResult) {
                 auto r = render(daemonResult.value());
-                if (!r) return r.error();
+                if (!r)
+                    return r.error();
                 return Result<void>();
             }
             // Fallback to local on error
             auto fb = fallback();
-            if (!fb) return fb.error();
+            if (!fb)
+                return fb.error();
             return Result<void>();
-            
+
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }

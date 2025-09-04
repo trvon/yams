@@ -14,4 +14,3 @@ std::filesystem::path resolve_socket_path();
 std::filesystem::path resolve_socket_path_config_first();
 
 } // namespace yams::daemon::socket_utils
-

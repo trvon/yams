@@ -11,9 +11,9 @@ namespace yamsfmt = fmt;
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <random>
-#include <deque>
 #include <thread>
 
 // Include generated protobuf headers
@@ -625,12 +625,14 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
     if (const char* s = std::getenv("YAMS_RECONSTRUCT_PREFETCH")) {
         try {
             long v = std::strtol(s, nullptr, 10);
-            if (v > 0 && v <= 64) prefetch = static_cast<std::size_t>(v);
+            if (v > 0 && v <= 64)
+                prefetch = static_cast<std::size_t>(v);
         } catch (...) {
         }
     }
     // Clamp to a reasonable upper bound
-    if (prefetch > 64) prefetch = 64;
+    if (prefetch > 64)
+        prefetch = 64;
 
     struct Inflight {
         std::future<Result<std::vector<std::byte>>> fut;
@@ -642,33 +644,35 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
         const auto& ref = manifest.chunks[idx];
         Inflight in;
         in.ref = ref;
-        in.fut = std::async(std::launch::async, [&provider, ref]() { return provider.getChunk(ref.hash); });
+        in.fut = std::async(std::launch::async,
+                            [&provider, ref]() { return provider.getChunk(ref.hash); });
         queue.emplace_back(std::move(in));
     };
 
     std::size_t nextIdx = 0;
     const std::size_t warm = std::min(prefetch, totalChunks);
-    for (; nextIdx < warm; ++nextIdx) launch_fetch(nextIdx);
+    for (; nextIdx < warm; ++nextIdx)
+        launch_fetch(nextIdx);
 
     while (!queue.empty()) {
         auto in = std::move(queue.front());
         queue.pop_front();
         auto chunkResult = in.fut.get();
         if (!chunkResult) {
-            return Result<void>(Error{ErrorCode::ChunkNotFound,
-                                      yamsfmt::format("Failed to retrieve chunk {}: {}",
-                                                      in.ref.hash.substr(0, 8),
-                                                      chunkResult.error().message)});
+            return Result<void>(
+                Error{ErrorCode::ChunkNotFound,
+                      yamsfmt::format("Failed to retrieve chunk {}: {}", in.ref.hash.substr(0, 8),
+                                      chunkResult.error().message)});
         }
 
         const auto& chunkData = chunkResult.value();
 
         // Validate chunk size
         if (chunkData.size() != in.ref.size) {
-            return Result<void>(Error{ErrorCode::ValidationError,
-                                      yamsfmt::format("Chunk {} size mismatch: expected {}, got {}",
-                                                      in.ref.hash.substr(0, 8), in.ref.size,
-                                                      chunkData.size())});
+            return Result<void>(
+                Error{ErrorCode::ValidationError,
+                      yamsfmt::format("Chunk {} size mismatch: expected {}, got {}",
+                                      in.ref.hash.substr(0, 8), in.ref.size, chunkData.size())});
         }
 
         // Optionally validate chunk hash if configured

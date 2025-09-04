@@ -1,13 +1,14 @@
 #pragma once
 
-#include <unordered_map>
+#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <cstdint>
+#include <unordered_map>
 
 #include <yams/daemon/ipc/request_context.h>
 
-namespace yams { namespace daemon {
+namespace yams {
+namespace daemon {
 
 class RequestContextRegistry {
 public:
@@ -27,7 +28,8 @@ public:
     bool cancel(uint64_t request_id) {
         std::lock_guard<std::mutex> lk(m_);
         auto it = map_.find(request_id);
-        if (it == map_.end()) return false;
+        if (it == map_.end())
+            return false;
         if (auto sp = it->second.lock()) {
             sp->canceled.store(true, std::memory_order_relaxed);
             return true;
@@ -40,5 +42,5 @@ private:
     std::unordered_map<uint64_t, std::weak_ptr<RequestContext>> map_;
 };
 
-}} // namespace yams::daemon
-
+} // namespace daemon
+} // namespace yams

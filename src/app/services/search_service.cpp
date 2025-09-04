@@ -1,26 +1,24 @@
+#include <spdlog/spdlog.h>
 #include <yams/app/services/services.hpp>
 #include <yams/search/query_qualifiers.hpp>
-#include <spdlog/spdlog.h>
-
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
-#include <atomic>
-#include <thread>
-#include <mutex>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
 
 // Forward util for snippet creation
 namespace yams::app::services::utils {
-std::string createSnippet(const std::string& content, size_t maxLength,
-                          bool preserveWordBoundary);
+std::string createSnippet(const std::string& content, size_t maxLength, bool preserveWordBoundary);
 }
 
 namespace yams::app::services {
@@ -203,14 +201,15 @@ public:
         spdlog::info("SearchService: type='{}' fuzzy={} sim={} pathsOnly={} literal={} limit={} "
                      "filters: ext='{}' mime='{}' path='{}' tags={} allTags={}",
                      type, req.fuzzy, req.similarity, req.pathsOnly, req.literalText, req.limit,
-                     req.extension, req.mimeType, req.pathPattern, req.tags.size(), req.matchAllTags);
+                     req.extension, req.mimeType, req.pathPattern, req.tags.size(),
+                     req.matchAllTags);
 
         if (type == "hybrid" || type == "semantic") {
             if (ctx_.hybridEngine) {
                 auto result = hybridSearch(normalizedReq, parsed.scope);
                 setExecTime(result, t0);
-            if (result) {
-                // If no results, enrich diagnostics with extraction stats
+                if (result) {
+                    // If no results, enrich diagnostics with extraction stats
                     if (result.value().total == 0 && ctx_.metadataRepo) {
                         auto allDocs = ctx_.metadataRepo->findDocumentsByPath("%");
                         if (allDocs) {
@@ -314,7 +313,8 @@ private:
     AppContext ctx_;
 
     void hydrateSnippets(const SearchRequest& req, SearchResponse& resp) {
-        if (!ctx_.metadataRepo) return;
+        if (!ctx_.metadataRepo)
+            return;
         // Collect indices needing hydration (empty snippet, have path or hash)
         std::vector<size_t> todo;
         todo.reserve(resp.results.size());
@@ -324,7 +324,8 @@ private:
                 todo.push_back(i);
             }
         }
-        if (todo.empty()) return;
+        if (todo.empty())
+            return;
 
         size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
         size_t rec = std::max<size_t>(hw / 2, (hw > 1 ? hw - 1 : 1));
@@ -338,7 +339,12 @@ private:
         size_t workers = std::clamp<size_t>(rec, 1, hw);
         workers = std::min(workers, todo.size());
         if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
-            try { auto cap = static_cast<size_t>(std::stoul(gcap)); if (cap > 0) workers = std::min(workers, cap); } catch (...) {}
+            try {
+                auto cap = static_cast<size_t>(std::stoul(gcap));
+                if (cap > 0)
+                    workers = std::min(workers, cap);
+            } catch (...) {
+            }
         }
 
         std::atomic<size_t> next{0};
@@ -346,27 +352,38 @@ private:
         auto work = [&]() {
             while (true) {
                 size_t k = next.fetch_add(1);
-                if (k >= todo.size()) break;
+                if (k >= todo.size())
+                    break;
                 size_t idx = todo[k];
                 auto& out = resp.results[idx];
                 std::string hash = out.hash;
                 int64_t docId = -1;
                 if (!hash.empty()) {
                     auto d = ctx_.metadataRepo->getDocumentByHash(hash);
-                    if (d && d.value().has_value()) docId = d.value()->id;
+                    if (d && d.value().has_value())
+                        docId = d.value()->id;
                 }
                 if (docId < 0 && !out.path.empty()) {
                     auto v = ctx_.metadataRepo->findDocumentsByPath(out.path);
-                    if (v && !v.value().empty()) docId = v.value().front().id;
+                    if (v && !v.value().empty())
+                        docId = v.value().front().id;
                 }
-                if (docId < 0) continue;
+                if (docId < 0)
+                    continue;
                 auto contentResult = ctx_.metadataRepo->getContent(docId);
-                if (!contentResult || !contentResult.value().has_value()) continue;
+                if (!contentResult || !contentResult.value().has_value())
+                    continue;
                 const auto& content = contentResult.value().value();
-                if (content.contentText.empty()) continue;
+                if (content.contentText.empty())
+                    continue;
                 size_t maxLen = 200;
                 if (const char* sn = std::getenv("YAMS_SNIPPET_LENGTH")) {
-                    try { auto v = std::stoul(sn); if (v > 16 && v < 4096) maxLen = v; } catch (...) {}
+                    try {
+                        auto v = std::stoul(sn);
+                        if (v > 16 && v < 4096)
+                            maxLen = v;
+                    } catch (...) {
+                    }
                 }
                 std::string s = utils::createSnippet(content.contentText, maxLen, true);
                 {
@@ -375,9 +392,12 @@ private:
                 }
             }
         };
-        std::vector<std::thread> ths; ths.reserve(workers);
-        for (size_t t = 0; t < workers; ++t) ths.emplace_back(work);
-        for (auto& th : ths) th.join();
+        std::vector<std::thread> ths;
+        ths.reserve(workers);
+        for (size_t t = 0; t < workers; ++t)
+            ths.emplace_back(work);
+        for (auto& th : ths)
+            th.join();
     }
 
     void ensurePathsFallback(const SearchRequest& req, SearchResponse& resp) {
@@ -403,7 +423,12 @@ private:
         size_t workers = std::clamp<size_t>(rec, 1, hw);
         workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
         if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
-            try { auto cap = static_cast<size_t>(std::stoul(gcap)); if (cap > 0) workers = std::min(workers, cap); } catch (...) {}
+            try {
+                auto cap = static_cast<size_t>(std::stoul(gcap));
+                if (cap > 0)
+                    workers = std::min(workers, cap);
+            } catch (...) {
+            }
         }
 
         std::atomic<size_t> next{0};
@@ -414,7 +439,8 @@ private:
         auto worker = [&]() {
             while (true) {
                 size_t i = next.fetch_add(1);
-                if (i >= docs.size()) break;
+                if (i >= docs.size())
+                    break;
                 const auto& d = docs[i];
                 if (!req.query.empty()) {
                     if (d.filePath.find(req.query) == std::string::npos &&
@@ -424,17 +450,23 @@ private:
                 }
                 std::string p = !d.filePath.empty() ? d.filePath : d.fileName;
                 std::lock_guard<std::mutex> lk(outMutex);
-                if (out.size() < req.limit) out.push_back(std::move(p));
-                if (out.size() >= req.limit) break;
+                if (out.size() < req.limit)
+                    out.push_back(std::move(p));
+                if (out.size() >= req.limit)
+                    break;
             }
         };
 
-        std::vector<std::thread> ths; ths.reserve(workers);
-        for (size_t t = 0; t < workers; ++t) ths.emplace_back(worker);
-        for (auto& th : ths) th.join();
+        std::vector<std::thread> ths;
+        ths.reserve(workers);
+        for (size_t t = 0; t < workers; ++t)
+            ths.emplace_back(worker);
+        for (auto& th : ths)
+            th.join();
 
         // If threads broke early due to limit, ensure size <= limit
-        if (out.size() > req.limit) out.resize(req.limit);
+        if (out.size() > req.limit)
+            out.resize(req.limit);
         resp.paths.insert(resp.paths.end(), out.begin(), out.end());
         if (resp.paths.empty() && !req.query.empty()) {
             // Last-resort: include the query as a pseudo-path to satisfy paths-only consumers
@@ -586,25 +618,41 @@ private:
             workers = std::min(workers, n > 0 ? n : size_t{1});
             std::atomic<size_t> next{0};
             std::mutex outMutex;
-            std::vector<SearchItem> out; out.reserve(n);
+            std::vector<SearchItem> out;
+            out.reserve(n);
             auto worker = [&]() {
                 while (true) {
                     size_t i = next.fetch_add(1);
-                    if (i >= n) break;
+                    if (i >= n)
+                        break;
                     const auto& r = vec[i];
-                    SearchItem it; it.id = static_cast<int64_t>(i + 1);
-                    auto itTitle = r.metadata.find("title"); if (itTitle != r.metadata.end()) it.title = itTitle->second;
-                    auto itPath = r.metadata.find("path"); if (itPath != r.metadata.end()) it.path = itPath->second;
+                    SearchItem it;
+                    it.id = static_cast<int64_t>(i + 1);
+                    auto itTitle = r.metadata.find("title");
+                    if (itTitle != r.metadata.end())
+                        it.title = itTitle->second;
+                    auto itPath = r.metadata.find("path");
+                    if (itPath != r.metadata.end())
+                        it.path = itPath->second;
                     it.score = static_cast<double>(r.hybrid_score);
-                    if (!r.content.empty()) it.snippet = r.content;
-                    if (req.verbose) { it.vectorScore = r.vector_score; it.keywordScore = r.keyword_score; it.kgEntityScore = r.kg_entity_score; it.structuralScore = r.structural_score; }
+                    if (!r.content.empty())
+                        it.snippet = r.content;
+                    if (req.verbose) {
+                        it.vectorScore = r.vector_score;
+                        it.keywordScore = r.keyword_score;
+                        it.kgEntityScore = r.kg_entity_score;
+                        it.structuralScore = r.structural_score;
+                    }
                     std::lock_guard<std::mutex> lk(outMutex);
                     out.push_back(std::move(it));
                 }
             };
-            std::vector<std::thread> ths; ths.reserve(workers);
-            for (size_t t = 0; t < workers; ++t) ths.emplace_back(worker);
-            for (auto& th : ths) th.join();
+            std::vector<std::thread> ths;
+            ths.reserve(workers);
+            for (size_t t = 0; t < workers; ++t)
+                ths.emplace_back(worker);
+            for (auto& th : ths)
+                th.join();
             resp.results = std::move(out);
         }
 
@@ -694,53 +742,77 @@ private:
                 return resp;
             }
 
-        {
-            const auto& items = res.results;
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            size_t rec = hw > 1 ? (hw - 1) : 1;
+            {
+                const auto& items = res.results;
+                size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+                size_t rec = hw > 1 ? (hw - 1) : 1;
 #ifndef _WIN32
-            double loads[3] = {0, 0, 0};
-            if (getloadavg(loads, 3) == 3) {
-                double capacity = std::max(0.0, static_cast<double>(hw) - loads[0]);
-                rec = static_cast<size_t>(std::clamp(capacity, 1.0, static_cast<double>(hw)));
-            }
-#endif
-            size_t workers = std::clamp<size_t>(rec, 1, hw);
-            workers = std::min(workers, items.size() > 0 ? items.size() : size_t{1});
-            if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
-                try { auto cap = static_cast<size_t>(std::stoul(gcap)); if (cap > 0) workers = std::min(workers, cap); } catch (...) {}
-            }
-            std::atomic<size_t> next{0};
-            std::mutex outMutex;
-            std::vector<SearchItem> out; out.reserve(items.size());
-            auto worker = [&]() {
-                while (true) {
-                    size_t i = next.fetch_add(1);
-                    if (i >= items.size()) break;
-                    const auto& item = items[i];
-                    const auto& d = item.document;
-                    bool pathOk = true;
-                    if (!req.pathPattern.empty()) {
-                        if (hasWildcard(req.pathPattern)) pathOk = wildcardMatch(d.filePath, req.pathPattern);
-                        else pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
-                    }
-                    bool metaFiltersOk = true;
-                    if (!req.extension.empty()) {
-                        if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension)) metaFiltersOk = false;
-                    }
-                    if (!req.mimeType.empty() && d.mimeType != req.mimeType) metaFiltersOk = false;
-                    if (!pathOk || !metaFiltersOk || !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) continue;
-
-                    SearchItem it; it.id = item.document.id; it.hash = req.showHash ? item.document.sha256Hash : ""; it.title = item.document.fileName; it.path = item.document.filePath; it.score = item.score; it.snippet = item.snippet;
-                    std::lock_guard<std::mutex> lk(outMutex);
-                    out.push_back(std::move(it));
+                double loads[3] = {0, 0, 0};
+                if (getloadavg(loads, 3) == 3) {
+                    double capacity = std::max(0.0, static_cast<double>(hw) - loads[0]);
+                    rec = static_cast<size_t>(std::clamp(capacity, 1.0, static_cast<double>(hw)));
                 }
-            };
-            std::vector<std::thread> ths; ths.reserve(workers);
-            for (size_t t = 0; t < workers; ++t) ths.emplace_back(worker);
-            for (auto& th : ths) th.join();
-            resp.results = std::move(out);
-        }
+#endif
+                size_t workers = std::clamp<size_t>(rec, 1, hw);
+                workers = std::min(workers, items.size() > 0 ? items.size() : size_t{1});
+                if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
+                    try {
+                        auto cap = static_cast<size_t>(std::stoul(gcap));
+                        if (cap > 0)
+                            workers = std::min(workers, cap);
+                    } catch (...) {
+                    }
+                }
+                std::atomic<size_t> next{0};
+                std::mutex outMutex;
+                std::vector<SearchItem> out;
+                out.reserve(items.size());
+                auto worker = [&]() {
+                    while (true) {
+                        size_t i = next.fetch_add(1);
+                        if (i >= items.size())
+                            break;
+                        const auto& item = items[i];
+                        const auto& d = item.document;
+                        bool pathOk = true;
+                        if (!req.pathPattern.empty()) {
+                            if (hasWildcard(req.pathPattern))
+                                pathOk = wildcardMatch(d.filePath, req.pathPattern);
+                            else
+                                pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                        }
+                        bool metaFiltersOk = true;
+                        if (!req.extension.empty()) {
+                            if (d.fileExtension != req.extension &&
+                                d.fileExtension != ("." + req.extension))
+                                metaFiltersOk = false;
+                        }
+                        if (!req.mimeType.empty() && d.mimeType != req.mimeType)
+                            metaFiltersOk = false;
+                        if (!pathOk || !metaFiltersOk ||
+                            !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                             req.matchAllTags))
+                            continue;
+
+                        SearchItem it;
+                        it.id = item.document.id;
+                        it.hash = req.showHash ? item.document.sha256Hash : "";
+                        it.title = item.document.fileName;
+                        it.path = item.document.filePath;
+                        it.score = item.score;
+                        it.snippet = item.snippet;
+                        std::lock_guard<std::mutex> lk(outMutex);
+                        out.push_back(std::move(it));
+                    }
+                };
+                std::vector<std::thread> ths;
+                ths.reserve(workers);
+                for (size_t t = 0; t < workers; ++t)
+                    ths.emplace_back(worker);
+                for (auto& th : ths)
+                    th.join();
+                resp.results = std::move(out);
+            }
 
             return resp;
         } else {
@@ -769,11 +841,15 @@ private:
                     }
                     bool metaFiltersOk = true;
                     if (!req.extension.empty()) {
-                        if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
+                        if (d.fileExtension != req.extension &&
+                            d.fileExtension != ("." + req.extension))
                             metaFiltersOk = false;
                     }
-                    if (!req.mimeType.empty() && d.mimeType != req.mimeType) metaFiltersOk = false;
-                    if (pathOk && metaFiltersOk && metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) {
+                    if (!req.mimeType.empty() && d.mimeType != req.mimeType)
+                        metaFiltersOk = false;
+                    if (pathOk && metaFiltersOk &&
+                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                        req.matchAllTags)) {
                         resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                     }
                 }
@@ -781,9 +857,11 @@ private:
                     auto allDocs = ctx_.metadataRepo->findDocumentsByPath("%");
                     if (allDocs) {
                         for (const auto& d : allDocs.value()) {
-                            if (d.filePath.find(processedQuery) != std::string::npos || d.fileName.find(processedQuery) != std::string::npos) {
+                            if (d.filePath.find(processedQuery) != std::string::npos ||
+                                d.fileName.find(processedQuery) != std::string::npos) {
                                 resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                                if (resp.paths.size() >= req.limit) break;
+                                if (resp.paths.size() >= req.limit)
+                                    break;
                             }
                         }
                     }
@@ -793,7 +871,8 @@ private:
                     if (allDocs) {
                         for (const auto& d : allDocs.value()) {
                             resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                            if (resp.paths.size() >= req.limit) break;
+                            if (resp.paths.size() >= req.limit)
+                                break;
                         }
                     }
                 }
@@ -817,37 +896,61 @@ private:
                 size_t workers = std::clamp<size_t>(rec, 1, hw);
                 workers = std::min(workers, items.size() > 0 ? items.size() : size_t{1});
                 if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
-                    try { auto cap = static_cast<size_t>(std::stoul(gcap)); if (cap > 0) workers = std::min(workers, cap); } catch (...) {}
+                    try {
+                        auto cap = static_cast<size_t>(std::stoul(gcap));
+                        if (cap > 0)
+                            workers = std::min(workers, cap);
+                    } catch (...) {
+                    }
                 }
                 std::atomic<size_t> next{0};
                 std::mutex outMutex;
-                std::vector<SearchItem> out; out.reserve(items.size());
+                std::vector<SearchItem> out;
+                out.reserve(items.size());
                 auto worker = [&]() {
                     while (true) {
                         size_t i = next.fetch_add(1);
-                        if (i >= items.size()) break;
+                        if (i >= items.size())
+                            break;
                         const auto& item = items[i];
                         const auto& d = item.document;
                         bool pathOk = true;
                         if (!req.pathPattern.empty()) {
-                            if (hasWildcard(req.pathPattern)) pathOk = wildcardMatch(d.filePath, req.pathPattern);
-                            else pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                            if (hasWildcard(req.pathPattern))
+                                pathOk = wildcardMatch(d.filePath, req.pathPattern);
+                            else
+                                pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
                         }
                         bool metaFiltersOk = true;
                         if (!req.extension.empty()) {
-                            if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension)) metaFiltersOk = false;
+                            if (d.fileExtension != req.extension &&
+                                d.fileExtension != ("." + req.extension))
+                                metaFiltersOk = false;
                         }
-                        if (!req.mimeType.empty() && d.mimeType != req.mimeType) metaFiltersOk = false;
-                        if (!pathOk || !metaFiltersOk || !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags)) continue;
+                        if (!req.mimeType.empty() && d.mimeType != req.mimeType)
+                            metaFiltersOk = false;
+                        if (!pathOk || !metaFiltersOk ||
+                            !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                             req.matchAllTags))
+                            continue;
 
-                        SearchItem it; it.id = item.document.id; it.hash = req.showHash ? item.document.sha256Hash : ""; it.title = item.document.fileName; it.path = item.document.filePath; it.score = item.score; it.snippet = item.snippet;
+                        SearchItem it;
+                        it.id = item.document.id;
+                        it.hash = req.showHash ? item.document.sha256Hash : "";
+                        it.title = item.document.fileName;
+                        it.path = item.document.filePath;
+                        it.score = item.score;
+                        it.snippet = item.snippet;
                         std::lock_guard<std::mutex> lk(outMutex);
                         out.push_back(std::move(it));
                     }
                 };
-                std::vector<std::thread> ths; ths.reserve(workers);
-                for (size_t t = 0; t < workers; ++t) ths.emplace_back(worker);
-                for (auto& th : ths) th.join();
+                std::vector<std::thread> ths;
+                ths.reserve(workers);
+                for (size_t t = 0; t < workers; ++t)
+                    ths.emplace_back(worker);
+                for (auto& th : ths)
+                    th.join();
                 resp.results = std::move(out);
             }
 

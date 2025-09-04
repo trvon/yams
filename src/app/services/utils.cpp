@@ -1,8 +1,8 @@
 #include <yams/app/services/services.hpp>
 
-#include <string>
 #include <algorithm>
 #include <cctype>
+#include <string>
 
 namespace yams::app::services::utils {
 
@@ -36,9 +36,9 @@ bool matchGlob(const std::string& text, const std::string& pattern) {
 }
 
 // Create a short content snippet with basic cleanup and optional word-boundary preservation.
-std::string createSnippet(const std::string& content, size_t maxLength,
-                          bool preserveWordBoundary) {
-    if (content.empty() || maxLength == 0) return std::string();
+std::string createSnippet(const std::string& content, size_t maxLength, bool preserveWordBoundary) {
+    if (content.empty() || maxLength == 0)
+        return std::string();
 
     // Collapse whitespace and strip control chars for a compact snippet
     std::string cleaned;
@@ -55,10 +55,12 @@ std::string createSnippet(const std::string& content, size_t maxLength,
             cleaned.push_back(static_cast<char>(c));
             lastWasSpace = false;
         }
-        if (cleaned.size() > maxLength * 2) break; // safety bound
+        if (cleaned.size() > maxLength * 2)
+            break; // safety bound
     }
 
-    if (cleaned.size() <= maxLength) return cleaned;
+    if (cleaned.size() <= maxLength)
+        return cleaned;
 
     // Truncate with optional word boundary preservation
     size_t cut = maxLength;
@@ -72,7 +74,8 @@ std::string createSnippet(const std::string& content, size_t maxLength,
     }
     std::string out = cleaned.substr(0, cut);
     // Trim trailing spaces
-    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) out.pop_back();
+    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back())))
+        out.pop_back();
     out.append("...");
     return out;
 }

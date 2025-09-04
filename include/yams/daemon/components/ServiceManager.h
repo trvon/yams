@@ -47,7 +47,9 @@ public:
     void shutdown() override;
 
     // Set callback to be invoked when async initialization completes
-    void setInitCompleteCallback(InitCompleteCallback callback) { initCompleteCallback_ = callback; }
+    void setInitCompleteCallback(InitCompleteCallback callback) {
+        initCompleteCallback_ = callback;
+    }
 
     // Service Accessors
     std::shared_ptr<api::IContentStore> getContentStore() const { return contentStore_; }
@@ -95,7 +97,7 @@ private:
 
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
     mutable std::mutex searchEngineMutex_;
-    
+
     InitCompleteCallback initCompleteCallback_;
 };
 

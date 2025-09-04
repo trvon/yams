@@ -10,7 +10,6 @@
 #include <span>
 #include <vector>
 
-
 namespace yams::daemon {
 
 // C++20 concept for framed messages

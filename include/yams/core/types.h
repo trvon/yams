@@ -3,12 +3,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <variant>
-#include <new>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 namespace yams {
@@ -167,7 +167,9 @@ struct Error {
 template <typename T> class Result {
 public:
     Result(T&& value) : data_(std::move(value)) {}
-    Result(const T& value) requires std::is_copy_constructible_v<T> : data_(value) {}
+    Result(const T& value)
+    requires std::is_copy_constructible_v<T>
+        : data_(value) {}
     Result(ErrorCode error) : data_(Error{error}) {}
     Result(Error error) : data_(std::move(error)) {}
 
@@ -267,12 +269,16 @@ template <> struct fmt::formatter<yams::ErrorCode> {
 namespace yams {
 
 // Common constants
-inline constexpr size_t HASH_SIZE = 32;                  // SHA-256
-inline constexpr size_t HASH_STRING_SIZE = 64;           // Hex encoded
-inline constexpr size_t DEFAULT_CHUNK_SIZE = static_cast<size_t>(64) * static_cast<size_t>(1024);   // 64KB
-inline constexpr size_t MIN_CHUNK_SIZE     = static_cast<size_t>(16) * static_cast<size_t>(1024);   // 16KB
-inline constexpr size_t MAX_CHUNK_SIZE     = static_cast<size_t>(256) * static_cast<size_t>(1024);  // 256KB
-inline constexpr size_t DEFAULT_BUFFER_SIZE = static_cast<size_t>(64) * static_cast<size_t>(1024);  // 64KB
+inline constexpr size_t HASH_SIZE = 32;        // SHA-256
+inline constexpr size_t HASH_STRING_SIZE = 64; // Hex encoded
+inline constexpr size_t DEFAULT_CHUNK_SIZE =
+    static_cast<size_t>(64) * static_cast<size_t>(1024); // 64KB
+inline constexpr size_t MIN_CHUNK_SIZE =
+    static_cast<size_t>(16) * static_cast<size_t>(1024); // 16KB
+inline constexpr size_t MAX_CHUNK_SIZE =
+    static_cast<size_t>(256) * static_cast<size_t>(1024); // 256KB
+inline constexpr size_t DEFAULT_BUFFER_SIZE =
+    static_cast<size_t>(64) * static_cast<size_t>(1024); // 64KB
 
 // Storage statistics
 struct StorageStats {

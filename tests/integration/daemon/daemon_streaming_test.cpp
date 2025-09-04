@@ -2,11 +2,11 @@
 #include <fstream>
 #include <random>
 #include <thread>
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/api/content_store_builder.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
-#include "test_async_helpers.h"
 #include <yams/metadata/metadata_repository.h>
 
 namespace yams::daemon::integration::test {

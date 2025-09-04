@@ -446,8 +446,8 @@ AtomicFileWriter::generateTempName(const std::filesystem::path& target) const {
     return {yamsfmt::format("{}.tmp.{}.{}", target.string(), timestamp, dist(gen))};
 }
 
-auto AtomicFileWriter::writeImpl(const std::filesystem::path& path,
-                                 std::span<const std::byte> data) -> Result<void> {
+auto AtomicFileWriter::writeImpl(const std::filesystem::path& path, std::span<const std::byte> data)
+    -> Result<void> {
     auto tempPath = generateTempName(path);
 
     // RAII cleanup guard

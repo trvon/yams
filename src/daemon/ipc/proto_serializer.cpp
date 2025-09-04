@@ -1183,9 +1183,10 @@ Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg)
         env.set_client_version(*msg.clientVersion);
     env.set_expects_streaming_response(msg.expectsStreamingResponse);
     spdlog::debug("encode_payload: payload={} expects_streaming_response={} request_id={}",
-                  (std::holds_alternative<Request>(msg.payload) ? static_cast<int>(getMessageType(std::get<Request>(msg.payload)))
-                                                                 : static_cast<int>(getMessageType(std::get<Response>(msg.payload)))), msg.expectsStreamingResponse,
-                  msg.requestId);
+                  (std::holds_alternative<Request>(msg.payload)
+                       ? static_cast<int>(getMessageType(std::get<Request>(msg.payload)))
+                       : static_cast<int>(getMessageType(std::get<Response>(msg.payload)))),
+                  msg.expectsStreamingResponse, msg.requestId);
 
     if (std::holds_alternative<Request>(msg.payload)) {
         const auto& req = std::get<Request>(msg.payload);
@@ -1223,9 +1224,10 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
         return Error{ErrorCode::SerializationError, "Failed to parse protobuf Envelope"};
     }
     // Debug visibility into the incoming payload
-    spdlog::debug("decode_payload: payload_case={} request_id={} size={}B expects_streaming_response={}",
-                  static_cast<int>(env.payload_case()), env.request_id(), bytes.size(),
-                  env.expects_streaming_response());
+    spdlog::debug(
+        "decode_payload: payload_case={} request_id={} size={}B expects_streaming_response={}",
+        static_cast<int>(env.payload_case()), env.request_id(), bytes.size(),
+        env.expects_streaming_response());
 
     Message m;
     m.version = env.version();

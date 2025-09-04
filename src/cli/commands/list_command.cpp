@@ -1,9 +1,9 @@
 #include <spdlog/spdlog.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -271,7 +271,8 @@ public:
                               : run_sync(client.call(dreq), std::chrono::seconds(30));
             if (result) {
                 auto r = render(result.value());
-                if (!r) return r.error();
+                if (!r)
+                    return r.error();
                 return Result<void>();
             }
             // Fallback to service-based approach

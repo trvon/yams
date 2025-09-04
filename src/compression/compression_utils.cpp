@@ -180,14 +180,14 @@ size_t estimateCompressionRatio(std::span<const std::byte> data, CompressionAlgo
 }
 
 Result<std::string> getCompressionStats(const CompressionResult& result) {
-    const double ratio = result.originalSize > 0
-                             ? static_cast<double>(result.originalSize) / static_cast<double>(result.compressedSize)
-                             : 0.0;
+    const double ratio = result.originalSize > 0 ? static_cast<double>(result.originalSize) /
+                                                       static_cast<double>(result.compressedSize)
+                                                 : 0.0;
 
-    const double throughputMBps = result.duration.count() > 0
-                                      ? (static_cast<double>(result.originalSize) / (1024 * 1024)) /
-                                            (static_cast<double>(result.duration.count()) / 1000000.0)
-                                      : 0.0;
+    const double throughputMBps =
+        result.duration.count() > 0 ? (static_cast<double>(result.originalSize) / (1024 * 1024)) /
+                                          (static_cast<double>(result.duration.count()) / 1000000.0)
+                                    : 0.0;
 
     std::string algorithmName;
     switch (result.algorithm) {

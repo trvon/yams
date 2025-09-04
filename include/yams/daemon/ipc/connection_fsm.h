@@ -2,10 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <filesystem>
 // Intentionally avoid heavy project headers here to keep adapter minimal.
 
 namespace yams {

@@ -26,8 +26,8 @@
 //
 // Thread-safety: increments are wait-free and lock-free; snapshot/reset are safe with atomics.
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <thread>
@@ -64,9 +64,7 @@ public:
     }
 
     // Configure whether metrics collection is enabled
-    void setEnabled(bool enabled) noexcept {
-        enabled_.store(enabled, std::memory_order_relaxed);
-    }
+    void setEnabled(bool enabled) noexcept { enabled_.store(enabled, std::memory_order_relaxed); }
 
     // Enable/disable metrics collection (disabled = fast no-op on increments)
     inline void set_enabled(bool on) noexcept { enabled_.store(on, std::memory_order_relaxed); }
@@ -74,27 +72,33 @@ public:
 
     // Incremental counters (fast-path; relaxed atomics)
     inline void incrementTransitions(uint64_t n = 1) noexcept {
-        if (!enabled()) return;
+        if (!enabled())
+            return;
         shard().transitions.fetch_add(n, std::memory_order_relaxed);
     }
     inline void incrementHeaderReads(uint64_t n = 1) noexcept {
-        if (!enabled()) return;
+        if (!enabled())
+            return;
         shard().headerReads.fetch_add(n, std::memory_order_relaxed);
     }
     inline void incrementPayloadReads(uint64_t n = 1) noexcept {
-        if (!enabled()) return;
+        if (!enabled())
+            return;
         shard().payloadReads.fetch_add(n, std::memory_order_relaxed);
     }
     inline void incrementPayloadWrites(uint64_t n = 1) noexcept {
-        if (!enabled()) return;
+        if (!enabled())
+            return;
         shard().payloadWrites.fetch_add(n, std::memory_order_relaxed);
     }
     inline void addBytesSent(uint64_t n) noexcept {
-        if (!enabled()) return;
+        if (!enabled())
+            return;
         shard().bytesSent.fetch_add(n, std::memory_order_relaxed);
     }
     inline void addBytesReceived(uint64_t n) noexcept {
-        if (!enabled()) return;
+        if (!enabled())
+            return;
         shard().bytesReceived.fetch_add(n, std::memory_order_relaxed);
     }
 
@@ -157,7 +161,8 @@ private:
             // Incremental assignment; wrap naturally with modulo
             idx = next.fetch_add(1, std::memory_order_relaxed);
         }
-        return static_cast<std::size_t>(idx) & (kDefaultShards - 1); // kDefaultShards is power-of-two
+        return static_cast<std::size_t>(idx) &
+               (kDefaultShards - 1); // kDefaultShards is power-of-two
     }
 
     inline Shard& shard() noexcept { return shards_[shard_index()]; }

@@ -34,8 +34,12 @@ struct StreamingRabinTables {
     }
 
 private:
-    struct ExpTag { size_t v; };
-    struct PolyTag { uint64_t v; };
+    struct ExpTag {
+        size_t v;
+    };
+    struct PolyTag {
+        uint64_t v;
+    };
     static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
         uint64_t result = 1;
         base %= poly.v;

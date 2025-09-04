@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <thread>
+#include "test_async_helpers.h"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <sys/resource.h>
@@ -10,7 +11,6 @@
 #include <sys/wait.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
-#include "test_async_helpers.h"
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
@@ -422,25 +422,25 @@ TEST_F(DaemonResilienceTest, ErrorInjection) {
     ASSERT_TRUE(client.connect());
 
     // Send various invalid requests
-    std::vector<std::function<void()>> errorTests = {[&client]() {
-                                                         // Empty search
-                                                         SearchRequest req{};
-                                                         req.query = "";
-                                                         req.limit = 0;
-                                                         (void)yams::test_async::res(client.search(req));
-                                                     },
-                                                     [&client]() {
-                                                         // Invalid model
-                                                         LoadModelRequest req{
-                                                             "nonexistent-model-xyz"};
-                                                         (void)yams::test_async::res(client.loadModel(req));
-                                                     },
-                                                     [&client]() {
-                                                         // Invalid hash
-                                                         GetRequest req{};
-                                                         req.hash = "invalid-hash-123";
-                                                         (void)yams::test_async::res(client.get(req));
-                                                     }};
+    std::vector<std::function<void()>> errorTests = {
+        [&client]() {
+            // Empty search
+            SearchRequest req{};
+            req.query = "";
+            req.limit = 0;
+            (void)yams::test_async::res(client.search(req));
+        },
+        [&client]() {
+            // Invalid model
+            LoadModelRequest req{"nonexistent-model-xyz"};
+            (void)yams::test_async::res(client.loadModel(req));
+        },
+        [&client]() {
+            // Invalid hash
+            GetRequest req{};
+            req.hash = "invalid-hash-123";
+            (void)yams::test_async::res(client.get(req));
+        }};
 
     // Run error tests
     for (auto& test : errorTests) {

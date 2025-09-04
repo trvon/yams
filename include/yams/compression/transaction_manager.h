@@ -10,8 +10,8 @@
 #include <span>
 #include <string>
 #include <unordered_map>
-#include <vector>
 #include <utility>
+#include <vector>
 #include <yams/compression/compressor_interface.h>
 #include <yams/compression/error_handler.h>
 #include <yams/core/types.h>
@@ -260,7 +260,8 @@ public:
      * @return Transaction log as JSON
      */
     [[nodiscard]] std::string
-    exportTransactionLog(std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point> range = {}) const;
+    exportTransactionLog(std::pair<std::chrono::system_clock::time_point,
+                                   std::chrono::system_clock::time_point> range = {}) const;
 
     /**
      * @brief Get diagnostic information
