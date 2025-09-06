@@ -42,35 +42,13 @@ protected:
         config_.maxMemoryGb = 1.0;
 
         // Check if we should attempt to use models
-        bool shouldUseModels = false;
-        if (home && strlen(home) > 0) {
-            // Don't attempt model loading under AddressSanitizer
-            if (!std::getenv("ASAN_OPTIONS")) {
-                fs::path modelPath = fs::path(home) / ".yams/models/all-MiniLM-L6-v2/model.onnx";
-                try {
-                    if (fs::exists(modelPath)) {
-                        shouldUseModels = true;
-                    }
-                } catch (const std::exception& e) {
-                    // Ignore filesystem errors
-                }
-            }
-        }
-
-        if (shouldUseModels) {
-            // Enable model provider with real model
-            config_.enableModelProvider = true;
-            config_.modelPoolConfig.lazyLoading = true;
-            config_.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
-        } else {
-            // Test without models to avoid loading issues
-            config_.enableModelProvider = false;
-            config_.modelPoolConfig.lazyLoading = true;
-            config_.modelPoolConfig.preloadModels.clear();
-        }
-
-        // Disable plugin auto-loading for tests
-        config_.autoLoadPlugins = false;
+        // Enable model provider and plugin auto-loading in tests to exercise real provider path
+        // Use lazy loading to avoid blocking test startup if model isn’t present
+        config_.enableModelProvider = true;
+        config_.autoLoadPlugins = true;
+        config_.modelPoolConfig.lazyLoading = true;
+        // Do not force preloads in unit tests; allow on-demand
+        config_.modelPoolConfig.preloadModels.clear();
 
         std::error_code se;
         fs::create_directories(config_.dataDir, se);

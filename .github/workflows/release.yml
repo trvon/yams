@@ -370,23 +370,23 @@ jobs:
             do
               if [ -f "$json_file" ]; then
                 python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
-                  import json, sys
-                  try:
-                      path = sys.argv[1]
-                      with open(path) as f:
-                          data = json.load(f)
-                          if 'benchmarks' in data:
-                              for bench in data['benchmarks']:
-                                  name = bench.get('name', 'Unknown')
-                                  real_time = bench.get('real_time', 0.0)
-                                  cpu_time = bench.get('cpu_time', 0.0)
-                                  bytes_per_sec = bench.get('bytes_per_second', 0.0)
-                                  items_per_sec = bench.get('items_per_second', 0.0)
-                                  memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
-                                  print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
-                  except Exception:
-                      pass
-                  PY
+import json, sys
+try:
+    path = sys.argv[1]
+    with open(path) as f:
+        data = json.load(f)
+        if 'benchmarks' in data:
+            for bench in data['benchmarks']:
+                name = bench.get('name', 'Unknown')
+                real_time = bench.get('real_time', 0.0)
+                cpu_time = bench.get('cpu_time', 0.0)
+                bytes_per_sec = bench.get('bytes_per_second', 0.0)
+                items_per_sec = bench.get('items_per_second', 0.0)
+                memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
+                print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
+except Exception:
+    pass
+PY
               fi
             done
             echo "" >> "$SUMMARY_FILE"

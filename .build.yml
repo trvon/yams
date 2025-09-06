@@ -84,27 +84,6 @@ tasks:
         -o enable_onnx=False \
         --build=missing
 
-      # Ensure Boost config is present for CMake (find_package(Boost CONFIG)).
-      # Some older conanfiles might miss Boost; add a targeted fallback to inject it.
-      if [ ! -f "${BUILD_DIR}/generators/BoostConfig.cmake" ]; then
-        echo "BoostConfig.cmake not found in generators; installing Boost via Conan fallback..."
-        cat > "${BUILD_DIR}/conanfile.boost.txt" <<'EOF'
-        [requires]
-        boost/1.86.0
-
-        [generators]
-        CMakeDeps
-      EOF
-        conan install "${BUILD_DIR}/conanfile.boost.txt" \
-          -of "${BUILD_DIR}" \
-          -s build_type=Release \
-          --build=missing
-        if [ ! -f "${BUILD_DIR}/generators/BoostConfig.cmake" ]; then
-          echo "ERROR: Boost install fallback failed to produce BoostConfig.cmake" >&2
-          exit 1
-        fi
-      fi
-
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
         -DYAMS_BUILD_PROFILE=release \

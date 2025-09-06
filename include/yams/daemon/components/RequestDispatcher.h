@@ -63,6 +63,13 @@ private:
     Response handleDownloadRequest(const DownloadRequest& req);
     Response handlePrepareSessionRequest(const PrepareSessionRequest& req);
 
+    // Embedding/model provider handlers
+    Response handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req);
+    Response handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req);
+    Response handleLoadModelRequest(const LoadModelRequest& req);
+    Response handleUnloadModelRequest(const UnloadModelRequest& req);
+    Response handleModelStatusRequest(const ModelStatusRequest& req);
+
     // Helper functions for status reporting
     double getMemoryUsage();
     double getCpuUsage();

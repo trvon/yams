@@ -291,9 +291,11 @@ std::vector<std::filesystem::path> PluginLoader::getDefaultPluginDirectories() {
     directories.push_back(fs::path("/usr/local/lib/yams/plugins"));
     directories.push_back(fs::path("/usr/lib/yams/plugins"));
 
-    // 5. Installation prefix (if configured)
-#ifdef CMAKE_INSTALL_PREFIX
-    directories.push_back(fs::path(CMAKE_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
+    // 5. Installation prefix (if configured via compile definition)
+    // Note: CMAKE_INSTALL_PREFIX is not defined as a preprocessor macro by default.
+    // We pass YAMS_INSTALL_PREFIX from CMake to enable runtime discovery of installed plugins.
+#ifdef YAMS_INSTALL_PREFIX
+    directories.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
 #endif
 
     return directories;

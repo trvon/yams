@@ -61,8 +61,9 @@ static Result<std::pair<int, int>> parseRangeToken(std::string_view tok) {
     }
 
     // A-B
-    std::string_view a = s.substr(0, pos);
-    std::string_view b = s.substr(pos + 1);
+    std::string_view sv{s};
+    std::string_view a = sv.substr(0, pos);
+    std::string_view b = sv.substr(pos + 1);
 
     int av = 0;
     int bv = 0;

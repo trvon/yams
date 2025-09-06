@@ -19,7 +19,7 @@ namespace yams::daemon {
 
 // Forward declarations
 class RequestDispatcher;
-class StateComponent;
+struct StateComponent;
 
 /**
  * Modernized socket server using native Boost.ASIO

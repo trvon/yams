@@ -426,8 +426,10 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     poolConfig.maxSize = 3; // Allow up to 3 concurrent users per model
     poolConfig.maxIdle = 2;
     poolConfig.idleTimeout = config_.modelIdleTimeout;
-    // Always use lazy loading to prevent blocking on model load
-    poolConfig.preCreateResources = false;
+    // Honor keep-hot semantics: when lazyLoading=false, pre-create at least one session
+    // so the model is immediately usable for embeddings generation.
+    // When lazyLoading=true, defer creation to first acquire to avoid blocking startup.
+    poolConfig.preCreateResources = !config_.lazyLoading;
 
     // Create embedding config
     vector::EmbeddingConfig embConfig;

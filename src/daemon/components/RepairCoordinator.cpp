@@ -84,9 +84,53 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
         spdlog::debug("RepairFsm state changed to: {}", core::RepairFsm::to_string(state));
     });
 
+    bool initialScanEnqueued = false;
     while (!st.stop_requested()) {
         // Wait for work (no timeout - purely event driven)
         std::unique_lock<std::mutex> lock(queueMutex_);
+        // If no pending work yet, opportunistically enqueue an initial backlog scan once
+        if (pendingDocuments_.empty() && !initialScanEnqueued && maintenance_allowed()) {
+            lock.unlock();
+            try {
+                auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+                if (meta) {
+                    // Scan all docs to find those without embeddings
+                    vector::VectorDatabaseConfig vdbConfig;
+                    vdbConfig.database_path = (cfg_.dataDir / "vectors.db").string();
+                    vdbConfig.embedding_dim = 384;
+                    auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
+                    if (vectorDb->initialize()) {
+                        auto allDocs = meta->findDocumentsByPath("%");
+                        if (allDocs && !allDocs.value().empty()) {
+                            size_t enq = 0;
+                            {
+                                std::lock_guard<std::mutex> ql(queueMutex_);
+                                for (const auto& d : allDocs.value()) {
+                                    if (st.stop_requested())
+                                        break;
+                                    if (!vectorDb->hasEmbedding(d.sha256Hash)) {
+                                        pendingDocuments_.push(d.sha256Hash);
+                                        ++enq;
+                                    }
+                                }
+                            }
+                            if (enq > 0) {
+                                spdlog::info(
+                                    "RepairCoordinator: enqueued {} backlog documents for repair",
+                                    enq);
+                                queueCv_.notify_one();
+                            }
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("Initial backlog scan failed: {}", e.what());
+            }
+            initialScanEnqueued = true;
+            // Re-acquire lock before proceeding to wait
+            lock.lock();
+        }
+
         queueCv_.wait(lock,
                       [this, &st] { return !pendingDocuments_.empty() || st.stop_requested(); });
 

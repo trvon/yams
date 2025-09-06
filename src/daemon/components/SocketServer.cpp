@@ -16,6 +16,7 @@
 #include <boost/asio/write.hpp>
 
 #include <filesystem>
+
 #ifndef _WIN32
 #include <sys/un.h>
 #endif
@@ -274,10 +275,10 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         RequestHandler handler(disp, handlerConfig);
 
         // Create a stop_source for this connection
-        std::stop_source stop_source;
+        yams::compat::stop_token token{};
 
         // Delegate connection handling to RequestHandler which supports streaming
-        co_await handler.handle_connection(std::move(socket), stop_source.get_token());
+        co_await handler.handle_connection(std::move(socket), token);
     } catch (const std::exception& e) {
         spdlog::debug("Connection handler error: {}", e.what());
     }

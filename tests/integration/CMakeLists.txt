@@ -164,3 +164,23 @@ gtest_discover_tests(daemon_mux_active_handlers_integration_test DISCOVERY_TIMEO
 add_executable(daemon_prepare_session_integration_test daemon/daemon_prepare_session_integration_test.cpp)
 target_link_libraries(daemon_prepare_session_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 gtest_discover_tests(daemon_prepare_session_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration;prepare" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+
+# Embeddings pipeline integration test
+add_executable(daemon_embeddings_integration_test daemon/daemon_embeddings_integration_test.cpp)
+
+# Link the usual integration test deps
+target_link_libraries(daemon_embeddings_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+
+gtest_discover_tests(daemon_embeddings_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)

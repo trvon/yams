@@ -170,6 +170,16 @@ Response RequestDispatcher::dispatch(const Request& req) {
                 return handleDeleteRequest(arg);
             } else if constexpr (std::is_same_v<T, GetStatsRequest>) {
                 return handleGetStatsRequest(arg);
+            } else if constexpr (std::is_same_v<T, GenerateEmbeddingRequest>) {
+                return handleGenerateEmbeddingRequest(arg);
+            } else if constexpr (std::is_same_v<T, BatchEmbeddingRequest>) {
+                return handleBatchEmbeddingRequest(arg);
+            } else if constexpr (std::is_same_v<T, LoadModelRequest>) {
+                return handleLoadModelRequest(arg);
+            } else if constexpr (std::is_same_v<T, UnloadModelRequest>) {
+                return handleUnloadModelRequest(arg);
+            } else if constexpr (std::is_same_v<T, ModelStatusRequest>) {
+                return handleModelStatusRequest(arg);
             } else if constexpr (std::is_same_v<T, UpdateDocumentRequest>) {
                 return handleUpdateDocumentRequest(arg);
             } else if constexpr (std::is_same_v<T, GrepRequest>) {
@@ -221,6 +231,20 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             res.initProgress["vector_index"] = state_->readiness.vectorIndexProgress.load();
         if (!state_->readiness.modelProviderReady.load())
             res.initProgress["model_provider"] = state_->readiness.modelLoadProgress.load();
+
+        // Populate model provider presence only (avoid potential blocking calls while models load)
+        try {
+            auto provider = serviceManager_->getModelProvider();
+            if (provider) {
+                StatusResponse::ModelInfo mi;
+                mi.name = "(provider)";
+                mi.type = provider->getProviderName();
+                mi.memoryMb = 0;
+                mi.requestCount = 0;
+                res.models.push_back(std::move(mi));
+            }
+        } catch (...) {
+        }
 
         // Derive overall status from authoritative lifecycle FSM rather than
         // readiness booleans (which include optional subsystems like models).
@@ -311,6 +335,146 @@ Response RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
     }
 
     return SuccessResponse{"Shutdown initiated"};
+}
+
+Response RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req) {
+    try {
+        auto provider = serviceManager_->getModelProvider();
+        if (!provider || !provider->isAvailable()) {
+            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
+        }
+        // If a model name is provided, best-effort load it first
+        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
+            auto lr = provider->loadModel(req.modelName);
+            if (!lr) {
+                return ErrorResponse{lr.error().code, lr.error().message};
+            }
+        }
+        auto r = provider->generateEmbedding(req.text);
+        if (!r) {
+            return ErrorResponse{r.error().code, r.error().message};
+        }
+        EmbeddingResponse resp;
+        resp.embedding = std::move(r.value());
+        resp.dimensions = resp.embedding.size();
+        resp.modelUsed = req.modelName;
+        resp.processingTimeMs = 0;
+        return resp;
+    } catch (const std::exception& e) {
+        return ErrorResponse{ErrorCode::InternalError,
+                             std::string("Embedding generation failed: ") + e.what()};
+    }
+}
+
+Response RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req) {
+    try {
+        auto provider = serviceManager_->getModelProvider();
+        if (!provider || !provider->isAvailable()) {
+            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
+        }
+        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
+            auto lr = provider->loadModel(req.modelName);
+            if (!lr) {
+                return ErrorResponse{lr.error().code, lr.error().message};
+            }
+        }
+        auto r = provider->generateBatchEmbeddings(req.texts);
+        if (!r) {
+            return ErrorResponse{r.error().code, r.error().message};
+        }
+        BatchEmbeddingResponse resp;
+        resp.embeddings = std::move(r.value());
+        resp.dimensions = resp.embeddings.empty() ? 0 : resp.embeddings.front().size();
+        resp.modelUsed = req.modelName;
+        resp.processingTimeMs = 0;
+        resp.successCount = resp.embeddings.size();
+        resp.failureCount = 0;
+        return resp;
+    } catch (const std::exception& e) {
+        return ErrorResponse{ErrorCode::InternalError,
+                             std::string("Batch embedding failed: ") + e.what()};
+    }
+}
+
+Response RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
+    try {
+        auto provider = serviceManager_->getModelProvider();
+        if (!provider || !provider->isAvailable()) {
+            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
+        }
+        if (req.modelName.empty()) {
+            return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
+        }
+        auto r = provider->loadModel(req.modelName);
+        if (!r) {
+            return ErrorResponse{r.error().code, r.error().message};
+        }
+        ModelLoadResponse resp;
+        resp.success = true;
+        resp.modelName = req.modelName;
+        resp.memoryUsageMb = provider->getMemoryUsage() / (1024 * 1024);
+        resp.loadTimeMs = 0;
+        return resp;
+    } catch (const std::exception& e) {
+        return ErrorResponse{ErrorCode::InternalError,
+                             std::string("Load model failed: ") + e.what()};
+    }
+}
+
+Response RequestDispatcher::handleUnloadModelRequest(const UnloadModelRequest& req) {
+    try {
+        auto provider = serviceManager_->getModelProvider();
+        if (!provider || !provider->isAvailable()) {
+            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
+        }
+        if (req.modelName.empty()) {
+            return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
+        }
+        auto r = provider->unloadModel(req.modelName);
+        if (!r) {
+            return ErrorResponse{r.error().code, r.error().message};
+        }
+        SuccessResponse resp{"Model unloaded"};
+        return resp;
+    } catch (const std::exception& e) {
+        return ErrorResponse{ErrorCode::InternalError,
+                             std::string("Unload model failed: ") + e.what()};
+    }
+}
+
+Response RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
+    try {
+        auto provider = serviceManager_->getModelProvider();
+        ModelStatusResponse resp;
+        if (!provider || !provider->isAvailable()) {
+            return resp;
+        }
+        auto loaded = provider->getLoadedModels();
+        for (const auto& name : loaded) {
+            if (!req.modelName.empty() && req.modelName != name) {
+                continue;
+            }
+            ModelStatusResponse::ModelDetails d{};
+            d.name = name;
+            d.path = "";
+            d.loaded = true;
+            d.isHot = false;
+            d.memoryMb = 0; // per-model memory not exposed
+            d.embeddingDim = provider->getEmbeddingDim(name);
+            d.maxSequenceLength = 0;
+            d.requestCount = 0;
+            d.errorCount = 0;
+            d.loadTime = {};
+            d.lastAccess = {};
+            resp.models.push_back(std::move(d));
+        }
+        resp.totalMemoryMb = provider->getMemoryUsage() / (1024 * 1024);
+        resp.maxMemoryMb = 0;
+        return resp;
+    } catch (const std::exception& e) {
+        return ErrorResponse{ErrorCode::InternalError,
+                             std::string("Model status failed: ") + e.what()};
+    }
 }
 
 Response RequestDispatcher::handlePingRequest(const PingRequest& /*req*/) {
@@ -1518,11 +1682,16 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
 
         // Defensive fallback: if content store reports zero but configured storage exists,
         // scan objects directory to estimate counts and total size.
+        // Cap the scan to avoid blocking status requests on large stores.
         if (response.totalDocuments == 0 || response.totalSize == 0) {
             try {
                 auto cfg = serviceManager_->getConfig();
                 std::filesystem::path objectsDir = cfg.dataDir / "storage" / "objects";
                 if (std::filesystem::exists(objectsDir)) {
+                    const uint64_t maxFiles = 1000; // hard cap to avoid long scans
+                    const auto maxDuration = std::chrono::milliseconds(150);
+                    const auto startScan = std::chrono::steady_clock::now();
+
                     uint64_t count = 0;
                     uint64_t bytes = 0;
                     for (auto it = std::filesystem::recursive_directory_iterator(objectsDir);
@@ -1531,6 +1700,11 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                             ++count;
                             std::error_code ec;
                             bytes += std::filesystem::file_size(it->path(), ec);
+                            if (count >= maxFiles)
+                                break;
+                        }
+                        if (std::chrono::steady_clock::now() - startScan > maxDuration) {
+                            break;
                         }
                     }
                     if (count > 0) {
@@ -1686,18 +1860,14 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 response.additionalStats["vectordb_error"] = e.what();
             }
 
-            // Embedding / ONNX provider status
+            // Embedding / ONNX provider status (non-blocking; avoid locking provider internals)
             try {
                 auto provider = serviceManager_->getModelProvider();
                 auto generator = serviceManager_->getEmbeddingGenerator();
-                if (generator) {
-                    response.additionalStats["service_embeddingservice"] = "available";
-                } else {
-                    response.additionalStats["service_embeddingservice"] = "unavailable";
-                }
+                response.additionalStats["service_embeddingservice"] =
+                    generator ? "available" : "unavailable";
                 if (provider) {
-                    auto loaded = provider->getLoadedModels();
-                    response.additionalStats["onnx_models_loaded"] = std::to_string(loaded.size());
+                    response.additionalStats["onnx_models_loaded"] = "unknown";
                 } else {
                     response.additionalStats["onnx_models_loaded"] = "0";
                 }

@@ -1016,6 +1016,28 @@ private:
                         std::cout << "    - " << k << ": " << (v ? "ok" : "…") << "\n";
                     }
                 }
+                // Plugin / Model summary
+                if (!status.models.empty()) {
+                    size_t model_count = 0;
+                    std::string provider;
+                    for (const auto& m : status.models) {
+                        if (m.name != "(provider)")
+                            model_count++;
+                        if (provider.empty())
+                            provider = m.type;
+                    }
+                    std::cout << "  Models: " << model_count;
+                    if (!provider.empty())
+                        std::cout << " loaded (" << provider << ")";
+                    std::cout << "\n";
+                    if (detailed_) {
+                        for (const auto& m : status.models) {
+                            if (m.name == "(provider)")
+                                continue;
+                            std::cout << "    - " << m.name << " [" << m.type << "]\n";
+                        }
+                    }
+                }
                 if (!status.initProgress.empty()) {
                     std::cout << "  Initialization progress:\n";
                     for (const auto& [k, v] : status.initProgress) {

@@ -356,9 +356,16 @@ std::string PdfExtractor::convertUtf16ToUtf8(const std::vector<unsigned short>& 
 
     // Use codecvt for conversion
     try {
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
         std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
         std::u16string u16str(reinterpret_cast<const char16_t*>(utf16.data()), len);
         return converter.to_bytes(u16str);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
     } catch (const std::exception& e) {
         spdlog::warn("UTF-16 to UTF-8 conversion failed: {}", e.what());
 

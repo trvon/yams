@@ -852,7 +852,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // Use the configured processor (server may decorate with streaming support)
         std::shared_ptr<RequestProcessor> proc = processor_;
         spdlog::debug("handle_streaming_request: processor type={} for request_id={}",
-                      proc ? typeid(*proc).name() : "null", request_id);
+                      proc ? typeid(RequestProcessor).name() : "null", request_id);
 
         // Process the request with streaming support (may return no value to indicate chunking)
         // regardless of the client's hint to ensure immediate header emission and avoid timeouts.

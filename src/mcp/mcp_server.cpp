@@ -1233,7 +1233,8 @@ json MCPServer::listTools() {
         json props = json::object();
         props["directory_path"] = makeProp("string", "Directory path");
         props["recursive"] = makeProp("boolean", "Recursively add subdirectories");
-        props["recursive"]["default"] = false;
+        // Align default with CLI behavior: recursive by default for directory indexing
+        props["recursive"]["default"] = true;
         props["collection"] = makeProp("string", "Collection name for grouping");
         props["snapshot_id"] = makeProp("string", "Snapshot ID for versioning");
         props["snapshot_label"] = makeProp("string", "Human-readable snapshot label");
@@ -2254,8 +2255,9 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
             daemon_req.metadata[key] = value.dump();
     }
     // Increase daemon timeouts for long-running directory indexing
-    daemon_client_->setHeaderTimeout(std::chrono::seconds(120));
-    daemon_client_->setBodyTimeout(std::chrono::seconds(600));
+    // Use moderate defaults; avoid appearing to hang on misconfigured daemons
+    daemon_client_->setHeaderTimeout(std::chrono::seconds(30));
+    daemon_client_->setBodyTimeout(std::chrono::seconds(300));
     // Validate that the directory path exists and is a directory
     if (!daemon_req.path.empty()) {
         std::error_code __ec;
@@ -2267,10 +2269,75 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
             co_return Error{ErrorCode::InvalidArgument,
                             std::string("Path is not a directory: ") + daemon_req.path};
         }
+        if (!daemon_req.recursive) {
+            // Match CLI/service semantics: explicit recursive required for directory adds
+            co_return Error{ErrorCode::InvalidArgument,
+                            "Directory specified but --recursive not set"};
+        }
     }
+    // Check daemon readiness quickly; if not ready, fall back to local indexing service
+    {
+        auto statusRes = co_await daemon_client_->status();
+        bool ready = false;
+        if (statusRes) {
+            const auto& st = statusRes.value();
+            ready = st.ready || st.overallStatus == "ready" || st.overallStatus == "degraded";
+        }
+        if (!ready) {
+            if (indexingService_) {
+                app::services::AddDirectoryRequest sreq;
+                sreq.directoryPath = daemon_req.path;
+                sreq.collection = daemon_req.collection;
+                sreq.includePatterns = daemon_req.includePatterns;
+                sreq.excludePatterns = daemon_req.excludePatterns;
+                sreq.recursive = daemon_req.recursive;
+                for (const auto& [k, v] : daemon_req.metadata)
+                    sreq.metadata[k] = v;
+                auto sres = indexingService_->addDirectory(sreq);
+                if (!sres)
+                    co_return sres.error();
+                MCPAddDirectoryResponse out;
+                const auto& r = sres.value();
+                out.directoryPath = r.directoryPath;
+                out.collection = r.collection;
+                out.filesProcessed = r.filesProcessed;
+                out.filesIndexed = r.filesIndexed;
+                out.filesSkipped = r.filesSkipped;
+                out.filesFailed = r.filesFailed;
+                co_return out;
+            }
+            // If no service, propagate a clear not ready error
+            co_return Error{ErrorCode::InvalidState, "Daemon not ready for add_directory"};
+        }
+    }
+
     auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
-    if (!dres)
+    if (!dres) {
+        // Fallback to local indexing service on daemon failure
+        if (indexingService_) {
+            app::services::AddDirectoryRequest sreq;
+            sreq.directoryPath = daemon_req.path;
+            sreq.collection = daemon_req.collection;
+            sreq.includePatterns = daemon_req.includePatterns;
+            sreq.excludePatterns = daemon_req.excludePatterns;
+            sreq.recursive = daemon_req.recursive;
+            for (const auto& [k, v] : daemon_req.metadata)
+                sreq.metadata[k] = v;
+            auto sres = indexingService_->addDirectory(sreq);
+            if (!sres)
+                co_return dres.error(); // keep original daemon error if service also fails
+            MCPAddDirectoryResponse out;
+            const auto& r = sres.value();
+            out.directoryPath = r.directoryPath;
+            out.collection = r.collection;
+            out.filesProcessed = r.filesProcessed;
+            out.filesIndexed = r.filesIndexed;
+            out.filesSkipped = r.filesSkipped;
+            out.filesFailed = r.filesFailed;
+            co_return out;
+        }
         co_return dres.error();
+    }
     MCPAddDirectoryResponse out;
     const auto& add = dres.value();
     out.directoryPath = add.path;
@@ -2719,9 +2786,36 @@ static json createLogNotification(const std::string& level, const std::string& m
 
 yams::Task<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
-    // Streamed retrieval via GetInit/GetChunk/GetEnd to mirror CLI robustness
+    // Prefer fast name -> hash resolution and non-streamed get (CLI parity)
     MCPGetByNameResponse mcp_response;
 
+    // First try to resolve name to hash using document service
+    if (documentService_ && !req.name.empty()) {
+        auto rh = documentService_->resolveNameToHash(req.name);
+        if (rh) {
+            yams::daemon::GetRequest greq;
+            greq.hash = rh.value();
+            greq.metadataOnly = false;
+            auto gres = co_await daemon_client_->get(greq);
+            if (gres) {
+                const auto& r = gres.value();
+                mcp_response.size = r.size;
+                mcp_response.hash = r.hash;
+                mcp_response.name = r.name;
+                mcp_response.path = r.path;
+                mcp_response.mimeType = r.mimeType;
+                if (!r.content.empty()) {
+                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                    mcp_response.content =
+                        r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+                }
+                co_return mcp_response;
+            }
+            // If daemon get failed, fall through to streaming/fuzzy paths below
+        }
+    }
+
+    // Streamed retrieval via GetInit/GetChunk/GetEnd as fallback
     daemon::GetInitRequest init{};
     // Normalize name: if a full URL was provided, use its basename for name-based lookup
     init.name = req.name;

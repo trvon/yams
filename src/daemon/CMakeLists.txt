@@ -343,6 +343,12 @@ target_link_libraries(yams_daemon
         # Removed: onnxruntime::onnxruntime (moved to plugin)
 )
 
+# Propagate install prefix to code so PluginLoader can discover installed plugins at runtime
+if(CMAKE_INSTALL_PREFIX)
+    # Define as a string literal macro for plugin_loader.cpp
+    target_compile_definitions(yams_daemon PRIVATE YAMS_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}")
+endif()
+
 # Add Boost headers for Boost.Asio support
 yams_add_boost_headers(yams_daemon)
 

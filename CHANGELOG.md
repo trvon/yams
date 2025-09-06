@@ -7,11 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 
 - [SourceHut](https://sr.ht/~trvon/yams/): https://sr.ht/~trvon/yams/
 
+## [v0.6.11] - 2025-09-06
+
+### Fixed
+- MCP server: add_directory and get_by_name could appear to hang when the daemon was not ready or when directories were passed without recursive. The MCP handlers now:
+  - Check daemon readiness up front and fall back to local services (IndexingService/DocumentService) when unavailable, matching CLI behavior.
+  - Fast‑fail directory adds without `--recursive` with a clear error (parity with CLI).
+  - Resolve name→hash via DocumentService in get_by_name before attempting streamed transfers; this avoids unnecessary GetInit/GetChunk paths.
+  - Reduce overly long default timeouts for directory indexing to avoid perceived hangs (header 30s, body 300s).
+- Daemon status -d could hang while models were loading. Status path no longer calls blocking provider APIs (e.g., `getLoadedModels()`), and the defensive objects-dir scan is capped by files/time to ensure immediate responses.
+- Embeddings via daemon IPC were unreliable because server handlers were missing. Added request handling on the daemon side for generate embedding(s), load/unload model, and model status; client RPCs now complete as expected.
+- ONNX plugin discovery: plugin loader now detects installed plugins using a compile‑time `YAMS_INSTALL_PREFIX` macro; resolves cases where the ONNX provider failed to load after install.
+- Extraction backlog: RepairCoordinator now performs a one‑time backlog enqueue on startup (when idle) so existing documents without embeddings get scheduled; prevents "extraction_pending" from staying high indefinitely.
+- Build (Darwin/Clang): resolved "no type named 'stop_source' in namespace 'std'" in `SocketServer` by using the existing `yams::compat::stop_token` and removing the unnecessary `<stop_token>` include.
+- Daemon components: fixed mismatched forward declaration of `StateComponent` (class vs struct) to silence `-Wmismatched-tags`.
+- IPC RequestHandler logging: avoided evaluated operand in `typeid` usage to silence `-Wpotentially-evaluated-expression`.
+- Extraction: corrected a dangling `std::string_view` when parsing range tokens in `format_handler.cpp`.
+
+### Changed
+- MCP add_directory: `recursive` now defaults to `true` in the MCP tool schema for parity with CLI directory indexing. Timeouts tuned (30s/300s) and clearer error messages on misuse.
+- Keep-hot semantics for embeddings: when `[embeddings].keep_model_hot = true` (i.e., `lazyLoading=false`), the ONNX model pool now pre‑creates a session for hot models (preCreateResources=true) so embeddings are immediately usable after preload.
+- Status detail now reports provider presence without enumerating models to avoid lock contention; `onnx_models_loaded` is "unknown" in this non-blocking mode.
+- Tests: enable model provider and plugin auto‑loading in daemon unit tests (with lazy loading, no forced preload) to exercise real provider paths instead of bypassing them.
+- Build (SourceHut): `.build.yml` adds a Boost fallback install when `BoostConfig.cmake` is missing, ensuring `find_package(Boost CONFIG)` succeeds with Conan CMakeDeps output.
+- Build/CMake: define `YAMS_INSTALL_PREFIX` for `yams_daemon` so runtime plugin discovery includes `$prefix/lib/yams/plugins`.
+- Embedding service: unified on compat `jthread`/`stop_token`; simplifies cross‑platform behavior and cooperative stop.
+- PDF extractor: locally suppressed deprecated `std::wstring_convert/std::codecvt` warnings under Clang to reduce build noise while a modern replacement is planned.
+- Storage plugin loader: marked unused parameters to quiet `-Wunused-parameter` without changing behavior.
+
+### Notes
+- Large `extraction_pending` values reflect missing embeddings, not just text extraction. With the backlog enqueue and ONNX provider discovery fixes, pending counts should drop as embeddings are generated. Ensure the ONNX plugin builds (onnxruntime present) or set `YAMS_PLUGIN_DIR` to the plugin output directory during development/CI.
+
 ## [v0.6.10] - 2025-09-06
 
 ## CI bump
-- Patches for the build pipelines
-- MacOS compatibility patches
+- macOS build failures: replaced direct `std::jthread`/`std::stop_token` usages with our portability shim (`yams::compat`) across daemon, services, and embedding service; resolves libc++ gaps on hosted macOS.
+- GitHub Actions release workflow: corrected heredoc in summary generation to avoid "unexpected EOF"; now writes Python output to a temp file and reads it safely.
 
 ## [v0.6.9] - 2025-09-05
 

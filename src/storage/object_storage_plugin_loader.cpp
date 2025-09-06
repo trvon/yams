@@ -111,8 +111,9 @@ static fs::path resolveS3PluginPath() {
     return {};
 }
 
-static std::unique_ptr<IStorageBackend> loadSpecific(const char* createSym, const char* destroySym,
-                                                     const std::vector<std::string>& names) {
+static std::unique_ptr<IStorageBackend> loadSpecific(const char* createSym,
+                                                     const char* /*destroySym*/,
+                                                     const std::vector<std::string>& /*names*/) {
     fs::path path = resolveS3PluginPath();
     if (path.empty())
         return nullptr;
