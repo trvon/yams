@@ -94,7 +94,7 @@ tasks:
 
         [generators]
         CMakeDeps
-EOF
+      EOF
         conan install "${BUILD_DIR}/conanfile.boost.txt" \
           -of "${BUILD_DIR}" \
           -s build_type=Release \
