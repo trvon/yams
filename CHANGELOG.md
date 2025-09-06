@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 
 - [SourceHut](https://sr.ht/~trvon/yams/): https://sr.ht/~trvon/yams/
 
+## [v0.6.10] - 2025-09-06
+
+## CI bump
+- Patches for the build pipelines
+- MacOS compatibility patches
+
 ## [v0.6.9] - 2025-09-05
 
 ### Notes

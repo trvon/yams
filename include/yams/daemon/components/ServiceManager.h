@@ -5,6 +5,7 @@
 #include <stop_token>
 #include "IComponent.h"
 #include <yams/app/services/services.hpp>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h> // For DaemonConfig
 
@@ -82,11 +83,11 @@ public:
 #endif
 
 private:
-    Result<void> initializeAsync(std::stop_token token);
+    Result<void> initializeAsync(yams::compat::stop_token token);
 
     const DaemonConfig& config_;
     StateComponent& state_;
-    std::jthread initThread_;
+    yams::compat::jthread initThread_;
 
     // All the services managed by this component
     std::shared_ptr<api::IContentStore> contentStore_;

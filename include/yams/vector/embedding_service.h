@@ -7,12 +7,9 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#if defined(__cpp_lib_jthread)
-#include <stop_token>
-#define YAMS_HAVE_JTHREAD 1
-#endif
 #include <vector>
 #include <yams/api/content_store.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/metadata/metadata_repository.h>
 
@@ -78,14 +75,10 @@ private:
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo_;
     std::filesystem::path dataPath_;
 
-    // Managed background worker (std::jthread when available; otherwise std::thread)
+    // Managed background worker (uses compat shim; joins on destruction)
     mutable std::mutex workerMutex_;
-#ifdef YAMS_HAVE_JTHREAD
-    std::jthread repairThread_;
-#else
-    std::thread repairThread_;
+    yams::compat::jthread repairThread_;
     std::atomic<bool> stopRequested_{false};
-#endif
     bool repairRunning_{false};
 
     // Internal helper methods (extracted from repair command)
@@ -93,12 +86,8 @@ private:
     Result<void> generateEmbeddingsInternal(const std::vector<std::string>& documentHashes,
                                             bool showProgress = false);
 
-    // Stop-aware repair routine used by the managed worker
-#ifdef YAMS_HAVE_JTHREAD
-    void runRepair(std::stop_token stopToken);
-#else
-    void runRepairLegacy();
-#endif
+    // Stop-aware repair routine used by the managed worker (compat stop_token)
+    void runRepair(yams::compat::stop_token stopToken);
 };
 
 } // namespace yams::vector

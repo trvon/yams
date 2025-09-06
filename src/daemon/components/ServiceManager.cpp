@@ -5,6 +5,7 @@
 #include <fstream>
 #include <thread>
 #include <yams/api/content_store_builder.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -68,7 +69,7 @@ Result<void> ServiceManager::initialize() {
     resolvedDataDir_ = dataDir;
 
     // Start background resource initialization
-    initThread_ = std::jthread([this](std::stop_token token) {
+    initThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
         spdlog::info("Starting async resource initialization...");
         auto result = initializeAsync(token);
         if (!result) {
@@ -247,7 +248,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
     }
 }
 
-Result<void> ServiceManager::initializeAsync(std::stop_token token) {
+Result<void> ServiceManager::initializeAsync(yams::compat::stop_token token) {
     spdlog::debug("ServiceManager: Initializing daemon resources");
     writeBootstrapStatusFile(config_, state_);
 

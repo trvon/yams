@@ -1,3 +1,4 @@
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/RepairCoordinator.h>
 
 #include <spdlog/spdlog.h>
@@ -28,7 +29,7 @@ void RepairCoordinator::start() {
     }
     // Initialize maintenance tokens based on config
     tokens_.store(cfg_.maintenanceTokens);
-    thread_ = std::jthread([this](std::stop_token st) { run(st); });
+    thread_ = yams::compat::jthread([this](yams::compat::stop_token st) { run(st); });
     spdlog::info("RepairCoordinator started in event-driven mode (enable={}, batch={})",
                  cfg_.enable, cfg_.maxBatch);
 }
@@ -71,7 +72,7 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
     spdlog::debug("RepairCoordinator: document {} removed", event.hash);
 }
 
-void RepairCoordinator::run(std::stop_token st) {
+void RepairCoordinator::run(yams::compat::stop_token st) {
     core::RepairFsm::Config fsmConfig;
     fsmConfig.enable_online_repair = true;
     fsmConfig.max_repair_concurrency = cfg_.maintenanceTokens;

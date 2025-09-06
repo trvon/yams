@@ -173,7 +173,9 @@ public:
             setExecTime(result, t0);
             if (result && normalizedReq.pathsOnly && result.value().paths.empty()) {
                 auto resp = std::move(result).value();
-                ensurePathsFallback(normalizedReq, resp);
+                if (normalizedReq.useSession) {
+                    ensurePathsFallback(normalizedReq, resp);
+                }
                 result = Result<SearchResponse>(std::move(resp));
             }
             return result;
@@ -184,7 +186,9 @@ public:
             setExecTime(result, t0);
             if (result && normalizedReq.pathsOnly && result.value().paths.empty()) {
                 auto resp = std::move(result).value();
-                ensurePathsFallback(normalizedReq, resp);
+                if (normalizedReq.useSession) {
+                    ensurePathsFallback(normalizedReq, resp);
+                }
                 result = Result<SearchResponse>(std::move(resp));
             }
             return result;
@@ -231,7 +235,9 @@ public:
                     }
                     if (normalizedReq.pathsOnly && result.value().paths.empty()) {
                         auto resp = std::move(result).value();
-                        ensurePathsFallback(normalizedReq, resp);
+                        if (normalizedReq.useSession) {
+                            ensurePathsFallback(normalizedReq, resp);
+                        }
                         result = Result<SearchResponse>(std::move(resp));
                     }
                     return result;
@@ -262,13 +268,17 @@ public:
             }
             if (result && normalizedReq.pathsOnly && result.value().paths.empty()) {
                 auto resp = std::move(result).value();
-                ensurePathsFallback(normalizedReq, resp);
+                if (normalizedReq.useSession) {
+                    ensurePathsFallback(normalizedReq, resp);
+                }
                 result = Result<SearchResponse>(std::move(resp));
             }
             // Hydrate snippets in parallel if needed
             if (result && !normalizedReq.pathsOnly) {
                 auto resp = std::move(result).value();
-                hydrateSnippets(normalizedReq, resp);
+                if (normalizedReq.useSession) {
+                    hydrateSnippets(normalizedReq, resp);
+                }
                 result = Result<SearchResponse>(std::move(resp));
             }
             return result;
@@ -303,7 +313,9 @@ public:
         // Hydrate snippets for keyword path as well
         if (result && !normalizedReq.pathsOnly) {
             auto resp = std::move(result).value();
-            hydrateSnippets(normalizedReq, resp);
+            if (normalizedReq.useSession) {
+                hydrateSnippets(normalizedReq, resp);
+            }
             result = Result<SearchResponse>(std::move(resp));
         }
         return result;

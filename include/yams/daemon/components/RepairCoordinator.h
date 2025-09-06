@@ -8,6 +8,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <yams/compat/thread_stop_compat.h>
 
 namespace yams {
 namespace api {
@@ -61,7 +62,7 @@ public:
     void onDocumentRemoved(const DocumentRemovedEvent& event);
 
 private:
-    void run(std::stop_token st);
+    void run(yams::compat::stop_token st);
     bool maintenance_allowed() const; // idle window based on server stats
     // Token gating helpers (inline to avoid ODR/decl mismatches)
     bool try_acquire_token() {
@@ -117,7 +118,7 @@ private:
     mutable std::mutex queueMutex_;
     std::condition_variable queueCv_;
 
-    std::jthread thread_{};
+    yams::compat::jthread thread_{};
     std::atomic<bool> running_{false};
 };
 

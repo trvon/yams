@@ -130,6 +130,10 @@ struct SearchRequest {
     bool jsonOutput{false};      // structured JSON output for LLM parsing
     std::string format{"table"}; // "table" | "json" | "minimal" | "paths"
 
+    // Session context for gating hot-path behaviors
+    bool useSession{false};
+    std::string sessionName;
+
     // Line-level context (like grep)
     bool showLineNumbers{false};    // show line numbers with matches
     int beforeContext{0};           // show N lines before match

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <thread>
 #include <unistd.h> // For getuid(), geteuid(), getpid()
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -164,7 +165,7 @@ Result<void> YamsDaemon::start() {
     // Bootstrapped event already dispatched before service initialization to prevent race.
 
     // Start lightweight main loop thread; no in-process IPC acceptor
-    daemonThread_ = std::jthread([this](std::stop_token token) {
+    daemonThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
         spdlog::debug("Daemon main loop started.");
         // Drive lifecycle FSM periodically
         lifecycleFsm_.tick();

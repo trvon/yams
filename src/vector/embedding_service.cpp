@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <thread>
 #include <unistd.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
@@ -65,9 +66,8 @@ bool EmbeddingService::startRepairAsync() {
     }
     repairRunning_ = true;
 
-#ifdef YAMS_HAVE_JTHREAD
     // Launch stop-aware background worker with std::jthread
-    repairThread_ = std::jthread([this](std::stop_token stoken) {
+    repairThread_ = yams::compat::jthread([this](yams::compat::stop_token stoken) {
         // Ensure running flag is reset when the thread exits
         struct Reset {
             bool& flag;
@@ -80,27 +80,12 @@ bool EmbeddingService::startRepairAsync() {
 
         this->runRepair(stoken);
     });
-#else
-    stopRequested_.store(false);
-    repairThread_ = std::thread([this]() {
-        struct Reset {
-            bool& flag;
-            std::mutex& mtx;
-            ~Reset() {
-                std::lock_guard<std::mutex> l(mtx);
-                flag = false;
-            }
-        } reset{repairRunning_, workerMutex_};
-        this->runRepairLegacy();
-    });
-#endif
 
     return true;
 }
 
 void EmbeddingService::stopRepair() {
-#ifdef YAMS_HAVE_JTHREAD
-    std::jthread local;
+    yams::compat::jthread local;
     {
         std::lock_guard<std::mutex> lock(workerMutex_);
         if (!repairThread_.joinable()) {
@@ -109,20 +94,11 @@ void EmbeddingService::stopRepair() {
         local = std::move(repairThread_);
     }
     // Request cooperative stop; jthread joins on destruction
+    stopRequested_.store(true);
     local.request_stop();
-#else
-    std::thread local;
-    {
-        std::lock_guard<std::mutex> lock(workerMutex_);
-        if (!repairThread_.joinable()) {
-            return;
-        }
-        stopRequested_.store(true);
-        local = std::move(repairThread_);
-    }
-    if (local.joinable())
+    if (local.joinable()) {
         local.join();
-#endif
+    }
 }
 
 bool EmbeddingService::isRepairRunning() const {
@@ -198,8 +174,7 @@ void EmbeddingService::triggerRepairIfNeeded() {
     }
 }
 
-#ifdef YAMS_HAVE_JTHREAD
-void EmbeddingService::runRepair(std::stop_token stopToken) {
+void EmbeddingService::runRepair(yams::compat::stop_token stopToken) {
     // Cross-process single-writer lock using a lockfile on vectors.db
     fs::path lockPath = dataPath_ / "vectors.db.lock";
     struct FileLock {
@@ -252,7 +227,7 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
             return;
         }
 
-        if (stopToken.stop_requested()) {
+        if (stopToken.stop_requested() || stopRequested_.load()) {
             spdlog::debug("Repair thread: stop requested before scan");
             return;
         }
@@ -266,7 +241,7 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
         std::vector<std::string> missingEmbeddings;
         missingEmbeddings.reserve(docsResult.value().size());
         for (const auto& doc : docsResult.value()) {
-            if (stopToken.stop_requested()) {
+            if (stopToken.stop_requested() || stopRequested_.load()) {
                 spdlog::debug("Repair thread: stop requested during scan");
                 return;
             }
@@ -301,7 +276,7 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
         }
         spdlog::info("EmbeddingService: using batch size {}", batchSize);
         for (size_t i = 0; i < missingEmbeddings.size(); i += batchSize) {
-            if (stopToken.stop_requested()) {
+            if (stopToken.stop_requested() || stopRequested_.load()) {
                 spdlog::debug("Repair thread: stop requested during processing");
                 break;
             }
@@ -327,136 +302,6 @@ void EmbeddingService::runRepair(std::stop_token stopToken) {
 
     spdlog::debug("Repair thread stopped");
 }
-#else
-void EmbeddingService::runRepairLegacy() {
-    // Cross-process single-writer lock using a lockfile on vectors.db
-    fs::path lockPath = dataPath_ / "vectors.db.lock";
-    struct FileLock {
-        int fd{-1};
-        fs::path path;
-        explicit FileLock(const fs::path& p) : path(p) {
-            fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
-            if (fd >= 0) {
-                struct flock fl{};
-                fl.l_type = F_WRLCK;
-                fl.l_whence = SEEK_SET;
-                fl.l_start = 0;
-                fl.l_len = 0; // whole file
-                if (fcntl(fd, F_SETLK, &fl) == -1) {
-                    ::close(fd);
-                    fd = -1;
-                }
-            }
-        }
-        bool locked() const { return fd >= 0; }
-        ~FileLock() {
-            if (fd >= 0) {
-                struct flock fl{};
-                fl.l_type = F_UNLCK;
-                fl.l_whence = SEEK_SET;
-                fl.l_start = 0;
-                fl.l_len = 0;
-                (void)fcntl(fd, F_SETLK, &fl);
-                ::close(fd);
-            }
-        }
-    } vlock(lockPath);
-
-    if (!vlock.locked()) {
-        spdlog::info("Repair thread: another process holds vector DB lock; skipping repair");
-        return;
-    }
-
-    spdlog::debug("Repair thread started");
-
-    try {
-        // Initialize vector DB
-        vector::VectorDatabaseConfig vdbConfig;
-        vdbConfig.database_path = (dataPath_ / "vectors.db").string();
-        vdbConfig.embedding_dim = 384;
-
-        auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-        if (!vectorDb->initialize()) {
-            spdlog::error("Repair thread: Failed to initialize vector database");
-            return;
-        }
-
-        if (stopRequested_.load()) {
-            spdlog::debug("Repair thread: stop requested before scan");
-            return;
-        }
-
-        auto docsResult = metadataRepo_->findDocumentsByPath("%");
-        if (!docsResult) {
-            spdlog::error("Repair thread: Failed to get documents");
-            return;
-        }
-
-        std::vector<std::string> missingEmbeddings;
-        missingEmbeddings.reserve(docsResult.value().size());
-        for (const auto& doc : docsResult.value()) {
-            if (stopRequested_.load()) {
-                spdlog::debug("Repair thread: stop requested during scan");
-                return;
-            }
-            if (!vectorDb->hasEmbedding(doc.sha256Hash)) {
-                missingEmbeddings.push_back(doc.sha256Hash);
-            }
-        }
-
-        if (missingEmbeddings.empty()) {
-            spdlog::info("Repair thread: All embeddings already generated");
-            return;
-        }
-
-        spdlog::info("Repair thread: Processing {} documents with missing embeddings",
-                     missingEmbeddings.size());
-
-        // Process in batches
-        size_t batchSize = 32; // safe default
-        if (const char* envBatch = std::getenv("YAMS_EMBED_BATCH")) {
-            try {
-                unsigned long v = std::stoul(std::string(envBatch));
-                // Clamp to a reasonable range to avoid OOM or tiny batches
-                if (v < 4UL)
-                    v = 4UL;
-                if (v > 128UL)
-                    v = 128UL;
-                batchSize = static_cast<size_t>(v);
-            } catch (...) {
-                spdlog::warn("Invalid YAMS_EMBED_BATCH='{}', using default {}", envBatch,
-                             batchSize);
-            }
-        }
-        spdlog::info("EmbeddingService: using batch size {}", batchSize);
-        for (size_t i = 0; i < missingEmbeddings.size(); i += batchSize) {
-            if (stopRequested_.load()) {
-                spdlog::debug("Repair thread: stop requested during processing");
-                break;
-            }
-
-            size_t end = std::min(i + batchSize, missingEmbeddings.size());
-            std::vector<std::string> batch(missingEmbeddings.begin() + i,
-                                           missingEmbeddings.begin() + end);
-
-            auto result = generateEmbeddingsInternal(batch, false);
-            if (!result) {
-                spdlog::debug("Repair thread: Batch processing failed: {}", result.error().message);
-            }
-
-            // Small delay between batches to avoid hogging resources
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
-        spdlog::info("Repair thread: Completed processing");
-
-    } catch (const std::exception& e) {
-        spdlog::error("Repair thread exception: {}", e.what());
-    }
-
-    spdlog::debug("Repair thread stopped");
-}
-#endif
 
 Result<void>
 EmbeddingService::generateEmbeddingsForDocuments(const std::vector<std::string>& documentHashes) {

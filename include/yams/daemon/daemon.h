@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <yams/compat/thread_stop_compat.h>
 //
 
 namespace yams::daemon {
@@ -108,7 +109,7 @@ public:
     // Threading and state
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};
-    std::jthread daemonThread_;
+    yams::compat::jthread daemonThread_;
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
 };
