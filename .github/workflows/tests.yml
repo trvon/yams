@@ -2,7 +2,9 @@ name: Tests
 
 on:
   pull_request:
-    branches: [ main ] # Or your default branch
+    branches: [main] # Or your default branch
+permissions:
+  contents: write
 
 jobs:
   run-tests:

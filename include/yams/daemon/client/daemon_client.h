@@ -75,6 +75,9 @@ public:
     Task<Result<AddDocumentResponse>> streamingAddDocument(const AddDocumentRequest& req);
     Task<Result<GetStatsResponse>> getStats(const GetStatsRequest& req);
     Task<Result<UpdateDocumentResponse>> updateDocument(const UpdateDocumentRequest& req);
+    Task<Result<PrepareSessionResponse>> prepareSession(const PrepareSessionRequest& req) {
+        return call<PrepareSessionRequest>(req);
+    }
 
     // High-level streaming helpers
     Task<Result<void>> getToStdout(const GetInitRequest& req) {
@@ -345,7 +348,7 @@ template <class Req> Task<Result<ResponseOfT<Req>>> DaemonClient::call(const Req
                       std::is_same<Req, UnloadModelRequest>, std::is_same<Req, ModelStatusRequest>,
                       std::is_same<Req, AddDocumentRequest>, std::is_same<Req, GrepRequest>,
                       std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
-                      std::is_same<Req, GetStatsRequest>>,
+                      std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>>,
                   "Req must be a valid daemon Request alternative");
 
     // Prefer streaming for streaming-capable requests unless disabled in config

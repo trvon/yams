@@ -736,6 +736,32 @@ template <> struct ProtoBinding<GetStatsRequest> {
     }
 };
 
+template <> struct ProtoBinding<PrepareSessionRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPrepareSessionRequest;
+    static void set(Envelope& env, const PrepareSessionRequest& r) {
+        auto* o = env.mutable_prepare_session_request();
+        o->set_session_name(r.sessionName);
+        o->set_cores(r.cores);
+        o->set_memory_gb(r.memoryGb);
+        o->set_time_ms(r.timeMs);
+        o->set_aggressive(r.aggressive);
+        o->set_limit(static_cast<uint64_t>(r.limit));
+        o->set_snippet_len(static_cast<uint32_t>(r.snippetLen));
+    }
+    static PrepareSessionRequest get(const Envelope& env) {
+        const auto& i = env.prepare_session_request();
+        PrepareSessionRequest r{};
+        r.sessionName = i.session_name();
+        r.cores = i.cores();
+        r.memoryGb = i.memory_gb();
+        r.timeMs = i.time_ms();
+        r.aggressive = i.aggressive();
+        r.limit = static_cast<size_t>(i.limit());
+        r.snippetLen = static_cast<size_t>(i.snippet_len());
+        return r;
+    }
+};
+
 // --------------------------- Responses ---------------------------
 template <> struct ProtoBinding<SuccessResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kSuccessResponse;
@@ -745,6 +771,22 @@ template <> struct ProtoBinding<SuccessResponse> {
     static SuccessResponse get(const Envelope& env) {
         SuccessResponse r{};
         r.message = env.success_response().message();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PrepareSessionResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPrepareSessionResponse;
+    static void set(Envelope& env, const PrepareSessionResponse& r) {
+        auto* o = env.mutable_prepare_session_response();
+        o->set_warmed_count(r.warmedCount);
+        o->set_message(r.message);
+    }
+    static PrepareSessionResponse get(const Envelope& env) {
+        const auto& i = env.prepare_session_response();
+        PrepareSessionResponse r{};
+        r.warmedCount = i.warmed_count();
+        r.message = i.message();
         return r;
     }
 };
@@ -906,30 +948,39 @@ template <> struct ProtoBinding<ListResponse> {
 template <> struct ProtoBinding<StatusResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kStatusResponse;
     static void set(Envelope& env, const StatusResponse& r) {
-        // DEPRECATION NOTICE: overallStatus/ready are legacy display hints only.
-        // Lifecycle will be driven by DaemonLifecycleFsm and exposed via
-        // StatusResponse.state/lastError. For now, map overallStatus to state string to preserve
-        // behavior.
-        env.mutable_status_response()->set_state(
-            r.overallStatus.empty() ? (r.running ? "ready" : "stopped") : r.overallStatus);
-        // TODO(PBI-007-06): When protocol adds lifecycle_state (enum) and lifecycle_last_error,
-        // populate them from DaemonLifecycleFsm snapshot(); keep
-        // ready/readinessStates/initProgress/overallStatus for compatibility.
+        auto* o = env.mutable_status_response();
+        // Preserve textual summary for legacy clients
+        o->set_state(r.overallStatus.empty() ? (r.running ? "ready" : "stopped") : r.overallStatus);
+        // Populate extended runtime fields (proto v2+)
+        o->set_running(r.running);
+        o->set_ready(r.ready);
+        o->set_uptime_seconds(static_cast<uint64_t>(r.uptimeSeconds));
+        o->set_requests_processed(static_cast<uint64_t>(r.requestsProcessed));
+        o->set_active_connections(static_cast<uint64_t>(r.activeConnections));
+        o->set_memory_mb(r.memoryUsageMb);
+        o->set_cpu_pct(r.cpuUsagePercent);
+        o->set_version(r.version);
     }
     static StatusResponse get(const Envelope& env) {
         StatusResponse r{};
-        // Best-effort reconstruction from legacy 'state' string.
-        r.overallStatus = env.status_response().state();
-        r.running = (r.overallStatus != "stopped");
-        r.ready = (r.overallStatus == "ready");
-        r.uptimeSeconds = 0;
-        r.requestsProcessed = 0;
-        r.activeConnections = 0;
-        r.memoryUsageMb = 0;
-        r.cpuUsagePercent = 0;
-        r.version = "";
-        // TODO(lifecycle-fsm): read new fields (state enum, last_error, last_transition_time) when
-        // available.
+        const auto& i = env.status_response();
+        // Preserve textual summary for back-compat
+        r.overallStatus = i.state();
+        // Hydrate extended fields when present
+        r.running = i.running();
+        r.ready = i.ready();
+        r.uptimeSeconds = i.uptime_seconds();
+        r.requestsProcessed = i.requests_processed();
+        r.activeConnections = i.active_connections();
+        r.memoryUsageMb = i.memory_mb();
+        r.cpuUsagePercent = i.cpu_pct();
+        r.version = i.version();
+        // If older daemon (proto v1) set only state, derive minimal booleans
+        if (r.version.empty() && r.uptimeSeconds == 0 && r.memoryUsageMb == 0 &&
+            r.cpuUsagePercent == 0) {
+            r.running = (r.overallStatus != "stopped");
+            r.ready = (r.overallStatus == "ready");
+        }
         return r;
     }
 };
@@ -1103,12 +1154,25 @@ template <> struct ProtoBinding<GetStatsResponse> {
         auto it = r.additionalStats.find("json");
         if (it != r.additionalStats.end())
             o->set_json(it->second);
+        // Populate numeric fields alongside JSON so non-JSON clients don't see zeros
+        o->set_total_documents(static_cast<uint64_t>(r.totalDocuments));
+        o->set_total_size(static_cast<uint64_t>(r.totalSize));
+        o->set_indexed_documents(static_cast<uint64_t>(r.indexedDocuments));
+        o->set_vector_index_size(static_cast<uint64_t>(r.vectorIndexSize));
+        o->set_compression_ratio(r.compressionRatio);
     }
     static GetStatsResponse get(const Envelope& env) {
         GetStatsResponse r{};
-        if (!env.get_stats_response().json().empty()) {
-            r.additionalStats["json"] = env.get_stats_response().json();
+        const auto& g = env.get_stats_response();
+        if (!g.json().empty()) {
+            r.additionalStats["json"] = g.json();
         }
+        // Also hydrate numeric fields for non-JSON consumers
+        r.totalDocuments = static_cast<size_t>(g.total_documents());
+        r.totalSize = static_cast<size_t>(g.total_size());
+        r.indexedDocuments = static_cast<size_t>(g.indexed_documents());
+        r.vectorIndexSize = static_cast<size_t>(g.vector_index_size());
+        r.compressionRatio = g.compression_ratio();
         return r;
     }
 };
@@ -1356,6 +1420,11 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kPrepareSessionRequest: {
+            auto v = ProtoBinding<PrepareSessionRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -1446,6 +1515,11 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
         case Envelope::kDeleteResponse: {
             auto v = ProtoBinding<DeleteResponse>::get(env);
             m.payload = Response{std::in_place_type<DeleteResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kPrepareSessionResponse: {
+            auto v = ProtoBinding<PrepareSessionResponse>::get(env);
+            m.payload = Response{std::in_place_type<PrepareSessionResponse>, std::move(v)};
             break;
         }
         case Envelope::PAYLOAD_NOT_SET:

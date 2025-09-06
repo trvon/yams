@@ -1,4 +1,6 @@
 #include <spdlog/spdlog.h>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,12 +23,98 @@ public:
         config.maxMemoryGB = 2.0;
         config.numThreads = 4;
         config.enableGPU = false; // Can be made configurable
+        // Prefer lazy loading to avoid blocking startup on ONNX session creation
         config.lazyLoading = true;
         config.modelIdleTimeout = std::chrono::minutes(5);
 
-        // Preload common models if they exist
-        config.preloadModels = {"all-MiniLM-L6-v2", "all-mpnet-base-v2"};
+        // Read embeddings settings from config.toml (preferred_model, model_path, keep_model_hot)
+        std::string preferredModel;
+        std::string modelsRoot;
+        bool keepModelHot = true; // default: keep model in memory
+        try {
+            namespace fs = std::filesystem;
+            fs::path cfgPath;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+                cfgPath = fs::path(xdg) / "yams" / "config.toml";
+            } else if (const char* home = std::getenv("HOME")) {
+                cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
+            }
+            if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                std::ifstream file(cfgPath);
+                std::string line;
+                std::string section;
+                auto trim = [](std::string& s) {
+                    if (s.empty())
+                        return;
+                    s.erase(0, s.find_first_not_of(" \t"));
+                    auto pos = s.find_last_not_of(" \t");
+                    if (pos != std::string::npos)
+                        s.erase(pos + 1);
+                };
+                while (std::getline(file, line)) {
+                    if (line.empty() || line[0] == '#')
+                        continue;
+                    if (line[0] == '[') {
+                        auto end = line.find(']');
+                        section = (end != std::string::npos) ? line.substr(1, end - 1) : "";
+                        continue;
+                    }
+                    auto eq = line.find('=');
+                    if (eq == std::string::npos)
+                        continue;
+                    std::string key = line.substr(0, eq);
+                    std::string value = line.substr(eq + 1);
+                    trim(key);
+                    trim(value);
+                    auto hash = value.find('#');
+                    if (hash != std::string::npos) {
+                        value = value.substr(0, hash);
+                        trim(value);
+                    }
+                    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+                        value = value.substr(1, value.size() - 2);
+                    }
+                    if (section == "embeddings") {
+                        if (key == "preferred_model" && preferredModel.empty())
+                            preferredModel = value;
+                        else if (key == "model_path" && modelsRoot.empty())
+                            modelsRoot = value;
+                        else if (key == "keep_model_hot") {
+                            std::string v = value;
+                            for (auto& c : v)
+                                c = static_cast<char>(std::tolower(c));
+                            keepModelHot = !(v == "false" || v == "0" || v == "no" || v == "off");
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Config read error (embeddings): {}", e.what());
+        }
+        preferredModel_ = preferredModel;
+        modelsRoot_ = modelsRoot;
+        // Expand ~ in modelsRoot if present
+        if (!modelsRoot_.empty() && modelsRoot_[0] == '~') {
+            if (const char* home = std::getenv("HOME")) {
+                modelsRoot_ = std::string(home) + modelsRoot_.substr(1);
+            }
+        }
+        // Map keep_model_hot to lazy loading (inverse)
+        config.lazyLoading = !keepModelHot;
+        // If keeping hot, allow preloading preferred model; otherwise skip preloads
+        if (keepModelHot && !preferredModel_.empty()) {
+            if (!modelsRoot_.empty()) {
+                config.preloadModels = {modelsRoot_ + "/" + preferredModel_ + "/model.onnx"};
+            } else {
+                config.preloadModels = {preferredModel_};
+            }
+        }
+        configuredPreloads_ = config.preloadModels;
 
+        // Honor configured models root if provided
+        if (!modelsRoot_.empty()) {
+            config.modelsRoot = modelsRoot_;
+        }
         pool_ = std::make_unique<OnnxModelPool>(config);
 
         // Initialize the pool
@@ -212,6 +300,9 @@ public:
 private:
     std::unique_ptr<OnnxModelPool> pool_;
     bool initialized_ = false;
+    std::string preferredModel_;
+    std::string modelsRoot_;
+    std::vector<std::string> configuredPreloads_;
 
     // Get the default model to use for embeddings
     std::string getDefaultModel() const {
@@ -219,12 +310,41 @@ private:
             return "";
         }
 
+        // Try configured preferred model first (full path under modelsRoot, then by name)
+        if (!preferredModel_.empty()) {
+            if (!modelsRoot_.empty()) {
+                std::string full = modelsRoot_ + "/" + preferredModel_ + "/model.onnx";
+                if (pool_->isModelLoaded(full)) {
+                    return full;
+                }
+                if (pool_->loadModel(full)) {
+                    return full;
+                }
+            }
+            if (pool_->isModelLoaded(preferredModel_)) {
+                return preferredModel_;
+            }
+            if (pool_->loadModel(preferredModel_)) {
+                return preferredModel_;
+            }
+        }
+
+        // Prefer configured preloads first (from DaemonConfig -> ModelPoolConfig)
+        if (!configuredPreloads_.empty()) {
+            for (const auto& model : configuredPreloads_) {
+                if (pool_->isModelLoaded(model)) {
+                    return model;
+                }
+            }
+        }
+
         // Check for commonly used models in order of preference
-        const std::vector<std::string> preferredModels = {
+        const std::vector<std::string> defaultPreferred = {
             "all-MiniLM-L6-v2", "all-mpnet-base-v2", "sentence-transformers/all-MiniLM-L6-v2",
             "sentence-transformers/all-mpnet-base-v2"};
 
-        for (const auto& model : preferredModels) {
+        // Any default already loaded?
+        for (const auto& model : defaultPreferred) {
             if (pool_->isModelLoaded(model)) {
                 return model;
             }
@@ -236,8 +356,17 @@ private:
             return loadedModels[0];
         }
 
-        // Try to load a preferred model
-        for (const auto& model : preferredModels) {
+        // Try to load configured preferred models first
+        if (!configuredPreloads_.empty()) {
+            for (const auto& model : configuredPreloads_) {
+                if (pool_->loadModel(model)) {
+                    return model;
+                }
+            }
+        }
+
+        // Then try to load a default preferred model
+        for (const auto& model : defaultPreferred) {
             if (pool_->loadModel(model)) {
                 return model;
             }

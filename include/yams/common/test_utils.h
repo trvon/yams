@@ -26,7 +26,9 @@ inline bool isTestDiscoveryMode() {
  * (either in discovery mode or explicitly requested)
  */
 inline bool shouldSkipModelLoading() {
-    return isTestDiscoveryMode() || std::getenv("YAMS_SKIP_MODEL_LOADING");
+    // Honor multiple env toggles to avoid heavy model work in tests/CI
+    return isTestDiscoveryMode() || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
+           std::getenv("YAMS_TEST_MODE");
 }
 
 /**

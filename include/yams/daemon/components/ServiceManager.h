@@ -68,6 +68,10 @@ public:
     // Get AppContext for app services
     app::services::AppContext getAppContext() const;
 
+    // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
+    void onPrepareSessionRequested() {};
+    void onPrepareSessionCompleted() {};
+
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
     // Resolved data directory used for storage (may derive from env/config)

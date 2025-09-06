@@ -62,6 +62,11 @@ This document establishes a unified, machine-readable, and authoritative policy 
 - **Pre-Watch Code Update Workflow (until folder track/watch is available):**
   ```bash
   # After editing code, re-index changed files or directories
+  # TIP: You can add multiple paths in one command
+  # e.g., index source and headers together with a single invocation
+  yams add src/ include/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source,headers"
+
+  # Or run targeted adds in smaller chunks to avoid long operations
   yams add src/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source"
   yams add include/ --recursive --include="*.hpp,*.h" --tags "code,headers"
 
@@ -83,7 +88,10 @@ This document establishes a unified, machine-readable, and authoritative policy 
 
 - **Codebase Indexing (initial import and after edits):**
   ```bash
-  # Index entire codebase with proper file type detection
+  # Index entire codebase with proper file type detection (multi-path is supported)
+  yams add src/ include/ docs/ --recursive --include="*.cpp,*.hpp,*.h,*.md" --tags="code,source,headers,docs"
+
+  # Alternatively, index in separate calls if you prefer shorter runs
   yams add src/ --recursive --include="*.cpp,*.h" --tags="code,source"
   yams add include/ --recursive --include="*.h,*.hpp" --tags="code,headers"
 

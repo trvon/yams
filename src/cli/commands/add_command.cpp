@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
@@ -7,6 +8,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <thread>
 #include <yams/api/content_metadata.h>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
@@ -54,6 +56,21 @@ public:
         cmd->add_flag("--no-embeddings", noEmbeddings_,
                       "Disable automatic embedding generation for added documents");
 
+        // Daemon interaction robustness controls (always use daemon for file/dir)
+        cmd->add_option("--daemon-timeout-ms", daemonTimeoutMs_,
+                        "Per-request timeout when talking to the daemon (ms)")
+            ->default_val(30000);
+        cmd->add_option("--daemon-retries", daemonRetries_,
+                        "Retry attempts for transient daemon failures")
+            ->default_val(3)
+            ->check(CLI::Range(0, 10));
+        cmd->add_option("--daemon-backoff-ms", daemonBackoffMs_,
+                        "Initial backoff between retries (ms); doubles each attempt")
+            ->default_val(250);
+        cmd->add_option("--daemon-ready-timeout-ms", daemonReadyTimeoutMs_,
+                        "Max time to wait for daemon readiness (ms)")
+            ->default_val(10000);
+
         // Collection and snapshot options
         cmd->add_option("-c,--collection", collection_, "Collection name for organizing documents");
         cmd->add_option("--snapshot-id", snapshotId_, "Unique snapshot identifier");
@@ -100,19 +117,81 @@ public:
                     }
                 }
 
-                // Process each path; use daemon-first for non-stdin targets
-                bool any_daemon_ok = false;
+                // Ensure daemon is running; auto-start if necessary
+                std::filesystem::path effectiveSocket =
+                    yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+                if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                    yams::daemon::ClientConfig startCfg;
+                    startCfg.dataDir = cli_->getDataPath();
+                    if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
+                        return Error{ErrorCode::InternalError,
+                                     std::string("Failed to start daemon: ") + r.error().message};
+                    }
+                    // Wait for readiness with bounded backoff (up to ~3 seconds)
+                    int waits[] = {100, 200, 400, 800, 1500};
+                    bool ready = false;
+                    for (int w : waits) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(w));
+                        if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    if (!ready) {
+                        return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
+                    }
+                }
+
+                // Actively wait for daemon readiness state (not just socket up)
+                {
+                    yams::daemon::ClientConfig cfg;
+                    cfg.dataDir = cli_->getDataPath();
+                    cfg.enableChunkedResponses = false;
+                    cfg.singleUseConnections = true;
+                    cfg.requestTimeout = std::chrono::milliseconds(2000);
+                    yams::daemon::DaemonClient client(cfg);
+
+                    auto start = std::chrono::steady_clock::now();
+                    while (true) {
+                        yams::daemon::StatusRequest sreq;
+                        sreq.detailed = true;
+                        auto st = run_sync(client.call(sreq), std::chrono::milliseconds(2500));
+                        if (st) {
+                            const auto& sr = st.value();
+                            if (sr.overallStatus == "ready" || sr.overallStatus == "degraded" ||
+                                sr.ready) {
+                                break;
+                            }
+                        }
+                        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count() >= daemonReadyTimeoutMs_) {
+                            return Error{ErrorCode::Timeout,
+                                         "Daemon is running but not ready yet (timed out)"};
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+                }
+
+                // Process each path with per-path fallback; collect remaining for services
+                size_t ok = 0, failed = 0;
+                bool hasStdin = std::any_of(paths.begin(), paths.end(),
+                                            [](const auto& p) { return p.string() == "-"; });
+                std::vector<std::filesystem::path> serviceDirs;
                 for (const auto& path : paths) {
                     if (path.string() == "-") {
-                        continue; // handled later via services path
+                        continue; // handled later via services path (stdin)
                     }
 
+                    // Build daemon request
                     yams::daemon::AddDocumentRequest dreq;
-                    dreq.path = std::filesystem::absolute(path).string();
+                    // Use canonical absolute path to satisfy daemon's exact path requirement
+                    std::error_code canon_ec;
+                    auto abs = std::filesystem::absolute(path, canon_ec);
+                    auto canon = std::filesystem::weakly_canonical(abs, canon_ec);
+                    dreq.path = (canon.empty() ? abs : canon).string();
                     dreq.name = documentName_;
                     dreq.tags = tags_;
-
-                    // Parse metadata key=value pairs
                     for (const auto& kv : metadata_) {
                         auto pos = kv.find('=');
                         if (pos != std::string::npos) {
@@ -121,7 +200,6 @@ public:
                             dreq.metadata[key] = value;
                         }
                     }
-
                     dreq.recursive = recursive_;
                     dreq.includePatterns = includePatterns_;
                     dreq.excludePatterns = excludePatterns_;
@@ -133,9 +211,7 @@ public:
                     }
                     dreq.disableAutoMime = disableAutoMime_;
 
-                    auto render =
-                        [&](const yams::daemon::AddDocumentResponse& resp) -> Result<void> {
-                        // Display results
+                    auto render = [&](const yams::daemon::AddDocumentResponse& resp) -> void {
                         if (resp.documentsAdded == 1) {
                             std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
                                       << std::endl;
@@ -143,36 +219,88 @@ public:
                             std::cout << "Added " << resp.documentsAdded << " documents"
                                       << std::endl;
                         }
-                        return Result<void>();
                     };
 
-                    auto fallback = [&]() -> Result<void> {
-                        // Fall back to service-based local execution
-                        return executeWithServices();
-                    };
-
-                    try {
-                        yams::daemon::ClientConfig cfg;
-                        cfg.dataDir = cli_->getDataPath();
-                        cfg.enableChunkedResponses = false; // small unary response
-                        cfg.singleUseConnections = true;
-                        cfg.requestTimeout = std::chrono::milliseconds(30000);
-                        yams::daemon::DaemonClient client(cfg);
-                        auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
-                        if (result) {
-                            auto r = render(result.value());
-                            if (!r)
-                                return r.error();
-                            any_daemon_ok = true;
-                            continue;
+                    // Retry with exponential backoff on transient failures
+                    bool success = false;
+                    std::string lastError;
+                    for (int attempt = 0; attempt <= daemonRetries_; ++attempt) {
+                        try {
+                            yams::daemon::ClientConfig cfg;
+                            cfg.dataDir = cli_->getDataPath();
+                            cfg.enableChunkedResponses = false; // small unary response
+                            cfg.singleUseConnections = true;
+                            cfg.requestTimeout = std::chrono::milliseconds(daemonTimeoutMs_);
+                            yams::daemon::DaemonClient client(cfg);
+                            auto result = run_sync(client.streamingAddDocument(dreq),
+                                                   std::chrono::milliseconds(daemonTimeoutMs_));
+                            if (result) {
+                                render(result.value());
+                                success = true;
+                                break;
+                            } else {
+                                // If daemon not fully ready, error may surface as missing stream
+                                // response; treat as transient
+                                lastError = result.error().message;
+                            }
+                        } catch (const std::exception& e) {
+                            lastError = e.what();
+                        } catch (...) {
+                            lastError = "unknown error";
                         }
-                    } catch (...) {
-                        // fall through to fallback
+
+                        if (attempt < daemonRetries_) {
+                            // Normalize certain errors to improve backoff decisions
+                            std::string low = lastError;
+                            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                            bool likelyNotReady =
+                                low.find("missing adddocumentresponse") != std::string::npos ||
+                                low.find("not ready") != std::string::npos;
+                            auto delay = daemonBackoffMs_ * (1 << attempt);
+                            if (likelyNotReady && delay < 500)
+                                delay = 500; // allow readiness to settle
+                            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                        }
+                    }
+
+                    if (!success) {
+                        if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
+                            spdlog::warn("Daemon add failed for directory '{}': {}. Falling back "
+                                         "to local indexing service.",
+                                         path.string(), lastError);
+                            serviceDirs.push_back(path);
+                        } else {
+                            spdlog::error("Daemon add failed for '{}': {}.", path.string(),
+                                          lastError);
+                            failed++;
+                        }
+                    } else {
+                        ok++;
                     }
                 }
-                if (any_daemon_ok && (targetPaths_.empty() || (targetPaths_.size() == 1 &&
-                                                               targetPaths_[0].string() != "-"))) {
-                    return Result<void>();
+
+                // If there were any non-stdin paths processed, report summary here
+                if (ok + failed > 0) {
+                    std::cout << "Daemon add completed: " << ok << " ok, " << failed << " failed"
+                              << std::endl;
+                }
+                // If there were any failures, abort before considering stdin
+                if (failed > 0) {
+                    return Error{ErrorCode::InternalError, "One or more adds failed via daemon"};
+                }
+
+                // Prepare remaining service work: stdin and any directories that failed via daemon
+                if (hasStdin || !serviceDirs.empty()) {
+                    targetPaths_.clear();
+                    for (const auto& d : serviceDirs)
+                        targetPaths_.push_back(d);
+                    if (hasStdin)
+                        targetPaths_.push_back(std::filesystem::path("-"));
+                } else {
+                    // Nothing left to do if we processed only non-stdin paths successfully
+                    if (ok > 0 && failed == 0) {
+                        return Result<void>();
+                    }
                 }
             }
 
@@ -463,6 +591,12 @@ private:
     bool recursive_ = false;
     std::vector<std::string> includePatterns_;
     std::vector<std::string> excludePatterns_;
+
+    // Daemon interaction controls
+    int daemonTimeoutMs_ = 30000;
+    int daemonRetries_ = 3;
+    int daemonBackoffMs_ = 250;
+    int daemonReadyTimeoutMs_ = 10000;
 };
 
 // Factory function

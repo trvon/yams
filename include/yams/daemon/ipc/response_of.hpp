@@ -68,6 +68,9 @@ template <> struct ResponseOf<UpdateDocumentRequest> {
 template <> struct ResponseOf<GetStatsRequest> {
     using type = GetStatsResponse;
 };
+template <> struct ResponseOf<PrepareSessionRequest> {
+    using type = PrepareSessionResponse;
+};
 template <> struct ResponseOf<DownloadRequest> {
     using type = DownloadResponse;
 };

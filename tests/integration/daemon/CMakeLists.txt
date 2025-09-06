@@ -130,3 +130,16 @@ target_link_libraries(daemon_search_streaming_protocol_test PRIVATE
 )
 add_test(NAME daemon_search_streaming_protocol_test COMMAND daemon_search_streaming_protocol_test)
 set_tests_properties(daemon_search_streaming_protocol_test PROPERTIES LABELS "daemon;integration")
+
+# Status/Stats proto fields smoke test
+add_executable(daemon_status_stats_integration_test
+    daemon_status_stats_integration_test.cpp
+)
+target_link_libraries(daemon_status_stats_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams_cli
+)
+add_test(NAME daemon_status_stats_integration_test COMMAND daemon_status_stats_integration_test)
+set_tests_properties(daemon_status_stats_integration_test PROPERTIES LABELS "daemon;integration")

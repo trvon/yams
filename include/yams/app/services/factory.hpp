@@ -14,6 +14,7 @@
 
 #include <memory>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 
 namespace yams::app::services {
 
@@ -62,5 +63,8 @@ struct ServiceBundle {
 [[nodiscard]] std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx);
 [[nodiscard]] std::shared_ptr<IIndexingService> makeIndexingService(const AppContext& ctx);
 [[nodiscard]] std::shared_ptr<IStatsService> makeStatsService(const AppContext& ctx);
+
+// Session service factory (shared across CLI/MCP)
+// Declared in session_service.hpp; included above for consumers.
 
 } // namespace yams::app::services

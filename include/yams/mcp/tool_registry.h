@@ -55,6 +55,9 @@ struct MCPSearchRequest {
     std::string pathPattern;
     std::vector<std::string> tags;
     bool matchAllTags = false;
+    // Session scoping
+    bool useSession = true;  // default: scope to current session when available
+    std::string sessionName; // optional: target a specific session
 
     static MCPSearchRequest fromJson(const json& j);
     json toJson() const;
@@ -104,6 +107,10 @@ struct MCPGrepRequest {
     int context = 0;
     std::optional<int> maxCount;
     std::string color = "auto";
+    bool fastFirst = false;
+    // Session scoping
+    bool useSession = true;
+    std::string sessionName;
 
     static MCPGrepRequest fromJson(const json& j);
     json toJson() const;
@@ -163,6 +170,9 @@ struct MCPDownloadResponse {
     std::optional<std::string> etag;
     std::optional<std::string> lastModified;
     std::optional<bool> checksumOk;
+    // Exposed HTTP-derived metadata for clients
+    std::optional<std::string> contentType;   // e.g., "application/pdf"
+    std::optional<std::string> suggestedName; // from Content-Disposition filename
 
     static MCPDownloadResponse fromJson(const json& j);
     json toJson() const;
@@ -199,10 +209,14 @@ struct MCPRetrieveDocumentRequest {
     using RequestType = MCPRetrieveDocumentRequest;
 
     std::string hash;
+    std::string name; // optional: retrieve by name
     std::string outputPath;
     bool graph = false;
     int depth = 1;
     bool includeContent = false;
+    // Session scoping for name resolution
+    bool useSession = true;
+    std::string sessionName;
 
     static MCPRetrieveDocumentRequest fromJson(const json& j);
     json toJson() const;
@@ -240,6 +254,10 @@ struct MCPListDocumentsRequest {
     int offset = 0;
     std::string sortBy = "modified";
     std::string sortOrder = "desc";
+    bool pathsOnly = false;
+    // Session scoping
+    bool useSession = true;
+    std::string sessionName;
 
     static MCPListDocumentsRequest fromJson(const json& j);
     json toJson() const;
@@ -510,6 +528,82 @@ struct MCPListSnapshotsResponse {
 
     static MCPListSnapshotsResponse fromJson(const json& j);
     json toJson() const;
+};
+
+// Session start/stop (simplified)
+struct MCPSessionStartRequest {
+    using RequestType = MCPSessionStartRequest;
+    std::string name;        // optional; empty means use existing
+    std::string description; // optional
+    bool warm = true;        // warm after starting
+    int limit = 200;         // docs per selector
+    int snippetLen = 160;    // snippet length
+    int cores = -1;
+    int memoryGb = -1;
+    long timeMs = -1;
+    bool aggressive = false;
+
+    static MCPSessionStartRequest fromJson(const json& j) {
+        MCPSessionStartRequest r;
+        if (j.contains("name"))
+            r.name = j.value("name", "");
+        if (j.contains("description"))
+            r.description = j.value("description", "");
+        r.warm = j.value("warm", true);
+        r.limit = j.value("limit", 200);
+        r.snippetLen = j.value("snippet_len", 160);
+        r.cores = j.value("cores", -1);
+        r.memoryGb = j.value("memory_gb", -1);
+        r.timeMs = j.value<long>("time_ms", -1);
+        r.aggressive = j.value("aggressive", false);
+        return r;
+    }
+    json toJson() const {
+        return json{
+            {"name", name},          {"description", description}, {"warm", warm},
+            {"limit", limit},        {"snippet_len", snippetLen},  {"cores", cores},
+            {"memory_gb", memoryGb}, {"time_ms", timeMs},          {"aggressive", aggressive}};
+    }
+};
+
+struct MCPSessionStartResponse {
+    using ResponseType = MCPSessionStartResponse;
+    std::string name;
+    uint64_t warmedCount = 0;
+    static MCPSessionStartResponse fromJson(const json& j) {
+        MCPSessionStartResponse r;
+        r.name = j.value("name", "");
+        r.warmedCount = j.value<uint64_t>("warmed_count", 0);
+        return r;
+    }
+    json toJson() const { return json{{"name", name}, {"warmed_count", warmedCount}}; }
+};
+
+struct MCPSessionStopRequest {
+    using RequestType = MCPSessionStopRequest;
+    std::string name;  // optional; empty = current
+    bool clear = true; // clear materialized cache
+    static MCPSessionStopRequest fromJson(const json& j) {
+        MCPSessionStopRequest r;
+        if (j.contains("name"))
+            r.name = j.value("name", "");
+        r.clear = j.value("clear", true);
+        return r;
+    }
+    json toJson() const { return json{{"name", name}, {"clear", clear}}; }
+};
+
+struct MCPSessionStopResponse {
+    using ResponseType = MCPSessionStopResponse;
+    std::string name;
+    bool cleared = false;
+    static MCPSessionStopResponse fromJson(const json& j) {
+        MCPSessionStopResponse r;
+        r.name = j.value("name", "");
+        r.cleared = j.value("cleared", false);
+        return r;
+    }
+    json toJson() const { return json{{"name", name}, {"cleared", cleared}}; }
 };
 
 // Generic tool wrapper template

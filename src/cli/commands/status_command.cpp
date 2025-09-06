@@ -55,7 +55,123 @@ public:
                 cfg.dataDir = cli_->getDataPath();
                 yams::daemon::DaemonClient client(cfg);
                 if (auto st = yams::cli::run_sync(client.status(), std::chrono::seconds(5)); st) {
-                    const auto& s = st.value();
+                    auto s = st.value();
+
+                    // Build services summary from stats JSON for a quick health glance
+                    std::string svcSummary;
+                    std::string waitingSummary;
+
+                    // Supplement Status with daemon stats JSON to avoid zeros from proto path
+                    // (StatusResponse over proto currently only carries a 'state' string)
+                    try {
+                        yams::daemon::GetStatsRequest sreq; // defaults are fine
+                        if (auto gres =
+                                yams::cli::run_sync(client.getStats(sreq), std::chrono::seconds(2));
+                            gres) {
+                            const auto& g = gres.value();
+                            auto itJson = g.additionalStats.find("json");
+                            if (itJson != g.additionalStats.end()) {
+                                auto j = nlohmann::json::parse(itJson->second);
+                                if (s.version.empty() && j.contains("version"))
+                                    s.version = j["version"].get<std::string>();
+                                if (s.uptimeSeconds == 0 && j.contains("uptime_seconds"))
+                                    s.uptimeSeconds = j["uptime_seconds"].get<uint64_t>();
+                                if (s.memoryUsageMb == 0 && j.contains("memory_mb"))
+                                    s.memoryUsageMb = j["memory_mb"].get<double>();
+                                if (s.cpuUsagePercent == 0 && j.contains("cpu_pct"))
+                                    s.cpuUsagePercent = j["cpu_pct"].get<double>();
+
+                                // Derive services summary
+                                auto flag = [&](const char* key, const char* good) -> std::string {
+                                    if (j.contains("services") && j["services"].contains(key)) {
+                                        auto v = j["services"][key].get<std::string>();
+                                        if (v == good)
+                                            return "✓";
+                                        if (v == std::string("available") ||
+                                            v == std::string("initialized"))
+                                            return "✓";
+                                        return "⚠";
+                                    }
+                                    return "⚠";
+                                };
+                                std::string content = flag("contentstore", "running");
+                                std::string repo = flag("metadatarepo", "running");
+                                std::string search;
+                                if (j.contains("services") &&
+                                    j["services"].contains("searchexecutor")) {
+                                    auto sv = j["services"]["searchexecutor"].get<std::string>();
+                                    if (sv == "available")
+                                        search = "✓";
+                                    else {
+                                        std::string reason =
+                                            j["services"].value("searchexecutor_reason", "");
+                                        search = reason.empty() ? "⚠" : ("⚠ (" + reason + ")");
+                                    }
+                                } else {
+                                    search = "⚠";
+                                }
+                                std::string models;
+                                if (j.contains("services") &&
+                                    j["services"].contains("embeddingservice")) {
+                                    auto ev = j["services"]["embeddingservice"].get<std::string>();
+                                    if (ev == "available") {
+                                        std::string count =
+                                            j["services"].contains("onnx_models_loaded")
+                                                ? j["services"]["onnx_models_loaded"].dump()
+                                                : std::string{"0"};
+                                        models = (count == "0" || count == "\"0\"") ? "⚠ (0)" : "✓";
+                                    } else {
+                                        models = "⚠";
+                                    }
+                                } else {
+                                    models = "⚠";
+                                }
+                                svcSummary = content + " Content | " + repo + " Repo | " + search +
+                                             " Search | " + models + " Models";
+
+                                // Build waiting summary when not ready
+                                if (!s.ready && j.contains("readiness")) {
+                                    std::vector<std::string> waiting;
+                                    for (auto it = j["readiness"].begin();
+                                         it != j["readiness"].end(); ++it) {
+                                        bool ok = false;
+                                        try {
+                                            ok = it.value().get<bool>();
+                                        } catch (...) {
+                                        }
+                                        if (!ok) {
+                                            std::ostringstream os;
+                                            os << it.key();
+                                            if (j.contains("progress") &&
+                                                j["progress"].contains(it.key())) {
+                                                try {
+                                                    os << " (" << j["progress"][it.key()].get<int>()
+                                                       << "%)";
+                                                } catch (...) {
+                                                }
+                                            }
+                                            waiting.push_back(os.str());
+                                        }
+                                    }
+                                    if (!waiting.empty()) {
+                                        std::ostringstream line;
+                                        for (size_t i = 0; i < waiting.size(); ++i) {
+                                            if (i)
+                                                line << ", ";
+                                            line << waiting[i];
+                                            if (i >= 4) {
+                                                line << ", …";
+                                                break;
+                                            }
+                                        }
+                                        waitingSummary = line.str();
+                                    }
+                                }
+                            }
+                        }
+                    } catch (...) {
+                        // best-effort supplement only
+                    }
                     if (jsonOutput_) {
                         nlohmann::json j;
                         j["running"] = s.running;
@@ -93,24 +209,28 @@ public:
                         }
                         std::cout << j.dump(2) << std::endl;
                     } else {
-                        std::cout << "YAMS Daemon Status\n";
-                        std::cout << "==================\n";
-                        std::cout << (s.running ? "✓ Running" : "✗ Not running") << "\n";
-                        std::cout << "Version: " << s.version << "\n";
-                        std::cout << "Uptime: " << s.uptimeSeconds << "s\n";
-                        std::cout << "Requests: " << s.requestsProcessed
-                                  << ", Active: " << s.activeConnections << "\n";
-                        std::cout << "Memory: " << s.memoryUsageMb
-                                  << " MB, CPU: " << s.cpuUsagePercent << "%\n";
-                        std::cout << "FSM: transitions=" << s.fsmTransitions
-                                  << ", header_reads=" << s.fsmHeaderReads
-                                  << ", payload_reads=" << s.fsmPayloadReads
-                                  << ", payload_writes=" << s.fsmPayloadWrites << "\n";
-                        std::cout << "     bytes_sent=" << s.fsmBytesSent
-                                  << ", bytes_recv=" << s.fsmBytesReceived << "\n";
-                        std::cout << "MUX: active_handlers=" << s.muxActiveHandlers
-                                  << ", queued_bytes=" << s.muxQueuedBytes
-                                  << ", writer_budget=" << s.muxWriterBudgetBytes << "\n";
+                        // Retro, compact output (using supplemented values when available)
+                        std::cout << "== DAEMON STATUS ==\n";
+                        std::cout << "RUN  : " << (s.running ? "yes" : "no") << "\n";
+                        std::cout << "VER  : " << s.version << "\n";
+                        std::cout << "STATE: "
+                                  << (s.overallStatus.empty()
+                                          ? (s.ready ? "Ready"
+                                                     : (s.running ? "Starting" : "Stopped"))
+                                          : s.overallStatus)
+                                  << "\n";
+                        std::cout << "UP   : " << s.uptimeSeconds << "s\n";
+                        std::cout << "REQ  : " << s.requestsProcessed
+                                  << "  ACT: " << s.activeConnections << "\n";
+                        std::cout << "MEM  : " << std::fixed << std::setprecision(1)
+                                  << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
+                                  << "%\n";
+                        if (!svcSummary.empty()) {
+                            std::cout << "SVC  : " << svcSummary << "\n";
+                        }
+                        if (!s.ready && !waitingSummary.empty()) {
+                            std::cout << "WAIT : " << waitingSummary << "\n";
+                        }
                     }
                     return Result<void>();
                 }

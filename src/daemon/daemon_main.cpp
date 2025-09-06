@@ -210,6 +210,33 @@ int main(int argc, char* argv[]) {
                 config.enableModelProvider = config.autoLoadPlugins;
             }
 
+            // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
+            // This prevents startup from waiting on embedding services when embeddings are
+            // disabled.
+            if (tomlConfig.find("embeddings") != tomlConfig.end()) {
+                const auto& embSection = tomlConfig.at("embeddings");
+                auto it = embSection.find("enable");
+                if (it != embSection.end()) {
+                    std::string v = it->second;
+                    // normalize value to lowercase for comparison
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    if (v == "false" || v == "0" || v == "no" || v == "off") {
+                        if (config.enableModelProvider) {
+                            spdlog::info("Embeddings disabled in config "
+                                         "([embeddings].enable=false); disabling model provider");
+                        }
+                        config.enableModelProvider = false;
+                        // Also short-circuit plugin auto-loading to avoid unnecessary startup work
+                        if (config.autoLoadPlugins) {
+                            spdlog::info("Embeddings disabled; skipping plugin auto-loading to "
+                                         "speed up startup");
+                        }
+                        config.autoLoadPlugins = false;
+                    }
+                }
+            }
+
             // Load daemon.models configuration if present
             if (config.enableModelProvider &&
                 tomlConfig.find("daemon.models") != tomlConfig.end()) {

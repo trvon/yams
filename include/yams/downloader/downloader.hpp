@@ -209,6 +209,8 @@ struct FinalResult {
     std::optional<std::string> etag{};
     std::optional<std::string> lastModified{};
     std::optional<bool> checksumOk{};
+    std::optional<std::string> contentType{};
+    std::optional<std::string> suggestedName{};
 
     std::optional<Error> error{};
 
@@ -286,7 +288,9 @@ public:
           /* out */ bool& resumeSupported,
           /* out */ std::optional<std::uint64_t>& contentLength,
           /* out */ std::optional<std::string>& etag,
-          /* out */ std::optional<std::string>& lastModified, const TlsConfig& tls,
+          /* out */ std::optional<std::string>& lastModified,
+          /* out */ std::optional<std::string>& contentType,
+          /* out */ std::optional<std::string>& suggestedFilename, const TlsConfig& tls,
           const std::optional<std::string>& proxy,
           std::chrono::milliseconds timeout) = 0; // TODO(parallel): consider exposing server part
                                                   // size/alignment for multi-range planning

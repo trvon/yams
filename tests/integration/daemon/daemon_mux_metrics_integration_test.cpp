@@ -22,8 +22,14 @@ TEST(ServerMultiplexIntegrationTest, MuxMetricsExposedInStatus) {
     cfg.maxInflight = 8;
     yams::daemon::DaemonClient client(cfg);
 
-    yams::daemon::StatusRequest req;
-    req.detailed = true;
+    // Wait until Ready/Degraded
+    for (int i = 0; i < 50; ++i) {
+        auto st = yams::cli::run_sync(client.status(), 1s);
+        if (st && (st.value().ready || st.value().overallStatus == "Ready" ||
+                   st.value().overallStatus == "Degraded"))
+            break;
+        std::this_thread::sleep_for(100ms);
+    }
     auto res = yams::cli::run_sync(client.status(), 3s);
     ASSERT_TRUE(res);
     const auto& s = res.value();

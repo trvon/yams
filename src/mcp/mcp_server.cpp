@@ -59,6 +59,9 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 
 } // namespace
 
+// Forward declare helper for in-band logging
+static nlohmann::json createLogNotification(const std::string& level, const std::string& message);
+
 // Define static mutex for StdioTransport
 std::mutex StdioTransport::out_mutex_;
 
@@ -96,17 +99,20 @@ void StdioTransport::writerLoop() {
                 currentState == TransportState::Closing) {
                 std::lock_guard<std::mutex> lock(out_mutex_);
                 const std::string payload = message.dump();
-
-                if (outbuf_ && std::cout.rdbuf() != outbuf_) {
+                // Temporarily bind std::cout to captured buffer to honor test redirections
+                std::streambuf* saved = std::cout.rdbuf();
+                if (outbuf_) {
                     (void)std::cout.rdbuf(outbuf_);
                 }
-
                 // LSP/MCP framing
                 std::cout << "Content-Length: " << payload.size() << "\r\n";
                 std::cout << "Content-Type: application/json\r\n\r\n";
                 std::cout << payload;
                 std::cout << "\r\n";
                 std::cout.flush();
+                if (saved) {
+                    (void)std::cout.rdbuf(saved);
+                }
             }
         }
 
@@ -132,9 +138,8 @@ StdioTransport::StdioTransport() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 #endif
-    // Capture current stream buffers so we honor caller redirections (tests set rdbuf)
+    // Capture the current stdout buffer so we honor caller redirections (tests set rdbuf)
     outbuf_ = std::cout.rdbuf();
-    inbuf_ = std::cin.rdbuf();
     state_.store(TransportState::Connected);
     // Start outbound writer thread for non-blocking sends
     writerRunning_.store(true);
@@ -147,17 +152,20 @@ void StdioTransport::send(const json& message) {
     if (currentState == TransportState::Connected) {
         std::lock_guard<std::mutex> lock(out_mutex_);
         const std::string payload = message.dump();
-
-        if (outbuf_ && std::cout.rdbuf() != outbuf_) {
+        // Temporarily bind std::cout to captured buffer to honor test redirections
+        std::streambuf* saved = std::cout.rdbuf();
+        if (outbuf_) {
             (void)std::cout.rdbuf(outbuf_);
         }
-
-        // Minimal LSP/MCP framing: only Content-Length header is required
+        // Minimal LSP/MCP framing
         std::cout << "Content-Length: " << payload.size() << "\r\n";
         std::cout << "Content-Type: application/json\r\n\r\n";
         std::cout << payload;
         std::cout << "\r\n";
         std::cout.flush();
+        if (saved) {
+            (void)std::cout.rdbuf(saved);
+        }
     }
 }
 
@@ -202,8 +210,9 @@ MessageResult StdioTransport::receive() {
     }
 
     // MCP stdio transport: Support both LSP-style Content-Length framing and
-    // newline-delimited JSON. Use captured input buffer to respect redirections.
-    std::istream in(inbuf_);
+    // newline-delimited JSON. Always read from the current std::cin buffer so
+    // redirections done after construction (in tests) are honored.
+    std::istream in(std::cin.rdbuf());
 
     while (state_.load() != TransportState::Closing) {
         // Check for input availability
@@ -939,6 +948,11 @@ json MCPServer::listTools() {
                  {"description", "Filter by tags (presence-based, matches any by default)"}};
         props["match_all_tags"] = makeProp("boolean", "Require all specified tags to be present");
         props["match_all_tags"]["default"] = false;
+        // Session scoping for server-managed sessions
+        props["use_session"] =
+            makeProp("boolean", "Scope search to current session when available");
+        props["use_session"]["default"] = true;
+        props["session"] = makeProp("string", "Explicit session name to scope the search");
         schema["properties"] = props;
         schema["required"] = json::array({"query"});
         tool["inputSchema"] = schema;
@@ -982,6 +996,10 @@ json MCPServer::listTools() {
         props["max_count"] = makeProp("integer", "Maximum matches per file");
         props["color"] = makeProp("string", "Color highlighting (values: always, never, auto)");
         props["color"]["default"] = "auto";
+        // Session scoping for name and path resolution
+        props["use_session"] = makeProp("boolean", "Scope grep to current session when available");
+        props["use_session"]["default"] = true;
+        props["session"] = makeProp("string", "Explicit session name to scope the grep");
         schema["properties"] = props;
         schema["required"] = json::array({"pattern"});
         tool["inputSchema"] = schema;
@@ -1362,6 +1380,35 @@ json MCPServer::listTools() {
         tools.push_back(tool);
     }
 
+    // session_start
+    {
+        json tool;
+        tool["name"] = "session_start";
+        tool["description"] = "Start or switch to a named session for context scoping";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["name"] = makeProp("string", "Session name");
+        schema["properties"] = props;
+        schema["required"] = json::array({"name"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // session_stop
+    {
+        json tool;
+        tool["name"] = "session_stop";
+        tool["description"] = "Stop the current or specified session";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["name"] = makeProp("string", "Optional session name (defaults to current)");
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
     return json{{"tools", tools}};
 }
 
@@ -1467,6 +1514,57 @@ yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrep
     dreq.colorMode = req.color;
     if (req.maxCount)
         dreq.maxMatches = *req.maxCount;
+
+    // Session scoping for grep: if no explicit paths, use session patterns
+    if (req.useSession && dreq.paths.empty()) {
+        auto sess = app::services::makeSessionService(nullptr);
+        auto pats = sess->activeIncludePatterns(req.sessionName.empty()
+                                                    ? std::optional<std::string>{}
+                                                    : std::optional<std::string>{req.sessionName});
+        if (!pats.empty()) {
+            size_t added = 0;
+            for (const auto& p : pats) {
+                dreq.paths.push_back(p);
+                if (++added >= 64)
+                    break;
+            }
+        }
+    }
+
+    // Fast-first path: emit early semantic suggestions and return immediately if requested
+    if (req.fastFirst) {
+        try {
+            if (transport_) {
+                transport_->send(createLogNotification(
+                    "info", "grep fast-first: returning semantic semantic suggestions"));
+            }
+        } catch (...) {
+            // best-effort notification
+        }
+        yams::daemon::SearchRequest sreq;
+        sreq.query = req.pattern;
+        sreq.limit = 10;
+        sreq.fuzzy = true;
+        sreq.searchType = "hybrid";
+        sreq.pathsOnly = false;
+        auto sres = co_await daemon_client_->streamingSearch(sreq);
+        if (sres) {
+            const auto& sr = sres.value();
+            MCPGrepResponse early;
+            std::ostringstream oss_;
+            for (const auto& item : sr.results) {
+                std::string p = !item.path.empty() ? item.path : item.title;
+                if (!p.empty()) {
+                    oss_ << "[S] " << p << "\n";
+                }
+            }
+            early.output = oss_.str();
+            early.matchCount = 0;
+            early.fileCount = sr.results.size();
+            co_return early;
+        }
+        // If semantic burst failed, fall through to standard grep
+    }
 
     MCPGrepResponse out;
     auto res = co_await daemon_client_->streamingGrep(dreq);
@@ -1759,6 +1857,10 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         mcp_response.lastModified = *final.lastModified;
     if (final.checksumOk)
         mcp_response.checksumOk = *final.checksumOk;
+    if (final.contentType)
+        mcp_response.contentType = *final.contentType;
+    if (final.suggestedName)
+        mcp_response.suggestedName = *final.suggestedName;
 
     if (verbose) {
         spdlog::debug(
@@ -1808,10 +1910,12 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
         addReq.path = __abs.string(); // normalized absolute path
 
         // Preserve a human-friendly name for name-based retrieval
-        // Derive from URL basename (strip query params)
+        // Prefer Content-Disposition filename when available; fallback to URL basename
         try {
             std::string fname;
-            {
+            if (final.suggestedName && !final.suggestedName->empty()) {
+                fname = *final.suggestedName;
+            } else {
                 auto lastSlash = req.url.find_last_of('/');
                 fname = (lastSlash == std::string::npos) ? req.url : req.url.substr(lastSlash + 1);
                 auto q = fname.find('?');
@@ -1823,6 +1927,9 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
             addReq.name = std::move(fname);
         } catch (...) {
             addReq.name = "downloaded_file";
+        }
+        if (final.contentType && !final.contentType->empty()) {
+            addReq.mimeType = *final.contentType;
         }
         addReq.collection = req.collection;
         addReq.snapshotId = req.snapshotId;
@@ -1865,6 +1972,8 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
             addReq.tags.push_back(t);
 
         // 3) Provenance metadata
+        addReq.metadata["extract_text"] = "true";
+        addReq.metadata["raw_content"] = "false";
         addReq.metadata["source_url"] = req.url;
         if (mcp_response.httpStatus)
             addReq.metadata["http_status"] = std::to_string(*mcp_response.httpStatus);
@@ -1975,6 +2084,44 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.graphDepth = req.depth;
     daemon_req.metadataOnly = !req.includeContent;
 
+    // Session-aware name resolution when hash is not provided
+    if (daemon_req.hash.empty() && !req.name.empty()) {
+        // Try app service name -> hash resolution first
+        if (documentService_) {
+            auto rh = documentService_->resolveNameToHash(req.name);
+            if (rh) {
+                daemon_req.hash = rh.value();
+            }
+        }
+        // Fallback: use session scoping to find a document with matching name
+        if (daemon_req.hash.empty() && req.useSession) {
+            auto sess = app::services::makeSessionService(nullptr);
+            auto pats = sess->activeIncludePatterns(
+                req.sessionName.empty() ? std::optional<std::string>{}
+                                        : std::optional<std::string>{req.sessionName});
+            for (const auto& pat : pats) {
+                yams::daemon::ListRequest lreq;
+                lreq.namePattern = pat;
+                lreq.limit = 200;
+                lreq.pathsOnly = false;
+                auto lres = co_await daemon_client_->list(lreq);
+                if (lres) {
+                    for (const auto& item : lres.value().items) {
+                        if (item.name == req.name && !item.hash.empty()) {
+                            daemon_req.hash = item.hash;
+                            break;
+                        }
+                    }
+                    if (!daemon_req.hash.empty())
+                        break;
+                }
+            }
+        }
+        if (daemon_req.hash.empty()) {
+            co_return Error{ErrorCode::NotFound, "Document not found by name"};
+        }
+    }
+
     auto dres = co_await daemon_client_->get(daemon_req);
     if (!dres)
         co_return dres.error();
@@ -2001,12 +2148,22 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
     daemon_req.namePattern = req.pattern;
+    if (req.useSession && daemon_req.namePattern.empty()) {
+        auto sess = app::services::makeSessionService(nullptr);
+        auto pats = sess->activeIncludePatterns(req.sessionName.empty()
+                                                    ? std::optional<std::string>{}
+                                                    : std::optional<std::string>{req.sessionName});
+        if (!pats.empty()) {
+            daemon_req.namePattern = pats.front();
+        }
+    }
     daemon_req.tags = req.tags;
     daemon_req.fileType = req.type;
     daemon_req.mimeType = req.mime;
     daemon_req.extensions = req.extension;
     daemon_req.binaryOnly = req.binary;
     daemon_req.textOnly = req.text;
+    daemon_req.pathsOnly = req.pathsOnly;
     daemon_req.recentCount = req.recent > 0 ? req.recent : 0;
     daemon_req.limit = req.limit > 0 ? static_cast<size_t>(req.limit) : daemon_req.limit;
     daemon_req.offset = req.offset > 0 ? req.offset : 0;
@@ -2148,6 +2305,62 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     co_return out;
 }
 
+yams::Task<Result<MCPSessionStartResponse>>
+MCPServer::handleSessionStart(const MCPSessionStartRequest& req) {
+    // Initialize or select session using JSON-backed service
+    auto sessionSvc = app::services::makeSessionService(nullptr);
+    if (!req.name.empty()) {
+        if (!sessionSvc->exists(req.name)) {
+            sessionSvc->init(req.name, req.description);
+        } else {
+            sessionSvc->use(req.name);
+        }
+    }
+
+    uint64_t warmed = 0;
+    if (req.warm) {
+        // Prefer daemon offload
+        yams::daemon::PrepareSessionRequest dreq;
+        dreq.sessionName = req.name; // empty ok => current
+        dreq.cores = req.cores;
+        dreq.memoryGb = req.memoryGb;
+        dreq.timeMs = req.timeMs;
+        dreq.aggressive = req.aggressive;
+        dreq.limit = static_cast<std::size_t>(req.limit);
+        dreq.snippetLen = static_cast<std::size_t>(req.snippetLen);
+
+        auto resp = co_await daemon_client_->call<yams::daemon::PrepareSessionRequest>(dreq);
+        if (resp) {
+            warmed = resp.value().warmedCount;
+        } else {
+            // Fallback to local prepare (will be no-op without app context)
+            app::services::PrepareBudget b{req.cores, req.memoryGb, req.timeMs, req.aggressive};
+            warmed = sessionSvc->prepare(b, static_cast<std::size_t>(req.limit),
+                                         static_cast<std::size_t>(req.snippetLen));
+        }
+    }
+
+    MCPSessionStartResponse out;
+    out.name = !req.name.empty() ? req.name : sessionSvc->current().value_or("");
+    out.warmedCount = warmed;
+    co_return out;
+}
+
+yams::Task<Result<MCPSessionStopResponse>>
+MCPServer::handleSessionStop(const MCPSessionStopRequest& req) {
+    auto sessionSvc = app::services::makeSessionService(nullptr);
+    if (!req.name.empty()) {
+        if (sessionSvc->exists(req.name))
+            sessionSvc->use(req.name);
+    }
+    if (req.clear)
+        sessionSvc->clearMaterialized();
+    MCPSessionStopResponse out;
+    out.name = !req.name.empty() ? req.name : sessionSvc->current().value_or("");
+    out.cleared = req.clear;
+    co_return out;
+}
+
 void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
@@ -2187,8 +2400,11 @@ void MCPServer::initializeToolRegistry() {
                  {"default", false}}},
                {"line_numbers",
                 {{"type", "boolean"}, {"description", "Show line numbers"}, {"default", false}}},
-               {"context",
-                {{"type", "integer"}, {"description", "Context lines"}, {"default", 0}}}}},
+               {"context", {{"type", "integer"}, {"description", "Context lines"}, {"default", 0}}},
+               {"fast_first",
+                {{"type", "boolean"},
+                 {"description", "Return a fast semantic-first burst"},
+                 {"default", false}}}}},
              {"required", json::array({"pattern"})}},
         "Search documents using regular expressions with grep-like functionality");
 
@@ -2267,12 +2483,17 @@ void MCPServer::initializeToolRegistry() {
         json{{"type", "object"},
              {"properties",
               {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
+               {"name", {{"type", "string"}, {"description", "Document name (optional)"}}},
                {"output_path", {{"type", "string"}, {"description", "Output file path"}}},
                {"include_content",
                 {{"type", "boolean"},
                  {"description", "Include content in response"},
-                 {"default", false}}}}},
-             {"required", json::array({"hash"})}},
+                 {"default", false}}},
+               {"use_session",
+                {{"type", "boolean"},
+                 {"description", "Use current session scope for name resolution"},
+                 {"default", true}}},
+               {"session", {{"type", "string"}, {"description", "Session name override"}}}}}},
         "Retrieve documents from storage by hash with optional knowledge graph expansion");
 
     toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
@@ -2285,6 +2506,10 @@ void MCPServer::initializeToolRegistry() {
                  {"items", {{"type", "string"}}},
                  {"description", "Filter by tags"}}},
                {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}},
+               {"paths_only",
+                {{"type", "boolean"},
+                 {"description", "Output only file paths"},
+                 {"default", false}}},
                {"limit",
                 {{"type", "integer"},
                  {"description", "Maximum number of results"},
@@ -2386,6 +2611,31 @@ void MCPServer::initializeToolRegistry() {
                  {"items", {{"type", "string"}}},
                  {"description", "Tags to add or update"}}}}}},
         "Update document metadata and tags");
+
+    // Session start/stop (simplified)
+    toolRegistry_->registerTool<MCPSessionStartRequest, MCPSessionStartResponse>(
+        "session_start",
+        [this](const MCPSessionStartRequest& req) { return handleSessionStart(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
+               {"description", {{"type", "string"}, {"description", "Session description"}}},
+               {"warm", {{"type", "boolean"}, {"default", true}}},
+               {"limit", {{"type", "integer"}, {"default", 200}}},
+               {"snippet_len", {{"type", "integer"}, {"default", 160}}},
+               {"cores", {{"type", "integer"}, {"default", -1}}},
+               {"memory_gb", {{"type", "integer"}, {"default", -1}}},
+               {"time_ms", {{"type", "integer"}, {"default", -1}}},
+               {"aggressive", {{"type", "boolean"}, {"default", false}}}}}},
+        "Start (and optionally warm) a session with default budgets");
+
+    toolRegistry_->registerTool<MCPSessionStopRequest, MCPSessionStopResponse>(
+        "session_stop", [this](const MCPSessionStopRequest& req) { return handleSessionStop(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
+               {"clear", {{"type", "boolean"}, {"default", true}}}}}},
+        "Stop session (clear materialized cache)");
 
     toolRegistry_->registerTool<MCPRestoreCollectionRequest, MCPRestoreCollectionResponse>(
         "restore_collection",

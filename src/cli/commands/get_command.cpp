@@ -9,6 +9,7 @@
 #include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/session_store.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -78,6 +79,10 @@ public:
         cmd->add_flag("--latest", getLatest_, "Get the most recently indexed matching document");
         cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document");
 
+        // Session scoping controls
+        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
+        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
+
         // Text extraction options
         cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
         cmd->add_flag("--extract", extract_, "Force text extraction even when piping to file");
@@ -89,6 +94,12 @@ public:
             ->check(CLI::Range(1, 5));
 
         cmd->callback([this]() {
+            if (!noSession_) {
+                sessionPatterns_ =
+                    yams::cli::session_store::active_include_patterns(sessionOverride_);
+            } else {
+                sessionPatterns_.clear();
+            }
             auto result = execute();
             if (!result) {
                 spdlog::error("Command failed: {}", result.error().message);
@@ -691,7 +702,24 @@ private:
         // First try as a path suffix (for real files)
         auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
         if (documentsResult && !documentsResult.value().empty()) {
-            const auto& results = documentsResult.value();
+            auto results = documentsResult.value();
+            if (!sessionPatterns_.empty()) {
+                std::vector<metadata::DocumentInfo> filtered;
+                for (const auto& d : results) {
+                    bool match = false;
+                    for (const auto& pat : sessionPatterns_) {
+                        if (d.filePath.find(pat) != std::string::npos ||
+                            d.fileName.find(pat) != std::string::npos) {
+                            match = true;
+                            break;
+                        }
+                    }
+                    if (match)
+                        filtered.push_back(d);
+                }
+                if (!filtered.empty())
+                    results.swap(filtered);
+            }
             if (results.size() > 1) {
                 if (hasWildcards || getLatest_ || getOldest_) {
                     // For wildcards or explicit latest/oldest flags, select automatically
@@ -726,8 +754,26 @@ private:
         // Try exact path match
         documentsResult = metadataRepo->findDocumentsByPath(name);
         if (documentsResult && !documentsResult.value().empty()) {
-            if (documentsResult.value().size() > 1 && (hasWildcards || getLatest_ || getOldest_)) {
-                auto sorted = documentsResult.value();
+            auto docs = documentsResult.value();
+            if (!sessionPatterns_.empty()) {
+                std::vector<metadata::DocumentInfo> filtered;
+                for (const auto& d : docs) {
+                    bool match = false;
+                    for (const auto& pat : sessionPatterns_) {
+                        if (d.filePath.find(pat) != std::string::npos ||
+                            d.fileName.find(pat) != std::string::npos) {
+                            match = true;
+                            break;
+                        }
+                    }
+                    if (match)
+                        filtered.push_back(d);
+                }
+                if (!filtered.empty())
+                    docs.swap(filtered);
+            }
+            if (docs.size() > 1 && (hasWildcards || getLatest_ || getOldest_)) {
+                auto sorted = docs;
                 std::sort(sorted.begin(), sorted.end(),
                           [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
                               return getOldest_ ? (a.indexedTime < b.indexedTime)
@@ -741,7 +787,7 @@ private:
                 }
                 return sorted[0].sha256Hash;
             }
-            return documentsResult.value()[0].sha256Hash;
+            return docs[0].sha256Hash;
         }
 
         // For wildcard patterns, try wildcard matching before fuzzy
@@ -875,6 +921,24 @@ private:
         }
 
         std::vector<std::pair<std::string, int>> candidatesWithScores;
+        std::vector<metadata::DocumentInfo> docs = documentsResult.value();
+        if (!sessionPatterns_.empty()) {
+            std::vector<metadata::DocumentInfo> filtered;
+            for (const auto& d : docs) {
+                bool match = false;
+                for (const auto& pat : sessionPatterns_) {
+                    if (d.filePath.find(pat) != std::string::npos ||
+                        d.fileName.find(pat) != std::string::npos) {
+                        match = true;
+                        break;
+                    }
+                }
+                if (match)
+                    filtered.push_back(d);
+            }
+            if (!filtered.empty())
+                docs.swap(filtered);
+        }
 
         // Split query into path components
         std::vector<std::string> queryComponents;
@@ -891,7 +955,7 @@ private:
         }
 
         // Score each document path
-        for (const auto& doc : documentsResult.value()) {
+        for (const auto& doc : docs) {
             std::filesystem::path docPath(doc.filePath);
 
             // Split document path into components
@@ -1159,6 +1223,11 @@ private:
     // Knowledge graph options
     bool showGraph_ = false;
     int graphDepth_ = 1;
+
+    // Session scoping
+    std::optional<std::string> sessionOverride_{};
+    bool noSession_{false};
+    std::vector<std::string> sessionPatterns_;
 
     // Daemon streaming options
     bool metadataOnly_ = false;

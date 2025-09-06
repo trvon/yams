@@ -2,7 +2,10 @@
 #include <spdlog/spdlog.h>
 #include <CLI/CLI.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
+#include <yams/cli/session_store.h>
 #include <yams/cli/yams_cli.h>
 
 #include <algorithm>
@@ -91,75 +94,349 @@ public:
         auto* cmd = app.add_subcommand(getName(), getDescription());
         cmd->require_subcommand();
 
-        // session list
-        auto* listCmd = cmd->add_subcommand("list", "List pinned items (client-side)");
-        listCmd->callback([this]() { this->mode_ = Mode::List; });
+        // Quick, pipe-friendly help examples for Unix ergonomics
+        cmd->footer(R"(Examples:
+  # Create and use a session
+  yams session init mywork --desc "PBI-008-11"
+  yams session use mywork
 
-        // session pin --path PATTERN [--tag t]* [--meta k=v]*
-        auto* pinCmd =
-            cmd->add_subcommand("pin", "Pin items by path pattern; add 'pinned' tag in repository");
-        pinCmd->add_option("--path", pinPath_, "Path or glob pattern to pin")->required();
-        pinCmd->add_option("--tag", pinTags_, "Tags to attach when pinning")->take_all();
-        pinCmd->add_option("--meta", pinMetaPairs_, "Metadata pairs key=value")->take_all();
-        pinCmd->callback([this]() { this->mode_ = Mode::Pin; });
+  # Add selectors and warm a small cache
+  yams session add --path "src/**/*.cpp"
+  yams session warm --limit 200
 
-        // session unpin --path PATTERN
-        auto* unpinCmd =
-            cmd->add_subcommand("unpin", "Unpin items by path pattern; remove 'pinned' tag");
-        unpinCmd->add_option("--path", pinPath_, "Path or glob pattern to unpin")->required();
-        unpinCmd->callback([this]() { this->mode_ = Mode::Unpin; });
+  # Scope search/list to current session by default
+  yams search -q "allocator leak"
+  yams list --format json
 
-        // session warm: retrieve pinned docs to warm caches
+  # Pipe-friendly emitters: compose tags/metadata explicitly
+  yams session emit --kind names | xargs -n1 yams update --add-tag pinned
+  yams session emit --kind paths --materialized | while read p; do \
+    yams update --name "$p" --meta session=mywork; \
+  done
+
+  # Save and load sessions
+  yams session save /tmp/mywork.json
+  yams session load /tmp/mywork.json --name mywork-restored
+
+Env:
+  YAMS_SESSION_CURRENT=<name> selects the default session for this process.)");
+
+        // session lifecycle
+        auto* initCmd = cmd->add_subcommand("init", "Initialize a named session");
+        initCmd->add_option("name", sessionName_, "Session name")->required();
+        initCmd->add_option("--desc", sessionDesc_, "Session description");
+        initCmd->callback([this]() { this->mode_ = Mode::Init; });
+
+        auto* useCmd = cmd->add_subcommand("use", "Set current session");
+        useCmd->add_option("name", sessionName_, "Session name")->required();
+        useCmd->callback([this]() { this->mode_ = Mode::Use; });
+
+        auto* lsCmd = cmd->add_subcommand("ls", "List sessions");
+        lsCmd->callback([this]() { this->mode_ = Mode::Ls; });
+
+        auto* showCmd = cmd->add_subcommand("show", "Show current session details");
+        showCmd->add_flag("--json", jsonOutput_, "JSON output");
+        showCmd->callback([this]() { this->mode_ = Mode::Show; });
+
+        auto* rmCmd = cmd->add_subcommand("rm", "Remove a session");
+        rmCmd->add_option("name", sessionName_, "Session name")->required();
+        rmCmd->callback([this]() { this->mode_ = Mode::Rm; });
+
+        // Working set ops
+        auto* addCmd = cmd->add_subcommand("add", "Add selector to current session");
+        addCmd->add_option("--path", pinPath_, "Path or glob selector");
+        addCmd->add_option("--tag", pinTags_, "Tags")->take_all();
+        addCmd->add_option("--meta", pinMetaPairs_, "k=v metadata")->take_all();
+        addCmd->callback([this]() { this->mode_ = Mode::Add; });
+
+        auto* rmPathCmd = cmd->add_subcommand("rm-path", "Remove selector from current session");
+        rmPathCmd->add_option("--path", pinPath_, "Path or glob selector")->required();
+        rmPathCmd->callback([this]() { this->mode_ = Mode::RmPath; });
+
+        auto* listSelCmd = cmd->add_subcommand("list", "List selectors/materialized docs");
+        listSelCmd->add_flag("--json", jsonOutput_, "JSON output");
+        listSelCmd->callback([this]() { this->mode_ = Mode::List; });
+
+        // session warm
         auto* warmCmd =
-            cmd->add_subcommand("warm", "Warm pinned items (metadata/snippets) for fast retrieval");
+            cmd->add_subcommand("warm", "Warm session (budgets supported) for fast retrieval");
+        warmCmd->add_option("--limit", warmLimit_, "Max docs to materialize per selector")
+            ->default_val(200);
+        warmCmd->add_option("--snippet-len", snippetLen_, "Snippet length")->default_val(160);
+        warmCmd->add_option("--cores", budgetCores_, "Max CPU cores");
+        warmCmd->add_option("--memory-gb", budgetMemGb_, "Max memory in GB");
+        warmCmd->add_option("--time-ms", budgetTimeMs_, "Max time in ms");
+        warmCmd->add_flag("--aggressive", budgetAggressive_, "Aggressive warming");
         warmCmd->callback([this]() { this->mode_ = Mode::Warm; });
+
+        // Sugar wrappers
+        auto* tagsCmd = cmd->add_subcommand("tags", "Add/remove tags on materialized items");
+        tagsCmd->add_option("--add", tagAdds_, "Tags to add")->take_all();
+        tagsCmd->add_option("--remove", tagRemoves_, "Tags to remove")->take_all();
+        tagsCmd->callback([this]() { this->mode_ = Mode::Tags; });
+
+        auto* annCmd = cmd->add_subcommand("annotate", "Add metadata to materialized items (k=v)");
+        annCmd->add_option("--meta", annotateMetaPairs_, "k=v pairs")->take_all();
+        annCmd->callback([this]() { this->mode_ = Mode::Annotate; });
+
+        // Clear materialized cache only
+        auto* clearCmd =
+            cmd->add_subcommand("clear", "Clear materialized cache for current session");
+        clearCmd->callback([this]() { this->mode_ = Mode::Clear; });
+
+        // Save/load/export/import
+        auto* saveCmd = cmd->add_subcommand("save", "Save current session to file");
+        saveCmd->add_option("file", ioFile_, "Output file");
+        saveCmd->callback([this]() { this->mode_ = Mode::Save; });
+
+        auto* loadCmd = cmd->add_subcommand("load", "Load session from file");
+        loadCmd->add_option("file", ioFile_, "Input file")->required();
+        loadCmd->add_option("--name", sessionName_, "Target session name (optional)");
+        loadCmd->callback([this]() { this->mode_ = Mode::Load; });
+
+        // Emitters (pipe-friendly)
+        auto* emitCmd = cmd->add_subcommand("emit", "Emit current session targets for piping");
+        emitCmd->add_flag("--json", jsonOutput_, "JSON array output");
+        emitCmd->add_flag("--materialized", emitMaterialized_, "Emit from materialized cache");
+        emitCmd->add_option("--kind", emitKind_, "names|paths|hashes")
+            ->default_val("names")
+            ->check(CLI::IsMember({"names", "paths", "hashes"}));
+        emitCmd->callback([this]() { this->mode_ = Mode::Emit; });
     }
 
     Result<void> execute() override {
         switch (mode_) {
+            case Mode::Init:
+                return doInit();
+            case Mode::Use:
+                return doUse();
+            case Mode::Ls:
+                return doLs();
+            case Mode::Show:
+                return doShow();
+            case Mode::Rm:
+                return doRm();
+            case Mode::Add:
+                return doAdd();
+            case Mode::RmPath:
+                return doRmPath();
             case Mode::List:
                 return doList();
-            case Mode::Pin:
-                return doPin(true);
-            case Mode::Unpin:
-                return doPin(false);
             case Mode::Warm:
                 return doWarm();
+            case Mode::Clear:
+                return doClear();
+            case Mode::Save:
+                return doSave();
+            case Mode::Load:
+                return doLoad();
+            case Mode::Emit:
+                return doEmit();
+            case Mode::Tags:
+                return doTags();
+            case Mode::Annotate:
+                return doAnnotate();
             default:
                 return Result<void>(Error{ErrorCode::InvalidArgument, "No session subcommand"});
         }
     }
 
 private:
-    enum class Mode { None, List, Pin, Unpin, Warm };
+    enum class Mode {
+        None,
+        Init,
+        Use,
+        Ls,
+        Show,
+        Rm,
+        Add,
+        RmPath,
+        List,
+        Warm,
+        Clear,
+        Save,
+        Load,
+        Emit,
+        Tags,
+        Annotate
+    };
+
+    std::shared_ptr<app::services::ISessionService> sessionSvc() const {
+        auto appContext = cli_->getAppContext();
+        return app::services::makeSessionService(appContext.get());
+    }
+
+    // Session file helpers
+    static std::filesystem::path sessionsDir() { return yams::cli::session_store::sessions_dir(); }
+    static std::filesystem::path indexPath() { return yams::cli::session_store::index_path(); }
+    static std::optional<std::string> currentSession() {
+        return yams::cli::session_store::current_session();
+    }
+    static json loadSessionJson(const std::string& name) {
+        json j;
+        auto p = sessionsDir() / (name + ".json");
+        if (std::filesystem::exists(p)) {
+            try {
+                std::ifstream in(p);
+                if (in.good())
+                    in >> j;
+            } catch (...) {
+            }
+        }
+        return j;
+    }
+    static void saveSessionJson(const std::string& name, const json& j) {
+        auto p = sessionsDir() / (name + ".json");
+        std::ofstream out(p);
+        out << j.dump(2) << std::endl;
+    }
+    static void setCurrent(const std::string& name) {
+        json idx;
+        auto ip = indexPath();
+        if (std::filesystem::exists(ip)) {
+            try {
+                std::ifstream in(ip);
+                if (in.good())
+                    in >> idx;
+            } catch (...) {
+            }
+        }
+        idx["current"] = name;
+        std::ofstream out(ip);
+        out << idx.dump(2) << std::endl;
+    }
+
+    Result<void> doInit() {
+        if (sessionName_.empty())
+            return Error{ErrorCode::InvalidArgument, "Session name required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        svc->init(sessionName_, sessionDesc_);
+        std::cout << "Initialized session: " << sessionName_ << std::endl;
+        return {};
+    }
+
+    Result<void> doUse() {
+        if (sessionName_.empty())
+            return Error{ErrorCode::InvalidArgument, "Name required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        if (!svc->exists(sessionName_))
+            return Error{ErrorCode::NotFound, "Session not found"};
+        svc->use(sessionName_);
+        std::cout << "Using session: " << sessionName_ << std::endl;
+        return {};
+    }
+
+    Result<void> doLs() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current().value_or("");
+        auto names = svc->listSessions();
+        if (names.empty()) {
+            std::cout << "(no sessions)\n";
+        } else {
+            for (const auto& n : names) {
+                std::cout << (n == cur ? "* " : "  ") << n << std::endl;
+            }
+        }
+        return {};
+    }
+
+    Result<void> doShow() {
+        auto svc = sessionSvc();
+        auto cur = svc ? svc->current() : std::optional<std::string>{};
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        auto j = loadSessionJson(*cur);
+        if (jsonOutput_) {
+            std::cout << j.dump(2) << std::endl;
+        } else {
+            std::cout << "Session: " << *cur << std::endl;
+            size_t selCount = svc ? svc->listPathSelectors(*cur).size()
+                                  : (j.contains("selectors") ? j["selectors"].size() : 0);
+            auto mat =
+                svc ? svc->listMaterialized(*cur) : std::vector<app::services::MaterializedItem>{};
+            std::cout << "Selectors: " << selCount << std::endl;
+            std::cout << "Materialized: " << mat.size() << std::endl;
+        }
+        return {};
+    }
+
+    Result<void> doRm() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        if (!svc->exists(sessionName_))
+            return Error{ErrorCode::NotFound, "Not found"};
+        svc->remove(sessionName_);
+        std::cout << "Removed session: " << sessionName_ << std::endl;
+        return {};
+    }
+
+    Result<void> doAdd() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        std::vector<std::pair<std::string, std::string>> metaPairs;
+        for (const auto& p : pinMetaPairs_) {
+            auto pos = p.find('=');
+            if (pos != std::string::npos)
+                metaPairs.emplace_back(p.substr(0, pos), p.substr(pos + 1));
+        }
+        if (pinPath_.empty())
+            return Error{ErrorCode::InvalidArgument, "--path required"};
+        svc->addPathSelector(pinPath_, pinTags_, metaPairs);
+        std::cout << "Added selector to session '" << *cur << "'\n";
+        return {};
+    }
+
+    Result<void> doRmPath() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        if (pinPath_.empty())
+            return Error{ErrorCode::InvalidArgument, "--path required"};
+        svc->removePathSelector(pinPath_);
+        std::cout << "Removed selector from session '" << *cur << "'\n";
+        return {};
+    }
 
     Result<void> doList() {
-        auto pins = loadPins();
-        if (pins.empty()) {
-            std::cout << "No pinned items." << std::endl;
-            return Result<void>();
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        if (jsonOutput_) {
+            auto j = loadSessionJson(*cur);
+            std::cout << j.dump(2) << std::endl;
+            return {};
         }
-        for (const auto& p : pins) {
-            std::cout << p.path;
-            if (!p.tags.empty()) {
-                std::cout << " [tags:";
-                for (size_t i = 0; i < p.tags.size(); ++i) {
-                    std::cout << (i ? "," : "") << p.tags[i];
-                }
-                std::cout << "]";
+        std::cout << "Session '" << *cur << "'\n";
+        auto selectors = svc->listPathSelectors(*cur);
+        if (selectors.empty()) {
+            std::cout << "(no selectors)\n";
+        } else {
+            for (const auto& s : selectors) {
+                std::cout << "- selector: " << s << "\n";
             }
-            if (!p.metadata.empty()) {
-                std::cout << " [meta:";
-                bool first = true;
-                for (const auto& kv : p.metadata) {
-                    std::cout << (first ? "" : ";") << kv.first << "=" << kv.second;
-                    first = false;
-                }
-                std::cout << "]";
-            }
-            std::cout << "\n";
         }
-        return Result<void>();
+        auto j = loadSessionJson(*cur);
+        if (j.contains("materialized")) {
+            std::cout << "Materialized: " << j["materialized"].size() << "\n";
+        }
+        return {};
     }
 
     Result<void> doPin(bool add) {
@@ -263,70 +540,228 @@ private:
     }
 
     Result<void> doWarm() {
-        auto pins = loadPins();
-        if (pins.empty()) {
-            std::cout << "No pinned items to warm." << std::endl;
-            return Result<void>();
-        }
-        auto appContext = cli_->getAppContext();
-        if (!appContext) {
-            return Result<void>(Error{ErrorCode::NotInitialized, "CLI context not initialized"});
-        }
-        auto doc = app::services::makeDocumentService(*appContext);
-        if (!doc) {
-            return Result<void>(Error{ErrorCode::NotInitialized, "Document service not available"});
-        }
-        std::size_t warmed = 0;
-        // Normalize path to absolute to satisfy daemon (expand ~, make absolute, normalize slashes)
-        auto normalizePathPattern = [](const std::string& input) -> std::string {
-            std::string s = input;
-            if (!s.empty() && s[0] == '~') {
-                const char* home = std::getenv("HOME");
-                if (home && *home) {
-                    if (s.size() == 1) {
-                        s = std::string(home);
-                    } else if (s.size() > 1 && (s[1] == '/' || s[1] == '\\')) {
-                        s = std::string(home) + s.substr(1);
-                    }
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured)
+            return ensured;
+        // Attempt daemon offload first; fallback to local
+        uint64_t warmedCount = 0;
+        bool attemptedDaemon = false;
+        try {
+            yams::cli::DaemonClientPool pool({.min_clients = 1, .max_clients = 1});
+            auto leaseRes = pool.acquire();
+            if (leaseRes) {
+                attemptedDaemon = true;
+                auto lease = std::move(leaseRes.value());
+                yams::daemon::PrepareSessionRequest dreq;
+                dreq.sessionName = ""; // use current
+                dreq.cores = budgetCores_;
+                dreq.memoryGb = budgetMemGb_;
+                dreq.timeMs = budgetTimeMs_;
+                dreq.aggressive = budgetAggressive_;
+                dreq.limit = static_cast<std::size_t>(warmLimit_);
+                dreq.snippetLen = static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160);
+                auto res =
+                    yams::cli::run_sync(lease->call<yams::daemon::PrepareSessionRequest>(dreq));
+                if (res) {
+                    warmedCount = res.value().warmedCount;
+                    std::cout << "Warmed (daemon) " << warmedCount << " document(s)." << std::endl;
+                    return Result<void>();
                 }
             }
-#ifdef _WIN32
-            std::replace(s.begin(), s.end(), '\\', '/');
-#endif
-            std::filesystem::path p(s);
-            if (p.is_relative()) {
-                p = std::filesystem::absolute(p);
+        } catch (...) {
+            // ignore and fallback
+        }
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        app::services::PrepareBudget b;
+        b.maxCores = budgetCores_;
+        b.maxMemoryGb = budgetMemGb_;
+        b.maxTimeMs = budgetTimeMs_;
+        b.aggressive = budgetAggressive_;
+        std::size_t count =
+            svc->prepare(b, static_cast<std::size_t>(warmLimit_),
+                         static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160));
+        std::cout << "Warmed (local) " << count << " document(s)." << std::endl;
+        return Result<void>();
+    }
+
+    Result<void> doTags() {
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured)
+            return ensured;
+        auto appContext = cli_->getAppContext();
+        auto doc = app::services::makeDocumentService(*appContext);
+        if (!doc)
+            return Error{ErrorCode::NotInitialized, "Document service not available"};
+        auto cur = currentSession();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        auto j = loadSessionJson(*cur);
+        if (!j.contains("materialized") || !j["materialized"].is_array()) {
+            std::cout << "No materialized items to tag." << std::endl;
+            return Result<void>();
+        }
+        std::size_t updated = 0;
+        for (const auto& m : j["materialized"]) {
+            app::services::UpdateMetadataRequest u;
+            if (m.contains("name"))
+                u.name = m.at("name").get<std::string>();
+            if (m.contains("hash") && u.name.empty())
+                u.hash = m.at("hash").get<std::string>();
+            u.addTags = tagAdds_;
+            u.removeTags = tagRemoves_;
+            auto ur = doc->updateMetadata(u);
+            if (ur && ur.value().success)
+                ++updated;
+        }
+        std::cout << "Tagged " << updated << " item(s)." << std::endl;
+        return Result<void>();
+    }
+
+    Result<void> doAnnotate() {
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured)
+            return ensured;
+        auto appContext = cli_->getAppContext();
+        auto doc = app::services::makeDocumentService(*appContext);
+        if (!doc)
+            return Error{ErrorCode::NotInitialized, "Document service not available"};
+        auto cur = currentSession();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        auto j = loadSessionJson(*cur);
+        if (!j.contains("materialized") || !j["materialized"].is_array()) {
+            std::cout << "No materialized items to annotate." << std::endl;
+            return Result<void>();
+        }
+        std::size_t updated = 0;
+        for (const auto& m : j["materialized"]) {
+            app::services::UpdateMetadataRequest u;
+            if (m.contains("name"))
+                u.name = m.at("name").get<std::string>();
+            if (m.contains("hash") && u.name.empty())
+                u.hash = m.at("hash").get<std::string>();
+            for (const auto& p : annotateMetaPairs_) {
+                auto pos = p.find('=');
+                if (pos != std::string::npos)
+                    u.keyValues[p.substr(0, pos)] = p.substr(pos + 1);
             }
-            return p.generic_string();
-        };
-        for (const auto& p : pins) {
-            app::services::ListDocumentsRequest lreq;
-            std::string norm = normalizePathPattern(p.path);
-            lreq.pattern = norm;
-            lreq.limit = 1000;
-            lreq.showSnippets = true;
-            lreq.snippetLength = 120;
-            auto lres = doc->list(lreq);
-            if (!lres)
-                continue;
-            for (const auto& d : lres.value().documents) {
-                // Read a small cat to ensure extraction path is exercised
-                app::services::CatDocumentRequest creq;
-                creq.name = d.name; // resolve by name
-                auto catRes = doc->cat(creq);
-                (void)catRes; // warming side-effect
-                ++warmed;
+            auto ur = doc->updateMetadata(u);
+            if (ur && ur.value().success)
+                ++updated;
+        }
+        std::cout << "Annotated " << updated << " item(s)." << std::endl;
+        return Result<void>();
+    }
+
+    Result<void> doClear() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        svc->clearMaterialized();
+        std::cout << "Cleared materialized cache for '" << *cur << "'\n";
+        return {};
+    }
+
+    Result<void> doSave() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        std::optional<std::filesystem::path> out;
+        if (!ioFile_.empty())
+            out = std::filesystem::path(ioFile_);
+        svc->save(out);
+        std::cout << "Saved session to "
+                  << (out ? out->string() : (sessionsDir() / (*cur + ".json")).string())
+                  << std::endl;
+        return {};
+    }
+
+    Result<void> doLoad() {
+        if (ioFile_.empty())
+            return Error{ErrorCode::InvalidArgument, "File required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        std::string name = !sessionName_.empty() ? sessionName_ : std::string();
+        svc->load(std::filesystem::path(ioFile_),
+                  name.empty() ? std::nullopt : std::optional<std::string>(name));
+        std::cout << "Loaded session as '"
+                  << (name.empty() ? svc->current().value_or("current") : name) << "'\n";
+        return {};
+    }
+
+    Result<void> doEmit() {
+        auto svc = sessionSvc();
+        auto cur = svc ? svc->current() : std::optional<std::string>{};
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session"};
+        std::vector<std::string> out;
+
+        if (emitMaterialized_) {
+            auto items = svc->listMaterialized(*cur);
+            for (const auto& m : items) {
+                if (emitKind_ == "paths")
+                    out.push_back(m.path);
+                else if (emitKind_ == "hashes")
+                    out.push_back(m.hash);
+                else {
+                    if (!m.name.empty())
+                        out.push_back(m.name);
+                    else if (!m.path.empty())
+                        out.push_back(m.path);
+                }
+            }
+        } else {
+            auto selectors = svc->listPathSelectors(*cur);
+            if (emitKind_ == "paths") {
+                out = std::move(selectors);
             }
         }
-        std::cout << "Warmed " << warmed << " document(s)." << std::endl;
-        return Result<void>();
+
+        if (jsonOutput_) {
+            json arr = json::array();
+            for (const auto& v : out)
+                arr.push_back(v);
+            std::cout << arr.dump(2) << std::endl;
+        } else {
+            for (const auto& v : out)
+                std::cout << v << "\n";
+        }
+        return {};
     }
 
     YamsCLI* cli_ = nullptr;
     Mode mode_{Mode::None};
+    // lifecycle fields
+    std::string sessionName_;
+    std::string sessionDesc_;
+    std::string ioFile_;
+    bool jsonOutput_{false};
+    int warmLimit_{200};
+    int snippetLen_{160};
+    // prepare budgets
+    int budgetCores_{-1};
+    int budgetMemGb_{-1};
+    long budgetTimeMs_{-1};
+    bool budgetAggressive_{false};
     std::string pinPath_;
     std::vector<std::string> pinTags_;
     std::vector<std::string> pinMetaPairs_;
+    // sugar and emit options
+    std::vector<std::string> tagAdds_;
+    std::vector<std::string> tagRemoves_;
+    std::vector<std::string> annotateMetaPairs_;
+    // emit options
+    bool emitMaterialized_{false};
+    std::string emitKind_{"names"};
 };
 } // namespace
 

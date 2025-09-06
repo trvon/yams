@@ -289,11 +289,17 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
 
     // Enable WAL mode if requested (disabled in tests to avoid tempfs WAL I/O issues)
+    // If enabling WAL fails (e.g., on restricted filesystems), log and fall back to a
+    // memory journal to improve concurrency in test environments.
 #ifndef YAMS_TESTING
     if (config_.enableWAL) {
         auto walResult = db.enableWAL();
         if (!walResult) {
-            return walResult.error();
+            spdlog::warn("WAL enable failed: {} — continuing without WAL",
+                         walResult.error().message);
+            // Best-effort fallbacks for CI/restricted environments
+            db.execute("PRAGMA journal_mode=MEMORY");
+            db.execute("PRAGMA locking_mode=NORMAL");
         }
     }
 #endif
@@ -306,8 +312,13 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         }
     }
 
-    // Additional pragmas for performance
-    db.execute("PRAGMA synchronous = NORMAL");
+    // Additional pragmas for performance (more relaxed when running tests)
+    if (std::getenv("YAMS_TEST_TMPDIR")) {
+        db.execute("PRAGMA synchronous = OFF");
+        db.execute("PRAGMA journal_mode=MEMORY");
+    } else {
+        db.execute("PRAGMA synchronous = NORMAL");
+    }
     db.execute("PRAGMA temp_store = MEMORY");
     db.execute("PRAGMA mmap_size = 268435456"); // 256MB
 

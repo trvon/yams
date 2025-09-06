@@ -106,18 +106,23 @@ public:
                     } else if (ctx_.metadataRepo) {
                         metadata::DocumentInfo docInfo;
 
-                        // Derive filename from URL for name-based retrieval
-                        std::string filename = finalResult.url;
-                        auto lastSlash = filename.find_last_of('/');
-                        if (lastSlash != std::string::npos) {
-                            filename = filename.substr(lastSlash + 1);
-                        }
-                        auto questionMark = filename.find('?');
-                        if (questionMark != std::string::npos) {
-                            filename = filename.substr(0, questionMark);
-                        }
-                        if (filename.empty()) {
-                            filename = "downloaded_file";
+                        // Derive filename, preferring server-suggested name when available
+                        std::string filename;
+                        if (finalResult.suggestedName && !finalResult.suggestedName->empty()) {
+                            filename = *finalResult.suggestedName;
+                        } else {
+                            filename = finalResult.url;
+                            auto lastSlash = filename.find_last_of('/');
+                            if (lastSlash != std::string::npos) {
+                                filename = filename.substr(lastSlash + 1);
+                            }
+                            auto questionMark = filename.find('?');
+                            if (questionMark != std::string::npos) {
+                                filename = filename.substr(0, questionMark);
+                            }
+                            if (filename.empty()) {
+                                filename = "downloaded_file";
+                            }
                         }
 
                         // Use the filename as filePath to make name-based retrieval work
@@ -130,7 +135,8 @@ public:
                         }
                         docInfo.fileSize = static_cast<int64_t>(finalResult.sizeBytes);
                         docInfo.sha256Hash = storeRes.value().contentHash;
-                        docInfo.mimeType = "application/octet-stream";
+                        docInfo.mimeType =
+                            finalResult.contentType.value_or("application/octet-stream");
                         auto now = std::chrono::system_clock::now();
                         docInfo.createdTime = now;
                         docInfo.modifiedTime = now;
@@ -151,6 +157,17 @@ public:
                                 ctx_.metadataRepo->setMetadata(
                                     docId, "last_modified",
                                     metadata::MetadataValue(*finalResult.lastModified));
+                            }
+                            // Surface content type and suggested filename when available
+                            if (finalResult.contentType) {
+                                ctx_.metadataRepo->setMetadata(
+                                    docId, "content_type",
+                                    metadata::MetadataValue(*finalResult.contentType));
+                            }
+                            if (finalResult.suggestedName) {
+                                ctx_.metadataRepo->setMetadata(
+                                    docId, "suggested_name",
+                                    metadata::MetadataValue(*finalResult.suggestedName));
                             }
                             if (finalResult.httpStatus) {
                                 ctx_.metadataRepo->setMetadata(

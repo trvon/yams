@@ -7,9 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.
 
 - [SourceHut](https://sr.ht/~trvon/yams/): https://sr.ht/~trvon/yams/
 
-## [v0.6.x] Meta Message
+## [v0.6.9] - 2025-09-05
 
-Version v0.6.x will focus on improving stability, performance and the CI. All new features will move to the experimental or v0.7.0 branch.
+### Notes
+- Upgrading daemon is recommended: older daemons (v1) will log a one‑time warning "Daemon protocol v1 < client v2" and some fields will be supplemented client‑side.
+
+### Known Issues
+- Daemon startup may remain in "Initializing" when embeddings are configured to keep the model hot (preload) and the ONNX stack cannot complete early model resolution on some systems. Workarounds:
+  - Set `[embeddings].keep_model_hot = false` and `[embeddings].preload_on_startup = false` in `~/.config/yams/config.toml` to use lazy loading (model loads on first use).
+  - Or export `YAMS_DISABLE_MODEL_PRELOAD=1` before starting the daemon.
+  - Status derives from the lifecycle FSM; optional subsystems (models) should not gate readiness in recent builds. If you still see "Initializing", ensure you are running the updated daemon and ONNX plugin.
+
+### Changed
+- Status handler hardened to a minimal, safe snapshot; FSM/MUX metrics gated by lifecycle (Ready/Degraded) to avoid init races.
+- Linux CPU proxy: read `Threads:` from `/proc/self/status` (robust) instead of parsing `/proc/self/stat` field 20.
+- Stats defaults: `yams stats` now begins with the System Health section before compact counters.
+- `yams stats`: prefers daemon JSON values to avoid zeros; local fallback includes vector DB size.
+- `yams status`: supplements from stats JSON when talking to older daemons (v1) to avoid zeros; shows services summary and waiting components when not ready.
+- Service detectors hardened:
+  - SearchExecutor now includes a reason when unavailable: `database_not_ready | metadata_repo_not_ready | not_initialized`.
+  - ONNX models status reports loaded count with clear guidance to download a preferred model.
+- CLI search defaults to hybrid and now auto-retries with fuzzy when strict/hybrid returns zero results for better “true hybrid” behavior.
+- Service metadata search path now falls back to fuzzy when full-text returns no results.
+ - Model CLI help updated with subcommands and `--url` usage; clearer guidance to avoid confusion with the top-level `download` command.
+ - Model CLI guidance: after downloads, success output includes `yams config embeddings model <name>` and related steps; `yams model list` and `yams model info` now mirror a one-line configuration hint.
+
+### Added
+- IPC Protocol v2:
+  - StatusResponse now carries runtime fields: running, ready, uptime_seconds, requests_processed, active_connections, memory_mb, cpu_pct, version.
+  - GetStatsResponse carries numeric fields alongside JSON: total_documents, total_size, indexed_documents, vector_index_size, compression_ratio.
+- Daemon stats JSON: explicit `not_ready` flag; includes `durations_ms`, `top_slowest`, and latency percentiles (`latency_p50_ms`, `latency_p95_ms`).
+- Bootstrap status file: `~/.local/state/yams/yams-daemon.status.json` with readiness, progress, durations, and top_slowest for pre‑IPC visibility.
+- CLI doctor/status: shows top 3 slowest components with elapsed ms when available (from bootstrap JSON).
+- CLI UI (retro): compact text for status and stats; `yams stats -v` shows System Health and detailed sections; `stats vectors` prints compact block.
+- CLI daemon status (-d):
+  - One-line services summary: `SVC  : ✓ Content | ✓ Repo | ✓ Search | ⚠ (0) Models`.
+  - WAIT line during initialization listing not-ready services with progress (e.g., `WAIT : search_engine (70%), model_provider (0%)`).
+- ServiceManager:
+  - Preferred model preload on startup: uses configured `embeddings.preloadModels` (first entry) when no models are loaded; falls back to `all-MiniLM-L6-v2`.
+  - Sanity warning when `SearchExecutor` is not initialized despite database and metadata repo ready.
+- FSM metrics emission (server): counts payload writes/bytes sent, header reads/bytes received; exposed in Status when Ready/Degraded.
+- LatencyRegistry (server): lightweight histogram; p50/p95 emitted via stats JSON.
+- Protocol compatibility guard: one‑time warning when daemon/client protocol versions differ.
+- SocketServer::setDispatcher(RequestDispatcher*) for safe future hot‑rebinds (not used by default).
+- Integration test: daemon_status_stats_integration_test covers Status/Stats proto presence and basic FSM exposure.
+- MCP list: added `paths_only` parameter to the MCP list tool; forwarded to daemon `ListRequest.pathsOnly` to engage the hot path (no snippet/metadata hydration).
+- MCP grep: introduced `fast_first` option that returns a quick semantic suggestions burst when requested.
+- MCP server: startup flags to set hot/cold modes consistently with CLI:
+  - `--list-mode` → sets `YAMS_LIST_MODE`
+  - `--grep-mode` → sets `YAMS_GREP_MODE`
+  - `--retrieval-mode` → sets `YAMS_RETRIEVAL_MODE`
+ - CLI model management:
+   - New built-in entry: `nomic-embed-text-v1.5` (ONNX URL; override supported).
+   - `--url` override to download any model by name from a custom URL.
+   - Subcommands: `yams model list|download|info|check` (aliases to flags).
+   - `yams model check` shows ONNX runtime support and plugin directory status, plus autodiscovers installed models under `~/.yams/models`.
+ - Model autodiscovery: `yams model list` now lists locally installed models found at `~/.yams/models/<name>/model.onnx`.
+ - Daemon model selection: honors `embeddings.preferred_model` from `~/.config/yams/config.toml` (or XDG config) to preload and prefer that model at runtime.
+ - Model path resolution: honors `embeddings.model_path` as the models root (with `~` expansion) and resolves name-based models in priority order: configured root → `~/.yams/models` → `models/` → `/usr/local/share/yams/models`; full paths are used as-is.
+ - Docs: PROMPT updated to show multi-path `yams add src/ include/ ...` examples.
+
+### Fixed
+- Build: resolved C++ signature mismatch for `EmbeddingService::runRepair` by aligning the implementation with header declarations and providing a proper non-jthread legacy runner.
+- MCP schemas updated for list (`paths_only`) and grep (`fast_first`) to reflect new behaviors.
+- ONNX plugin: CMake fixes to ensure dynamic plugin loads cleanly:
+  - Disable IPO/LTO on `yams_onnx_plugin` (INTERPROCEDURAL_OPTIMIZATION FALSE) to prevent LTO symbol internalization and tooling noise.
+  - Ensure exported C symbols have default visibility (`C_VISIBILITY_PRESET/CXX_VISIBILITY_PRESET default`, `VISIBILITY_INLINES_HIDDEN OFF`) so `getProviderName`/`createOnnxProvider` remain visible.
+  - On ELF, link with `-Wl,-z,defs` to catch unresolved symbols at link time.
+  - Resolves daemon warning: "Plugin missing getProviderName function: .../libyams_onnx_plugin.so".
+ - Retrieval now accepts `sha256:<hex>` hashes (normalized before validation) in `DocumentService` `retrieve` and `cat`.
+ - Model downloads provide clearer errors when offline (curl exit code mapping for host resolution/connect failures).
 
 ## [v0.6.8] - 2025-09-04
 

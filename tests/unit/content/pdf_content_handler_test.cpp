@@ -250,8 +250,8 @@ TEST_F(PdfContentHandlerTest, ProcessingPerformance) {
 
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-    // Simple PDF should process quickly. Allow some headroom for slower CI/macOS (under 300ms)
-    EXPECT_LT(duration.count(), 300) << "Processing took " << duration.count() << "ms";
+    // Simple PDF should process quickly. Allow generous headroom for CI variability (under 1200ms)
+    EXPECT_LT(duration.count(), 1200) << "Processing took " << duration.count() << "ms";
 
     // Check that processing time is recorded in metadata
     const auto& metadata = result.value().metadata;

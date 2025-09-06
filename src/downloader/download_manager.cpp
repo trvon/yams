@@ -239,10 +239,13 @@ public:
             std::optional<std::uint64_t> contentLength{};
             std::optional<std::string> currentEtag{};
             std::optional<std::string> currentLastModified{};
+            std::optional<std::string> currentContentType{};
+            std::optional<std::string> suggestedFilename{};
             {
-                auto pr = http_->probe(request.url, request.headers, resumeSupported, contentLength,
-                                       currentEtag, currentLastModified, request.tls, request.proxy,
-                                       request.timeout);
+                auto pr =
+                    http_->probe(request.url, request.headers, resumeSupported, contentLength,
+                                 currentEtag, currentLastModified, currentContentType,
+                                 suggestedFilename, request.tls, request.proxy, request.timeout);
                 if (!pr.ok()) {
                     return pr.error();
                 }
@@ -434,6 +437,10 @@ public:
                 out.etag = *currentEtag;
             if (currentLastModified)
                 out.lastModified = *currentLastModified;
+            if (currentContentType)
+                out.contentType = *currentContentType;
+            if (suggestedFilename)
+                out.suggestedName = *suggestedFilename;
 
             if (onProgress) {
                 ProgressEvent ev;

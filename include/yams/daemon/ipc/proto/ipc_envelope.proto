@@ -224,6 +224,17 @@ message GetStatsRequest {
   bool include_health = 8;
 }
 
+// Session preparation (warming) with resource budgets
+message PrepareSessionRequest {
+  string session_name = 1; // optional; empty means current session
+  int32 cores = 2;         // -1 for default
+  int32 memory_gb = 3;     // -1 for default
+  int64 time_ms = 4;       // -1 for default
+  bool aggressive = 5;
+  uint64 limit = 6;        // max docs per selector
+  uint32 snippet_len = 7;  // snippet length
+}
+
 // RESPONSES
 message SuccessResponse { string message = 1; }
 message ErrorResponse { uint32 code = 1; string message = 2; }
@@ -295,6 +306,15 @@ message ListResponse { repeated ListEntry items = 1; uint64 total_count = 2; }
 
 message StatusResponse {
   string state = 1; // textual summary; details TBD
+  // Extended runtime fields (proto v2+)
+  bool running = 2;
+  bool ready = 3;
+  uint64 uptime_seconds = 4;
+  uint64 requests_processed = 5;
+  uint64 active_connections = 6;
+  double memory_mb = 7;
+  double cpu_pct = 8;
+  string version = 9;
 }
 
 message EmbeddingResponse {
@@ -327,8 +347,17 @@ message DownloadResponse {
   bool success = 5;
   string error = 6;
 }
-message GetStatsResponse { string json = 1; }
+message GetStatsResponse {
+  string json = 1;
+  // Numeric fields to support non-JSON clients
+  uint64 total_documents = 2;
+  uint64 total_size = 3;
+  uint64 indexed_documents = 4;
+  uint64 vector_index_size = 5;
+  double compression_ratio = 6;
+}
 message DeleteResponse { bool success = 1; uint64 count = 2; }
+message PrepareSessionResponse { uint64 warmed_count = 1; string message = 2; }
 
 // ENVELOPE
 message Envelope {
@@ -360,6 +389,7 @@ message Envelope {
     UpdateDocumentRequest update_document_request = 28;
     DownloadRequest download_request = 29;
     GetStatsRequest get_stats_request = 30;
+    PrepareSessionRequest prepare_session_request = 31;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -382,5 +412,6 @@ message Envelope {
     GetStatsResponse get_stats_response = 117;
     DownloadResponse download_response = 118;
     DeleteResponse delete_response = 119;
+    PrepareSessionResponse prepare_session_response = 120;
   }
 }

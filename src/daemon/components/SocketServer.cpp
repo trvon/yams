@@ -106,6 +106,13 @@ Result<void> SocketServer::start() {
         // Update state if available
         if (state_) {
             state_->readiness.ipcServerReady.store(true);
+            try {
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - state_->stats.startTime)
+                              .count();
+                state_->initDurationsMs.emplace("ipc_server", static_cast<uint64_t>(ms));
+            } catch (...) {
+            }
         }
 
         spdlog::info("Socket server listening on {}", config_.socketPath.string());
@@ -259,7 +266,12 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         handlerConfig.writer_budget_bytes_per_turn =
             256 * 1024; // 256KB per turn for higher throughput
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
-        RequestHandler handler(dispatcher_, handlerConfig);
+        RequestDispatcher* disp = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(dispatcherMutex_);
+            disp = dispatcher_;
+        }
+        RequestHandler handler(disp, handlerConfig);
 
         // Create a stop_source for this connection
         std::stop_source stop_source;

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -44,6 +45,12 @@ public:
     Result<void> stop();
     bool isRunning() const { return running_.load(); }
 
+    // Optional: allow safe rebinding of the dispatcher after startup.
+    void setDispatcher(RequestDispatcher* dispatcher) {
+        std::lock_guard<std::mutex> lk(dispatcherMutex_);
+        dispatcher_ = dispatcher;
+    }
+
     // Metrics
     size_t activeConnections() const { return activeConnections_.load(); }
     uint64_t totalConnections() const { return totalConnections_.load(); }
@@ -58,6 +65,7 @@ private:
     Config config_;
     RequestDispatcher* dispatcher_;
     StateComponent* state_;
+    mutable std::mutex dispatcherMutex_;
 
     // Boost.ASIO components
     boost::asio::io_context io_context_;

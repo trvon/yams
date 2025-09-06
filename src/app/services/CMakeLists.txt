@@ -10,6 +10,7 @@ set(APP_SERVICES_SOURCES
     stats_service.cpp
     utils.cpp
     factory.cpp
+    session_service.cpp
 )
 
 add_library(yams_app_services STATIC ${APP_SERVICES_SOURCES})

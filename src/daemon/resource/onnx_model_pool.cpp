@@ -1,3 +1,4 @@
+#include <yams/common/test_utils.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 
 #include <onnxruntime_cxx_api.h>
@@ -343,6 +344,10 @@ std::vector<std::string> OnnxModelPool::getLoadedModels() const {
 }
 
 Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
+    // In test environments, avoid heavy model loading entirely
+    if (yams::test::shouldSkipModelLoading()) {
+        return Error{ErrorCode::NotFound, "Model loading skipped in test mode"};
+    }
     // Quick check if already loaded (with minimal lock time)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -580,20 +585,38 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
     const char* home = std::getenv("HOME");
     std::string homeDir = home ? home : "";
 
-    // Try different paths - check standard "model.onnx" name first (most common)
-    std::vector<std::string> searchPaths = {
-        modelName, // If it's already a full path
-        homeDir + "/.yams/models/" + modelName +
-            "/model.onnx", // Standard Hugging Face naming (check first)
-        homeDir + "/.yams/models/" + modelName + "/" + modelName + ".onnx",
-        homeDir + "/.yams/models/" + modelName + ".onnx",
-        "models/" + modelName + "/model.onnx", // Standard naming in local dir
-        "models/" + modelName + "/" + modelName + ".onnx",
-        "models/" + modelName + ".onnx",
-        "/usr/local/share/yams/models/" + modelName +
-            "/model.onnx", // Standard naming in system dir
-        "/usr/local/share/yams/models/" + modelName + "/" + modelName + ".onnx",
-        "/usr/local/share/yams/models/" + modelName + ".onnx"};
+    // Build search paths with priority:
+    // 1) Treat modelName as a full path
+    // 2) Configured modelsRoot (if set), with common filename layouts
+    // 3) User models (~/.yams/models), local models/, system share models
+    std::vector<std::string> searchPaths;
+    searchPaths.push_back(modelName);
+
+    // Expand configured modelsRoot if present (supports '~')
+    if (!config_.modelsRoot.empty()) {
+        std::string root = config_.modelsRoot;
+        if (!root.empty() && root[0] == '~') {
+            if (!homeDir.empty()) {
+                root = homeDir + root.substr(1);
+            }
+        }
+        // Common layouts under configured root
+        searchPaths.push_back(root + "/" + modelName + "/model.onnx");
+        searchPaths.push_back(root + "/" + modelName + "/" + modelName + ".onnx");
+        searchPaths.push_back(root + "/" + modelName + ".onnx");
+    }
+
+    // Default locations
+    searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + "/model.onnx");
+    searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + "/" + modelName +
+                          ".onnx");
+    searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + ".onnx");
+    searchPaths.push_back("models/" + modelName + "/model.onnx");
+    searchPaths.push_back("models/" + modelName + "/" + modelName + ".onnx");
+    searchPaths.push_back("models/" + modelName + ".onnx");
+    searchPaths.push_back("/usr/local/share/yams/models/" + modelName + "/model.onnx");
+    searchPaths.push_back("/usr/local/share/yams/models/" + modelName + "/" + modelName + ".onnx");
+    searchPaths.push_back("/usr/local/share/yams/models/" + modelName + ".onnx");
 
     // Direct filesystem checks - no async, no timeouts needed for local files
     for (const auto& path : searchPaths) {

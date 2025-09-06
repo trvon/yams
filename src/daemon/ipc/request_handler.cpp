@@ -1,6 +1,8 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/fsm_helpers.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/ipc/latency_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_context_registry.h>
@@ -538,6 +540,13 @@ RequestHandler::handle_request(boost::asio::local::stream_protocol::socket& sock
         auto duration = std::chrono::steady_clock::now() - start_time;
         stats_.requests_processed++;
         stats_.total_processing_time += duration;
+        try {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+            if (ms >= 0) {
+                LatencyRegistry::instance().record(static_cast<uint64_t>(ms));
+            }
+        } catch (...) {
+        }
 
         if (duration < stats_.min_latency) {
             stats_.min_latency = duration;
@@ -586,6 +595,7 @@ RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket
 
         auto feed_result = reader.feed(buffer.data(), buffer.size());
         stats_.bytes_received += feed_result.consumed;
+        FsmMetricsRegistry::instance().addBytesReceived(bytes_read);
 
         if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
             co_return Error{ErrorCode::InvalidArgument, "Invalid frame"};
@@ -601,7 +611,11 @@ RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket
         co_return frame_result.error();
     }
 
-    co_return framer_.parse_frame(frame_result.value());
+    auto parsed = framer_.parse_frame(frame_result.value());
+    if (parsed) {
+        FsmMetricsRegistry::instance().incrementHeaderReads(1);
+    }
+    co_return parsed;
 }
 
 boost::asio::awaitable<Result<void>>
@@ -681,6 +695,9 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
                 }
                 co_return Error{ErrorCode::NetworkError, msg};
             }
+            // FSM metrics: count payload writes and bytes sent (header)
+            FsmMetricsRegistry::instance().incrementPayloadWrites(1);
+            FsmMetricsRegistry::instance().addBytesSent(header.size());
             spdlog::debug("write_message: header write complete (request_id={})",
                           message.requestId);
         }
@@ -709,6 +726,8 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
                 co_return Error{ErrorCode::NetworkError, msg};
             }
             payload_written += to_write;
+            FsmMetricsRegistry::instance().incrementPayloadWrites(1);
+            FsmMetricsRegistry::instance().addBytesSent(to_write);
             if (to_write == 0) {
                 using namespace std::chrono_literals;
                 std::this_thread::sleep_for(1ms);

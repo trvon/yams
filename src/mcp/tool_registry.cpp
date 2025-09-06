@@ -31,6 +31,8 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
         }
     }
     req.matchAllTags = j.value("match_all_tags", false);
+    req.useSession = j.value("use_session", true);
+    req.sessionName = j.value("session", std::string{});
 
     return req;
 }
@@ -168,11 +170,14 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     req.withFilename = j.value("with_filename", true);
     req.count = j.value("count", false);
     req.filesWithMatches = j.value("files_with_matches", false);
+    req.fastFirst = j.value("fast_first", false);
     req.filesWithoutMatch = j.value("files_without_match", false);
     req.afterContext = j.value("after_context", 0);
     req.beforeContext = j.value("before_context", 0);
     req.context = j.value("context", 0);
     req.color = j.value("color", std::string{"auto"});
+    req.useSession = j.value("use_session", true);
+    req.sessionName = j.value("session", std::string{});
 
     if (j.contains("max_count") && j["max_count"].is_number_integer()) {
         req.maxCount = j["max_count"].get<int>();
@@ -192,6 +197,7 @@ json MCPGrepRequest::toJson() const {
     j["with_filename"] = withFilename;
     j["count"] = count;
     j["files_with_matches"] = filesWithMatches;
+    j["fast_first"] = fastFirst;
     j["files_without_match"] = filesWithoutMatch;
     j["after_context"] = afterContext;
     j["before_context"] = beforeContext;
@@ -324,6 +330,12 @@ MCPDownloadResponse MCPDownloadResponse::fromJson(const json& j) {
     if (j.contains("checksum_ok")) {
         resp.checksumOk = j["checksum_ok"].get<bool>();
     }
+    if (j.contains("content_type")) {
+        resp.contentType = j["content_type"].get<std::string>();
+    }
+    if (j.contains("suggested_name")) {
+        resp.suggestedName = j["suggested_name"].get<std::string>();
+    }
     return resp;
 }
 
@@ -341,6 +353,10 @@ json MCPDownloadResponse::toJson() const {
         j["last_modified"] = *lastModified;
     if (checksumOk)
         j["checksum_ok"] = *checksumOk;
+    if (contentType)
+        j["content_type"] = *contentType;
+    if (suggestedName)
+        j["suggested_name"] = *suggestedName;
     return j;
 }
 
@@ -389,19 +405,25 @@ json MCPStoreDocumentResponse::toJson() const {
 MCPRetrieveDocumentRequest MCPRetrieveDocumentRequest::fromJson(const json& j) {
     MCPRetrieveDocumentRequest req;
     req.hash = j.value("hash", std::string{});
+    req.name = j.value("name", std::string{});
     req.outputPath = j.value("output_path", std::string{});
     req.graph = j.value("graph", false);
     req.depth = j.value("depth", 1);
     req.includeContent = j.value("include_content", false);
+    req.useSession = j.value("use_session", true);
+    req.sessionName = j.value("session", std::string{});
     return req;
 }
 
 json MCPRetrieveDocumentRequest::toJson() const {
     return json{{"hash", hash},
+                {"name", name},
                 {"output_path", outputPath},
                 {"graph", graph},
                 {"depth", depth},
-                {"include_content", includeContent}};
+                {"include_content", includeContent},
+                {"use_session", useSession},
+                {"session", sessionName}};
 }
 
 // MCPRetrieveDocumentResponse implementation
@@ -455,14 +477,18 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     req.offset = j.value("offset", 0);
     req.sortBy = j.value("sort_by", std::string{"modified"});
     req.sortOrder = j.value("sort_order", std::string{"desc"});
+    req.pathsOnly = j.value("paths_only", false);
+    req.useSession = j.value("use_session", true);
+    req.sessionName = j.value("session", std::string{});
     return req;
 }
 
 json MCPListDocumentsRequest::toJson() const {
-    return json{{"pattern", pattern}, {"tags", tags},           {"type", type},
-                {"mime", mime},       {"extension", extension}, {"binary", binary},
-                {"text", text},       {"recent", recent},       {"limit", limit},
-                {"offset", offset},   {"sort_by", sortBy},      {"sort_order", sortOrder}};
+    return json{{"pattern", pattern},     {"tags", tags},           {"type", type},
+                {"mime", mime},           {"extension", extension}, {"binary", binary},
+                {"text", text},           {"recent", recent},       {"limit", limit},
+                {"offset", offset},       {"sort_by", sortBy},      {"sort_order", sortOrder},
+                {"paths_only", pathsOnly}};
 }
 
 // MCPListDocumentsResponse implementation

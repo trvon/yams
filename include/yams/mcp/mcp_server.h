@@ -75,9 +75,8 @@ private:
     std::atomic<bool> writerRunning_{false};
     void writerLoop();
 
-    // Capture the stream buffers at construction to respect caller redirections (e.g., tests)
+    // Capture output buffer at construction to respect caller redirections (e.g., tests)
     std::streambuf* outbuf_{nullptr};
-    std::streambuf* inbuf_{nullptr};
 
     // Helper for non-blocking stdin check
     bool isInputAvailable(int timeoutMs = 100) const;
@@ -187,6 +186,11 @@ private:
     handleListCollections(const MCPListCollectionsRequest& req);
     yams::Task<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);
+
+    // Session start/stop (simplified surface)
+    yams::Task<Result<MCPSessionStartResponse>>
+    handleSessionStart(const MCPSessionStartRequest& req);
+    yams::Task<Result<MCPSessionStopResponse>> handleSessionStop(const MCPSessionStopRequest& req);
 
     // Legacy JSON-based tool implementations (for gradual migration)
     json storeDocument(const json& args);

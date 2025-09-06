@@ -40,7 +40,9 @@ public:
 private:
     std::atomic<int64_t> activeHandlers_{0};
     std::atomic<int64_t> queuedBytes_{0};
-    std::atomic<uint64_t> writerBudgetBytes_{0};
+    // Initialize to a safe non-zero default to ensure status exposes a reasonable budget
+    // even before the first connection is fully initialized.
+    std::atomic<uint64_t> writerBudgetBytes_{4096};
 };
 
 } // namespace daemon

@@ -32,8 +32,8 @@ sudo cmake --install build/yams-release && sudo ldconfig
 
 Deps quick refs:
 
-- Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler libncurses-dev
-- macOS: openssl@3 protobuf sqlite3 ncurses (export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3))
+- Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler libncurses-dev ninja-build cmake
+- macOS: openssl@3 protobuf sqlite3 ncurses (export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)) ninja-build cmake
 
 Build options (common): `YAMS_BUILD_TESTS=ON|OFF`, `YAMS_BUILD_BENCHMARKS=ON|OFF`, `YAMS_ENABLE_PDF=ON|OFF`, `YAMS_ENABLE_TUI=ON|OFF`, `YAMS_ENABLE_ONNX=ON|OFF`.
 

@@ -4,6 +4,7 @@
 #include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/session_store.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -78,6 +79,10 @@ public:
         cmd->add_flag("--no-streaming", disableStreaming_,
                       "Disable streaming responses from daemon");
 
+        // Session scoping controls
+        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
+        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
+
         // File type filters
         cmd->add_option("--type", fileType_,
                         "Filter by file type (image, document, archive, audio, video, text, "
@@ -118,6 +123,14 @@ public:
             // Handle snippet flag logic
             if (noSnippets_) {
                 showSnippets_ = false;
+            }
+
+            // Populate session patterns once per invocation
+            if (!noSession_) {
+                sessionPatterns_ =
+                    yams::cli::session_store::active_include_patterns(sessionOverride_);
+            } else {
+                sessionPatterns_.clear();
             }
 
             auto result = execute();
@@ -190,6 +203,20 @@ public:
                         std::cout << "(no results)" << std::endl;
                     } else {
                         for (const auto& e : resp.items) {
+                            if (!sessionPatterns_.empty()) {
+                                bool match = false;
+                                for (const auto& pat : sessionPatterns_) {
+                                    if ((!e.path.empty() &&
+                                         e.path.find(pat) != std::string::npos) ||
+                                        (!e.fileName.empty() &&
+                                         e.fileName.find(pat) != std::string::npos)) {
+                                        match = true;
+                                        break;
+                                    }
+                                }
+                                if (!match)
+                                    continue;
+                            }
                             std::cout << e.path << std::endl;
                         }
                     }
@@ -200,6 +227,19 @@ public:
                 std::vector<EnhancedDocumentInfo> documents;
 
                 for (const auto& e : resp.items) {
+                    if (!sessionPatterns_.empty()) {
+                        bool match = false;
+                        for (const auto& pat : sessionPatterns_) {
+                            if ((!e.path.empty() && e.path.find(pat) != std::string::npos) ||
+                                (!e.fileName.empty() &&
+                                 e.fileName.find(pat) != std::string::npos)) {
+                                match = true;
+                                break;
+                            }
+                        }
+                        if (!match)
+                            continue;
+                    }
                     EnhancedDocumentInfo doc;
 
                     // Map daemon ListEntry to EnhancedDocumentInfo
@@ -286,6 +326,10 @@ public:
 private:
     // Default to non-streaming for best-effort reliability; users can opt back in.
     bool disableStreaming_ = false;
+    // Session scoping
+    std::optional<std::string> sessionOverride_{};
+    bool noSession_{false};
+    std::vector<std::string> sessionPatterns_;
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();

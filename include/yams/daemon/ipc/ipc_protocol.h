@@ -1827,13 +1827,66 @@ struct GetStatsRequest {
     }
 };
 
+struct PrepareSessionRequest {
+    std::string sessionName; // optional; empty = current session
+    int cores{-1};
+    int memoryGb{-1};
+    long timeMs{-1};
+    bool aggressive{false};
+    std::size_t limit{200};
+    std::size_t snippetLen{160};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << sessionName << cores << memoryGb << timeMs << aggressive
+            << static_cast<uint64_t>(limit) << static_cast<uint32_t>(snippetLen);
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PrepareSessionRequest> deserialize(Deserializer& deser) {
+        PrepareSessionRequest req;
+        auto s = deser.readString();
+        if (!s)
+            return s.error();
+        req.sessionName = std::move(s.value());
+        auto c = deser.template read<int>();
+        if (!c)
+            return c.error();
+        req.cores = c.value();
+        auto m = deser.template read<int>();
+        if (!m)
+            return m.error();
+        req.memoryGb = m.value();
+        auto t = deser.template read<long>();
+        if (!t)
+            return t.error();
+        req.timeMs = t.value();
+        auto a = deser.template read<bool>();
+        if (!a)
+            return a.error();
+        req.aggressive = a.value();
+        auto l = deser.template read<uint64_t>();
+        if (!l)
+            return l.error();
+        req.limit = static_cast<std::size_t>(l.value());
+        auto sl = deser.template read<uint32_t>();
+        if (!sl)
+            return sl.error();
+        req.snippetLen = static_cast<std::size_t>(sl.value());
+        return req;
+    }
+};
+
 // Variant type for all requests
 using Request =
     std::variant<SearchRequest, AddRequest, GetRequest, GetInitRequest, GetChunkRequest,
                  GetEndRequest, DeleteRequest, ListRequest, ShutdownRequest, StatusRequest,
                  PingRequest, GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
                  UnloadModelRequest, ModelStatusRequest, AddDocumentRequest, GrepRequest,
-                 UpdateDocumentRequest, DownloadRequest, GetStatsRequest, CancelRequest>;
+                 UpdateDocumentRequest, DownloadRequest, GetStatsRequest, PrepareSessionRequest,
+                 CancelRequest>;
 
 // ============================================================================
 // Response Types
@@ -3241,13 +3294,39 @@ struct DownloadResponse {
     }
 };
 
+struct PrepareSessionResponse {
+    uint64_t warmedCount{0};
+    std::string message;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << warmedCount << message;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PrepareSessionResponse> deserialize(Deserializer& deser) {
+        PrepareSessionResponse res;
+        auto wc = deser.template read<uint64_t>();
+        if (!wc)
+            return wc.error();
+        res.warmedCount = wc.value();
+        auto msg = deser.readString();
+        if (!msg)
+            return msg.error();
+        res.message = std::move(msg.value());
+        return res;
+    }
+};
+
 // Variant type for all responses
 using Response =
     std::variant<SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse,
                  StatusResponse, SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse,
                  BatchEmbeddingResponse, ModelLoadResponse, ModelStatusResponse, ListResponse,
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, DownloadResponse,
-                 GetStatsResponse, DeleteResponse>;
+                 GetStatsResponse, DeleteResponse, PrepareSessionResponse>;
 
 // ============================================================================
 // Message Envelope
@@ -3273,7 +3352,7 @@ struct Message {
 // Protocol Constants
 // ============================================================================
 
-constexpr uint32_t PROTOCOL_VERSION = 1;
+constexpr uint32_t PROTOCOL_VERSION = 2;
 constexpr size_t MAX_MESSAGE_SIZE =
     static_cast<size_t>(16) * static_cast<size_t>(1024) * static_cast<size_t>(1024); // 16MB
 constexpr size_t HEADER_SIZE = 16; // version(4) + size(4) + requestId(8)
@@ -3303,6 +3382,7 @@ enum class MessageType : uint8_t {
     UpdateDocumentRequest = 20,
     GetStatsRequest = 21,
     CancelRequest = 22,
+    PrepareSessionRequest = 23,
 
     // Responses
     SearchResponse = 128,
@@ -3324,7 +3404,8 @@ enum class MessageType : uint8_t {
     GrepResponse = 144,
     UpdateDocumentResponse = 145,
     GetStatsResponse = 146,
-    DeleteResponse = 147
+    DeleteResponse = 147,
+    PrepareSessionResponse = 148
 };
 
 // ============================================================================

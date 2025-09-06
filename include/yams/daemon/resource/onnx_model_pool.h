@@ -95,6 +95,9 @@ struct ModelPoolConfig {
     std::vector<std::string> preloadModels; // Models to load on startup
     bool lazyLoading = false;               // Load models only when needed
 
+    // Model discovery
+    std::string modelsRoot; // Optional root directory to search first (e.g., ~/.yams/models)
+
     // Performance
     bool enableGPU = false;
     int numThreads = 4;

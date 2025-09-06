@@ -69,20 +69,15 @@ target_include_directories(yams_vector
 )
 
 # Link dependencies
-# Make ONNX Runtime optional
+# Make ONNX Runtime selectable; when enabled, require it to be present
 option(YAMS_ENABLE_ONNX "Enable ONNX Runtime support in vector library" ON)
 
 if(YAMS_ENABLE_ONNX)
+    # When ONNX is enabled, require the package instead of silently disabling
     if(NOT TARGET onnxruntime::onnxruntime)
-        find_package(onnxruntime QUIET)
+        find_package(onnxruntime REQUIRED)
     endif()
-
-    if(NOT TARGET onnxruntime::onnxruntime)
-        message(WARNING "ONNX Runtime requested but not found. Embedding features will use mock/daemon provider only.")
-        set(YAMS_ENABLE_ONNX OFF)
-    else()
-        message(STATUS "ONNX Runtime found - enabling local embedding generation")
-    endif()
+    message(STATUS "ONNX Runtime found - enabling local embedding generation")
 else()
     message(STATUS "ONNX Runtime disabled - using mock/daemon embedding providers")
 endif()

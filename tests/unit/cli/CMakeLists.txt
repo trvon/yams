@@ -67,3 +67,20 @@ endif()
 
 # PooledRequestManager unit tests removed in favor of real-daemon integration tests.
 # The integration suite exercises the pooled request path end-to-end.
+
+# Session command parsing smoke test
+if(TARGET yams_cli)
+    add_executable(session_command_tests
+        session_command_test.cpp
+    )
+    target_compile_features(session_command_tests PRIVATE cxx_std_20)
+    target_link_libraries(session_command_tests PRIVATE test_utils gtest_main yams_cli)
+    gtest_discover_tests(session_command_tests DISCOVERY_TIMEOUT 30)
+
+    add_executable(model_command_tests
+        model_command_test.cpp
+    )
+    target_compile_features(model_command_tests PRIVATE cxx_std_20)
+    target_link_libraries(model_command_tests PRIVATE test_utils gtest_main yams_cli)
+    gtest_discover_tests(model_command_tests DISCOVERY_TIMEOUT 30)
+endif()

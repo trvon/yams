@@ -279,6 +279,21 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
                     if (!msgRes)
                         continue;
                     auto& msg = msgRes.value();
+                    // Compatibility guard: warn once if protocol version is older/newer
+                    static std::atomic<bool> warned{false};
+                    if (!warned.load()) {
+                        if (msg.version < PROTOCOL_VERSION) {
+                            spdlog::warn(
+                                "Daemon protocol v{} < client v{}; consider upgrading daemon",
+                                msg.version, PROTOCOL_VERSION);
+                            warned.store(true);
+                        } else if (msg.version > PROTOCOL_VERSION) {
+                            spdlog::warn(
+                                "Daemon protocol v{} > client v{}; consider upgrading client",
+                                msg.version, PROTOCOL_VERSION);
+                            warned.store(true);
+                        }
+                    }
                     uint64_t reqId = msg.requestId;
 
                     AsioTransportAdapter::Connection::Handler* handlerPtr = nullptr;
@@ -513,6 +528,20 @@ AsioTransportAdapter::receive_frames(boost::asio::local::stream_protocol::socket
                 }
 
                 const auto& response = std::get<Response>(respMsg.value().payload);
+                // Warn once on version mismatch
+                static std::atomic<bool> warned2{false};
+                if (!warned2.load()) {
+                    auto v = respMsg.value().version;
+                    if (v < PROTOCOL_VERSION) {
+                        spdlog::warn("Daemon protocol v{} < client v{}; consider upgrading daemon",
+                                     v, PROTOCOL_VERSION);
+                        warned2.store(true);
+                    } else if (v > PROTOCOL_VERSION) {
+                        spdlog::warn("Daemon protocol v{} > client v{}; consider upgrading client",
+                                     v, PROTOCOL_VERSION);
+                        warned2.store(true);
+                    }
+                }
                 spdlog::debug(
                     "AsioTransportAdapter: delivering complete non-chunked response to handler");
                 onHeader(response);
@@ -554,6 +583,19 @@ AsioTransportAdapter::receive_frames(boost::asio::local::stream_protocol::socket
             }
 
             const auto& parsed = std::get<Response>(respMsg.value().payload);
+            static std::atomic<bool> warned3{false};
+            if (!warned3.load()) {
+                auto v = respMsg.value().version;
+                if (v < PROTOCOL_VERSION) {
+                    spdlog::warn("Daemon protocol v{} < client v{}; consider upgrading daemon", v,
+                                 PROTOCOL_VERSION);
+                    warned3.store(true);
+                } else if (v > PROTOCOL_VERSION) {
+                    spdlog::warn("Daemon protocol v{} > client v{}; consider upgrading client", v,
+                                 PROTOCOL_VERSION);
+                    warned3.store(true);
+                }
+            }
             if (!headerNotified) {
                 spdlog::debug("AsioTransportAdapter: delivering onHeader to handler");
                 onHeader(parsed);
@@ -585,10 +627,15 @@ Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
     }
 
+    // Generate a globally unique request ID to avoid collisions under high concurrency.
+    // Using a process-wide atomic counter avoids duplicate IDs when many requests are queued
+    // within the same steady_clock tick.
+    static std::atomic<uint64_t> g_req_id{
+        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
+
     Message msg;
     msg.version = PROTOCOL_VERSION;
-    msg.requestId =
-        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    msg.requestId = g_req_id.fetch_add(1, std::memory_order_relaxed);
     msg.timestamp = std::chrono::steady_clock::now();
     msg.payload = req;
     msg.clientVersion = "yams-client-0.3.4";
@@ -646,10 +693,13 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
     }
 
+    // Generate a globally unique request ID to avoid collisions under high concurrency.
+    static std::atomic<uint64_t> g_req_id{
+        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
+
     Message msg;
     msg.version = PROTOCOL_VERSION;
-    msg.requestId =
-        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    msg.requestId = g_req_id.fetch_add(1, std::memory_order_relaxed);
     msg.timestamp = std::chrono::steady_clock::now();
     msg.payload = req;
     msg.clientVersion = "yams-client-0.3.4";

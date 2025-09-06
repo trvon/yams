@@ -102,25 +102,10 @@ Result<void> YamsDaemon::start() {
     // before kicking off async service initialization to avoid race with HealthyEvent.
     lifecycleFsm_.dispatch(BootstrappedEvent{});
 
-    // Set callback to transition to Ready state when initialization completes
-    serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
-        if (success) {
-            lifecycleFsm_.dispatch(HealthyEvent{});
-        } else {
-            lifecycleFsm_.dispatch(FailureEvent{error});
-        }
-    });
-
-    if (auto result = serviceManager_->initialize(); !result) {
-        running_ = false;
-        lifecycleManager_->shutdown();
-        return result;
-    }
-
-    // Initialize request dispatcher
+    // Initialize request dispatcher before IPC so Ping/Status can be handled immediately
     requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_);
 
-    // Start integrated socket server
+    // Start integrated socket server ASAP so status requests work during initialization
     SocketServer::Config socketConfig;
     socketConfig.socketPath = config_.socketPath;
     socketConfig.workerThreads = config_.workerThreads;
@@ -139,6 +124,28 @@ Result<void> YamsDaemon::start() {
     // Mark IPC as ready now that socket server is running
     state_.readiness.ipcServerReady = true;
     spdlog::info("Socket server started on {}", config_.socketPath.string());
+
+    // Set callback to transition to Ready state when initialization completes
+    serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
+        if (success) {
+            lifecycleFsm_.dispatch(HealthyEvent{});
+        } else {
+            lifecycleFsm_.dispatch(FailureEvent{error});
+        }
+    });
+
+    // Kick off service initialization (async)
+    if (auto result = serviceManager_->initialize(); !result) {
+        running_ = false;
+        lifecycleManager_->shutdown();
+        // Stop socket if we fail to initialize services
+        if (socketServer_) {
+            (void)socketServer_->stop();
+            socketServer_.reset();
+            state_.readiness.ipcServerReady = false;
+        }
+        return result;
+    }
 
     // Start feature-flagged repair coordinator (idle-only)
     if (config_.enableAutoRepair) {

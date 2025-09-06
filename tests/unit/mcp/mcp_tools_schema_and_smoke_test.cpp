@@ -108,6 +108,8 @@ TEST(MCPSchemaTest, ListTools_ContainsAllExpectedTools) {
     std::vector<std::string> expected = {"search",
                                          "grep",
                                          "download",
+                                         "session_start",
+                                         "session_stop",
                                          "get",
                                          "stats",
                                          "update",
@@ -153,8 +155,10 @@ TEST(MCPSchemaTest, SearchDocuments_SchemaHasErgonomicAndContextParams) {
 
     EXPECT_TRUE(hasProp(*props, "type"));
 
-    // LLM ergonomics / output shaping
+    // LLM ergonomics / output shaping + session scoping
     EXPECT_TRUE(hasProp(*props, "paths_only"));
+    EXPECT_TRUE(hasProp(*props, "use_session"));
+    EXPECT_TRUE(hasProp(*props, "session"));
 
     // Contextual display options
     EXPECT_TRUE(hasProp(*props, "line_numbers"));
@@ -195,9 +199,11 @@ TEST(MCPSchemaTest, GrepDocuments_SchemaHasExpectedGrepOptions) {
     EXPECT_TRUE(hasProp(*props, "files_with_matches"));
     EXPECT_TRUE(hasProp(*props, "files_without_match"));
 
-    // Color and max count
+    // Color and max count + session scoping
     EXPECT_TRUE(hasProp(*props, "color"));
     EXPECT_TRUE(hasProp(*props, "max_count"));
+    EXPECT_TRUE(hasProp(*props, "use_session"));
+    EXPECT_TRUE(hasProp(*props, "session"));
 }
 
 TEST(MCPSchemaTest, RetrieveDocument_SchemaHasGraphParams) {

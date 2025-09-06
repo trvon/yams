@@ -717,7 +717,7 @@ if(YAMS_USE_CONAN)
     endif()
     find_package(tl-expected REQUIRED)
     # Boost headers (for Asio) are provided by Conan; import targets to expose include dirs
-    find_package(Boost REQUIRED)
+    find_package(Boost REQUIRED CONFIG)
     # Provide a stable interface target to propagate Boost headers (Asio is header-only)
     if(NOT TARGET yams_boost_headers)
         add_library(yams_boost_headers INTERFACE)

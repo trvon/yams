@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <csignal>
+#include <cstdlib>
 #include <thread>
 
 #include <CLI/CLI.hpp>
@@ -23,11 +24,24 @@ int main(int argc, char* argv[]) {
     std::string log_level = "info";
     std::string log_file;
     bool daemon_mode = false;
+    std::string list_mode = "auto";
+    std::string grep_mode = "auto";
+    std::string retrieval_mode = "auto";
 
     app.add_option("-l,--log-level", log_level, "Log level (trace, debug, info, warn, error)")
         ->default_val("info");
     app.add_option("--log-file", log_file, "Log file path (optional)");
     app.add_flag("-d,--daemon", daemon_mode, "Run as daemon");
+    app.add_option("--list-mode", list_mode, "Hot/cold mode for list: hot_only|cold_only|auto")
+        ->check(CLI::IsMember({"hot_only", "hot", "cold_only", "cold", "auto"}))
+        ->default_val("auto");
+    app.add_option("--grep-mode", grep_mode, "Hot/cold mode for grep: hot_only|cold_only|auto")
+        ->check(CLI::IsMember({"hot_only", "hot", "cold_only", "cold", "auto"}))
+        ->default_val("auto");
+    app.add_option("--retrieval-mode", retrieval_mode,
+                   "Hot/cold mode for retrieval: hot_only|cold_only|auto")
+        ->check(CLI::IsMember({"hot_only", "hot", "cold_only", "cold", "auto"}))
+        ->default_val("auto");
     CLI11_PARSE(app, argc, argv);
 
     try {
@@ -57,6 +71,16 @@ int main(int argc, char* argv[]) {
             spdlog::set_level(spdlog::level::err);
 
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
+        // Apply hot/cold modes for list/grep/retrieval so MCP uses hot paths like CLI
+        if (!list_mode.empty()) {
+            setenv("YAMS_LIST_MODE", list_mode.c_str(), 1);
+        }
+        if (!grep_mode.empty()) {
+            setenv("YAMS_GREP_MODE", grep_mode.c_str(), 1);
+        }
+        if (!retrieval_mode.empty()) {
+            setenv("YAMS_RETRIEVAL_MODE", retrieval_mode.c_str(), 1);
+        }
     } catch (const std::exception& e) {
         std::cerr << "Failed to setup logging: " << e.what() << std::endl;
         return 1;

@@ -28,6 +28,21 @@ public:
 
     Response dispatch(const Request& req);
 
+    // PBI-008-11: Session prepare (warming) options and entrypoint
+    struct PrepareSessionOptions {
+        std::string sessionName;
+        int maxCores{-1};
+        int maxMemoryGb{-1};
+        long maxTimeMs{-1};
+        bool aggressive{false};
+        std::size_t limit{200};
+        std::size_t snippetLen{160};
+    };
+
+    // Best-effort synchronous prepare that delegates to ISessionService
+    // Returns number of warmed documents or negative on error
+    int prepareSession(const PrepareSessionOptions& opts);
+
 private:
     // One handler for each request type
     Response handleStatusRequest(const StatusRequest& req);
@@ -46,6 +61,7 @@ private:
     Response handleUpdateDocumentRequest(const UpdateDocumentRequest& req);
     Response handleGrepRequest(const GrepRequest& req);
     Response handleDownloadRequest(const DownloadRequest& req);
+    Response handlePrepareSessionRequest(const PrepareSessionRequest& req);
 
     // Helper functions for status reporting
     double getMemoryUsage();

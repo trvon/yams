@@ -4,6 +4,7 @@
 set(CLI_SOURCES
     yams_cli.cpp
     command_registry.cpp
+    session_store.cpp
     time_parser.cpp
     progress_indicator.cpp
     commands/add_command.cpp

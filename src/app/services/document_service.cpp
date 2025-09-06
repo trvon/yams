@@ -232,6 +232,21 @@ public:
         return out;
     }
 
+    // Normalize common prefixed hash forms like "sha256:<hex>"
+    static std::string normalizeHashInput(const std::string& in) {
+        if (in.size() > 7) {
+            // Accept case-insensitive prefix
+            auto lower = in;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::string prefix = "sha256:";
+            if (lower.rfind(prefix, 0) == 0) {
+                return in.substr(prefix.size());
+            }
+        }
+        return in;
+    }
+
     // Retrieve by hash or name (+ optional outputPath) with optional content and simple graph
     Result<RetrieveDocumentResponse> retrieve(const RetrieveDocumentRequest& req) override {
         if (!ctx_.store) {
@@ -245,13 +260,14 @@ public:
         resp.graphEnabled = req.graph;
 
         // If name is provided but no hash, resolve name to hash first
-        std::string resolvedHash = req.hash;
+        std::string resolvedHash = normalizeHashInput(req.hash);
         if (!req.name.empty() && req.hash.empty()) {
             auto resolveResult = resolveNameToHash(req.name);
             if (!resolveResult) {
                 return Error{ErrorCode::NotFound, "Document not found with name: " + req.name};
             }
             resolvedHash = resolveResult.value();
+            resolvedHash = normalizeHashInput(resolvedHash);
         }
 
         // Resolve hash (handle partial hashes)
@@ -406,12 +422,12 @@ public:
         std::string name = req.name;
 
         if (!req.hash.empty()) {
-            hash = req.hash;
+            hash = normalizeHashInput(req.hash);
         } else if (!req.name.empty()) {
             auto h = resolveNameToHash(req.name);
             if (!h)
                 return Error{h.error().code, h.error().message};
-            hash = h.value();
+            hash = normalizeHashInput(h.value());
         } else {
             return Error{ErrorCode::InvalidArgument, "Provide 'hash' or 'name'"};
         }

@@ -65,23 +65,6 @@ static bool hasWildcard(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
 
-static std::vector<std::string> splitToLines(const std::string& content) {
-    std::vector<std::string> lines;
-    std::istringstream iss(content);
-    std::string line;
-    while (std::getline(iss, line)) {
-#ifdef _WIN32
-        if (!line.empty() && (line.back() == '\r'))
-            line.pop_back();
-#else
-        if (!line.empty() && (line.back() == '\r'))
-            line.pop_back();
-#endif
-        lines.push_back(std::move(line));
-    }
-    return lines;
-}
-
 // Helper to check if document has required tags
 static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
                             const std::vector<std::string>& tags, bool matchAll) {
@@ -463,15 +446,21 @@ public:
         // Perform semantic search unless disabled; allow even in count/files-only/paths-only modes
         if (!req.regexOnly && req.semanticLimit > 0) {
             try {
-                auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
-                yams::search::SearchEngineBuilder builder;
-                builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
-                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                opts.hybrid.final_top_k = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
-                auto engRes = builder.buildEmbedded(opts);
-                if (engRes) {
-                    auto eng = engRes.value();
-                    auto hres = eng->search(req.pattern, opts.hybrid.final_top_k);
+                std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
+                size_t topk = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
+                if (!eng) {
+                    auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                    yams::search::SearchEngineBuilder builder;
+                    builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
+                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                    opts.hybrid.final_top_k = topk;
+                    auto engRes = builder.buildEmbedded(opts);
+                    if (engRes) {
+                        eng = engRes.value();
+                    }
+                }
+                if (eng) {
+                    auto hres = eng->search(req.pattern, topk);
                     if (hres) {
                         std::set<std::string> regexFiles;
                         for (const auto& fr : response.results)

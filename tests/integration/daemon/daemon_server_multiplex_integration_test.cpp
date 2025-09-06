@@ -43,6 +43,15 @@ TEST(ServerMultiplexIntegrationTest, ManyParallelStatusRequests) {
     cfg.maxInflight = 128; // client cap
     yams::daemon::DaemonClient client(cfg);
 
+    // Wait until daemon Ready/Degraded to avoid init-time flakiness
+    for (int i = 0; i < 50; ++i) {
+        auto st = yams::cli::run_sync(client.status(), 1s);
+        if (st && (st.value().ready || st.value().overallStatus == "Ready" ||
+                   st.value().overallStatus == "Degraded"))
+            break;
+        std::this_thread::sleep_for(100ms);
+    }
+
     const int N = 50;
     std::vector<std::future<bool>> futs;
     futs.reserve(N);

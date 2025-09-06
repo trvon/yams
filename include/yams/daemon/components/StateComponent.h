@@ -67,6 +67,10 @@ struct DaemonStats {
 struct StateComponent {
     DaemonReadiness readiness;
     DaemonStats stats;
+    // Initialization durations (ms since daemon start) per component once ready
+    // Example keys: "ipc_server", "content_store", "database", "metadata_repo",
+    //               "search_engine", "model_provider", "vector_index", "plugins"
+    std::map<std::string, uint64_t> initDurationsMs;
 };
 
 } // namespace yams::daemon

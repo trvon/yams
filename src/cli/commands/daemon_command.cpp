@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/progress_indicator.h>
@@ -265,7 +266,7 @@ private:
 
         // Check if daemon is already running and handle version compatibility
         if (checkAndHandleVersionMismatch(effectiveSocket)) {
-            spdlog::info("A YAMS daemon is already running");
+            std::cout << "[INFO] A YAMS daemon is already running\n";
             return;
         }
 
@@ -274,7 +275,7 @@ private:
 
         if (runForeground) {
             // Exec yams-daemon with provided flags, do not return on success
-            spdlog::info("Starting YAMS daemon in foreground mode...");
+            std::cout << "[INFO] Starting YAMS daemon in foreground mode...\n";
 
             // Derive executable path
             std::string exePath;
@@ -371,6 +372,8 @@ private:
             // Exec and never return on success
             ::execvp(exePath.c_str(), argv.data());
             spdlog::error("Failed to exec yams-daemon ({}): {}", exePath, strerror(errno));
+            std::cerr << "[FAIL] Failed to exec yams-daemon: " << exePath << ": " << strerror(errno)
+                      << "\n";
             std::exit(1);
         } else {
             // Start daemon in background
@@ -404,6 +407,7 @@ private:
             auto result = daemon::DaemonClient::startDaemon(config);
             if (!result) {
                 spdlog::error("Failed to start daemon: {}", result.error().message);
+                std::cerr << "[FAIL] Failed to start daemon: " << result.error().message << "\n";
                 std::exit(1);
             }
 
@@ -452,7 +456,7 @@ private:
                     pi.tick();
                     if (ready) {
                         pi.stop();
-                        spdlog::info("YAMS daemon started successfully");
+                        std::cout << "[OK] YAMS daemon started successfully\n";
                         became_ready = true;
                         break;
                     }
@@ -465,9 +469,10 @@ private:
 
             if (!became_ready) {
                 pi.stop();
-                spdlog::warn(
-                    "Daemon start initiated. It will finish initializing in the background.");
-                spdlog::warn("Tip: run 'yams daemon status -d' or check the log for progress.");
+                std::cout << "[INFO] Daemon start initiated. It will finish initializing in the "
+                             "background.\n";
+                std::cout
+                    << "[INFO] Tip: run 'yams daemon status -d' or check the log for progress.\n";
             }
         }
     }
@@ -602,10 +607,11 @@ private:
         // Clean up files if daemon was stopped
         if (stopped) {
             cleanupDaemonFiles(socketPath_, pidFile_);
-            spdlog::info("YAMS daemon stopped successfully");
+            std::cout << "[OK] YAMS daemon stopped successfully\n";
         } else {
             spdlog::error("Failed to stop YAMS daemon");
-            spdlog::error("You may need to manually kill the process: pkill yams-daemon");
+            std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
+            std::cerr << "[INFO] You may need to manually kill the process: pkill yams-daemon\n";
             std::exit(1);
         }
     }
@@ -679,7 +685,7 @@ private:
                 ok = false;
             }
         }
-        // Check for stale socket
+        // Check for stale socket (and show readiness summary if daemon responds)
         bool socket_exists = !effectiveSocket.empty() && fs::exists(effectiveSocket);
         if (socket_exists) {
             std::cout << "[INFO] Socket file exists. Probing server...\n";
@@ -687,6 +693,68 @@ private:
             bool alive = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
             if (alive) {
                 std::cout << "[OK] Daemon responds on socket\n";
+                // Fetch detailed readiness and show a short Waiting on: summary
+                try {
+                    yams::daemon::DaemonClient probe{};
+                    auto sres = run_sync(probe.status(), std::chrono::seconds(2));
+                    if (sres) {
+                        const auto& s = sres.value();
+                        // Show any components not ready yet (up to a few for brevity)
+                        std::vector<std::string> waiting;
+                        for (const auto& [k, v] : s.readinessStates) {
+                            if (!v) {
+                                std::ostringstream w;
+                                w << k;
+                                auto it = s.initProgress.find(k);
+                                if (it != s.initProgress.end()) {
+                                    w << " (" << (int)it->second << "%)";
+                                }
+                                // Approximate elapsed with daemon uptime (per-component timing TBD)
+                                w << ", elapsed ~" << s.uptimeSeconds << "s";
+                                waiting.push_back(w.str());
+                            }
+                        }
+                        if (!waiting.empty()) {
+                            std::cout << "[INFO] Waiting on: ";
+                            for (size_t i = 0; i < waiting.size() && i < 3; ++i) {
+                                if (i)
+                                    std::cout << ", ";
+                                std::cout << waiting[i];
+                            }
+                            if (waiting.size() > 3)
+                                std::cout << ", …";
+                            std::cout << "\n";
+                        }
+                        // Additionally, show top 3 slowest components if bootstrap has timings
+                        try {
+                            auto rt =
+                                daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+                            std::ifstream bf(rt);
+                            if (bf) {
+                                nlohmann::json j;
+                                bf >> j;
+                                if (j.contains("top_slowest") && j["top_slowest"].is_array() &&
+                                    !j["top_slowest"].empty()) {
+                                    std::cout << "[INFO] Top slow components: ";
+                                    auto arr = j["top_slowest"];
+                                    for (size_t i = 0; i < arr.size() && i < 3; ++i) {
+                                        const auto& e = arr[i];
+                                        std::string name = e.value("name", std::string{"unknown"});
+                                        uint64_t ms = e.value("elapsed_ms", 0ULL);
+                                        if (i)
+                                            std::cout << ", ";
+                                        std::cout << name << " (" << ms << "ms)";
+                                    }
+                                    if (arr.size() > 3)
+                                        std::cout << ", …";
+                                    std::cout << "\n";
+                                }
+                            }
+                        } catch (...) {
+                        }
+                    }
+                } catch (...) {
+                }
             } else {
                 std::cout << "[WARN] No response on socket. File may be stale.\n";
                 if (confirm("Remove stale socket file now?")) {
@@ -720,6 +788,37 @@ private:
             }
         } else {
             std::cout << "[INFO] No PID file or unreadable\n";
+        }
+
+        // If IPC is not yet available and PID is not confirmed running,
+        // detect a launching daemon via /proc as an initializing state hint.
+        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+            try {
+                bool found = false;
+                for (const auto& entry : fs::directory_iterator("/proc")) {
+                    if (!entry.is_directory())
+                        continue;
+                    const auto& p = entry.path();
+                    auto name = p.filename().string();
+                    if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos)
+                        continue; // not a PID directory
+                    std::ifstream cmd(p / "cmdline");
+                    if (!cmd)
+                        continue;
+                    std::string cmdline;
+                    std::getline(cmd, cmdline, '\0');
+                    if (cmdline.find("yams-daemon") != std::string::npos) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) {
+                    std::cout
+                        << "[INFO] Daemon process detected: initializing (IPC not yet available)\n";
+                }
+            } catch (...) {
+                // ignore errors from /proc scanning
+            }
         }
 #else
         if (pid > 0) {
@@ -762,7 +861,118 @@ private:
 #ifndef _WIN32
             if (pid > 0 && kill(pid, 0) == 0) {
                 std::cout << "YAMS daemon is starting/initializing (IPC not yet available)\n";
+                if (detailed_) {
+                    try {
+                        auto logPath = daemon::YamsDaemon::resolveSystemPath(
+                                           daemon::YamsDaemon::PathType::LogFile)
+                                           .string();
+                        std::cout << "[INFO] Likely waiting on search stack (index, models).\n";
+                        std::cout << "[INFO] Tail log for details: " << logPath << "\n";
+                        // Try bootstrap status file for early readiness
+                        try {
+                            auto rt =
+                                daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+                            std::ifstream bf(rt);
+                            if (bf) {
+                                nlohmann::json j;
+                                bf >> j;
+                                if (j.contains("readiness")) {
+                                    std::vector<std::string> waiting;
+                                    for (auto it = j["readiness"].begin();
+                                         it != j["readiness"].end(); ++it) {
+                                        if (!it.value().get<bool>()) {
+                                            std::ostringstream w;
+                                            w << it.key();
+                                            if (j.contains("progress") &&
+                                                j["progress"].contains(it.key())) {
+                                                try {
+                                                    w << " (" << j["progress"][it.key()].get<int>()
+                                                      << "%)";
+                                                } catch (...) {
+                                                }
+                                            }
+                                            if (j.contains("uptime_seconds")) {
+                                                try {
+                                                    w << ", elapsed ~"
+                                                      << j["uptime_seconds"].get<long>() << "s";
+                                                } catch (...) {
+                                                }
+                                            }
+                                            waiting.push_back(w.str());
+                                        }
+                                    }
+                                    if (!waiting.empty()) {
+                                        std::cout << "[INFO] Waiting on: ";
+                                        for (size_t i = 0; i < waiting.size() && i < 3; ++i) {
+                                            if (i)
+                                                std::cout << ", ";
+                                            std::cout << waiting[i];
+                                        }
+                                        if (waiting.size() > 3)
+                                            std::cout << ", …";
+                                        std::cout << "\n";
+                                    }
+                                    if (j.contains("top_slowest") && j["top_slowest"].is_array() &&
+                                        !j["top_slowest"].empty()) {
+                                        std::cout << "[INFO] Top slow components: ";
+                                        auto arr = j["top_slowest"];
+                                        for (size_t i = 0; i < arr.size() && i < 3; ++i) {
+                                            const auto& e = arr[i];
+                                            std::string name =
+                                                e.value("name", std::string{"unknown"});
+                                            uint64_t ms = e.value("elapsed_ms", 0ULL);
+                                            if (i)
+                                                std::cout << ", ";
+                                            std::cout << name << " (" << ms << "ms)";
+                                        }
+                                        if (arr.size() > 3)
+                                            std::cout << ", …";
+                                        std::cout << "\n";
+                                    }
+                                }
+                            }
+                        } catch (...) {
+                        }
+                    } catch (...) {
+                    }
+                }
                 return;
+            }
+            // Linux: as a best-effort fallback, detect a launching daemon by scanning /proc
+            // for a yams-daemon process when socket and PID file are not yet ready.
+            try {
+                namespace fs = std::filesystem;
+                for (const auto& entry : fs::directory_iterator("/proc")) {
+                    if (!entry.is_directory())
+                        continue;
+                    const auto& p = entry.path();
+                    auto name = p.filename().string();
+                    if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos)
+                        continue; // not a PID directory
+                    std::ifstream cmd(p / "cmdline");
+                    if (!cmd)
+                        continue;
+                    std::string cmdline;
+                    std::getline(cmd, cmdline, '\0');
+                    if (cmdline.find("yams-daemon") != std::string::npos) {
+                        std::cout
+                            << "YAMS daemon is starting/initializing (IPC not yet available)\n";
+                        if (detailed_) {
+                            try {
+                                auto logPath = daemon::YamsDaemon::resolveSystemPath(
+                                                   daemon::YamsDaemon::PathType::LogFile)
+                                                   .string();
+                                std::cout
+                                    << "[INFO] Likely waiting on search stack (index, models).\n";
+                                std::cout << "[INFO] Tail log for details: " << logPath << "\n";
+                            } catch (...) {
+                            }
+                        }
+                        return;
+                    }
+                }
+            } catch (...) {
+                // Ignore any /proc scanning errors; fall through to not running message
             }
 #endif
             std::cout << "YAMS daemon is not running\n";

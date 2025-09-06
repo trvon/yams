@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <vector>
 #include <yams/cli/command.h>
+#include <yams/cli/session_store.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine_builder.h>
@@ -52,6 +53,10 @@ private:
     bool matchAllTags_ = false;
     std::string colorMode_ = "auto";
     size_t maxCount_ = 20;
+    // Session scoping
+    std::optional<std::string> sessionOverride_{};
+    bool noSession_{false};
+    std::vector<std::string> sessionPatterns_;
 
 public:
     std::string getName() const override { return "grep"; }
@@ -123,7 +128,17 @@ public:
         cmd->add_flag("--no-streaming", disableStreaming_,
                       "Disable streaming responses from daemon");
 
+        // Session scoping controls
+        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
+        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
+
         cmd->callback([this]() {
+            if (!noSession_) {
+                sessionPatterns_ =
+                    yams::cli::session_store::active_include_patterns(sessionOverride_);
+            } else {
+                sessionPatterns_.clear();
+            }
             auto result = execute();
             if (!result) {
                 spdlog::error("Grep failed: {}", result.error().message);
@@ -139,6 +154,9 @@ public:
                 yams::daemon::GrepRequest dreq;
                 dreq.pattern = pattern_;
                 dreq.paths = paths_; // Use new paths field for multiple paths
+                if (dreq.paths.empty() && !sessionPatterns_.empty()) {
+                    dreq.paths = sessionPatterns_;
+                }
                 dreq.caseInsensitive = ignoreCase_;
                 dreq.invertMatch = invertMatch_;
 

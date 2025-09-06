@@ -14,8 +14,13 @@ using namespace yams::search;
 class MetadataRepositoryTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Use temporary database for tests
-        dbPath_ = std::filesystem::temp_directory_path() / "metadata_repo_test.db";
+        // Use temporary database for tests; allow override for restricted environments
+        const char* t = std::getenv("YAMS_TEST_TMPDIR");
+        auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
+        std::error_code ec;
+        std::filesystem::create_directories(base, ec);
+        auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+        dbPath_ = base / (std::string("metadata_repo_test_") + std::to_string(ts) + ".db");
         std::filesystem::remove(dbPath_);
 
         // Create connection pool

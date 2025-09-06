@@ -52,7 +52,7 @@ void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
 Result<void> UpdateCommand::execute() {
     try {
         // Attempt daemon-first update; fall back to local on failure
-        {
+        if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
             dreq.hash = hash_;
             dreq.name = name_;
@@ -89,7 +89,8 @@ Result<void> UpdateCommand::execute() {
 
             try {
                 yams::daemon::ClientConfig cfg;
-                cfg.dataDir = cli_->getDataPath();
+                if (cli_)
+                    cfg.dataDir = cli_->getDataPath();
                 cfg.enableChunkedResponses = false;
                 cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);

@@ -93,3 +93,25 @@ gtest_discover_tests(grep_service_test
         LABELS "unit;services;grep"
         TIMEOUT 120
 )
+
+# SessionService tests
+add_executable(session_service_test
+    session_service_test.cpp
+)
+
+target_link_libraries(session_service_test
+    PRIVATE
+        test_utils
+        gtest_main
+        yams_app_services
+        yams::metadata
+        yams::api
+)
+
+gtest_discover_tests(session_service_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 90
+    PROPERTIES
+        LABELS "unit;services;session"
+        TIMEOUT 120
+)

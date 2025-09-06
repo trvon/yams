@@ -12,6 +12,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/hybrid_search_factory.h>
+#include <yams/search/search_engine_builder.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
@@ -68,6 +69,9 @@ namespace fs = std::filesystem;
 #endif
 #endif
 #include <algorithm>
+#ifdef NDEBUG
+#include <spdlog/sinks/null_sink.h>
+#endif
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -78,7 +82,7 @@ namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
 
 YamsCLI::YamsCLI() {
-    // Default: suppress info/debug unless --verbose is used
+    // Set a conservative default; finalized after parsing flags in run()
     spdlog::set_level(spdlog::level::warn);
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
@@ -259,14 +263,77 @@ int YamsCLI::run(int argc, char* argv[]) {
         // Register all commands
         registerBuiltinCommands();
 
-        // Parse command line
-        app_->parse(argc, argv);
+        // If 'daemon' is invoked without a subcommand, inject 'status' by default
+        // Detect: first non-flag token is 'daemon' and there is no subsequent non-flag token
+        bool injectDaemonStatus = false;
+        if (argc > 1 && argv[1] && std::string_view(argv[1]) == "daemon") {
+            bool hasSub = false;
+            for (int i = 2; i < argc; ++i) {
+                if (argv[i] == nullptr)
+                    continue;
+                if (!isFlag(argv[i])) {
+                    hasSub = true;
+                    break;
+                }
+            }
+            if (!hasSub)
+                injectDaemonStatus = true;
+        }
+
+        std::vector<char*> argvVec;
+        if (injectDaemonStatus) {
+            argvVec.reserve(argc + 1);
+            for (int i = 0; i < argc; ++i)
+                argvVec.push_back(argv[i]);
+            static std::string statusStr = std::string("status");
+            argvVec.push_back(const_cast<char*>(statusStr.c_str()));
+            argvVec.push_back(nullptr);
+            app_->parse(argc + 1, argvVec.data());
+        } else {
+            // Parse command line
+            app_->parse(argc, argv);
+        }
 
         // Apply log level after parsing flags (avoid CLI11 Option::callback dependency)
-        if (verbose_) {
+        // Precedence: env YAMS_LOG_LEVEL > --verbose > build-type default
+        auto parseLevel = [](const std::string& s) -> std::optional<spdlog::level::level_enum> {
+            std::string v;
+            v.reserve(s.size());
+            for (char c : s)
+                v.push_back(static_cast<char>(std::tolower(c)));
+            if (v == "trace")
+                return spdlog::level::trace;
+            if (v == "debug")
+                return spdlog::level::debug;
+            if (v == "info")
+                return spdlog::level::info;
+            if (v == "warn" || v == "warning")
+                return spdlog::level::warn;
+            if (v == "error" || v == "err")
+                return spdlog::level::err;
+            if (v == "critical" || v == "crit")
+                return spdlog::level::critical;
+            if (v == "off" || v == "none" || v == "silent")
+                return spdlog::level::off;
+            return std::nullopt;
+        };
+
+        if (const char* envLvl = std::getenv("YAMS_LOG_LEVEL"); envLvl && *envLvl) {
+            if (auto lvl = parseLevel(envLvl)) {
+                spdlog::set_level(*lvl);
+            }
+        } else if (verbose_) {
             spdlog::set_level(spdlog::level::debug);
         } else {
+#ifdef NDEBUG
+            // Suppress spdlog output in Release unless explicitly enabled
+            auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+            auto null_logger = std::make_shared<spdlog::logger>("yams-cli-null", null_sink);
+            spdlog::set_default_logger(null_logger);
+            spdlog::set_level(spdlog::level::off);
+#else
             spdlog::set_level(spdlog::level::warn);
+#endif
         }
 
         // Enforce data directory precedence after parsing options
@@ -303,6 +370,8 @@ int YamsCLI::run(int argc, char* argv[]) {
     } catch (const CLI::ParseError& e) {
         return app_->exit(e);
     } catch (const std::exception& e) {
+        // Always provide a user-facing error even if logging is off
+        std::cerr << "[FAIL] Unexpected error: " << e.what() << "\n";
         spdlog::error("Unexpected error: {}", e.what());
         return 1;
     }
@@ -341,8 +410,10 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         // Ensure storage is initialized before creating context
         auto initResult = ensureStorageInitialized();
         if (!initResult) {
-            spdlog::error("Failed to initialize storage for AppContext: {}",
-                          initResult.error().message);
+            if (verbose_) {
+                spdlog::error("Failed to initialize storage for AppContext: {}",
+                              initResult.error().message);
+            }
             return nullptr;
         }
 
@@ -352,9 +423,39 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_->searchExecutor = getSearchExecutor();
         appContext_->metadataRepo = getMetadataRepository();
 
-        // HybridEngine may not be available, that's ok
-        // TODO: Add hybrid engine initialization if needed
-        appContext_->hybridEngine = nullptr;
+        // Initialize HybridSearchEngine so SearchService can use hybrid search by default
+        try {
+            auto vecMgr = getVectorIndexManager();
+            auto repo = getMetadataRepository();
+
+            if (vecMgr && repo) {
+                yams::search::SearchEngineBuilder builder;
+                builder.withVectorIndex(vecMgr).withMetadataRepo(repo).withKGStore(
+                    getKnowledgeGraphStore());
+
+                // Reuse a shared embedding generator if available
+                if (auto emb = getEmbeddingGenerator()) {
+                    builder.withEmbeddingGenerator(emb);
+                }
+
+                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                auto engRes = builder.buildEmbedded(opts);
+                if (engRes) {
+                    appContext_->hybridEngine = engRes.value();
+                    spdlog::info("HybridSearchEngine initialized for AppContext (KG {}abled)",
+                                 appContext_->hybridEngine->getConfig().enable_kg ? "en" : "dis");
+                } else {
+                    spdlog::warn("HybridSearchEngine initialization failed: {}",
+                                 engRes.error().message);
+                    appContext_->hybridEngine = nullptr;
+                }
+            } else {
+                appContext_->hybridEngine = nullptr;
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("HybridSearchEngine bring-up error (ignored): {}", e.what());
+            appContext_->hybridEngine = nullptr;
+        }
 
         spdlog::debug("Created AppContext for services");
     }
@@ -385,7 +486,10 @@ Result<void> YamsCLI::initializeStorage() {
         // Initialize migration system (creates migration_history table)
         auto initResult = migrationManager.initialize();
         if (!initResult) {
-            spdlog::error("Failed to initialize migration system: {}", initResult.error().message);
+            if (verbose_) {
+                spdlog::error("Failed to initialize migration system: {}",
+                              initResult.error().message);
+            }
             return initResult;
         }
 
@@ -398,7 +502,10 @@ Result<void> YamsCLI::initializeStorage() {
         // Apply all migrations
         auto migrateResult = migrationManager.migrate();
         if (!migrateResult) {
-            spdlog::error("Failed to run database migrations: {}", migrateResult.error().message);
+            if (verbose_) {
+                spdlog::error("Failed to run database migrations: {}",
+                              migrateResult.error().message);
+            }
             return migrateResult;
         }
 

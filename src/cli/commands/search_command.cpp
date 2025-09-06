@@ -8,6 +8,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/result_renderer.h>
+#include <yams/cli/session_store.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
@@ -64,6 +65,10 @@ private:
 
     // Include globs filtering
     std::vector<std::string> includeGlobs_;
+
+    // Session scoping controls
+    std::optional<std::string> sessionOverride_{};
+    bool noSession_{false};
 
     // Helper function to truncate snippet to a maximum length at word boundary
     std::string truncateSnippet(const std::string& snippet, size_t maxLength) {
@@ -181,6 +186,10 @@ public:
         cmd->add_flag("--paths-only", pathsOnly_,
                       "Output only file paths, one per line (useful for scripting)");
 
+        // Session scoping controls
+        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
+        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
+
         cmd->add_option("--header-timeout", headerTimeoutMs_,
                         "Timeout for receiving response headers (milliseconds)")
             ->default_val(30000);
@@ -227,7 +236,7 @@ public:
             this->extraArgs_ = cmd->remaining();
             auto result = execute();
             if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
+                std::cerr << "[FAIL] " << result.error().message << "\n";
                 throw CLI::RuntimeError(1);
             }
         });
@@ -313,6 +322,18 @@ public:
             }
             // Normalize include globs (split commas)
             auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
+            if (!noSession_) {
+                auto sess = yams::cli::session_store::active_include_patterns(sessionOverride_);
+                includeGlobsExpanded.insert(includeGlobsExpanded.end(), sess.begin(), sess.end());
+            }
+            // Session-aware scoping: merge active session include patterns unless disabled
+            if (!noSession_) {
+                auto sessionName = (sessionOverride_ ? std::optional<std::string>(*sessionOverride_)
+                                                     : std::optional<std::string>{});
+                auto sessPatterns = yams::cli::session_store::active_include_patterns(sessionName);
+                includeGlobsExpanded.insert(includeGlobsExpanded.end(), sessPatterns.begin(),
+                                            sessPatterns.end());
+            }
             if (includeGlobsExpanded.empty() && !pathFilter_.empty()) {
                 includeGlobsExpanded.push_back(pathFilter_);
             }
@@ -352,9 +373,9 @@ public:
             yams::daemon::SearchRequest dreq;
             dreq.query = query_;
             dreq.limit = static_cast<size_t>(limit_);
-            dreq.fuzzy = fuzzySearch_;
+            dreq.fuzzy = true; // favor resilient defaults; CLI still refines client-side
             dreq.literalText = literalText_;
-            dreq.similarity = static_cast<double>(minSimilarity_);
+            dreq.similarity = (minSimilarity_ > 0.0) ? static_cast<double>(minSimilarity_) : 0.7;
             dreq.pathsOnly = pathsOnly_;
             dreq.searchType = searchType_;
             dreq.jsonOutput = jsonOutput_;

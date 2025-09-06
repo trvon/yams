@@ -17,7 +17,7 @@ function(yams_add_boost_headers TARGET_NAME)
         target_link_libraries(${TARGET_NAME} PRIVATE boost::boost)
     else()
         # Try to find Boost package if not already found
-        find_package(Boost QUIET)
+        find_package(Boost CONFIG QUIET)
         if(Boost_FOUND AND DEFINED Boost_INCLUDE_DIRS)
             target_include_directories(${TARGET_NAME} PRIVATE ${Boost_INCLUDE_DIRS})
         else()
@@ -539,6 +539,19 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
     )
 
     target_compile_features(yams_onnx_plugin PUBLIC cxx_std_20)
+
+    # Ensure the plugin isn't built with IPO/LTO and that C symbols remain visible
+    set_target_properties(yams_onnx_plugin PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION FALSE
+    C_VISIBILITY_PRESET default
+    CXX_VISIBILITY_PRESET default
+    VISIBILITY_INLINES_HIDDEN OFF
+    )
+
+    # Optional: fail link if there are unresolved symbols (Linux/ELF)
+    if(UNIX AND NOT APPLE)
+    target_link_options(yams_onnx_plugin PRIVATE "-Wl,-z,defs")
+    endif()
 
     # Install ONNX plugin to plugins directory
     install(TARGETS yams_onnx_plugin

@@ -718,6 +718,16 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
                 error = Error{err->code, err->message};
                 return false;
             }
+            if (auto* st = std::get_if<StatusResponse>(&chunkResponse)) {
+                // When daemon is not ready, dispatcher returns StatusResponse instead of
+                // processing the request. Surface a friendly message and stop.
+                std::string status = st->overallStatus.empty()
+                                         ? (st->ready ? "ready" : "initializing")
+                                         : st->overallStatus;
+                error = Error{ErrorCode::InvalidState,
+                              std::string("Daemon not ready yet (status=") + status + ")"};
+                return false;
+            }
             if (auto* add = std::get_if<AddDocumentResponse>(&chunkResponse)) {
                 if (!isLastChunk) {
                     // We expect the full response as the last chunk; ignore interim

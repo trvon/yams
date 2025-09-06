@@ -35,7 +35,11 @@ static const std::vector<ModelInfo> AVAILABLE_MODELS = {
      "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
     {"all-mpnet-base-v2",
      "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
-     "High-quality 768-dim embeddings", 420, "embedding"}};
+     "High-quality 768-dim embeddings", 420, "embedding"},
+    // Nomic model support (embedding). If the default URL changes, users can override with --url.
+    {"nomic-embed-text-v1.5",
+     "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx",
+     "Nomic embedding model (v1.5)", 0 /*unknown*/, "embedding"}};
 
 class ModelCommand : public ICommand {
 private:
@@ -43,6 +47,8 @@ private:
     bool list_ = false;
     std::string downloadModel_;
     std::string infoModel_;
+    std::string customUrl_;
+    bool check_ = false;
 
     // Helper function to check if a command exists in PATH
     bool commandExists(const std::string& cmd) const {
@@ -130,11 +136,74 @@ public:
 
         auto* cmd = app.add_subcommand("model", getDescription());
 
+        // Backward-compatible flags
         cmd->add_flag("--list", list_, "List available models");
         cmd->add_option("--download", downloadModel_, "Download a model by name");
         cmd->add_option("--info", infoModel_, "Show model information");
         cmd->add_option("--output", outputDir_, "Output directory for downloads");
+        cmd->add_option("--url", customUrl_,
+                        "Custom URL to download the model (use with --download <name>)");
         cmd->add_flag("--force", force_, "Force redownload if model exists");
+        cmd->add_flag("--check", check_, "Show provider health and installed model status");
+
+        // User-friendly subcommands: list | download <name> | info <name> | check
+        auto* sub_list = cmd->add_subcommand("list", "List available and installed models");
+        sub_list->callback([this]() {
+            list_ = true;
+            auto r = execute();
+            if (!r) {
+                spdlog::error("Model list failed: {}", r.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* sub_download = cmd->add_subcommand("download", "Download a model by name");
+        std::string positional_download_name;
+        sub_download->add_option("name", positional_download_name, "Model name");
+        sub_download->add_option("--output", outputDir_, "Output directory for downloads");
+        sub_download->add_option("--url", customUrl_, "Custom URL to download the model");
+        sub_download->add_flag("--force", force_, "Force redownload if model exists");
+        sub_download->callback([this, &positional_download_name]() {
+            if (positional_download_name.empty()) {
+                std::cout << "Model name is required. Usage: yams model download <name> [--url "
+                             "<url>] [--output <dir>]"
+                          << std::endl;
+                std::exit(2);
+            }
+            downloadModel_ = positional_download_name;
+            auto r = execute();
+            if (!r) {
+                spdlog::error("Model download failed: {}", r.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* sub_info = cmd->add_subcommand("info", "Show model details");
+        std::string positional_info_name;
+        sub_info->add_option("name", positional_info_name, "Model name");
+        sub_info->callback([this, &positional_info_name]() {
+            if (positional_info_name.empty()) {
+                std::cout << "Model name is required. Usage: yams model info <name>" << std::endl;
+                std::exit(2);
+            }
+            infoModel_ = positional_info_name;
+            auto r = execute();
+            if (!r) {
+                spdlog::error("Model info failed: {}", r.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* sub_check =
+            cmd->add_subcommand("check", "Check provider support and installed models");
+        sub_check->callback([this]() {
+            check_ = true;
+            auto r = execute();
+            if (!r) {
+                spdlog::error("Model check failed: {}", r.error().message);
+                std::exit(1);
+            }
+        });
 
         cmd->callback([this]() {
             auto result = execute();
@@ -149,12 +218,13 @@ public:
         YAMS_ZONE_SCOPED_N("ModelCommand::execute");
 
         try {
-            if (list_) {
+            if (list_)
                 return listModels();
-            }
+            if (check_)
+                return checkModels();
 
             if (!downloadModel_.empty()) {
-                return downloadModel(downloadModel_, outputDir_);
+                return downloadModel(downloadModel_, outputDir_, customUrl_);
             }
 
             if (!infoModel_.empty()) {
@@ -171,6 +241,32 @@ public:
     }
 
 private:
+    std::vector<ModelInfo> discoverLocalModels() const {
+        std::vector<ModelInfo> locals;
+        const char* home = std::getenv("HOME");
+        if (!home)
+            return locals;
+        fs::path base = fs::path(home) / ".yams" / "models";
+        std::error_code ec;
+        if (!fs::exists(base, ec) || !fs::is_directory(base, ec))
+            return locals;
+        for (const auto& entry : fs::directory_iterator(base, ec)) {
+            if (!entry.is_directory())
+                continue;
+            auto dir = entry.path();
+            auto onnx = dir / "model.onnx";
+            if (fs::exists(onnx, ec)) {
+                size_t size_mb = 0;
+                std::error_code ec2;
+                auto sz = fs::file_size(onnx, ec2);
+                if (!ec2)
+                    size_mb = static_cast<size_t>(sz / (1024 * 1024));
+                locals.push_back(ModelInfo{dir.filename().string(), "", "Installed local model",
+                                           size_mb, "embedding"});
+            }
+        }
+        return locals;
+    }
     Result<void> listModels() {
         std::cout << "\nAvailable ONNX Models:\n";
         std::cout << "=====================\n\n";
@@ -181,26 +277,53 @@ private:
             std::cout << "    " << model.description << "\n\n";
         }
 
+        // Show installed models (autodiscovered)
+        auto locals = discoverLocalModels();
+        if (!locals.empty()) {
+            std::cout << "Installed Models:\n";
+            for (const auto& m : locals) {
+                std::cout << "  " << m.name << " (installed";
+                if (m.size_mb)
+                    std::cout << ", ~" << m.size_mb << " MB";
+                std::cout << ")\n";
+            }
+            std::cout << "\n";
+        }
+
         std::cout << "To download a model:\n";
-        std::cout << "  yams model --download <model-name>\n\n";
+        std::cout << "  yams model --download <model-name>\n";
+        std::cout << "Then set it as preferred:\n";
+        std::cout << "  yams config embeddings model <model-name>\n\n";
 
         return Result<void>{};
     }
 
-    Result<void> downloadModel(const std::string& model_name, const std::string& output_dir) {
+    Result<void> downloadModel(const std::string& model_name, const std::string& output_dir,
+                               const std::string& override_url) {
         YAMS_ZONE_SCOPED_N("ModelCommand::downloadModel");
 
         // Find model info
         auto it = std::find_if(AVAILABLE_MODELS.begin(), AVAILABLE_MODELS.end(),
                                [&](const ModelInfo& m) { return m.name == model_name; });
 
+        ModelInfo model;
         if (it == AVAILABLE_MODELS.end()) {
-            std::cout << "Unknown model: " << model_name << "\n";
-            std::cout << "Use 'yams model --list' to see available models\n";
-            return Error{ErrorCode::InvalidArgument, "Unknown model: " + model_name};
+            // Allow custom download when URL is provided
+            if (override_url.empty()) {
+                std::cout << "Unknown model: " << model_name << "\n";
+                std::cout << "Use 'yams model --list' to see available models or provide --url"
+                          << "\n";
+                return Error{ErrorCode::InvalidArgument,
+                             "Unknown model and no --url provided: " + model_name};
+            }
+            model =
+                ModelInfo{model_name, override_url, std::string{"Custom model"}, 0, "embedding"};
+        } else {
+            model = *it;
+            if (!override_url.empty()) {
+                model.url = override_url; // explicit user override
+            }
         }
-
-        const auto& model = *it;
 
         // Determine output path
         fs::path output_path;
@@ -240,7 +363,11 @@ private:
             return Result<void>{};
         }
 
-        std::cout << "Downloading " << model.name << " (" << model.size_mb << " MB)...\n";
+        std::cout << "Downloading " << model.name;
+        if (model.size_mb > 0) {
+            std::cout << " (" << model.size_mb << " MB)";
+        }
+        std::cout << "...\n";
         std::cout << "From: " << model.url << "\n";
         std::cout << "To: " << model_file << "\n\n";
 
@@ -281,8 +408,15 @@ private:
             if (fs::exists(model_file)) {
                 fs::remove(model_file);
             }
+            std::string reason;
+            if (has_curl) {
+                if (result == 6)
+                    reason = " (Could not resolve host)";
+                else if (result == 7)
+                    reason = " (Failed to connect to host)";
+            }
             return Error{ErrorCode::InternalError,
-                         "Download failed with code: " + std::to_string(result)};
+                         "Download failed with code: " + std::to_string(result) + reason};
         }
 
         // Create model config file
@@ -310,6 +444,12 @@ private:
         if (model.type == "embedding") {
             std::cout << "  Configure YAMS to use: " << model_file << "\n";
             std::cout << "  for embedding generation in vector database operations\n";
+            std::cout << "\n  Set this as the preferred embedding model:\n";
+            std::cout << "    yams config embeddings model " << model.name << "\n";
+            std::cout << "  Check embedding status:\n";
+            std::cout << "    yams config embeddings status\n";
+            std::cout << "  Enable automatic embedding generation (optional):\n";
+            std::cout << "    yams config embeddings enable\n";
         } else {
             std::cout << "  Configure YAMS to use: " << model_file << "\n";
             std::cout << "  for text generation tasks\n";
@@ -350,6 +490,54 @@ private:
             }
         }
 
+        std::cout << "\nHint: set this as your preferred embedding model with:\n";
+        std::cout << "  yams config embeddings model " << model.name << "\n";
+
+        return Result<void>{};
+    }
+
+    Result<void> checkModels() {
+        std::cout << "\nModel Provider Health\n";
+        std::cout << "=====================\n\n";
+#ifdef YAMS_USE_ONNX_RUNTIME
+        std::cout << "ONNX runtime support: Enabled\n";
+#else
+        std::cout << "ONNX runtime support: Disabled (compiled without ONNX)\n";
+#endif
+        // Best-effort plugin presence check
+        const char* plugin_env = std::getenv("YAMS_PLUGIN_DIR");
+        fs::path plugin_dir =
+            plugin_env ? fs::path(plugin_env) : fs::path("/usr/local/lib/yams/plugins");
+        std::error_code ec;
+        size_t plugin_files = 0;
+        if (fs::exists(plugin_dir, ec) && fs::is_directory(plugin_dir, ec)) {
+            for (const auto& entry : fs::directory_iterator(plugin_dir, ec)) {
+                if (entry.is_regular_file()) {
+                    auto ext = entry.path().extension().string();
+                    if (ext == ".so" || ext == ".dylib" || ext == ".dll") {
+                        plugin_files++;
+                    }
+                }
+            }
+            std::cout << "Plugin directory: " << plugin_dir << " (" << plugin_files
+                      << " libraries)\n";
+        } else {
+            std::cout << "Plugin directory not found: " << plugin_dir << "\n";
+        }
+        auto locals = discoverLocalModels();
+        if (locals.empty()) {
+            std::cout << "No installed models found in ~/.yams/models\n";
+        } else {
+            std::cout << "Installed models:\n";
+            for (const auto& m : locals) {
+                std::cout << "  - " << m.name;
+                if (m.size_mb)
+                    std::cout << " (~" << m.size_mb << " MB)";
+                std::cout << "\n";
+            }
+        }
+        std::cout << "\nUse 'yams model download <name>' or 'yams model download <name> --url "
+                     "<url>' to add models.\n";
         return Result<void>{};
     }
 
@@ -359,19 +547,30 @@ YAMS Embedding Model Management
 
 Commands:
   yams model --list                    List available embedding models
+  yams model list                      List available embedding models (alias)
   yams model --download <name>         Download an embedding model
+  yams model download <name>           Download an embedding model (alias)
   yams model --info <name>             Show model details
+  yams model info <name>               Show model details (alias)
   yams model --download <name> --output <dir>  Download to specific directory
+  yams model --download <name> --url <url>     Download from a specific URL (override)
+  yams model check                     Check provider support and installed models
 
 Examples:
   yams model --list
+  yams model list
   yams model --download all-MiniLM-L6-v2
+  yams model download all-MiniLM-L6-v2
   yams model --info all-mpnet-base-v2
+  yams model info all-mpnet-base-v2
   yams model --download all-mpnet-base-v2 --output ~/my-models
+  yams model --download nomic-embed-text-v1.5 --url https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx
+  yams model check
 
 Available Models:
   - all-MiniLM-L6-v2: Fast 384-dim embeddings (90MB)
   - all-mpnet-base-v2: High-quality 768-dim embeddings (420MB)
+  - nomic-embed-text-v1.5: Nomic embedding model (URL override supported)
 
 Default download location: ~/.yams/models/<model-name>/
 )";

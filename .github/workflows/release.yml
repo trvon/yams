@@ -31,14 +31,14 @@ jobs:
             hosted: true
             build_packages: true
           - os: macos-hosted-arm64
-            runs_on: "macos-14"
+            runs_on: "macos-15"
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
             suffix: macos-arm64
             hosted: true
             build_packages: true
           - os: macos-hosted-x64
-            runs_on: "macos-14"
+            runs_on: "macos-15"
             packaging: zip
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
@@ -341,7 +341,7 @@ jobs:
           if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
-            coverage_pct="$(python3 <<'PY' 2>/dev/null
+            coverage_pct="$(python3 2>/dev/null <<PY
             import xml.etree.ElementTree as ET
             try:
                 root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()

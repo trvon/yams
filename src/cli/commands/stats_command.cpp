@@ -88,6 +88,43 @@ public:
             return executeLocal();
         }
 
+        // Best-effort: show readiness summary before stats to explain zeros/delays
+        try {
+            yams::daemon::DaemonClient probe{};
+            auto sres = run_sync(probe.status(), std::chrono::seconds(2));
+            if (sres) {
+                const auto& s = sres.value();
+                std::vector<std::string> waiting;
+                for (const auto& [k, v] : s.readinessStates) {
+                    if (!v) {
+                        std::ostringstream w;
+                        w << k;
+                        auto it = s.initProgress.find(k);
+                        if (it != s.initProgress.end())
+                            w << " (" << (int)it->second << "%)";
+                        waiting.push_back(w.str());
+                    }
+                }
+                if (!waiting.empty()) {
+                    if (format_ == "text") {
+                        std::cout << "[INFO] Waiting on: ";
+                        for (size_t i = 0; i < waiting.size() && i < 5; ++i) {
+                            if (i)
+                                std::cout << ", ";
+                            std::cout << waiting[i];
+                        }
+                        if (waiting.size() > 5)
+                            std::cout << ", …";
+                        std::cout << "\n";
+                    } else {
+                        pendingWaiting_ = std::move(waiting);
+                    }
+                }
+            }
+        } catch (...) {
+            // ignore; daemon may be offline or initializing
+        }
+
         // Build daemon request using simplified protocol
         yams::daemon::GetStatsRequest dreq;
         dreq.detailed = verbose_;        // Verbose mode requests detailed stats
@@ -101,9 +138,23 @@ public:
 
         // Render lambda for results
         auto render = [&](const yams::daemon::GetStatsResponse& resp) -> Result<void> {
+            // Prefer explicit readiness indicator when present to avoid showing zeros blindly
+            auto itReady = resp.additionalStats.find("ready");
+            if (format_ == "text" && itReady != resp.additionalStats.end() &&
+                itReady->second == "false") {
+                std::cout << "[INFO] Daemon not ready yet; metrics may be incomplete.\n";
+            }
             // Heuristic fallback only when not forcing daemon-only
-            if (!localOnly_ && !daemonOnly_ && resp.totalDocuments == 0 && resp.totalSize == 0) {
-                return executeLocal();
+            // If daemon provided compact JSON, prefer it to avoid zeros due to proto limitations
+            if (!daemonOnly_) {
+                auto itJson = resp.additionalStats.find("json");
+                if (itJson != resp.additionalStats.end()) {
+                    // Prefer JSON path for rendering
+                    return renderText(resp);
+                }
+                if (!localOnly_ && resp.totalDocuments == 0 && resp.totalSize == 0) {
+                    return executeLocal();
+                }
             }
             if (format_ == "json") {
                 return renderJSON(resp);
@@ -126,7 +177,31 @@ public:
 
             auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
             if (result) {
-                return render(result.value());
+                // If proto path delivered only JSON, check and emit early banner
+                const auto& resp = result.value();
+                auto itJson = resp.additionalStats.find("json");
+                if (itJson != resp.additionalStats.end()) {
+                    try {
+                        auto j = json::parse(itJson->second);
+                        if (j.contains("not_ready") && j["not_ready"].get<bool>()) {
+                            if (format_ == "text") {
+                                std::cout
+                                    << "[INFO] Daemon is initializing; stats will be incomplete.\n";
+                            }
+                        }
+                    } catch (...) {
+                    }
+                } else {
+                    // Fallback: explicit flag in additionalStats
+                    auto it = resp.additionalStats.find("not_ready");
+                    if (it != resp.additionalStats.end() && it->second == std::string{"true"}) {
+                        if (format_ == "text") {
+                            std::cout
+                                << "[INFO] Daemon is initializing; stats will be incomplete.\n";
+                        }
+                    }
+                }
+                return render(resp);
             }
             // On failure, choose fallback only when not daemon-only
             return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats unavailable"} : fallback();
@@ -170,37 +245,38 @@ private:
         dreq.detailed = verbose_;
         dreq.includeCache = false; // Focus on vector-specific data
 
-        // Render lambda for results - focus on vector-related data
+        // Render lambda for results - focus on vector-related data, prefer daemon JSON
         auto render = [&](const yams::daemon::GetStatsResponse& resp) -> Result<void> {
+            uint64_t totalDocs = resp.totalDocuments;
+            uint64_t vecSize = resp.vectorIndexSize;
+            uint64_t indexedDocs = resp.indexedDocuments;
+            auto itJson = resp.additionalStats.find("json");
+            if (itJson != resp.additionalStats.end()) {
+                try {
+                    auto j = json::parse(itJson->second);
+                    if (j.contains("total_documents"))
+                        totalDocs = j["total_documents"].get<uint64_t>();
+                    if (j.contains("vector_index_size"))
+                        vecSize = j["vector_index_size"].get<uint64_t>();
+                    if (j.contains("indexed_documents"))
+                        indexedDocs = j["indexed_documents"].get<uint64_t>();
+                } catch (...) {
+                }
+            }
             if (format_ == "json") {
                 json output;
-                output["vectorDatabase"] = {{"indexedDocuments", resp.indexedDocuments},
-                                            {"vectorIndexSize", resp.vectorIndexSize},
-                                            {"totalDocuments", resp.totalDocuments}};
-
-                // Extract vector-related additional stats
-                json vectorStats;
-                for (const auto& [key, value] : resp.additionalStats) {
-                    if (key.find("vector") != std::string::npos ||
-                        key.find("embedding") != std::string::npos) {
-                        vectorStats[key] = value;
-                    }
-                }
-                if (!vectorStats.empty()) {
-                    output["vectorDetails"] = vectorStats;
-                }
-
+                output["vectorDatabase"] = {{"indexedDocuments", indexedDocs},
+                                            {"vectorIndexSize", vecSize},
+                                            {"totalDocuments", totalDocs}};
                 std::cout << output.dump(2) << std::endl;
             } else {
-                std::cout << "Vector Database Statistics\n";
-                std::cout << "==========================\n";
-                std::cout << "Indexed Documents: " << resp.indexedDocuments << "\n";
-                std::cout << "Vector Index Size: " << formatSize(resp.vectorIndexSize) << "\n";
-                std::cout << "Total Documents: " << resp.totalDocuments << "\n";
-
-                if (resp.vectorIndexSize > 0 && resp.totalDocuments > 0) {
-                    double coverage = (double)resp.indexedDocuments / resp.totalDocuments * 100;
-                    std::cout << "Coverage: " << std::fixed << std::setprecision(1) << coverage
+                std::cout << "== VECTORS ==\n";
+                std::cout << "INDEX: " << formatNumber(indexedDocs) << "\n";
+                std::cout << "SIZE : " << formatSize(vecSize) << "\n";
+                if (totalDocs > 0) {
+                    double coverage =
+                        (double)indexedDocs / std::max<uint64_t>(1, totalDocs) * 100.0;
+                    std::cout << "COV  : " << std::fixed << std::setprecision(1) << coverage
                               << "%\n";
                 }
             }
@@ -251,11 +327,10 @@ private:
                 {"path", vdbPath.string()}, {"exists", exists}, {"embeddings", vectorCount}};
             std::cout << j.dump(2) << std::endl;
         } else {
-            std::cout << "Vector Database Statistics\n";
-            std::cout << "==========================\n";
-            std::cout << "Path: " << vdbPath.string() << "\n";
-            std::cout << "Exists: " << (exists ? "Yes" : "No") << "\n";
-            std::cout << "Embeddings: " << vectorCount << "\n";
+            std::cout << "== VECTORS ==\n";
+            std::cout << "PATH : " << vdbPath.string() << "\n";
+            std::cout << "EXIST: " << (exists ? "yes" : "no") << "\n";
+            std::cout << "COUNT: " << vectorCount << "\n";
         }
 
         return Result<void>();
@@ -280,18 +355,34 @@ private:
         auto stats = store->getStats();
 
         // Calculate storage size and provide basic output
+        // Also check vector DB file size for local approximations
+        namespace fs = std::filesystem;
+        fs::path vdbPath = cli_->getDataPath() / "vectors.db";
+        uint64_t vdbSize = 0;
+        std::error_code ec;
+        if (fs::exists(vdbPath, ec) && !ec) {
+            vdbSize = fs::file_size(vdbPath, ec);
+            if (ec)
+                vdbSize = 0;
+        }
+
         if (format_ == "json") {
             json output;
             output["storage"]["total_documents"] = stats.totalObjects;
             output["storage"]["total_size"] = stats.totalBytes;
             output["storage"]["unique_blocks"] = stats.uniqueBlocks;
+            if (vdbSize > 0)
+                output["storage"]["vector_index_size"] = vdbSize;
             std::cout << output.dump(2) << std::endl;
         } else {
-            std::cout << "\n=== Storage Statistics (Local) ===\n\n";
-            std::cout << "  Total Documents: " << stats.totalObjects << "\n";
-            std::cout << "  Total Size: " << formatSize(stats.totalBytes) << "\n";
-            std::cout << "  Unique Blocks: " << stats.uniqueBlocks << "\n";
-            std::cout << std::endl;
+            // Retro, compact output
+            std::cout << "== STORAGE (LOCAL) ==\n";
+            std::cout << "DOCS : " << formatNumber(stats.totalObjects) << "\n";
+            std::cout << "SIZE : " << formatSize(stats.totalBytes) << "\n";
+            std::cout << "BLOCK: " << formatNumber(stats.uniqueBlocks) << "\n";
+            if (vdbSize > 0) {
+                std::cout << "VECDB: " << formatSize(vdbSize) << "\n";
+            }
         }
 
         return Result<void>();
@@ -357,6 +448,9 @@ private:
     void printSectionHeader(const std::string& title) const {
         std::cout << yams::cli::ui::section_header(title) << "\n\n";
     }
+
+    // Stash readiness info for JSON output when applicable
+    std::vector<std::string> pendingWaiting_;
 
     struct Row {
         std::string label;
@@ -482,22 +576,87 @@ private:
     // ===================
 
     Result<void> renderText(const yams::daemon::GetStatsResponse& resp) {
-        // Command center banner and Storage Overview
-        std::cout << yams::cli::ui::title_banner("YAMS Command Center - Storage Statistics",
-                                                 yams::cli::ui::terminal_width())
-                  << "\n\n";
-        renderStorageOverview(resp);
-
-        // Always show health and recommendations (new default behavior)
-        renderSmartHealthSection(resp);
-        renderRecommendationsSection(resp);
-
-        // Verbose mode shows comprehensive technical details
-        if (verbose_) {
-            renderTechnicalDetailsSection(resp);
-            renderServiceStatusSection(resp);
+        // Prefer daemon JSON payload if present
+        uint64_t totalDocs = resp.totalDocuments;
+        uint64_t totalSize = resp.totalSize;
+        uint64_t indexedDocs = resp.indexedDocuments;
+        uint64_t vecSize = resp.vectorIndexSize;
+        uint64_t uniqueBlocks = 0;
+        bool notReady = false;
+        uint64_t p50 = 0, p95 = 0;
+        auto itJson = resp.additionalStats.find("json");
+        if (itJson != resp.additionalStats.end()) {
+            try {
+                auto j = json::parse(itJson->second);
+                if (j.contains("total_documents"))
+                    totalDocs = j["total_documents"].get<uint64_t>();
+                if (j.contains("total_size"))
+                    totalSize = j["total_size"].get<uint64_t>();
+                if (j.contains("indexed_documents"))
+                    indexedDocs = j["indexed_documents"].get<uint64_t>();
+                if (j.contains("vector_index_size"))
+                    vecSize = j["vector_index_size"].get<uint64_t>();
+                if (j.contains("not_ready"))
+                    notReady = j["not_ready"].get<bool>();
+                if (j.contains("latency_p50_ms"))
+                    p50 = j["latency_p50_ms"].get<uint64_t>();
+                if (j.contains("latency_p95_ms"))
+                    p95 = j["latency_p95_ms"].get<uint64_t>();
+                if (j.contains("additional") && j["additional"].contains("unique_blocks")) {
+                    // legacy, but keep if present
+                    uniqueBlocks = std::stoull(j["additional"]["unique_blocks"].get<std::string>());
+                }
+            } catch (...) {
+            }
+        } else {
+            auto itBlocks = resp.additionalStats.find("unique_blocks");
+            if (itBlocks != resp.additionalStats.end()) {
+                try {
+                    uniqueBlocks = std::stoull(itBlocks->second);
+                } catch (...) {
+                }
+            }
+            auto itNotReady = resp.additionalStats.find("not_ready");
+            if (itNotReady != resp.additionalStats.end())
+                notReady = (itNotReady->second == "true");
         }
 
+        if (verbose_) {
+            // Default themed sections (no duplicate headers)
+            renderSmartHealthSection(resp);
+            renderRecommendationsSection(resp);
+            // Inject latency metrics into Technical Details section via additional rows
+            if (p50 > 0 || p95 > 0) {
+                printSectionHeader("Technical Details");
+                std::vector<yams::cli::ui::Row> rows;
+                rows.push_back({"Latency p50", std::to_string(p50) + "ms", ""});
+                rows.push_back({"Latency p95", std::to_string(p95) + "ms", ""});
+                yams::cli::ui::render_rows(std::cout, rows);
+                std::cout << "\n";
+            }
+            renderTechnicalDetailsSection(resp);
+            renderServiceStatusSection(resp);
+        } else {
+            // Strong system health summary first
+            renderSmartHealthSection(resp);
+            // Then retro compact totals
+            // Retro, compact output
+            std::cout << "== STATS ==" << (notReady ? "  [INIT]" : "") << "\n";
+            std::cout << "DOCS : " << formatNumber(totalDocs) << "\n";
+            std::cout << "SIZE : " << formatSize(totalSize) << "\n";
+            if (uniqueBlocks > 0) {
+                std::cout << "BLOCK: " << formatNumber(uniqueBlocks) << "\n";
+            }
+            if (indexedDocs > 0 || totalDocs > 0) {
+                double pct =
+                    (totalDocs > 0) ? (static_cast<double>(indexedDocs) / totalDocs * 100.0) : 0.0;
+                std::cout << "INDEX: " << formatNumber(indexedDocs) << " (" << std::fixed
+                          << std::setprecision(1) << pct << "%)\n";
+            }
+            if (vecSize > 0) {
+                std::cout << "VECDB: " << formatSize(vecSize) << "\n";
+            }
+        }
         return Result<void>();
     }
 
@@ -530,6 +689,10 @@ private:
             {"ipc_pool_enabled", true},
             {"daemon_socket", yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string()},
             {"version", YAMS_VERSION_STRING}};
+
+        if (!pendingWaiting_.empty()) {
+            output["waiting_on"] = pendingWaiting_;
+        }
 
         std::cout << output.dump(2) << std::endl;
         return Result<void>();
@@ -600,6 +763,82 @@ private:
 
     void renderSmartHealthSection(const yams::daemon::GetStatsResponse& resp) {
         printSectionHeader("System Health");
+
+        // One-line services summary (✓/⚠/✗)
+        try {
+            json j;
+            bool haveJson = false;
+            if (auto itj = resp.additionalStats.find("json"); itj != resp.additionalStats.end()) {
+                j = json::parse(itj->second);
+                haveJson = true;
+            }
+            auto gs = [&](const std::string& key, const std::string& good, const std::string& bad,
+                          const std::string& unk) -> std::string {
+                auto it = resp.additionalStats.find(key);
+                std::string v = (it != resp.additionalStats.end()) ? it->second : std::string{};
+                if (v.empty() && haveJson && j.contains("services") &&
+                    j["services"].contains(key.substr(8))) {
+                    v = j["services"][key.substr(8)].get<std::string>();
+                }
+                if (v == good)
+                    return "✓";
+                if (v == bad || v == "error" || v == "unavailable" || v == "not_initialized")
+                    return "⚠";
+                return unk; // unknown
+            };
+            std::string content = gs("service_contentstore", "running", "unavailable", "⚠");
+            std::string repo = gs("service_metadatarepo", "running", "unavailable", "⚠");
+            std::string search;
+            {
+                auto it = resp.additionalStats.find("service_searchexecutor");
+                std::string v = (it != resp.additionalStats.end()) ? it->second : std::string{};
+                if (v.empty() && haveJson && j.contains("services") &&
+                    j["services"].contains("searchexecutor"))
+                    v = j["services"]["searchexecutor"].get<std::string>();
+                if (v == "available")
+                    search = "✓";
+                else {
+                    std::string reason;
+                    auto r = resp.additionalStats.find("searchexecutor_reason");
+                    if (r != resp.additionalStats.end())
+                        reason = r->second;
+                    else if (haveJson && j.contains("services"))
+                        reason = j["services"].value("searchexecutor_reason", "");
+                    search = reason.empty() ? "⚠" : ("⚠ (" + reason + ")");
+                }
+            }
+            std::string models;
+            {
+                std::string svc;
+                auto it = resp.additionalStats.find("service_embeddingservice");
+                if (it != resp.additionalStats.end())
+                    svc = it->second;
+                else if (haveJson && j.contains("services") &&
+                         j["services"].contains("embeddingservice"))
+                    svc = j["services"]["embeddingservice"].get<std::string>();
+                std::string count = "";
+                if (auto ml = resp.additionalStats.find("onnx_models_loaded");
+                    ml != resp.additionalStats.end())
+                    count = ml->second;
+                else if (haveJson && j.contains("services") &&
+                         j["services"].contains("onnx_models_loaded"))
+                    count = j["services"]["onnx_models_loaded"].dump();
+                if (svc == "available") {
+                    if (count == "0" || count == "\"0\"")
+                        models = "⚠ (0)";
+                    else
+                        models = "✓";
+                } else if (svc == "unavailable" || svc == "error") {
+                    models = "⚠";
+                } else {
+                    models = "⚠";
+                }
+            }
+            std::string summary = content + " Content | " + repo + " Repo | " + search +
+                                  " Search | " + models + " Models";
+            yams::cli::ui::render_rows(std::cout, {{"Services", summary, ""}});
+        } catch (...) {
+        }
 
         // Overall status
         auto healthStatus = resp.additionalStats.find("health_status");
@@ -830,6 +1069,18 @@ private:
     void renderServiceStatusSection(const yams::daemon::GetStatsResponse& resp) {
         printSectionHeader("Service Status");
 
+        // Parse daemon JSON for service keys when proto didn't carry them
+        json j;
+        bool haveJson = false;
+        if (auto itj = resp.additionalStats.find("json"); itj != resp.additionalStats.end()) {
+            try {
+                j = json::parse(itj->second);
+                haveJson = true;
+            } catch (...) {
+                haveJson = false;
+            }
+        }
+
         // Show daemon version and uptime
         std::vector<yams::cli::ui::Row> statusRows;
         auto versionIt = resp.additionalStats.find("daemon_version");
@@ -877,10 +1128,28 @@ private:
 
         // SearchExecutor status
         auto searchIt = resp.additionalStats.find("service_searchexecutor");
-        std::string searchStatus =
-            searchIt != resp.additionalStats.end() && searchIt->second == "available"
-                ? "✓ Available"
-                : "⚠ Unavailable";
+        std::string searchStatus;
+        if (searchIt != resp.additionalStats.end()) {
+            if (searchIt->second == "available") {
+                searchStatus = "✓ Available";
+            } else {
+                auto reasonIt = resp.additionalStats.find("searchexecutor_reason");
+                searchStatus = reasonIt != resp.additionalStats.end()
+                                   ? "⚠ Unavailable (" + reasonIt->second + ")"
+                                   : std::string{"⚠ Unavailable"};
+            }
+        } else if (haveJson && j.contains("services") && j["services"].contains("searchexecutor")) {
+            auto st = j["services"]["searchexecutor"].get<std::string>();
+            if (st == "available")
+                searchStatus = "✓ Available";
+            else {
+                std::string reason = j["services"].value("searchexecutor_reason", "");
+                searchStatus =
+                    reason.empty() ? "⚠ Unavailable" : ("⚠ Unavailable (" + reason + ")");
+            }
+        } else {
+            searchStatus = "⚠ Unknown";
+        }
         statusRows.push_back({"SearchExecutor", searchStatus, ""});
 
         yams::cli::ui::render_rows(std::cout, statusRows);
@@ -937,26 +1206,40 @@ private:
         auto modelsLoadedIt = resp.additionalStats.find("onnx_models_loaded");
         auto modelsErrorIt = resp.additionalStats.find("onnx_models_error");
 
+        // Determine service state from proto or JSON
+        std::string embeddingSvcState;
         if (embeddingServiceIt != resp.additionalStats.end()) {
-            if (embeddingServiceIt->second == "available") {
+            embeddingSvcState = embeddingServiceIt->second;
+        } else if (haveJson && j.contains("services") &&
+                   j["services"].contains("embeddingservice")) {
+            embeddingSvcState = j["services"]["embeddingservice"].get<std::string>();
+        }
+
+        if (!embeddingSvcState.empty()) {
+            if (embeddingSvcState == "available") {
                 std::string modelsCount =
-                    modelsLoadedIt != resp.additionalStats.end() ? modelsLoadedIt->second : "0";
+                    modelsLoadedIt != resp.additionalStats.end()
+                        ? modelsLoadedIt->second
+                        : (haveJson && j.contains("services") &&
+                                   j["services"].contains("onnx_models_loaded")
+                               ? j["services"]["onnx_models_loaded"].dump()
+                               : std::string{"0"});
                 if (modelsCount == "0") {
+                    yams::cli::ui::render_rows(std::cout,
+                                               {{"ONNX Models", "⚠ No models loaded (0)", ""}});
                     yams::cli::ui::render_rows(
-                        std::cout, {{"ONNX Models", "⚠ No models loaded (0/1 available)", ""}});
-                    yams::cli::ui::render_rows(
-                        std::cout, {{"", "", "Run 'yams model --download all-MiniLM-L6-v2'"}});
+                        std::cout, {{"", "", "Run 'yams model download all-MiniLM-L6-v2'"}});
                 } else {
                     yams::cli::ui::render_rows(
                         std::cout, {{"ONNX Models", "✓ " + modelsCount + " models loaded", ""}});
                 }
-            } else if (embeddingServiceIt->second == "unavailable") {
+            } else if (embeddingSvcState == "unavailable") {
                 yams::cli::ui::render_rows(std::cout,
                                            {{"ONNX Models", "⚠ Service unavailable", ""}});
                 if (modelsErrorIt != resp.additionalStats.end()) {
                     yams::cli::ui::render_rows(std::cout, {{"", "", modelsErrorIt->second}});
                 }
-            } else if (embeddingServiceIt->second == "error") {
+            } else if (embeddingSvcState == "error") {
                 yams::cli::ui::render_rows(std::cout, {{"ONNX Models", "✗ Service error", ""}});
                 if (modelsErrorIt != resp.additionalStats.end()) {
                     yams::cli::ui::render_rows(std::cout, {{"", "", modelsErrorIt->second}});

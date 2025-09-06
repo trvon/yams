@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
@@ -14,6 +15,7 @@
 #endif
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/common/name_resolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -21,6 +23,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/ipc/latency_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -78,23 +81,21 @@ double getCpuUsage() {
         return static_cast<double>(thread_count) * 0.1; // Rough approximation
     }
 #else
-    // Linux implementation - count threads from /proc/self/stat
-    std::ifstream stat("/proc/self/stat");
-    if (stat.is_open()) {
+    // Linux implementation - read thread count from /proc/self/status (robust to spaces)
+    std::ifstream status("/proc/self/status");
+    if (status.is_open()) {
         std::string line;
-        std::getline(stat, line);
-        // Parse the stat line to get thread count (field 20)
-        std::istringstream iss(line);
-        std::string field;
-        int field_num = 0;
-        while (iss >> field && field_num < 20) {
-            field_num++;
-            if (field_num == 20) {
+        while (std::getline(status, line)) {
+            if (line.rfind("Threads:", 0) == 0) {
                 try {
-                    int thread_count = std::stoi(field);
-                    return static_cast<double>(thread_count) * 0.1; // Rough approximation
+                    std::istringstream iss(line);
+                    std::string label;
+                    int thread_count = 0;
+                    iss >> label >> thread_count;
+                    if (thread_count > 0) {
+                        return static_cast<double>(thread_count) * 0.1; // Very rough proxy
+                    }
                 } catch (...) {
-                    // Ignore parsing errors
                 }
             }
         }
@@ -175,6 +176,8 @@ Response RequestDispatcher::dispatch(const Request& req) {
                 return handleGrepRequest(arg);
             } else if constexpr (std::is_same_v<T, DownloadRequest>) {
                 return handleDownloadRequest(arg);
+            } else if constexpr (std::is_same_v<T, PrepareSessionRequest>) {
+                return handlePrepareSessionRequest(arg);
             } else if constexpr (std::is_same_v<T, CancelRequest>) {
                 return handleCancelRequest(arg);
             } else {
@@ -185,103 +188,111 @@ Response RequestDispatcher::dispatch(const Request& req) {
 }
 
 Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
-    auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
+    // Minimal and safe status path to avoid early-crash scenarios
     StatusResponse res;
-    res.running = true;
-    res.uptimeSeconds = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
-    res.requestsProcessed = state_->stats.requestsProcessed.load();
-    res.activeConnections = state_->stats.activeConnections.load();
-    res.memoryUsageMb = getMemoryUsage();
-    res.cpuUsagePercent = getCpuUsage();
-    res.version = YAMS_VERSION_STRING;
-    // FSM transport metrics (aggregated snapshot)
-    {
-        auto snap = FsmMetricsRegistry::instance().snapshot();
-        res.fsmTransitions = snap.transitions;
-        res.fsmHeaderReads = snap.headerReads;
-        res.fsmPayloadReads = snap.payloadReads;
-        res.fsmPayloadWrites = snap.payloadWrites;
-        res.fsmBytesSent = snap.bytesSent;
-        res.fsmBytesReceived = snap.bytesReceived;
-    }
-    // Multiplexing metrics (aggregated)
-    {
-        auto msnap = MuxMetricsRegistry::instance().snapshot();
-        res.muxActiveHandlers = msnap.activeHandlers;
-        res.muxQueuedBytes = msnap.queuedBytes;
-        res.muxWriterBudgetBytes = msnap.writerBudgetBytes;
-    }
+    try {
+        auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
+        res.running = true;
+        res.version = YAMS_VERSION_STRING;
+        res.uptimeSeconds = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
+        res.requestsProcessed = state_->stats.requestsProcessed.load();
+        res.activeConnections = state_->stats.activeConnections.load();
+        // Keep resource probes simple and resilient
+        res.memoryUsageMb = getMemoryUsage();
+        res.cpuUsagePercent = getCpuUsage();
 
-    // Overall readiness (backward compatibility)
-    res.ready = state_->readiness.fullyReady();
+        // Overall readiness (back-compat)
+        res.ready = state_->readiness.fullyReady();
 
-    // Detailed readiness states
-    res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
-    res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
-    res.readinessStates["database"] = state_->readiness.databaseReady.load();
-    res.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
-    res.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
-    res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
-    res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
-    res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+        // Detailed readiness states
+        res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
+        res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
+        res.readinessStates["database"] = state_->readiness.databaseReady.load();
+        res.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
+        res.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
+        res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
+        res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
+        res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
 
-    // Progress for long-running initializations
-    if (!state_->readiness.searchEngineReady.load()) {
-        res.initProgress["search_engine"] = state_->readiness.searchProgress.load();
-    }
-    if (!state_->readiness.vectorIndexReady.load()) {
-        res.initProgress["vector_index"] = state_->readiness.vectorIndexProgress.load();
-    }
-    if (!state_->readiness.modelProviderReady.load()) {
-        res.initProgress["model_provider"] = state_->readiness.modelLoadProgress.load();
-    }
+        // Progress for long-running initializations
+        if (!state_->readiness.searchEngineReady.load())
+            res.initProgress["search_engine"] = state_->readiness.searchProgress.load();
+        if (!state_->readiness.vectorIndexReady.load())
+            res.initProgress["vector_index"] = state_->readiness.vectorIndexProgress.load();
+        if (!state_->readiness.modelProviderReady.load())
+            res.initProgress["model_provider"] = state_->readiness.modelLoadProgress.load();
 
-    // Overall status from lifecycle FSM
-    auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
-    switch (lifecycleSnapshot.state) {
-        case LifecycleState::Unknown:
-            res.overallStatus = "Unknown";
-            break;
-        case LifecycleState::Starting:
-            res.overallStatus = "Starting";
-            break;
-        case LifecycleState::Initializing:
-            res.overallStatus = "Initializing";
-            break;
-        case LifecycleState::Ready:
-            res.overallStatus = "Ready";
-            break;
-        case LifecycleState::Degraded:
-            res.overallStatus = "Degraded";
-            break;
-        case LifecycleState::Failed:
-            res.overallStatus = "Failed: " + lifecycleSnapshot.lastError;
-            break;
-        case LifecycleState::Stopping:
-            res.overallStatus = "Stopping";
-            break;
-        case LifecycleState::Stopped:
-            res.overallStatus = "Stopped";
-            break;
-        default:
-            res.overallStatus = "Unknown";
-            break;
-    }
-
-    // Add model information if available from service manager
-    if (serviceManager_ && serviceManager_->getModelProvider()) {
-        auto modelProvider = serviceManager_->getModelProvider();
-        auto loadedModels = modelProvider->getLoadedModels();
-        for (const auto& modelName : loadedModels) {
-            StatusResponse::ModelInfo info;
-            info.name = modelName;
-            info.type = "ONNX";
-            info.memoryMb = 0;     // TODO: Get actual memory usage
-            info.requestCount = 0; // TODO: Get actual request count
-            res.models.push_back(info);
+        // Derive overall status from authoritative lifecycle FSM rather than
+        // readiness booleans (which include optional subsystems like models).
+        try {
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            switch (lifecycleSnapshot.state) {
+                case LifecycleState::Ready:
+                    res.overallStatus = "ready";
+                    break;
+                case LifecycleState::Degraded:
+                    res.overallStatus = "degraded";
+                    break;
+                case LifecycleState::Initializing:
+                    res.overallStatus = "initializing";
+                    break;
+                case LifecycleState::Starting:
+                    res.overallStatus = "starting";
+                    break;
+                case LifecycleState::Failed:
+                    res.overallStatus = "failed";
+                    break;
+                case LifecycleState::Stopping:
+                    res.overallStatus = "stopping";
+                    break;
+                case LifecycleState::Stopped:
+                    res.overallStatus = "stopped";
+                    break;
+                case LifecycleState::Unknown:
+                default:
+                    res.overallStatus = "initializing";
+                    break;
+            }
+        } catch (...) {
+            // Fallback to legacy readiness view
+            res.overallStatus = state_->readiness.overallStatus();
         }
-    }
 
+        // FSM/MUX metrics: expose only when daemon is Ready/Degraded to avoid early init races
+        try {
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            if (lifecycleSnapshot.state == LifecycleState::Ready ||
+                lifecycleSnapshot.state == LifecycleState::Degraded) {
+                auto snap = FsmMetricsRegistry::instance().snapshot();
+                res.fsmTransitions = snap.transitions;
+                res.fsmHeaderReads = snap.headerReads;
+                res.fsmPayloadReads = snap.payloadReads;
+                res.fsmPayloadWrites = snap.payloadWrites;
+                res.fsmBytesSent = snap.bytesSent;
+                res.fsmBytesReceived = snap.bytesReceived;
+
+                auto msnap = MuxMetricsRegistry::instance().snapshot();
+                res.muxActiveHandlers = msnap.activeHandlers;
+                res.muxQueuedBytes = msnap.queuedBytes;
+                res.muxWriterBudgetBytes = msnap.writerBudgetBytes;
+            }
+        } catch (...) {
+            // best-effort only
+        }
+    } catch (...) {
+        // On any unexpected issue, return a minimal running=false stub to avoid crash
+        StatusResponse fallback;
+        fallback.running = true;
+        fallback.ready = false;
+        fallback.uptimeSeconds = 0;
+        fallback.requestsProcessed = 0;
+        fallback.activeConnections = 0;
+        fallback.memoryUsageMb = 0;
+        fallback.cpuUsagePercent = 0;
+        fallback.version = YAMS_VERSION_STRING;
+        fallback.overallStatus = "Starting";
+        return fallback;
+    }
     return res;
 }
 
@@ -527,6 +538,50 @@ Response RequestDispatcher::handleGetRequest(const GetRequest& req) {
         return ErrorResponse{ErrorCode::InternalError,
                              std::string("Get request failed: ") + e.what()};
     }
+}
+
+// PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
+int RequestDispatcher::prepareSession(const PrepareSessionOptions& opts) {
+    try {
+        auto appContext = serviceManager_->getAppContext();
+        auto svc = yams::app::services::makeSessionService(&appContext);
+        if (!svc)
+            return -1;
+        if (!opts.sessionName.empty()) {
+            if (!svc->exists(opts.sessionName))
+                return -2;
+            svc->use(opts.sessionName);
+        }
+        yams::app::services::PrepareBudget b;
+        b.maxCores = opts.maxCores;
+        b.maxMemoryGb = opts.maxMemoryGb;
+        b.maxTimeMs = opts.maxTimeMs;
+        b.aggressive = opts.aggressive;
+        auto warmed = svc->prepare(b, opts.limit, opts.snippetLen);
+        return static_cast<int>(warmed);
+    } catch (...) {
+        return -3;
+    }
+}
+
+Response RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequest& req) {
+    PrepareSessionOptions opts;
+    opts.sessionName = req.sessionName;
+    opts.maxCores = req.cores;
+    opts.maxMemoryGb = req.memoryGb;
+    opts.maxTimeMs = req.timeMs;
+    opts.aggressive = req.aggressive;
+    opts.limit = req.limit;
+    opts.snippetLen = req.snippetLen;
+
+    int warmed = prepareSession(opts);
+    if (warmed < 0) {
+        return ErrorResponse{ErrorCode::InternalError, "Session prepare failed"};
+    }
+    PrepareSessionResponse resp;
+    resp.warmedCount = static_cast<uint64_t>(warmed);
+    resp.message = "OK";
+    return resp;
 }
 
 Response RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
@@ -1285,6 +1340,11 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         // Create stats response. Prefer content store object count when available; fall back to
         // metadata.
         GetStatsResponse response;
+        // Explicit readiness indicator for consumers (CLI can avoid showing zeros blindly)
+        try {
+            response.additionalStats["ready"] = state_->readiness.fullyReady() ? "true" : "false";
+        } catch (...) {
+        }
         const size_t storeDocCount = static_cast<size_t>(storeStats.totalObjects);
         response.totalDocuments = (storeDocCount > 0) ? storeDocCount : metaDocCount;
         response.totalSize = storeStats.totalBytes;
@@ -1581,10 +1641,23 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 // ignore
             }
 
-            // Check search executor
-            auto searchExecutor = serviceManager_->getSearchExecutor();
-            response.additionalStats["service_searchexecutor"] =
-                searchExecutor ? "available" : "unavailable";
+            // Check search executor with reason if unavailable
+            {
+                auto searchExecutor = serviceManager_->getSearchExecutor();
+                if (searchExecutor) {
+                    response.additionalStats["service_searchexecutor"] = "available";
+                } else {
+                    response.additionalStats["service_searchexecutor"] = "unavailable";
+                    std::string reason;
+                    if (!state_->readiness.databaseReady.load())
+                        reason = "database_not_ready";
+                    else if (!state_->readiness.metadataRepoReady.load())
+                        reason = "metadata_repo_not_ready";
+                    else
+                        reason = "not_initialized";
+                    response.additionalStats["searchexecutor_reason"] = reason;
+                }
+            }
 
             // Check vector database status
             try {
@@ -1613,11 +1686,139 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 response.additionalStats["vectordb_error"] = e.what();
             }
 
+            // Embedding / ONNX provider status
+            try {
+                auto provider = serviceManager_->getModelProvider();
+                auto generator = serviceManager_->getEmbeddingGenerator();
+                if (generator) {
+                    response.additionalStats["service_embeddingservice"] = "available";
+                } else {
+                    response.additionalStats["service_embeddingservice"] = "unavailable";
+                }
+                if (provider) {
+                    auto loaded = provider->getLoadedModels();
+                    response.additionalStats["onnx_models_loaded"] = std::to_string(loaded.size());
+                } else {
+                    response.additionalStats["onnx_models_loaded"] = "0";
+                }
+            } catch (...) {
+                response.additionalStats["service_embeddingservice"] = "unavailable";
+            }
+
             // Service startup order and timing
             response.additionalStats["service_startup_order"] =
                 "contentstore,metadatarepo,searchexecutor,embeddingservice";
             response.additionalStats["service_initialization_time"] =
                 std::to_string(uptimeSeconds); // Time since daemon start
+        }
+
+        // Add explicit readiness indicator for stats consumers
+        {
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            bool readyish = (lifecycleSnapshot.state == LifecycleState::Ready ||
+                             lifecycleSnapshot.state == LifecycleState::Degraded);
+            response.additionalStats["not_ready"] = readyish ? "false" : "true";
+        }
+
+        // Provide a compact JSON payload so proto path can carry richer details
+        try {
+            nlohmann::json j;
+            j["total_documents"] = response.totalDocuments;
+            j["total_size"] = response.totalSize;
+            j["indexed_documents"] = response.indexedDocuments;
+            j["vector_index_size"] = response.vectorIndexSize;
+            j["compression_ratio"] = response.compressionRatio;
+            // Basic runtime stats for CLI without relying on Status proto
+            j["memory_mb"] = getMemoryUsage();
+            j["cpu_pct"] = getCpuUsage();
+            auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
+            j["uptime_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
+            j["version"] = std::string(YAMS_VERSION_STRING);
+
+            // Readiness snapshot
+            nlohmann::json rd;
+            rd["ipc_server"] = state_->readiness.ipcServerReady.load();
+            rd["content_store"] = state_->readiness.contentStoreReady.load();
+            rd["database"] = state_->readiness.databaseReady.load();
+            rd["metadata_repo"] = state_->readiness.metadataRepoReady.load();
+            rd["search_engine"] = state_->readiness.searchEngineReady.load();
+            rd["model_provider"] = state_->readiness.modelProviderReady.load();
+            rd["vector_index"] = state_->readiness.vectorIndexReady.load();
+            rd["plugins"] = state_->readiness.pluginsReady.load();
+            j["readiness"] = rd;
+
+            // Progress
+            nlohmann::json pr;
+            pr["search_engine"] = state_->readiness.searchProgress.load();
+            pr["vector_index"] = state_->readiness.vectorIndexProgress.load();
+            pr["model_provider"] = state_->readiness.modelLoadProgress.load();
+            j["progress"] = pr;
+
+            // Durations and top_slowest from state
+            if (!state_->initDurationsMs.empty()) {
+                nlohmann::json dur;
+                for (const auto& [k, v] : state_->initDurationsMs)
+                    dur[k] = v;
+                j["durations_ms"] = dur;
+                std::vector<std::pair<std::string, uint64_t>> items(state_->initDurationsMs.begin(),
+                                                                    state_->initDurationsMs.end());
+                std::sort(items.begin(), items.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                nlohmann::json top;
+                size_t count = std::min<size_t>(3, items.size());
+                for (size_t i = 0; i < count; ++i) {
+                    top.push_back({{"name", items[i].first}, {"elapsed_ms", items[i].second}});
+                }
+                if (!top.empty())
+                    j["top_slowest"] = top;
+            }
+
+            // Latency snapshot (approximate percentiles)
+            {
+                auto lsnap = LatencyRegistry::instance().snapshot();
+                j["latency_p50_ms"] = lsnap.p50_ms;
+                j["latency_p95_ms"] = lsnap.p95_ms;
+            }
+
+            // Services snapshot for JSON consumers
+            try {
+                nlohmann::json sj;
+                // Copy from additionalStats when available
+                auto it = response.additionalStats.find("service_contentstore");
+                if (it != response.additionalStats.end())
+                    sj["contentstore"] = it->second;
+                it = response.additionalStats.find("service_metadatarepo");
+                if (it != response.additionalStats.end())
+                    sj["metadatarepo"] = it->second;
+                it = response.additionalStats.find("service_searchexecutor");
+                if (it != response.additionalStats.end())
+                    sj["searchexecutor"] = it->second;
+                it = response.additionalStats.find("searchexecutor_reason");
+                if (it != response.additionalStats.end())
+                    sj["searchexecutor_reason"] = it->second;
+                it = response.additionalStats.find("service_vectordb");
+                if (it != response.additionalStats.end())
+                    sj["vectordb"] = it->second;
+                it = response.additionalStats.find("service_embeddingservice");
+                if (it != response.additionalStats.end())
+                    sj["embeddingservice"] = it->second;
+                it = response.additionalStats.find("onnx_models_loaded");
+                if (it != response.additionalStats.end())
+                    sj["onnx_models_loaded"] = it->second;
+                if (!sj.empty())
+                    j["services"] = sj;
+            } catch (...) {
+            }
+
+            // Overall readiness as explicit boolean for banner logic
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            bool readyish = (lifecycleSnapshot.state == LifecycleState::Ready ||
+                             lifecycleSnapshot.state == LifecycleState::Degraded);
+            j["not_ready"] = !readyish;
+
+            response.additionalStats["json"] = j.dump();
+        } catch (...) {
+            // ignore JSON build issues
         }
 
         // Streaming metrics (aggregated)

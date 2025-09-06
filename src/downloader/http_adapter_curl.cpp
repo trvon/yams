@@ -19,6 +19,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <optional>
+#include <span>
 #include <string_view>
 
 namespace yams::downloader {
@@ -97,6 +100,8 @@ struct HeaderParseContext {
     std::optional<std::uint64_t> contentLength{};
     std::optional<std::string> etag;
     std::optional<std::string> lastModified;
+    std::optional<std::string> contentType;
+    std::optional<std::string> suggestedFilename;
 };
 
 // CURL header callback
@@ -148,6 +153,44 @@ static size_t header_cb(char* buffer, size_t size, size_t nitems, void* userdata
         ctx->etag = std::move(v);
     } else if (key == "last-modified") {
         ctx->lastModified = trim(val);
+    } else if (key == "content-type") {
+        ctx->contentType = trim(val);
+    } else if (key == "content-disposition") {
+        // Parse filename or filename* parameter
+        std::string s = std::string(val);
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t semi = s.find(';', pos);
+            std::string part = trim(std::string_view(s).substr(
+                pos, (semi == std::string::npos ? s.size() : semi) - pos));
+            if (!part.empty()) {
+                auto eq = part.find('=');
+                if (eq != std::string::npos) {
+                    auto pkey = to_lower(trim(std::string_view(part).substr(0, eq)));
+                    auto pval = trim(std::string_view(part).substr(eq + 1));
+                    // strip quotes if present
+                    if (pval.size() >= 2 && ((pval.front() == '"' && pval.back() == '"') ||
+                                             (pval.front() == '\'' && pval.back() == '\''))) {
+                        pval = std::string_view(pval).substr(1, pval.size() - 2);
+                    }
+                    if (pkey == "filename*") {
+                        // RFC 5987: charset'lang'urlencoded-filename (best-effort: no URL decode)
+                        std::string pv = std::string(pval);
+                        auto apos = pv.find("''");
+                        if (apos != std::string::npos && apos + 2 < pv.size()) {
+                            ctx->suggestedFilename = pv.substr(apos + 2);
+                        } else {
+                            ctx->suggestedFilename = pv;
+                        }
+                    } else if (pkey == "filename") {
+                        ctx->suggestedFilename = std::string(pval);
+                    }
+                }
+            }
+            if (semi == std::string::npos)
+                break;
+            pos = semi + 1;
+        }
     }
 
     return total;
@@ -257,8 +300,10 @@ public:
                          /*out*/ bool& resumeSupported,
                          /*out*/ std::optional<std::uint64_t>& contentLength,
                          /*out*/ std::optional<std::string>& etag,
-                         /*out*/ std::optional<std::string>& lastModified, const TlsConfig& tls,
-                         const std::optional<std::string>& proxy,
+                         /*out*/ std::optional<std::string>& lastModified,
+                         /*out*/ std::optional<std::string>& contentType,
+                         /*out*/ std::optional<std::string>& suggestedFilename,
+                         const TlsConfig& tls, const std::optional<std::string>& proxy,
                          std::chrono::milliseconds timeout) override {
         resumeSupported = false;
         contentLength.reset();
@@ -318,14 +363,20 @@ public:
         contentLength = hctx.contentLength;
         etag = hctx.etag;
         lastModified = hctx.lastModified;
+        contentType = hctx.contentType;
+        suggestedFilename = hctx.suggestedFilename;
         if (hctx.etag) {
             spdlog::debug("HTTP probe captured ETag: {}", *hctx.etag);
         }
         if (hctx.lastModified) {
             spdlog::debug("HTTP probe captured Last-Modified: {}", *hctx.lastModified);
         }
-        etag = hctx.etag;
-        lastModified = hctx.lastModified;
+        if (hctx.contentType) {
+            spdlog::debug("HTTP probe captured Content-Type: {}", *hctx.contentType);
+        }
+        if (hctx.suggestedFilename) {
+            spdlog::debug("HTTP probe suggested filename: {}", *hctx.suggestedFilename);
+        }
         return Expected<void>{}; // success (no error)
     }
 

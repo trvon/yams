@@ -12,8 +12,13 @@ using namespace yams::metadata;
 class MetadataSchemaTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Use temporary database for tests
-        dbPath_ = std::filesystem::temp_directory_path() / "kronos_metadata_test.db";
+        // Use temporary database for tests; allow override for restricted environments
+        const char* t = std::getenv("YAMS_TEST_TMPDIR");
+        auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
+        std::error_code ec;
+        std::filesystem::create_directories(base, ec);
+        auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+        dbPath_ = base / (std::string("kronos_metadata_test_") + std::to_string(ts) + ".db");
         std::filesystem::remove(dbPath_);
 
         // Initialize connection pool
