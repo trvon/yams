@@ -16,7 +16,8 @@ namespace yams::mcp {
 
 using json = nlohmann::json;
 
-static nlohmann::json wrapToolResult(const nlohmann::json& structured, bool isError = false) {
+[[maybe_unused]] static nlohmann::json wrapToolResult(const nlohmann::json& structured,
+                                                      bool isError = false) {
     nlohmann::json result;
     // Format according to MCP spec - content array with text items
     if (isError) {

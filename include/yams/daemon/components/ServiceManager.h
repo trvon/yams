@@ -173,6 +173,17 @@ public:
     // Helper method to align vector component dimensions after embedding generator is initialized
     void alignVectorComponentDimensions();
 
+    // Model provider degraded state accessors
+    bool isModelProviderDegraded() const {
+        return modelProviderDegraded_.load(std::memory_order_relaxed);
+    }
+    const std::string& lastModelError() const { return lastModelError_; }
+    const std::string& adoptedProviderPluginName() const { return adoptedProviderPluginName_; }
+    void clearModelProviderError() {
+        modelProviderDegraded_.store(false, std::memory_order_relaxed);
+        lastModelError_.clear();
+    }
+
     // Combined embedding initialization and search engine rebuild coroutine.
     // This method provides idempotent, race-safe initialization of embedding capabilities
     // followed by search engine rebuild to enable vector search. Uses atomic guards to
@@ -199,6 +210,17 @@ public:
 
 #ifdef YAMS_TESTING
     // Additional test-only accessors can go here if needed
+    // Inject a mock model provider and override the adopted provider plugin name (tests only)
+    void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
+        modelProvider_ = std::move(provider);
+    }
+    void __test_setAdoptedProviderPluginName(const std::string& name) {
+        adoptedProviderPluginName_ = name;
+    }
+    void __test_setModelProviderDegraded(bool degraded, const std::string& error = {}) {
+        modelProviderDegraded_.store(degraded, std::memory_order_relaxed);
+        lastModelError_ = error;
+    }
 #endif
 
 private:
@@ -207,7 +229,8 @@ private:
                                                  int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
-    co_buildEngine(int timeout_ms, yams::compat::stop_token token);
+    co_buildEngine(int timeout_ms, yams::compat::stop_token token,
+                   bool includeEmbeddingGenerator = true);
 
     const DaemonConfig& config_;
     StateComponent& state_;
@@ -256,6 +279,11 @@ private:
     std::atomic<bool> embedInitCompleted_{false};
     std::atomic<bool> rebuildInProgress_{false};
     std::atomic<bool> preferredPreloadStarted_{false};
+
+    // Degraded provider tracking
+    std::atomic<bool> modelProviderDegraded_{false};
+    std::string lastModelError_;
+    std::string adoptedProviderPluginName_;
 };
 
 } // namespace yams::daemon

@@ -2474,6 +2474,30 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     rec["path"] = d.path.string();
                     if (!d.interfaces.empty())
                         rec["interfaces"] = d.interfaces;
+                    // Enrich adopted provider with degraded/error details and health when available
+                    try {
+                        if (serviceManager_) {
+                            if (!serviceManager_->adoptedProviderPluginName().empty() &&
+                                serviceManager_->adoptedProviderPluginName() == d.name) {
+                                rec["provider"] = true;
+                                if (auto mp = serviceManager_->getModelProvider()) {
+                                    rec["models_loaded"] = mp->getLoadedModels().size();
+                                }
+                                if (serviceManager_->isModelProviderDegraded()) {
+                                    rec["degraded"] = true;
+                                    if (!serviceManager_->lastModelError().empty())
+                                        rec["error"] = serviceManager_->lastModelError();
+                                }
+                            }
+                        }
+                        // Health best-effort
+                        try {
+                            if (auto hr = abi->health(d.name))
+                                rec["health"] = hr.value();
+                        } catch (...) {
+                        }
+                    } catch (...) {
+                    }
                     pj.push_back(rec);
                 }
             } else {
@@ -2488,7 +2512,15 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             }
             response.additionalStats["plugins_loaded"] = std::to_string(count);
             response.additionalStats["plugins_json"] = pj.dump();
+        } catch (const std::exception& ex) {
+            // Fail-safe: ensure keys exist even on error
+            response.additionalStats["plugins_loaded"] = "0";
+            response.additionalStats["plugins_json"] = "[]";
+            response.additionalStats["plugins_error"] = ex.what();
         } catch (...) {
+            response.additionalStats["plugins_loaded"] = "0";
+            response.additionalStats["plugins_json"] = "[]";
+            response.additionalStats["plugins_error"] = "unknown error";
         }
 
         // Defensive fallback: if content store reports zero but configured storage exists,
@@ -2912,6 +2944,22 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                                     rec["health"] = hr.value();
                             } catch (...) {
                             }
+                            // Enrich provider status
+                            try {
+                                if (!serviceManager_->adoptedProviderPluginName().empty() &&
+                                    serviceManager_->adoptedProviderPluginName() == d.name) {
+                                    rec["provider"] = true;
+                                    if (auto mp = serviceManager_->getModelProvider()) {
+                                        rec["models_loaded"] = mp->getLoadedModels().size();
+                                    }
+                                    if (serviceManager_->isModelProviderDegraded()) {
+                                        rec["degraded"] = true;
+                                        if (!serviceManager_->lastModelError().empty())
+                                            rec["error"] = serviceManager_->lastModelError();
+                                    }
+                                }
+                            } catch (...) {
+                            }
                             pj.push_back(rec);
                         }
                     } else {
@@ -2927,7 +2975,14 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     response.additionalStats["plugins_loaded"] = std::to_string(count);
                     response.additionalStats["plugins_json"] = pj.dump();
                 }
+            } catch (const std::exception& ex) {
+                response.additionalStats["plugins_loaded"] = "0";
+                response.additionalStats["plugins_json"] = "[]";
+                response.additionalStats["plugins_error"] = ex.what();
             } catch (...) {
+                response.additionalStats["plugins_loaded"] = "0";
+                response.additionalStats["plugins_json"] = "[]";
+                response.additionalStats["plugins_error"] = "unknown error";
             }
         }
 

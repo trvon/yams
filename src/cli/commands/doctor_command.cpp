@@ -772,14 +772,27 @@ private:
 
             // Show resources (memory/cpu) and worker/mux details when available
             try {
-                std::cout << "  Resources:    RAM=" << std::fixed << std::setprecision(1)
-                          << st.memoryUsageMb << " MB, CPU=" << std::setprecision(0)
-                          << st.cpuUsagePercent << "%\n";
+                if (!st.ready) {
+                    const auto& phase =
+                        (st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState);
+                    if (st.retryAfterMs > 0) {
+                        std::cout << "  Resources:    pending (daemon " << phase << ", retry after "
+                                  << st.retryAfterMs << " ms)" << "\n";
+                    } else {
+                        std::cout << "  Resources:    pending (daemon " << phase << ")" << "\n";
+                    }
+                } else {
+                    std::cout << "  Resources:    RAM=" << std::fixed << std::setprecision(1)
+                              << st.memoryUsageMb << " MB, CPU=" << std::setprecision(0)
+                              << st.cpuUsagePercent << "%\n";
+                }
                 auto wt = st.requestCounts.find("worker_threads");
                 auto wa = st.requestCounts.find("worker_active");
                 auto wq = st.requestCounts.find("worker_queued");
-                if (wt != st.requestCounts.end() || wa != st.requestCounts.end() ||
-                    wq != st.requestCounts.end()) {
+                if (!st.ready) {
+                    std::cout << "  Workers:      pending\n";
+                } else if (wt != st.requestCounts.end() || wa != st.requestCounts.end() ||
+                           wq != st.requestCounts.end()) {
                     size_t threads = wt != st.requestCounts.end() ? wt->second : 0;
                     size_t active = wa != st.requestCounts.end() ? wa->second : 0;
                     size_t queued = wq != st.requestCounts.end() ? wq->second : 0;
@@ -1134,7 +1147,67 @@ private:
                                 std::string name = rec.contains("name")
                                                        ? rec["name"].get<std::string>()
                                                        : std::string("(unknown)");
-                                std::cout << "- " << name << "\n";
+                                std::string line = "- " + name;
+                                try {
+                                    if (rec.contains("provider") && rec["provider"].is_boolean() &&
+                                        rec["provider"].get<bool>()) {
+                                        line += " [provider]";
+                                    }
+                                    if (rec.contains("degraded") && rec["degraded"].is_boolean() &&
+                                        rec["degraded"].get<bool>()) {
+                                        line += " [degraded]";
+                                    }
+                                    if (rec.contains("models_loaded")) {
+                                        try {
+                                            int models = rec["models_loaded"].get<int>();
+                                            if (models > 0) {
+                                                line += " models=" + std::to_string(models);
+                                            }
+                                        } catch (...) {
+                                        }
+                                    }
+                                    if (rec.contains("error")) {
+                                        try {
+                                            if (rec["error"].is_string()) {
+                                                auto err = rec["error"].get<std::string>();
+                                                if (!err.empty()) {
+                                                    line += " error=\"" + err + "\"";
+                                                }
+                                            } else {
+                                                line += " error=" + rec["error"].dump();
+                                            }
+                                        } catch (...) {
+                                        }
+                                    }
+                                } catch (...) {
+                                }
+                                std::cout << line << "\n";
+#ifdef __APPLE__
+                                // macOS diagnostic: if this plugin is degraded and we have a path,
+                                // run `otool -L` to surface DYLIB linkage issues.
+                                try {
+                                    bool __degraded = false;
+                                    std::string __pluginPath;
+                                    try {
+                                        if (rec.contains("degraded") &&
+                                            rec["degraded"].is_boolean())
+                                            __degraded = rec["degraded"].get<bool>();
+                                        if (rec.contains("path") && rec["path"].is_string())
+                                            __pluginPath = rec["path"].get<std::string>();
+                                    } catch (...) {
+                                    }
+                                    if (__degraded && !__pluginPath.empty()) {
+                                        std::cout << "  otool -L: " << __pluginPath << "\n";
+                                        int __rc = std::system(
+                                            (std::string("otool -L \"") + __pluginPath + "\"")
+                                                .c_str());
+                                        if (__rc == -1) {
+                                            std::cout << "    (failed to execute otool)\n";
+                                        }
+                                    }
+                                } catch (...) {
+                                }
+#endif
                             }
                         } else {
                             std::cout << "(none loaded)\n";
@@ -1144,6 +1217,12 @@ private:
                     }
                 } else {
                     std::cout << "(none loaded)\n";
+                }
+                {
+                    auto eit = gs.additionalStats.find("plugins_error");
+                    if (eit != gs.additionalStats.end() && !eit->second.empty()) {
+                        std::cout << "(plugins error: " << eit->second << ")\n";
+                    }
                 }
             }
         } catch (...) {

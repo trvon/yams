@@ -230,9 +230,37 @@ void PluginCommand::listPlugins() {
         for (const auto& rec : pj) {
             std::string name = rec.value("name", "");
             std::string path = rec.value("path", "");
+            bool provider = rec.value("provider", false);
+            bool degraded = rec.value("degraded", false);
+            int models = 0;
+            if (rec.contains("models_loaded")) {
+                try {
+                    models = rec["models_loaded"].get<int>();
+                } catch (...) {
+                }
+            }
             std::cout << "  - " << name;
             if (!path.empty())
                 std::cout << " (" << path << ")";
+            if (provider)
+                std::cout << " [provider]";
+            if (degraded)
+                std::cout << " [degraded]";
+            if (models > 0)
+                std::cout << " models=" << models;
+            if (rec.contains("error")) {
+                try {
+                    auto err = rec["error"];
+                    if (err.is_string()) {
+                        auto s = err.get<std::string>();
+                        if (!s.empty())
+                            std::cout << " error=\"" << s << "\"";
+                    } else {
+                        std::cout << " error=" << err.dump();
+                    }
+                } catch (...) {
+                }
+            }
             std::cout << "\n";
         }
     } catch (const std::exception& e) {

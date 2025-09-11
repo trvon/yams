@@ -1,6 +1,6 @@
+#include "pdf_content_handler.h"
 #include <spdlog/spdlog.h>
 #include <fstream>
-#include "pdf_content_handler.h"
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/text_extractor.h>
 

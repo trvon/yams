@@ -555,8 +555,8 @@ private:
         if (!ensured)
             return ensured;
         // Attempt daemon offload first; fallback to local
-        uint64_t warmedCount = 0;
         bool attemptedDaemon = false;
+
         try {
             yams::cli::DaemonClientPool pool({.min_clients = 1, .max_clients = 1});
             auto leaseRes = pool.acquire();

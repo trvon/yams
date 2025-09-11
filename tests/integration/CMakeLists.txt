@@ -323,3 +323,37 @@ gtest_discover_tests(semantic_search_e2e_test
     PROPERTIES LABELS "daemon;integration"
     TEST_PREFIX "semantic_search_e2e_test."
     TIMEOUT 90)
+
+# Plugins JSON fail-safe integration test
+add_executable(daemon_plugins_json_fail_safe_test daemon/daemon_plugins_json_fail_safe_test.cpp)
+target_link_libraries(daemon_plugins_json_fail_safe_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(daemon_plugins_json_fail_safe_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration;plugins"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)
+
+# CLI degraded output test (verifies plugin list shows provider/degraded/error)
+add_executable(cli_plugin_degraded_output_test daemon/cli_plugin_degraded_output_test.cpp)
+target_link_libraries(cli_plugin_degraded_output_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(cli_plugin_degraded_output_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration;cli"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)

@@ -748,6 +748,10 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                                             timeout_ms, preferred);
                                         state_.readiness.modelLoadProgress.store(
                                             0, std::memory_order_relaxed);
+                                        // Mark provider degraded and try to unload any partial state
+                                        modelProviderDegraded_.store(true, std::memory_order_relaxed);
+                                        lastModelError_ = "preload timeout";
+                                        try { if (modelProvider_) (void)modelProvider_->unloadModel(preferred); } catch (...) {}
                                         return; // Leave provider to complete in background if it can
                                     }
                                     auto lr = fut.get();
@@ -756,15 +760,22 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                                                      lr.error().message);
                                         state_.readiness.modelLoadProgress.store(
                                             0, std::memory_order_relaxed);
+                                        modelProviderDegraded_.store(true, std::memory_order_relaxed);
+                                        lastModelError_ = std::string("preload failed: ") + lr.error().message;
+                                        try { if (modelProvider_) (void)modelProvider_->unloadModel(preferred); } catch (...) {}
                                     } else {
                                         state_.readiness.modelLoadProgress.store(
                                             100, std::memory_order_relaxed);
                                         spdlog::info("Preferred model '{}' preloaded", preferred);
+                                        clearModelProviderError();
                                     }
                                 } catch (const std::exception& ex) {
                                     spdlog::warn("Model preload exception: {}", ex.what());
                                     state_.readiness.modelLoadProgress.store(
                                         0, std::memory_order_relaxed);
+                                    modelProviderDegraded_.store(true, std::memory_order_relaxed);
+                                    lastModelError_ = std::string("preload exception: ") + ex.what();
+                                    try { if (modelProvider_) (void)modelProvider_->unloadModel(preferred); } catch (...) {}
                                 }
                             }).detach();
                         }
@@ -1797,24 +1808,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                             auto meta = getMetadataRepo();
                             auto extractors = getContentExtractors();
                             if (embedGen && store && meta) {
-                                std::thread([store, meta, embedGen, extractors,
-                                             dataDir = resolvedDataDir_]() {
-                                    try {
-                                        yams::repair::EmbeddingRepairConfig rcfg;
-                                        rcfg.batchSize = 32;
-                                        rcfg.skipExisting = true;
-                                        rcfg.dataPath = dataDir;
-                                        spdlog::info("Bootstrap repair: starting immediate "
-                                                     "embedding generation");
-                                        (void)yams::repair::repairMissingEmbeddings(
-                                            store, meta, embedGen, rcfg, {}, nullptr, extractors);
-                                        spdlog::info("Bootstrap repair: embedding generation "
-                                                     "finished (immediate run)");
-                                    } catch (const std::exception& bootstrapEx) {
-                                        spdlog::warn("Bootstrap repair exception: {}",
-                                                     bootstrapEx.what());
-                                    }
-                                }).detach();
+                                // Defer all embedding repairs to the RepairCoordinator once the
+                                // daemon is Ready.
+                                spdlog::info(
+                                    "Bootstrap repair: deferred to RepairCoordinator after Ready");
                             }
                         } catch (...) {
                         }
@@ -1962,7 +1959,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             writeBootstrapStatusFile(config_, state_);
         }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
-        auto built = co_await co_buildEngine(build_timeout, token);
+        auto built = co_await co_buildEngine(build_timeout, token, false);
         if (built) {
             std::lock_guard<std::mutex> lk(searchEngineMutex_);
             searchEngine_ = built;
@@ -2099,14 +2096,15 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
 }
 
 boost::asio::awaitable<std::shared_ptr<search::HybridSearchEngine>>
-ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token) {
+ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token,
+                               bool includeEmbeddingGenerator) {
     using namespace boost::asio::experimental::awaitable_operators;
     auto ex = co_await boost::asio::this_coro::executor;
     searchBuilder_ = std::make_shared<search::SearchEngineBuilder>();
     searchBuilder_->withMetadataRepo(metadataRepo_);
     if (vectorIndexManager_)
         searchBuilder_->withVectorIndex(vectorIndexManager_);
-    if (embeddingGenerator_)
+    if (includeEmbeddingGenerator && embeddingGenerator_)
         searchBuilder_->withEmbeddingGenerator(embeddingGenerator_);
     auto opts = search::SearchEngineBuilder::BuildOptions::makeDefault();
     using RetT = Result<std::shared_ptr<search::HybridSearchEngine>>;
@@ -2168,6 +2166,8 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                 modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
                 state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
                 spdlog::info("Adopted model provider from plugin: {}", pluginName);
+                adoptedProviderPluginName_ = pluginName;
+                clearModelProviderError();
                 // Embedding generator initialization happens in the caller after all plugins are
                 // processed
 
@@ -2302,6 +2302,8 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                                      d.name);
                         modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
                         state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
+                        adoptedProviderPluginName_ = d.name;
+                        clearModelProviderError();
                         return Result<bool>(true);
                     } catch (...) {
                     }
@@ -2495,11 +2497,20 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                             self->state_.readiness.modelLoadProgress.store(
                                 100, std::memory_order_relaxed);
                             spdlog::info("Preferred model '{}' preloaded", preferred);
+                            self->clearModelProviderError();
                         } else {
                             self->state_.readiness.modelLoadProgress.store(
                                 0, std::memory_order_relaxed);
                             spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
                                          r.error().message);
+                            self->modelProviderDegraded_.store(true, std::memory_order_relaxed);
+                            self->lastModelError_ =
+                                std::string("preload failed: ") + r.error().message;
+                            try {
+                                if (self->modelProvider_)
+                                    (void)self->modelProvider_->unloadModel(preferred);
+                            } catch (...) {
+                            }
                             // Retry once after a short delay to tolerate slow filesystems
                             boost::asio::steady_timer timer(
                                 co_await boost::asio::this_coro::executor);
@@ -2513,6 +2524,7 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                                 self->state_.readiness.modelLoadProgress.store(
                                     100, std::memory_order_relaxed);
                                 spdlog::info("Preferred model '{}' preloaded on retry", preferred);
+                                self->clearModelProviderError();
                             } else {
 #ifndef YAMS_USE_ONNX_RUNTIME
                                 spdlog::warn("ONNX runtime disabled in this build; model "
@@ -2585,7 +2597,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             spdlog::info(
                 "Embedding generator ready, rebuilding search engine to enable vector search.");
             int build_timeout = 15000; // Generous timeout for rebuild
-            auto rebuilt = co_await co_buildEngine(build_timeout, {});
+            auto rebuilt = co_await co_buildEngine(build_timeout, {}, true);
 
             if (rebuilt) {
                 {
@@ -2790,6 +2802,13 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
         auto r = modelProvider_->loadModel(preferred);
         if (!r) {
             spdlog::warn("Model provider failed to load '{}': {}", preferred, r.error().message);
+            // Best-effort: unload the model if partially loaded and mark provider degraded
+            try {
+                (void)modelProvider_->unloadModel(preferred);
+            } catch (...) {
+            }
+            modelProviderDegraded_.store(true, std::memory_order_relaxed);
+            lastModelError_ = std::string("load '") + preferred + "' failed: " + r.error().message;
             // Fallback to local model generator
             try {
                 vector::EmbeddingConfig ecfg;
@@ -2816,6 +2835,7 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                                                        preferred + "': " + r.error().message};
         }
 
+        clearModelProviderError();
         // Create and initialize embedding generator, bound to the provider-loaded model via daemon
         // backend. Use provider-reported dimensions to ensure downstream vector DB/index alignment.
         try {

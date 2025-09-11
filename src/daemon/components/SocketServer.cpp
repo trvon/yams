@@ -331,6 +331,7 @@ awaitable<void> SocketServer::accept_loop() {
 
     while (running_ && !stopping_) {
         bool need_delay = false;
+        auto backoff_ms = config_.acceptBackoffMs;
 
         try {
             // Backpressure: if worker queue or mux bytes exceed thresholds, delay accepts
@@ -428,8 +429,17 @@ awaitable<void> SocketServer::accept_loop() {
                 break;
             }
 
-            spdlog::warn("Accept error: {} ({})", e.what(), e.code().message());
-            need_delay = true;
+#if defined(__APPLE__)
+            if (e.code().value() == EINVAL) {
+                spdlog::debug("Accept error (EINVAL): {} ({})", e.what(), e.code().message());
+                backoff_ms = std::chrono::milliseconds(50);
+                need_delay = true;
+            } else
+#endif
+            {
+                spdlog::warn("Accept error: {} ({})", e.what(), e.code().message());
+                need_delay = true;
+            }
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
                 break;
@@ -440,7 +450,7 @@ awaitable<void> SocketServer::accept_loop() {
         // Delay outside of catch block if needed
         if (need_delay) {
             boost::asio::steady_timer timer(io_context_);
-            timer.expires_after(config_.acceptBackoffMs);
+            timer.expires_after(backoff_ms);
             try {
                 co_await timer.async_wait(use_awaitable);
             } catch (const boost::system::system_error&) {

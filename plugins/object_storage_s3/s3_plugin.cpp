@@ -94,12 +94,6 @@ static Result<S3Url> parseS3Url(const std::string& url) {
     return out;
 }
 
-static std::string ensureHttps(const std::string& endpoint) {
-    if (endpoint.rfind("http://", 0) == 0 || endpoint.rfind("https://", 0) == 0)
-        return endpoint;
-    return "https://" + endpoint;
-}
-
 class S3Backend : public IStorageBackendExtended {
 public:
     S3Backend() = default;

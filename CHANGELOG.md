@@ -15,11 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.6.12] - 2025-09-11
-
 ### Known Issues
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
+
+## [v0.6.13] - 2025-09-11
+
+### Hotfixes
+- Build stabilizations and improvements from MacOS testing
+
+## [v0.6.12] - 2025-09-11
 
 ### Added
 - CLI: `yams graph` — read‑only graph viewer that mirrors `get --graph`.
