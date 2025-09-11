@@ -1,0 +1,5 @@
+{
+  "ref": "refs/tags/v1.2.3",
+  "repository": { "full_name": "local/yams" },
+  "head_commit": { "id": "0123456" }
+}

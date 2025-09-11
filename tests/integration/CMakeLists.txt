@@ -1,12 +1,4 @@
-# Toggle legacy integration tests (pre-tinyfsm IPC, older flows)
-option(YAMS_BUILD_LEGACY_INTEGRATION_TESTS "Build legacy integration tests (pre-tinyfsm IPC)" OFF)
 
-# Integration test subdirectories (legacy)
-if(YAMS_BUILD_LEGACY_INTEGRATION_TESTS)
-    add_subdirectory(manifest)
-    add_subdirectory(search)
-    add_subdirectory(daemon)
-endif()
 
 # pool_add_then_query_test removed - API changed with Boost.ASIO migration
 # Include Boost.Test shim to avoid accidental prg/exec monitor undefined refs
@@ -184,3 +176,150 @@ gtest_discover_tests(daemon_embeddings_integration_test
     PROPERTIES LABELS "daemon;integration"
     TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
 )
+
+# Unary vs streaming semantics protocol behavior
+add_executable(daemon_unary_streaming_semantics_test daemon/daemon_unary_streaming_semantics_test.cpp)
+target_link_libraries(daemon_unary_streaming_semantics_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(daemon_unary_streaming_semantics_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)
+
+# ONNX plugin integration (ABI host) — real plugin, real model (skips if missing)
+add_executable(external_plugin_integration_test external_plugin_integration_test.cpp)
+target_link_libraries(external_plugin_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(external_plugin_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration;external"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)
+
+add_executable(onnx_plugin_integration_test daemon/onnx_plugin_integration_test.cpp)
+target_link_libraries(onnx_plugin_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+# If the ONNX plugin target exists in this build, pass its path to the test
+if(TARGET yams_onnx_plugin)
+    add_dependencies(onnx_plugin_integration_test yams_onnx_plugin)
+    target_compile_definitions(onnx_plugin_integration_test PRIVATE yams_onnx_plugin_BUILT="$<TARGET_FILE:yams_onnx_plugin>")
+endif()
+gtest_discover_tests(onnx_plugin_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TEST_PREFIX "onnx_plugin_integration_test."
+    TIMEOUT 90)
+
+# FTS5 end-to-end — ingest and search
+add_executable(fts5_end_to_end_integration_test daemon/fts5_end_to_end_integration_test.cpp)
+target_link_libraries(fts5_end_to_end_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    yams_metadata
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(fts5_end_to_end_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TEST_PREFIX "fts5_end_to_end_integration_test."
+    TIMEOUT 90)
+
+# Embeddings vector persistence across restart
+add_executable(embeddings_vector_persist_integration_test daemon/embeddings_vector_persist_integration_test.cpp)
+target_link_libraries(embeddings_vector_persist_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+# If the ONNX plugin target exists, pass its path so the test can find it
+if(TARGET yams_onnx_plugin)
+    add_dependencies(embeddings_vector_persist_integration_test yams_onnx_plugin)
+    target_compile_definitions(embeddings_vector_persist_integration_test PRIVATE yams_onnx_plugin_BUILT="$<TARGET_FILE:yams_onnx_plugin>")
+endif()
+gtest_discover_tests(embeddings_vector_persist_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TEST_PREFIX "embeddings_vector_persist_integration_test."
+    TIMEOUT 90)
+
+# Semantic search end-to-end: add -> embed -> search
+add_executable(semantic_search_e2e_test daemon/semantic_search_e2e_test.cpp)
+target_link_libraries(semantic_search_e2e_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+
+# Mock content extractor integration test
+add_executable(mock_content_extractor_integration_test daemon/mock_content_extractor_integration_test.cpp)
+target_link_libraries(mock_content_extractor_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(mock_content_extractor_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration;plugins"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)
+
+# Auto embed on add integration test
+add_executable(auto_embed_on_add_integration_test daemon/auto_embed_on_add_integration_test.cpp)
+target_link_libraries(auto_embed_on_add_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams_cli
+    yams_api
+    spdlog::spdlog
+    Threads::Threads
+    yams::boost_test_shim
+)
+gtest_discover_tests(auto_embed_on_add_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration;embeddings"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)
+gtest_discover_tests(semantic_search_e2e_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TEST_PREFIX "semantic_search_e2e_test."
+    TIMEOUT 90)

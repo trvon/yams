@@ -174,6 +174,10 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
     return {};
 }
 
+std::filesystem::path StorageEngine::getBasePath() const {
+    return pImpl->config.basePath;
+}
+
 Result<void> StorageEngine::store(std::string_view hash, std::span<const std::byte> data) {
     // Allow manifest keys (hash.manifest) and regular hashes
     bool isManifest = hash.ends_with(".manifest");

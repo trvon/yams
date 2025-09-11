@@ -54,6 +54,15 @@ enable_chunking = true
 objects_dir = "objects"
 staging_dir = "staging"
 
+[storage.s3]
+# S3 Engine Settings (used if storage.engine = "s3")
+url = ""
+region = "us-east-1"
+endpoint = ""
+access_key = ""
+secret_key = ""
+use_path_style = false
+
 [chunking]
 # Rolling hash window size
 window_size = 48
@@ -120,7 +129,7 @@ database_path = "vectors.db"
 # Table name for embeddings
 table_name = "document_embeddings"
 # Embedding dimension (model-dependent)
-embedding_dim = 384
+embedding_dim = 768
 # Index type: "FLAT", "IVF_PQ", "HNSW"
 index_type = "IVF_PQ"
 # Number of partitions for IVF index
@@ -147,6 +156,8 @@ auto_repair = true
 enable = true
 # Automatically generate for new documents
 auto_generate = false
+# Automatically trigger embeddings after AddDocument
+auto_on_add = false
 # Preferred embedding model
 preferred_model = "all-MiniLM-L6-v2"
 # Path to model files
@@ -156,7 +167,7 @@ tokenizer_path = "models/tokenizer.json"
 # Maximum sequence length
 max_sequence_length = 512
 # Embedding dimension (must match model)
-embedding_dim = 384
+embedding_dim = 768
 # Batch size for generation
 batch_size = 32
 # Normalize embedding vectors
@@ -182,6 +193,31 @@ preload_on_startup = false
 # Maximum memory for model cache (MB)
 max_model_memory_mb = 1024
 
+# Daemon service and plugins
+[daemon]
+# Enable daemon-managed model provider and plugin auto-loading
+enable = true
+# Auto-load plugins from standard directories (and YAMS_PLUGIN_DIR if set)
+auto_load_plugins = true
+# Optional explicit plugin directory (comment out to use defaults and YAMS_PLUGIN_DIR)
+# plugin_dir = "/usr/local/lib/yams/plugins"
+# Worker threads for daemon (0 = auto)
+worker_threads = 0
+# Max memory in GB the daemon will attempt to use (0 = unlimited)
+max_memory_gb = 0
+# Log level for daemon background service (trace|debug|info|warn|error)
+log_level = "info"
+
+# Notes:
+# - When [embeddings].enable = false, the daemon automatically disables the model provider
+#   and plugin auto-load to reduce startup overhead.
+# - You can override plugin discovery with environment variables:
+#   * YAMS_PLUGIN_DIR: an exclusive directory to scan for plugins
+#   * XDG_CONFIG_HOME or HOME: determines plugins_trust.txt location for trust policy
+# - To control client/daemon timeouts at runtime, you can set:
+#   * YAMS_REQUEST_TIMEOUT_MS (sets both header/body timeouts in client)
+#   * YAMS_HEADER_TIMEOUT_MS / YAMS_BODY_TIMEOUT_MS (client-specific)
+
 [embeddings.cache]
 # Enable embedding cache for queries
 enable_query_cache = true
@@ -197,7 +233,7 @@ lru_eviction = true
 # Index type: "FLAT", "HNSW", "IVF_FLAT", "IVF_PQ", "LSH", "ANNOY"
 type = "HNSW"
 # Vector dimension
-dimension = 384
+dimension = 768
 # Distance metric: "COSINE", "L2", "INNER_PRODUCT"
 distance_metric = "COSINE"
 # HNSW: connections per node

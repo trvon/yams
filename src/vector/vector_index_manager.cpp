@@ -1714,6 +1714,28 @@ public:
     std::string getLastError() const { return lastError_; }
     void setLastError(const std::string& error) const { lastError_ = error; }
 
+    Result<std::vector<float>> getVector(const std::string& id) const {
+        std::shared_lock lock(mutex_);
+
+        if (!main_index_) {
+            return Result<std::vector<float>>(
+                Error{ErrorCode::NotInitialized, "Index not initialized"});
+        }
+
+        // Try main index first
+        auto result = main_index_->getVector(id);
+        if (result) {
+            return result;
+        }
+
+        // Try delta index if it exists
+        if (delta_index_) {
+            return delta_index_->getVector(id);
+        }
+
+        return Result<std::vector<float>>(Error{ErrorCode::NotFound, "Vector not found: " + id});
+    }
+
 private:
     mutable std::shared_mutex mutex_;
     mutable std::shared_mutex metadata_mutex_;
@@ -1748,7 +1770,9 @@ bool VectorIndexManager::isInitialized() const {
 }
 
 void VectorIndexManager::shutdown() {
-    pImpl->shutdown();
+    if (pImpl) {
+        pImpl->shutdown();
+    }
 }
 
 Result<void> VectorIndexManager::addVector(const std::string& id, const std::vector<float>& vector,
@@ -1800,7 +1824,80 @@ Result<std::vector<std::string>> VectorIndexManager::getAllVectorIds() const {
 
 // Missing method implementations (stubs for now)
 Result<void> VectorIndexManager::buildIndex() {
-    // TODO: Implement index building logic
+    if (!pImpl) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // If we have a main index, rebuild it
+    if (pImpl->isInitialized()) {
+        auto result = pImpl->optimizeIndex();
+        if (!result) {
+            return result;
+        }
+    }
+
+    // Merge delta index if it exists
+    if (pImpl->isInitialized()) {
+        auto mergeResult = mergeDeltaIndex();
+        if (!mergeResult) {
+            return mergeResult;
+        }
+    }
+
+    return Result<void>();
+}
+
+Result<void> VectorIndexManager::rebuildIndex() {
+    if (!pImpl) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // Rebuild index through the implementation
+    if (!pImpl->isInitialized()) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // Get current configuration
+    auto config = pImpl->getConfig();
+
+    // Get all current vector IDs
+    auto idsResult = pImpl->getAllVectorIds();
+    if (!idsResult) {
+        return Result<void>(
+            Error{ErrorCode::InternalError, "Failed to get vector IDs for rebuild"});
+    }
+
+    // Store vectors temporarily
+    std::vector<std::string> ids;
+    std::vector<std::vector<float>> vectors;
+    std::map<std::string, std::map<std::string, std::string>> metadata;
+
+    for (const auto& id : idsResult.value()) {
+        auto vectorResult = pImpl->getVector(id);
+        if (vectorResult) {
+            ids.push_back(id);
+            vectors.push_back(vectorResult.value());
+            // Note: metadata would need to be retrieved separately if we had a method for it
+        }
+    }
+
+    // Shutdown and reinitialize
+    pImpl->shutdown();
+    auto initResult = pImpl->initialize();
+    if (!initResult) {
+        return Result<void>(
+            Error{ErrorCode::InternalError, "Failed to reinitialize index during rebuild"});
+    }
+
+    // Re-add all vectors
+    if (!ids.empty()) {
+        auto addResult = pImpl->addVectors(ids, vectors, {});
+        if (!addResult) {
+            return Result<void>(
+                Error{ErrorCode::InternalError, "Failed to re-add vectors during rebuild"});
+        }
+    }
+
     return Result<void>();
 }
 
@@ -1815,6 +1912,158 @@ Result<void> VectorIndexManager::saveIndex(const std::string& path) {
 Result<void> VectorIndexManager::loadIndex(const std::string& path) {
     return pImpl->loadIndex(path);
 }
+
+Result<void> VectorIndexManager::removeVectors(const std::vector<std::string>& ids) {
+    if (!pImpl) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // Remove vectors one by one
+    for (const auto& id : ids) {
+        auto result = removeVector(id);
+        if (!result) {
+            return result;
+        }
+    }
+
+    return Result<void>();
+}
+
+Result<std::vector<std::vector<SearchResult>>>
+VectorIndexManager::batchSearch(const std::vector<std::vector<float>>& queries, size_t k,
+                                const SearchFilter& filter) {
+    if (!pImpl) {
+        return Result<std::vector<std::vector<SearchResult>>>(
+            Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    std::vector<std::vector<SearchResult>> results;
+    results.reserve(queries.size());
+
+    for (const auto& query : queries) {
+        auto result = search(query, k, filter);
+        if (!result) {
+            return Result<std::vector<std::vector<SearchResult>>>(result.error());
+        }
+        results.push_back(std::move(result.value()));
+    }
+
+    return results;
+}
+
+Result<std::vector<SearchResult>> VectorIndexManager::rangeSearch(const std::vector<float>& query,
+                                                                  float max_distance,
+                                                                  const SearchFilter& filter) {
+    if (!pImpl) {
+        return Result<std::vector<SearchResult>>(
+            Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // Use regular search with a large k, then filter by distance
+    auto searchResult = search(query, 1000, filter);
+    if (!searchResult) {
+        return searchResult;
+    }
+
+    std::vector<SearchResult> filtered;
+    for (const auto& result : searchResult.value()) {
+        if (result.distance <= max_distance) {
+            filtered.push_back(result);
+        }
+    }
+
+    return filtered;
+}
+
+Result<void> VectorIndexManager::exportIndex(const std::string& path, const std::string& format) {
+    if (!pImpl) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    if (format != "json") {
+        return Result<void>(
+            Error{ErrorCode::InvalidArgument, "Unsupported export format: " + format});
+    }
+
+    // For now, just save the index in its native format
+    return saveIndex(path);
+}
+
+Result<void> VectorIndexManager::changeIndexType(IndexType new_type) {
+    if (!pImpl) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    if (pImpl->getConfig().type == new_type) {
+        return Result<void>(); // Already the requested type
+    }
+
+    // Update config and rebuild index
+    auto config = pImpl->getConfig();
+    config.type = new_type;
+    pImpl->setConfig(config);
+    return rebuildIndex();
+}
+
+IndexType VectorIndexManager::getCurrentIndexType() const {
+    if (!pImpl) {
+        return IndexType::FLAT;
+    }
+    return pImpl->getIndexType();
+}
+
+void VectorIndexManager::clearCache() {
+    // Currently no cache implementation
+}
+
+void VectorIndexManager::warmupCache(const std::vector<std::vector<float>>& frequent_queries) {
+    // Currently no cache implementation
+    (void)frequent_queries;
+}
+
+Result<bool> VectorIndexManager::validateIndex() const {
+    if (!pImpl) {
+        return Result<bool>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // Basic validation through the implementation
+    return Result<bool>(pImpl->isInitialized());
+}
+
+Result<void> VectorIndexManager::repairIndex() {
+    if (!pImpl) {
+        return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
+    }
+
+    // Simple repair: rebuild the index
+    return rebuildIndex();
+}
+
+bool VectorIndexManager::hasError() const {
+    if (!pImpl) {
+        return true;
+    }
+    return !pImpl->getLastError().empty();
+}
+
+bool VectorIndexManager::needsOptimization() const {
+    if (!pImpl || !pImpl->isInitialized()) {
+        return false;
+    }
+
+    // Let implementation decide if optimization is needed
+    auto stats = pImpl->getStats();
+    return stats.needs_optimization;
+}
+
+size_t VectorIndexManager::dimension() const {
+    if (!pImpl) {
+        return 0;
+    }
+    return pImpl->getConfig().dimension;
+}
+
+// addVectors method already defined above
 
 // =============================================================================
 // Factory Function
@@ -1851,6 +2100,11 @@ float calculateDistance(const std::vector<float>& a, const std::vector<float>& b
                 dot += a[i] * b[i];
                 norm_a += a[i] * a[i];
                 norm_b += b[i] * b[i];
+            }
+            // Guard against zero-norm inputs which can occur when embeddings are unavailable
+            // or degenerate. For cosine distance, treat zero-norm as maximal distance (1.0).
+            if (norm_a == 0.0f || norm_b == 0.0f) {
+                return 1.0f;
             }
             float similarity = dot / (std::sqrt(norm_a) * std::sqrt(norm_b));
             return 1.0f - similarity; // Convert to distance
@@ -1999,5 +2253,7 @@ const IndexConfig& VectorIndexManager::getConfig() const {
 std::string VectorIndexManager::getLastError() const {
     return pImpl->getLastError();
 }
+
+// shutdown method already defined above
 
 } // namespace yams::vector

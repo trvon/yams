@@ -120,6 +120,8 @@ public:
 
         return results;
     }
+    // Expose base storage path (useful for wrappers to log the true root)
+    std::filesystem::path getBasePath() const;
 
     // Statistics and maintenance
     StorageStats getStats() const noexcept override;

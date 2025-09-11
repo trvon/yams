@@ -16,6 +16,7 @@ add_library(yams_storage_engine
     url_backend.cpp
     s3_signer.cpp
     object_storage_plugin_loader.cpp
+    ../storage/object_storage_adapter.cpp
     ${PLATFORM_SOURCES}
 )
 set_target_properties(yams_storage_engine PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)

@@ -34,7 +34,7 @@ Search for documents using keyword search, fuzzy matching, or hash lookup with e
     "fuzzy": {
       "type": "boolean",
       "description": "Enable fuzzy search for approximate matching",
-      "default": false
+      "default": true
     },
     "similarity": {
       "type": "number",
@@ -84,6 +84,8 @@ Search for documents using keyword search, fuzzy matching, or hash lookup with e
   "required": ["query"]
 }
 ```
+
+Defaults: When options are omitted, the server runs hybrid search with fuzzy enabled (similarity 0.7).
 
 **Response:**
 ```json
@@ -283,6 +285,11 @@ Search for regex patterns within document contents (similar to grep command).
       "type": "integer",
       "description": "Stop after N matches per file",
       "default": 0
+    },
+    "fast_first": {
+      "type": "boolean",
+      "description": "Return a quick semantic suggestions burst first",
+      "default": false
     }
   },
   "required": ["pattern"]
@@ -463,6 +470,7 @@ List all documents with comprehensive filtering and sorting capabilities.
 - Sorting options (`sort_by`: name, size, created, modified, indexed)
 - Sort order control (`sort_order`: asc, desc)
 - Full metadata and tag inclusion
+- Paths-only output (`paths_only`) to return only file paths
 
 **Example:**
 ```json
@@ -478,13 +486,33 @@ List all documents with comprehensive filtering and sorting capabilities.
 }
 ```
 
+## Additional Tools
+
+### add_directory
+Index directory contents recursively. Recursive behavior defaults to true; misuse produces clear errors.
+
+### downloader.download
+Download and store an artifact by URL with checksum support. Name derives from URL basename; returns hash and stored path.
+
+### restore_collection
+Restore all documents from a named collection to the filesystem.
+
+### restore_snapshot
+Restore documents from a snapshot ID to the filesystem.
+
+### list_collections
+List available collections.
+
+### list_snapshots
+List available snapshots.
+
 ## Legacy Tools (Available)
 
 ### delete_by_name
 Delete documents by name, multiple names, or glob patterns.
 
 ### get_by_name
-Retrieve document content by name instead of hash.
+Retrieve document content by name instead of hash. If direct lookup fails, a hybrid fuzzy search is attempted and the strongest match is retrieved by hash or normalized path.
 
 ### cat_document
 Display document content directly (similar to CLI cat command).
@@ -542,3 +570,13 @@ Add to your Claude Desktop configuration:
 ```
 
 This allows Claude to directly interact with your YAMS storage for enhanced memory and context management.
+
+
+## MCP Server Transport (HTTP + SSE)
+
+- Default transport is HTTP + SSE on 127.0.0.1:8757.
+- Stdio transport is temporarily deprecated and will be revisited.
+- Initialize via POST /mcp/jsonrpc; the result includes `sessionId`.
+- Open SSE at GET /mcp/events?session=<sessionId> to receive `notifications/ready`, logs, and progress.
+- Send `initialized` via POST using the same session to trigger `ready`.
+- Change bind via env: `YAMS_MCP_HTTP_BIND=127.0.0.1:8757`.

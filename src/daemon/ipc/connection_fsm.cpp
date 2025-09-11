@@ -1,9 +1,11 @@
 // Adapter implementation kept private; headers remain minimal and 3P-free.
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/resource_tuner.h>
 #include <yams/daemon/ipc/socket_utils.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <memory>
 #include <vector>
@@ -69,6 +71,9 @@ static inline ConnectionFsm::State to_public(ImplState s) {
 
 struct StateBase {
     virtual ~StateBase() = default;
+    // Phase 4: entry/exit hooks (no-op by default)
+    virtual void entry() {}
+    virtual void exit() {}
     virtual Next on_accept(int) { return {}; }
     virtual Next on_connect(int) { return {}; }
     virtual Next on_header_parsed(uint64_t /*payload_size*/) { return {}; }
@@ -215,34 +220,63 @@ struct MetricsCounters {
     uint64_t bytes_sent{0};
     uint64_t bytes_received{0};
     uint64_t transitions{0};
+    uint64_t timeouts_total{0};
+    uint64_t retries_total{0};
+    uint64_t errors_total{0};
 };
 
 struct ConfigValues {
     uint32_t header_timeout_ms{3000};
     uint32_t payload_timeout_ms{27000};
+    uint32_t idle_timeout_ms{30000};
     std::size_t max_retries{3};
     bool enable_metrics{true};
     bool enable_snapshots{false};
 };
 
 namespace {
-struct TinyAccessImpl {
-    ConfigValues cfg;
-    MetricsCounters metrics;
-    std::vector<SnapshotEntry> snapshots;
+// Fixed-size ring buffer to bound snapshot memory
+template <std::size_t N> struct SnapshotRing {
+    std::array<SnapshotEntry, N> buf{};
+    std::uint32_t head{0};
+    std::uint32_t size{0};
+    std::uint64_t dropped{0};
+    void push(const SnapshotEntry& s) {
+        buf[head] = s;
+        head = (head + 1) % N;
+        if (size < N)
+            ++size;
+        else
+            ++dropped;
+    }
+};
+} // unnamed namespace
+
+// Define the PIMPL that was forward-declared in the header
+struct ConnectionFsm::Impl {
+    ConfigValues cfg{};
+    MetricsCounters metrics{};
+    SnapshotRing<256> snapshots{};
     const char* last_event{"init"};
     uint64_t total_bytes{0};
     StateBase* current{nullptr};
+    // Phase 2: timer deadlines (consumed by on_timeout externally)
+    std::chrono::steady_clock::time_point idle_deadline{};
+    std::chrono::steady_clock::time_point op_deadline{};
+    bool idle_armed{false};
+    bool op_armed{false};
+    int retries{0};
+    // Phase 2: write backpressure queue (bytes only; payload owned by higher layers)
+    std::size_t write_bytes{0};
+    std::size_t write_cap_bytes{2 * 1024 * 1024};
+    uint32_t low_wm_percent{50};
+    uint32_t high_wm_percent{85};
+    bool backpressured{false};
+    int last_errno{0};
 };
 
-} // namespace
-
-void ConnectionFsm::TinyDeleter::operator()(void* p) const noexcept {
-    delete static_cast<TinyAccessImpl*>(p);
-}
-
-ConnectionFsm::ConnectionFsm() : impl_(static_cast<void*>(new TinyAccessImpl{})) {
-    auto* impl = static_cast<TinyAccessImpl*>(impl_.get());
+ConnectionFsm::ConnectionFsm() : impl_(std::make_unique<Impl>()) {
+    auto* impl = impl_.get();
     if (impl)
         impl->current = state_for(state_);
 }
@@ -253,81 +287,98 @@ ConnectionFsm& ConnectionFsm::operator=(ConnectionFsm&&) noexcept = default;
 
 // Public configuration API (kept light-weight)
 void ConnectionFsm::set_header_timeout_ms(uint32_t ms) noexcept {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->cfg.header_timeout_ms = ms;
 }
 void ConnectionFsm::set_payload_timeout_ms(uint32_t ms) noexcept {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->cfg.payload_timeout_ms = ms;
 }
+void ConnectionFsm::set_idle_timeout_ms(uint32_t ms) noexcept {
+    if (auto* impl = impl_.get())
+        impl->cfg.idle_timeout_ms = ms;
+}
 void ConnectionFsm::set_max_retries(std::size_t n) noexcept {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->cfg.max_retries = n;
 }
 void ConnectionFsm::enable_metrics(bool on) noexcept {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->cfg.enable_metrics = on;
 }
 void ConnectionFsm::enable_snapshots(bool on) noexcept {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->cfg.enable_snapshots = on;
+}
+void ConnectionFsm::set_write_cap_bytes(std::size_t bytes) noexcept {
+    if (auto* impl = impl_.get())
+        impl->write_cap_bytes = bytes;
+}
+void ConnectionFsm::set_backpressure_watermarks(uint32_t low_percent,
+                                                uint32_t high_percent) noexcept {
+    if (auto* impl = impl_.get()) {
+        impl->low_wm_percent = low_percent;
+        impl->high_wm_percent = high_percent;
+    }
 }
 
 void ConnectionFsm::debug_dump_snapshots(std::size_t max_entries) const noexcept {
-    auto* impl = static_cast<TinyAccessImpl*>(impl_.get());
-    if (!impl || impl->snapshots.empty())
+    auto* impl = impl_.get();
+    if (!impl || impl->snapshots.size == 0)
         return;
-    auto count = std::min(max_entries, impl->snapshots.size());
-    for (std::size_t i = impl->snapshots.size() - count; i < impl->snapshots.size(); ++i) {
-        const auto& s = impl->snapshots[i];
+    const std::uint32_t cap = 256;
+    std::uint32_t count =
+        static_cast<std::uint32_t>(std::min<std::size_t>(max_entries, impl->snapshots.size));
+    std::uint32_t start = (impl->snapshots.head + (impl->snapshots.size + cap - count) % cap) % cap;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto& s = impl->snapshots.buf[(start + i) % cap];
         spdlog::debug("FSM snapshot: state={}, t(ns)={}, last_event={}, bytes={}",
                       to_string(s.state), s.ns_since_epoch, s.last_event, s.bytes_transferred);
     }
 }
 
-void ConnectionFsm::transition(State next) noexcept {
+bool ConnectionFsm::transition(State next, const char* reason) noexcept {
     if (state_ == next)
-        return;
+        return true; // no-op but not an error
     auto from = state_;
-    // Basic legality table to avoid nonsensical jumps
-    auto legal = [from, next]() noexcept -> bool {
-        using S = ConnectionFsm::State;
-        switch (from) {
-            case S::Disconnected:
-                return (next == S::Accepting || next == S::Connected || next == S::Error);
-            case S::Accepting:
-                return (next == S::Connected || next == S::Closing || next == S::Error);
-            case S::Connected:
-                return (next == S::ReadingHeader || next == S::Closing || next == S::Error);
-            case S::ReadingHeader:
-                return (next == S::ReadingPayload || next == S::WritingHeader ||
-                        next == S::Closing || next == S::Error);
-            case S::ReadingPayload:
-                return (next == S::WritingHeader || next == S::Closing || next == S::Error);
-            case S::WritingHeader:
-                return (next == S::StreamingChunks || next == S::Closing || next == S::Connected ||
-                        next == S::Error);
-            case S::StreamingChunks:
-                return (next == S::StreamingChunks || next == S::Closing || next == S::Connected ||
-                        next == S::Error);
-            case S::Closing:
-                return (next == S::Closed || next == S::Error);
-            case S::Closed:
-                return (next == S::Closed);
-            case S::Error:
-                return (next == S::Closing || next == S::Closed || next == S::Error);
-        }
-        return false;
-    }();
+    // Compile-time legality matrix (bitmask per state)
+    constexpr auto b = [](int x) constexpr { return 1u << x; };
+    static constexpr std::array<std::uint32_t, 10> kLegal = {
+        /* Disconnected */ b((int)State::Accepting) | b((int)State::Connected) |
+            b((int)State::Error),
+        /* Accepting */ b((int)State::Connected) | b((int)State::Closing) | b((int)State::Error),
+        /* Connected */ b((int)State::ReadingHeader) | b((int)State::Closing) |
+            b((int)State::Error),
+        /* ReadingHeader */ b((int)State::ReadingPayload) | b((int)State::WritingHeader) |
+            b((int)State::Closing) | b((int)State::Error),
+        /* ReadingPayload */ b((int)State::WritingHeader) | b((int)State::Closing) |
+            b((int)State::Error),
+        /* WritingHeader */ b((int)State::StreamingChunks) | b((int)State::Closing) |
+            b((int)State::Connected) | b((int)State::Error),
+        /* StreamingChunks */ b((int)State::StreamingChunks) | b((int)State::Closing) |
+            b((int)State::Connected) | b((int)State::Error),
+        /* Closing */ b((int)State::Closed) | b((int)State::Error),
+        /* Closed */ b((int)State::Closed),
+        /* Error */ b((int)State::Closing) | b((int)State::Closed) | b((int)State::Error)};
+    auto can_transition = [](State f, State t) noexcept { return (kLegal[(int)f] >> (int)t) & 1u; };
+    bool legal = can_transition(from, next);
 
     if (!legal) {
-        spdlog::debug("ConnectionFsm: illegal transition {} -> {} (fd={})", to_string(from),
-                      to_string(next), fd_);
-        return;
+        spdlog::debug("ConnectionFsm: illegal transition {} -> {} (fd={}, reason={})",
+                      to_string(from), to_string(next), fd_, (reason ? reason : ""));
+        return false;
     }
-    spdlog::debug("ConnectionFsm: {} -> {} (fd={})", to_string(from), to_string(next), fd_);
+    spdlog::debug("ConnectionFsm: {} -> {} (fd={}, reason={})", to_string(from), to_string(next),
+                  fd_, (reason ? reason : ""));
+    // Leaving from-state: call exit(), cancel timers by default; re-arm as needed on enter
+    if (auto* impl = impl_.get()) {
+        if (impl->current)
+            impl->current->exit();
+        impl->idle_armed = false;
+        impl->op_armed = false;
+    }
     state_ = next;
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get())) {
+    if (auto* impl = impl_.get()) {
         impl->metrics.transitions++;
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_transitions", static_cast<int64_t>(impl->metrics.transitions));
@@ -368,40 +419,62 @@ void ConnectionFsm::transition(State next) noexcept {
                                           std::chrono::steady_clock::now().time_since_epoch())
                                           .count()),
                 impl->last_event, impl->total_bytes};
-            impl->snapshots.emplace_back(e);
-            if (impl->snapshots.size() > 256) {
-                impl->snapshots.erase(impl->snapshots.begin(), impl->snapshots.begin() + 128);
-            }
+            impl->snapshots.push(e);
         }
-        // Switch active state implementation
+        // Switch active state implementation and call entry()
         impl->current = state_for(state_);
+        if (impl->current)
+            impl->current->entry();
+        // Enter actions: arm timers based on state role
+        auto now = std::chrono::steady_clock::now();
+        if (state_ == State::Connected) {
+            if (impl->cfg.idle_timeout_ms > 0) {
+                impl->idle_deadline = now + std::chrono::milliseconds(impl->cfg.idle_timeout_ms);
+                impl->idle_armed = true;
+            }
+            impl->retries = 0;
+        } else if (state_ == State::ReadingHeader) {
+            if (impl->cfg.header_timeout_ms > 0) {
+                impl->op_deadline = now + std::chrono::milliseconds(impl->cfg.header_timeout_ms);
+                impl->op_armed = true;
+            }
+            impl->retries = 0;
+        } else if (state_ == State::ReadingPayload || state_ == State::WritingHeader ||
+                   state_ == State::StreamingChunks) {
+            if (impl->cfg.payload_timeout_ms > 0) {
+                impl->op_deadline = now + std::chrono::milliseconds(impl->cfg.payload_timeout_ms);
+                impl->op_armed = true;
+            }
+            impl->retries = 0;
+        }
     }
+    return true;
 }
 
 void ConnectionFsm::on_accept(int fd) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = "accept";
     fd_ = fd;
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_accept(fd);
         if (next.has)
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_accept:state_impl");
     }
 }
 
 void ConnectionFsm::on_connect(int fd) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = "connect";
     fd_ = fd;
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_connect(fd);
         if (next.has)
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_connect:state_impl");
     }
 }
 
 void ConnectionFsm::on_readable(std::size_t) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get())) {
+    if (auto* impl = impl_.get()) {
         impl->last_event = "readable";
         impl->metrics.header_reads_started +=
             (state_ == State::Connected || state_ == State::ReadingHeader) ? 1 : 0;
@@ -413,7 +486,7 @@ void ConnectionFsm::on_readable(std::size_t) {
     // Drive reads based on current state
     switch (state_) {
         case State::Connected:
-            transition(State::ReadingHeader);
+            transition(State::ReadingHeader, "on_readable:connected->reading_header");
             break;
         case State::ReadingHeader:
             // Header bytes available, remain until parsed
@@ -427,7 +500,7 @@ void ConnectionFsm::on_readable(std::size_t) {
 }
 
 void ConnectionFsm::on_writable(std::size_t) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = "writable";
     // Writes are driven by higher-level events; ignore spurious signals in other states
     switch (state_) {
@@ -440,17 +513,17 @@ void ConnectionFsm::on_writable(std::size_t) {
 }
 
 void ConnectionFsm::on_header_parsed(const FrameInfo& info) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = "header_parsed";
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_header_parsed(info.payload_size);
         if (next.has)
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_header_parsed:state_impl");
     }
 }
 
 void ConnectionFsm::on_body_parsed() {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get())) {
+    if (auto* impl = impl_.get()) {
         impl->last_event = "body_parsed";
         impl->metrics.payload_reads_completed++;
         if (impl->cfg.enable_metrics) {
@@ -458,16 +531,16 @@ void ConnectionFsm::on_body_parsed() {
                       static_cast<int64_t>(impl->metrics.payload_reads_completed));
         }
     }
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_body_parsed();
         if (next.has) {
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_body_parsed:state_impl");
             return;
         }
     }
     // Fallback: previous behavior
     if (state_ == State::ReadingPayload || state_ == State::ReadingHeader) {
-        transition(State::WritingHeader);
+        transition(State::WritingHeader, "on_body_parsed:fallback");
     } else {
         spdlog::debug("ConnectionFsm::on_body_parsed ignored in state {} (fd={})",
                       to_string(state_), fd_);
@@ -475,57 +548,99 @@ void ConnectionFsm::on_body_parsed() {
 }
 
 void ConnectionFsm::on_stream_next(bool done) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = done ? "stream_done" : "stream_next";
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_stream_next(done);
         if (next.has) {
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_stream_next:state_impl");
             return;
         }
     }
     // Fallback
     if (state_ == State::WritingHeader || state_ == State::StreamingChunks) {
-        transition(done ? State::Closing : State::StreamingChunks);
+        transition(done ? State::Closing : State::StreamingChunks,
+                   done ? "on_stream_next:done" : "on_stream_next:more");
     } else {
         spdlog::debug("ConnectionFsm::on_stream_next ignored in state {} (fd={})",
                       to_string(state_), fd_);
     }
 }
 
-void ConnectionFsm::on_timeout(Operation) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+void ConnectionFsm::on_timeout(Operation op) {
+    if (auto* impl = impl_.get())
         impl->last_event = "timeout";
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get()) {
+        impl->metrics.timeouts_total++;
+        if (impl->cfg.enable_metrics) {
+            YAMS_PLOT("daemon_fsm_timeouts_total",
+                      static_cast<int64_t>(impl->metrics.timeouts_total));
+        }
+    }
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_timeout();
         if (next.has) {
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_timeout:state_impl");
             return;
         }
     }
-    transition(State::Error);
+    // Retry policy: if operation timer armed and retries left, re-arm and continue in-place
+    if (auto* impl = impl_.get()) {
+        // Notify resource tuner of timeout
+        ResourceTuner::instance().onTimeout("ipc");
+        if (impl->op_armed && impl->retries < static_cast<int>(impl->cfg.max_retries)) {
+            impl->retries++;
+            impl->metrics.retries_total++;
+            if (impl->cfg.enable_metrics) {
+                YAMS_PLOT("daemon_fsm_retries_total",
+                          static_cast<int64_t>(impl->metrics.retries_total));
+            }
+            auto now = std::chrono::steady_clock::now();
+            uint32_t dur_ms = (state_ == State::ReadingHeader) ? impl->cfg.header_timeout_ms
+                                                               : impl->cfg.payload_timeout_ms;
+            if (dur_ms > 0) {
+                impl->op_deadline = now + std::chrono::milliseconds(dur_ms);
+                impl->op_armed = true;
+            }
+            spdlog::debug("ConnectionFsm: timeout retry {}/{} in state {} (op={})", impl->retries,
+                          impl->cfg.max_retries, to_string(state_), static_cast<int>(op));
+            return; // stay in current state
+        }
+    }
+    transition(State::Error, "on_timeout:fallback_error");
 }
 
-void ConnectionFsm::on_error(int) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+void ConnectionFsm::on_error(int err) {
+    on_error(err, nullptr);
+}
+
+void ConnectionFsm::on_error(int err, const char* where) {
+    if (auto* impl = impl_.get())
         impl->last_event = "error";
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get()) {
+        impl->metrics.errors_total++;
+        impl->last_errno = err;
+        if (impl->cfg.enable_metrics) {
+            YAMS_PLOT("daemon_fsm_errors_total", static_cast<int64_t>(impl->metrics.errors_total));
+        }
+    }
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_error(0);
         if (next.has) {
-            transition(to_public(next.state));
+            transition(to_public(next.state), where ? where : "on_error:state_impl");
             return;
         }
     }
-    transition(State::Error);
+    transition(State::Error, where ? where : "on_error:fallback_error");
 }
 
 void ConnectionFsm::on_close_request() {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = "close_request";
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()); impl && impl->current) {
+    if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_close_request();
         if (next.has) {
-            transition(to_public(next.state));
+            transition(to_public(next.state), "on_close_request:state_impl");
             return;
         }
     }
@@ -535,23 +650,27 @@ void ConnectionFsm::on_close_request() {
         case State::Closing:
             break;
         default:
-            transition(State::Closing);
+            transition(State::Closing, "on_close_request:fallback_closing");
             break;
     }
 }
 
 void ConnectionFsm::on_response_complete(bool close_after) {
-    if (auto* impl = static_cast<TinyAccessImpl*>(impl_.get()))
+    if (auto* impl = impl_.get())
         impl->last_event = close_after ? "response_complete_close" : "response_complete_keep";
     // If we are streaming or just wrote a header/payload and persistent connection is desired,
     // transition back to Connected to allow the next request. Otherwise go to Closing.
     switch (state_) {
         case State::WritingHeader:
         case State::StreamingChunks:
-            transition(close_after ? State::Closing : State::Connected);
+            transition(close_after ? State::Closing : State::Connected,
+                       close_after ? "on_response_complete:close"
+                                   : "on_response_complete:keepalive");
             break;
         default:
-            transition(close_after ? State::Closing : State::Connected);
+            transition(close_after ? State::Closing : State::Connected,
+                       close_after ? "on_response_complete:close"
+                                   : "on_response_complete:keepalive");
             break;
     }
 }
@@ -593,6 +712,76 @@ std::filesystem::path ConnectionFsm::resolve_socket_path() {
 
 std::filesystem::path ConnectionFsm::resolve_socket_path_config_first() {
     return socket_utils::resolve_socket_path_config_first();
+}
+
+// ======================
+// Phase 2b: Backpressure
+// ======================
+void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
+    if (bytes == 0)
+        return;
+    if (auto* impl = impl_.get()) {
+        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        const std::size_t before = impl->write_bytes;
+        impl->write_bytes = std::min(before + bytes, cap);
+        const std::size_t percent = cap ? (impl->write_bytes * 100) / cap : 0;
+        const bool was = impl->backpressured;
+        if (!impl->backpressured && percent >= impl->high_wm_percent) {
+            impl->backpressured = true;
+        } else if (impl->backpressured && percent <= impl->low_wm_percent) {
+            impl->backpressured = false;
+        }
+        if (was != impl->backpressured) {
+            YAMS_PLOT("daemon_fsm_backpressure_flip", impl->backpressured ? 1 : 0);
+            spdlog::debug("ConnectionFsm: backpressure {} (bytes={}, cap={}, state={})",
+                          impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
+                          to_string(state_));
+            ResourceTuner::instance().onBackpressureFlip("ipc", impl->backpressured);
+            // Also signal a distinct IO component for SocketServer autoscaling
+            ResourceTuner::instance().onBackpressureFlip("ipc_io", impl->backpressured);
+        }
+    }
+}
+
+void ConnectionFsm::on_write_flushed(std::size_t bytes) noexcept {
+    if (auto* impl = impl_.get()) {
+        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        if (bytes >= impl->write_bytes)
+            impl->write_bytes = 0;
+        else
+            impl->write_bytes -= bytes;
+        const std::size_t percent = cap ? (impl->write_bytes * 100) / cap : 0;
+        const bool was = impl->backpressured;
+        if (impl->backpressured && percent <= impl->low_wm_percent) {
+            // Hysteresis: when flipping OFF, clamp to low watermark to stabilize capacity
+            impl->backpressured = false;
+            impl->write_bytes = (cap * impl->low_wm_percent) / 100;
+        }
+        if (was != impl->backpressured) {
+            YAMS_PLOT("daemon_fsm_backpressure_flip", impl->backpressured ? 1 : 0);
+            spdlog::debug("ConnectionFsm: backpressure {} after flush (bytes={}, cap={}, state={})",
+                          impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
+                          to_string(state_));
+            ResourceTuner::instance().onBackpressureFlip("ipc", impl->backpressured);
+            ResourceTuner::instance().onBackpressureFlip("ipc_io", impl->backpressured);
+        }
+    }
+}
+
+bool ConnectionFsm::backpressured() const noexcept {
+    if (auto* impl = impl_.get())
+        return impl->backpressured;
+    return false;
+}
+
+std::size_t ConnectionFsm::write_capacity_remaining() const noexcept {
+    if (auto* impl = impl_.get()) {
+        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        if (impl->write_bytes >= cap)
+            return 0;
+        return cap - impl->write_bytes;
+    }
+    return 0;
 }
 
 } // namespace yams::daemon

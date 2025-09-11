@@ -2,10 +2,14 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-#include <yams/cli/async_bridge.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
@@ -53,24 +57,15 @@ public:
         vectors->add_flag("--daemon-only", daemonOnly_,
                           "Use daemon results only (no local fallback)");
         vectors->callback([this]() {
-            auto result = executeVectors();
-            if (!result) {
-                spdlog::error("Stats vectors failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            vectorsMode_ = true;
+            cli_->setPendingCommand(this);
         });
 
         // System help: explain fields/metrics shown by stats
         auto* helpCmd = cmd->add_subcommand("help", "Show system metrics help for stats output");
         helpCmd->callback([this]() { renderSystemHelp(); });
 
-        cmd->callback([this]() {
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Stats failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
-        });
+        cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
     Result<void> execute() override {
@@ -88,42 +83,7 @@ public:
             return executeLocal();
         }
 
-        // Best-effort: show readiness summary before stats to explain zeros/delays
-        try {
-            yams::daemon::DaemonClient probe{};
-            auto sres = run_sync(probe.status(), std::chrono::seconds(2));
-            if (sres) {
-                const auto& s = sres.value();
-                std::vector<std::string> waiting;
-                for (const auto& [k, v] : s.readinessStates) {
-                    if (!v) {
-                        std::ostringstream w;
-                        w << k;
-                        auto it = s.initProgress.find(k);
-                        if (it != s.initProgress.end())
-                            w << " (" << (int)it->second << "%)";
-                        waiting.push_back(w.str());
-                    }
-                }
-                if (!waiting.empty()) {
-                    if (format_ == "text") {
-                        std::cout << "[INFO] Waiting on: ";
-                        for (size_t i = 0; i < waiting.size() && i < 5; ++i) {
-                            if (i)
-                                std::cout << ", ";
-                            std::cout << waiting[i];
-                        }
-                        if (waiting.size() > 5)
-                            std::cout << ", …";
-                        std::cout << "\n";
-                    } else {
-                        pendingWaiting_ = std::move(waiting);
-                    }
-                }
-            }
-        } catch (...) {
-            // ignore; daemon may be offline or initializing
-        }
+        // Readiness check removed to prevent blocking on unready services
 
         // Build daemon request using simplified protocol
         yams::daemon::GetStatsRequest dreq;
@@ -138,23 +98,8 @@ public:
 
         // Render lambda for results
         auto render = [&](const yams::daemon::GetStatsResponse& resp) -> Result<void> {
-            // Prefer explicit readiness indicator when present to avoid showing zeros blindly
-            auto itReady = resp.additionalStats.find("ready");
-            if (format_ == "text" && itReady != resp.additionalStats.end() &&
-                itReady->second == "false") {
-                std::cout << "[INFO] Daemon not ready yet; metrics may be incomplete.\n";
-            }
-            // Heuristic fallback only when not forcing daemon-only
-            // If daemon provided compact JSON, prefer it to avoid zeros due to proto limitations
-            if (!daemonOnly_) {
-                auto itJson = resp.additionalStats.find("json");
-                if (itJson != resp.additionalStats.end()) {
-                    // Prefer JSON path for rendering
-                    return renderText(resp);
-                }
-                if (!localOnly_ && resp.totalDocuments == 0 && resp.totalSize == 0) {
-                    return executeLocal();
-                }
+            if (!localOnly_ && resp.totalDocuments == 0 && resp.totalSize == 0) {
+                return executeLocal();
             }
             if (format_ == "json") {
                 return renderJSON(resp);
@@ -172,41 +117,108 @@ public:
             cfg.dataDir = cli_->getDataPath();
             cfg.enableChunkedResponses = false; // stats is small; avoid streaming complexity
             cfg.singleUseConnections = true;    // keep isolation to avoid cross-talk
-            cfg.requestTimeout = std::chrono::milliseconds(30000);
+
+            // Fast-fallback mode: short timeout in non-verbose, non-watch, text mode (and not
+            // daemon-only)
+            bool shortMode = (!verbose_ && !watchMode_ && format_ != "json" && !daemonOnly_);
+            auto reqTimeout =
+                shortMode ? std::chrono::milliseconds(1500) : std::chrono::milliseconds(30000);
+            cfg.requestTimeout = reqTimeout;
+
             yams::daemon::DaemonClient client(cfg);
 
-            auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
-            if (result) {
-                // If proto path delivered only JSON, check and emit early banner
-                const auto& resp = result.value();
-                auto itJson = resp.additionalStats.find("json");
-                if (itJson != resp.additionalStats.end()) {
-                    try {
-                        auto j = json::parse(itJson->second);
-                        if (j.contains("not_ready") && j["not_ready"].get<bool>()) {
-                            if (format_ == "text") {
-                                std::cout
-                                    << "[INFO] Daemon is initializing; stats will be incomplete.\n";
+            std::promise<Result<yams::daemon::GetStatsResponse>> prom;
+            auto fut = prom.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    auto r = co_await client.call(dreq);
+                    prom.set_value(std::move(r));
+                    co_return;
+                },
+                boost::asio::detached);
+            if (fut.wait_for(reqTimeout) == std::future_status::ready) {
+                auto result = fut.get();
+                if (result) {
+                    const auto& resp = result.value();
+
+                    // When daemon reports not_ready in shortMode, silently fallback to local
+                    if (shortMode) {
+                        try {
+                            auto it = resp.additionalStats.find("not_ready");
+                            if (it != resp.additionalStats.end() && it->second == "true") {
+                                return executeLocal();
                             }
+                            auto itj = resp.additionalStats.find("json");
+                            if (itj != resp.additionalStats.end()) {
+                                auto j = json::parse(itj->second);
+                                if (j.contains("not_ready") && j["not_ready"].get<bool>()) {
+                                    return executeLocal();
+                                }
+                            }
+                        } catch (...) {
+                            // ignore parse errors and render as-is
                         }
-                    } catch (...) {
                     }
-                } else {
-                    // Fallback: explicit flag in additionalStats
-                    auto it = resp.additionalStats.find("not_ready");
-                    if (it != resp.additionalStats.end() && it->second == std::string{"true"}) {
-                        if (format_ == "text") {
-                            std::cout
-                                << "[INFO] Daemon is initializing; stats will be incomplete.\n";
-                        }
-                    }
+
+                    return render(resp);
                 }
-                return render(resp);
             }
             // On failure, choose fallback only when not daemon-only
             return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats unavailable"} : fallback();
         } catch (...) {
             return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats exception"} : fallback();
+        }
+
+        // Close execute()
+    }
+
+    // Native coroutine implementation to avoid promise bridging when runner is async
+    boost::asio::awaitable<Result<void>> executeAsync() override {
+        // Apply color mode overrides (same as execute)
+        if (forceColor_) {
+            yams::cli::ui::set_color_mode(yams::cli::ui::ColorMode::ForceOn);
+        } else if (noColor_) {
+            yams::cli::ui::set_color_mode(yams::cli::ui::ColorMode::ForceOff);
+        } else {
+            yams::cli::ui::clear_color_override();
+        }
+
+        if (localOnly_)
+            co_return executeLocal();
+
+        yams::daemon::GetStatsRequest dreq;
+        dreq.detailed = verbose_;
+        dreq.includeCache = true;
+        dreq.includeHealth = true;
+        dreq.showFileTypes = verbose_;
+        dreq.showCompression = verbose_;
+        dreq.showDuplicates = verbose_;
+        dreq.showDedup = verbose_;
+        dreq.showPerformance = verbose_;
+
+        auto render = [&](const yams::daemon::GetStatsResponse& resp) -> Result<void> {
+            if (!localOnly_ && resp.totalDocuments == 0 && resp.totalSize == 0) {
+                return executeLocal();
+            }
+            return (format_ == "json") ? renderJSON(resp) : renderText(resp);
+        };
+
+        try {
+            yams::daemon::ClientConfig cfg;
+            cfg.dataDir = cli_->getDataPath();
+            cfg.enableChunkedResponses = false;
+            cfg.singleUseConnections = true;
+            cfg.requestTimeout = std::chrono::milliseconds(30000);
+            yams::daemon::DaemonClient client(cfg);
+            auto result = co_await client.call(dreq);
+            if (result)
+                co_return render(result.value());
+            co_return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats unavailable"}
+                                  : executeLocal();
+        } catch (...) {
+            co_return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats exception"}
+                                  : executeLocal();
         }
     }
 
@@ -294,9 +306,21 @@ private:
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             yams::daemon::DaemonClient client(cfg);
 
-            auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
-            if (result) {
-                return render(result.value());
+            std::promise<Result<yams::daemon::GetStatsResponse>> prom;
+            auto fut = prom.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    auto r = co_await client.call(dreq);
+                    prom.set_value(std::move(r));
+                    co_return;
+                },
+                boost::asio::detached);
+            if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+                auto result = fut.get();
+                if (result) {
+                    return render(result.value());
+                }
             }
             return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) unavailable"}
                                : fallback();
@@ -636,11 +660,91 @@ private:
             }
             renderTechnicalDetailsSection(resp);
             renderServiceStatusSection(resp);
+            // Knowledge Graph (local DB quick stats)
+            try {
+                auto db = cli_->getDatabase();
+                if (db && db->isOpen()) {
+                    auto countTable = [&](const char* sql) -> long long {
+                        auto stR = db->prepare(sql);
+                        if (!stR)
+                            return -1;
+                        auto st = std::move(stR).value();
+                        auto step = st.step();
+                        if (step && step.value())
+                            return st.getInt64(0);
+                        return -1;
+                    };
+                    long long nodes = countTable("SELECT COUNT(1) FROM kg_nodes");
+                    long long edges = countTable("SELECT COUNT(1) FROM kg_edges");
+                    long long aliases = countTable("SELECT COUNT(1) FROM kg_aliases");
+                    long long embeddings = countTable("SELECT COUNT(1) FROM kg_node_embeddings");
+                    long long entities = countTable("SELECT COUNT(1) FROM doc_entities");
+                    std::cout << "\nKnowledge Graph:\n";
+                    if ((entities <= 0 && nodes <= 0) &&
+                        !(nodes >= 0 || edges >= 0 || aliases >= 0 || embeddings >= 0)) {
+                        std::cout << "  Graph entities: 0 — run 'yams doctor repair --graph' to "
+                                     "build from tags/metadata.\n";
+                    } else {
+                        if (nodes >= 0)
+                            std::cout << "  Nodes:        " << nodes << "\n";
+                        if (edges >= 0)
+                            std::cout << "  Edges:        " << edges << "\n";
+                        if (aliases >= 0)
+                            std::cout << "  Aliases:      " << aliases << "\n";
+                        if (embeddings >= 0)
+                            std::cout << "  Embeddings:   " << embeddings << "\n";
+                        if (entities >= 0)
+                            std::cout << "  Doc entities: " << entities << "\n";
+                    }
+                }
+            } catch (...) {
+                // best-effort only
+            }
         } else {
             // Strong system health summary first
             renderSmartHealthSection(resp);
-            // Then retro compact totals
-            // Retro, compact output
+
+            // Adaptive verbosity: include sections when service metrics or recommendations are
+            // present
+            auto hasServiceSpecific = [&](const yams::daemon::GetStatsResponse& r) {
+                const auto& a = r.additionalStats;
+                return a.count("service_contentstore") || a.count("service_metadatarepo") ||
+                       a.count("service_searchexecutor") || a.count("service_embeddingservice") ||
+                       a.count("daemon_version") || a.count("daemon_uptime");
+            };
+            auto hasRecommendationsLikely = [&](const yams::daemon::GetStatsResponse& r) {
+                const auto& a = r.additionalStats;
+                if (r.totalDocuments > 1000 && r.indexedDocuments < r.totalDocuments / 2)
+                    return true;
+                if (auto it = a.find("orphaned_blocks"); it != a.end()) {
+                    try {
+                        if (std::stoull(it->second) > 0ULL)
+                            return true;
+                    } catch (...) {
+                    }
+                }
+                if (auto it = a.find("block_health"); it != a.end() && it->second == "critical")
+                    return true;
+                if (auto it = a.find("space_efficiency"); it != a.end()) {
+                    try {
+                        if (std::stod(it->second) < 50.0)
+                            return true;
+                    } catch (...) {
+                    }
+                }
+                if (r.vectorIndexSize == 0 && r.totalDocuments > 0)
+                    return true;
+                return false;
+            };
+
+            if (hasRecommendationsLikely(resp)) {
+                renderRecommendationsSection(resp);
+            }
+            if (hasServiceSpecific(resp)) {
+                renderServiceStatusSection(resp);
+            }
+
+            // Retro, compact totals (always include)
             std::cout << "== STATS ==" << (notReady ? "  [INIT]" : "") << "\n";
             std::cout << "DOCS : " << formatNumber(totalDocs) << "\n";
             std::cout << "SIZE : " << formatSize(totalSize) << "\n";
@@ -656,6 +760,8 @@ private:
             if (vecSize > 0) {
                 std::cout << "VECDB: " << formatSize(vecSize) << "\n";
             }
+
+            // Best-effort daemon backpressure snapshot removed for async-first simplicity
         }
         return Result<void>();
     }
@@ -694,6 +800,8 @@ private:
             output["waiting_on"] = pendingWaiting_;
         }
 
+        // Daemon status supplement removed
+
         std::cout << output.dump(2) << std::endl;
         return Result<void>();
     }
@@ -703,40 +811,33 @@ private:
     // ===================
 
     void renderStorageOverview(const yams::daemon::GetStatsResponse& resp) {
-        printSectionHeader("Storage Overview");
-
-        {
-            std::vector<yams::cli::ui::Row> rows{
-                {"Documents", formatNumber(resp.totalDocuments), ""},
-                {"Size", formatSize(resp.totalSize), ""}};
-            yams::cli::ui::render_rows(std::cout, rows);
-        }
+        std::cout << "\nStorage Overview:\n";
+        std::cout << "  Documents:  " << formatNumber(resp.totalDocuments) << "\n";
+        std::cout << "  Size:       " << formatSize(resp.totalSize) << "\n";
 
         // Enhanced unique blocks display with ratio
         auto blocksIt = resp.additionalStats.find("unique_blocks");
         if (blocksIt != resp.additionalStats.end()) {
             uint64_t uniqueBlocks = std::stoull(blocksIt->second);
-            std::string blockInfo = formatNumber(uniqueBlocks);
+            std::cout << "  Blocks:     " << formatNumber(uniqueBlocks);
 
             // Show block to document ratio
             auto ratioIt = resp.additionalStats.find("block_to_doc_ratio");
             if (ratioIt != resp.additionalStats.end()) {
                 double ratio = std::stod(ratioIt->second);
                 if (ratio > 1.2) {
-                    // Format ratio with one decimal place
-                    std::ostringstream oss;
-                    oss << std::fixed << std::setprecision(1) << ratio;
-                    blockInfo += "  (~" + oss.str() + " blocks per document)";
+                    std::cout << " (~" << std::fixed << std::setprecision(1) << ratio
+                              << " per doc)";
                 }
             }
-            yams::cli::ui::render_rows(std::cout, {{"Blocks (unique)", blockInfo, ""}});
+            std::cout << "\n";
         }
 
         // Space efficiency
         auto effIt = resp.additionalStats.find("space_efficiency");
         if (effIt != resp.additionalStats.end()) {
             double efficiency = std::stod(effIt->second);
-            std::string effInfo = formatPercentage(efficiency);
+            std::cout << "  Efficiency: " << formatPercentage(efficiency);
 
             // Show orphaned space if present
             auto orphanIt = resp.additionalStats.find("orphaned_bytes");
@@ -744,25 +845,21 @@ private:
                 uint64_t orphanedBytes = std::stoull(orphanIt->second);
                 if (orphanedBytes > 0) {
                     double orphanedPercent = 100.0 - efficiency;
-                    effInfo += "  (" + formatPercentage(orphanedPercent) + " orphaned)";
+                    std::cout << " (" << formatPercentage(orphanedPercent) << " orphaned)";
                 }
             }
-            std::string effBar = yams::cli::ui::progress_bar(efficiency / 100.0, 30);
-            yams::cli::ui::render_rows(std::cout, {{"Space Efficiency", effInfo, effBar}});
+            std::cout << "\n";
         }
 
         double idxPct = resp.totalDocuments > 0
                             ? (double)resp.indexedDocuments / resp.totalDocuments * 100.0
                             : 0.0;
-        std::string idxPctStr = formatPercentage(idxPct);
-        yams::cli::ui::render_rows(std::cout,
-                                   {{"Indexed", formatNumber(resp.indexedDocuments), idxPctStr}});
-
-        std::cout << "\n";
+        std::cout << "  Indexed:    " << formatNumber(resp.indexedDocuments) << " ("
+                  << formatPercentage(idxPct) << ")\n";
     }
 
     void renderSmartHealthSection(const yams::daemon::GetStatsResponse& resp) {
-        printSectionHeader("System Health");
+        std::cout << "\nSystem Health:\n";
 
         // One-line services summary (✓/⚠/✗)
         try {
@@ -821,8 +918,18 @@ private:
                     ml != resp.additionalStats.end())
                     count = ml->second;
                 else if (haveJson && j.contains("services") &&
-                         j["services"].contains("onnx_models_loaded"))
-                    count = j["services"]["onnx_models_loaded"].dump();
+                         j["services"].contains("onnx_models_loaded")) {
+                    try {
+                        if (j["services"]["onnx_models_loaded"].is_string())
+                            count = j["services"]["onnx_models_loaded"].get<std::string>();
+                        else if (j["services"]["onnx_models_loaded"].is_number_integer())
+                            count = std::to_string(j["services"]["onnx_models_loaded"].get<int>());
+                        else
+                            count = j["services"]["onnx_models_loaded"].dump();
+                    } catch (...) {
+                        count = "unknown";
+                    }
+                }
                 if (svc == "available") {
                     if (count == "0" || count == "\"0\"")
                         models = "⚠ (0)";
@@ -834,9 +941,8 @@ private:
                     models = "⚠";
                 }
             }
-            std::string summary = content + " Content | " + repo + " Repo | " + search +
-                                  " Search | " + models + " Models";
-            yams::cli::ui::render_rows(std::cout, {{"Services", summary, ""}});
+            std::cout << "  Services:   " << content << " Content | " << repo << " Repo | "
+                      << search << " Search | " << models << " Models\n";
         } catch (...) {
         }
 
@@ -845,10 +951,7 @@ private:
         std::string status =
             (healthStatus != resp.additionalStats.end()) ? healthStatus->second : "unknown";
         std::string statusDisplay = (status == "healthy") ? "Healthy" : "Needs Attention";
-        {
-            std::vector<yams::cli::ui::Row> rows{{"Status", statusDisplay, ""}};
-            yams::cli::ui::render_rows(std::cout, rows);
-        }
+        std::cout << "  Status:     " << statusDisplay << "\n";
 
         // Storage health with warnings
         auto orphanedBlocks = resp.additionalStats.find("orphaned_blocks");
@@ -866,10 +969,7 @@ private:
             storageStatus = "OK - " + formatSize(resp.totalSize) + " in " +
                             formatNumber(resp.totalDocuments) + " documents";
         }
-        {
-            std::vector<yams::cli::ui::Row> rows{{"Storage", storageStatus, ""}};
-            yams::cli::ui::render_rows(std::cout, rows);
-        }
+        std::cout << "  Storage:    " << storageStatus << "\n";
 
         // Block integrity status
         auto blockHealth = resp.additionalStats.find("block_health");
@@ -890,10 +990,7 @@ private:
             } else {
                 blockStatus = blockHealth->second == "healthy" ? "Healthy" : "Needs Attention";
             }
-            {
-                std::vector<yams::cli::ui::Row> rows{{"Block Health", blockStatus, ""}};
-                yams::cli::ui::render_rows(std::cout, rows);
-            }
+            std::cout << "  Blocks:     " << blockStatus << "\n";
         }
 
         // Indexing health with actionable status
@@ -911,36 +1008,33 @@ private:
             indexStatus = "OK - " + formatNumber(resp.indexedDocuments) + " documents indexed (" +
                           formatPercentage(indexedPercent) + ")";
         }
-        {
-            std::vector<yams::cli::ui::Row> rows{{"Indexing", indexStatus, ""}};
-            yams::cli::ui::render_rows(std::cout, rows);
-        }
+        std::cout << "  Indexing:   " << indexStatus << "\n";
 
-        // Vector database status
+        // Vector database status with optional row count in verbose mode
         std::string vectorStatus = resp.vectorIndexSize > 0
                                        ? "Initialized - " + formatSize(resp.vectorIndexSize)
                                        : "Not initialized";
-        {
-            std::vector<yams::cli::ui::Row> rows{{"Vector DB", vectorStatus, ""}};
-            yams::cli::ui::render_rows(std::cout, rows);
+        if (verbose_) {
+            auto rowsIt = resp.additionalStats.find("vector_rows");
+            if (rowsIt != resp.additionalStats.end()) {
+                vectorStatus += " (" +
+                                formatNumber(static_cast<uint64_t>(std::stoull(rowsIt->second))) +
+                                " rows)";
+            }
         }
+        std::cout << "  Vector DB:  " << vectorStatus << "\n";
 
         // Daemon status if available
         auto uptimeIt = resp.additionalStats.find("daemon_uptime");
         if (uptimeIt != resp.additionalStats.end()) {
             long uptime = std::stoll(uptimeIt->second);
             std::string daemonStatus = "Running (uptime: " + formatUptime(uptime) + ")";
-            {
-                std::vector<yams::cli::ui::Row> rows{{"Daemon", daemonStatus, ""}};
-                yams::cli::ui::render_rows(std::cout, rows);
-            }
+            std::cout << "  Daemon:     " << daemonStatus << "\n";
         }
-
-        std::cout << "\n";
     }
 
     void renderRecommendationsSection(const yams::daemon::GetStatsResponse& resp) {
-        printSectionHeader("Recommendations");
+        std::cout << "\nRecommendations:\n";
 
         std::vector<std::string> recommendations;
         std::vector<std::string> warnings; // Higher priority items
@@ -971,8 +1065,17 @@ private:
             }
         }
 
-        // Check indexing status
-        if (resp.indexedDocuments == 0 && resp.totalDocuments > 0) {
+        // Check embedding coverage (single deduplicated recommendation)
+        bool needEmbeddingsRec = false;
+        if (resp.totalDocuments > 0) {
+            if (resp.indexedDocuments == 0) {
+                needEmbeddingsRec = true;
+            } else if (resp.totalDocuments > 1000 &&
+                       resp.indexedDocuments < (resp.totalDocuments / 2)) {
+                needEmbeddingsRec = true;
+            }
+        }
+        if (needEmbeddingsRec) {
             recommendations.push_back(
                 "Run 'yams repair --embeddings' to generate missing embeddings");
         }
@@ -993,10 +1096,7 @@ private:
                 "Vector database will be created automatically on first search");
         }
 
-        // Check for performance optimizations
-        if (resp.totalDocuments > 1000 && resp.indexedDocuments < resp.totalDocuments / 2) {
-            recommendations.push_back("Consider running indexing to improve search performance");
-        }
+        // Note: performance optimization rec consolidated above to avoid duplicates
 
         // Display warnings first (with warning symbol)
         for (const auto& warning : warnings) {
@@ -1012,21 +1112,16 @@ private:
         if (warnings.empty() && recommendations.empty()) {
             std::cout << "  ✓ System is optimally configured\n";
         }
-
-        std::cout << "\n";
     }
 
     void renderTechnicalDetailsSection(const yams::daemon::GetStatsResponse& resp) {
-        printSectionHeader("Technical Details");
+        std::cout << "\nTechnical Details:\n";
 
         // Deduplication info
-        std::vector<yams::cli::ui::Row> rows;
         auto uniqueBlocks = resp.additionalStats.find("unique_blocks");
         if (uniqueBlocks != resp.additionalStats.end()) {
-            std::string dedupInfo = std::to_string(resp.compressionRatio) + ":1 ratio, " +
-                                    formatNumber(std::stoull(uniqueBlocks->second)) +
-                                    " unique blocks";
-            rows.push_back({"Deduplication", dedupInfo, ""});
+            std::cout << "  Deduplication:  " << resp.compressionRatio << ":1 ratio, "
+                      << formatNumber(std::stoull(uniqueBlocks->second)) << " unique blocks\n";
         }
 
         // Performance info
@@ -1035,13 +1130,12 @@ private:
             uint64_t ops = std::stoull(storeOps->second);
             std::string perfInfo = ops > 0 ? formatNumber(ops) + " operations recorded"
                                            : "Fresh daemon (0 operations recorded)";
-            rows.push_back({"Performance", perfInfo, ""});
+            std::cout << "  Performance:    " << perfInfo << "\n";
         }
 
         // Compression info
-        std::string compressionInfo =
-            std::to_string(resp.compressionRatio) + ":1 ratio using content-addressed storage";
-        rows.push_back({"Compression", compressionInfo, ""});
+        std::cout << "  Compression:    " << resp.compressionRatio
+                  << ":1 ratio using content-addressed storage\n";
 
         // Streaming metrics if available
         auto ttfb = resp.additionalStats.find("stream_ttfb_avg_ms");
@@ -1050,24 +1144,72 @@ private:
         auto keepalives = resp.additionalStats.find("stream_keepalives");
         if (ttfb != resp.additionalStats.end() || streams != resp.additionalStats.end() ||
             batches != resp.additionalStats.end() || keepalives != resp.additionalStats.end()) {
-            rows.push_back(
-                {"Streaming TTFB (avg)",
-                 (ttfb != resp.additionalStats.end() ? ttfb->second : "0") + std::string(" ms"),
-                 ""});
+            std::cout << "  Streaming:\n";
+            if (ttfb != resp.additionalStats.end())
+                std::cout << "    TTFB (avg):     " << ttfb->second << " ms\n";
             if (streams != resp.additionalStats.end())
-                rows.push_back({"Streams", streams->second, ""});
+                std::cout << "    Streams:        " << streams->second << "\n";
             if (batches != resp.additionalStats.end())
-                rows.push_back({"Batches Emitted", batches->second, ""});
+                std::cout << "    Batches:        " << batches->second << "\n";
             if (keepalives != resp.additionalStats.end())
-                rows.push_back({"Keepalives", keepalives->second, ""});
+                std::cout << "    Keepalives:     " << keepalives->second << "\n";
         }
 
-        yams::cli::ui::render_rows(std::cout, rows);
-        std::cout << "\n";
+        // Resource pools (IPC)
+        auto poolSize = resp.additionalStats.find("pool_ipc_size");
+        auto poolResizes = resp.additionalStats.find("pool_ipc_resizes");
+        auto poolRejected = resp.additionalStats.find("pool_ipc_rejected_on_cap");
+        auto poolThrottled = resp.additionalStats.find("pool_ipc_throttled_on_cooldown");
+        if (poolSize != resp.additionalStats.end() || poolResizes != resp.additionalStats.end() ||
+            poolRejected != resp.additionalStats.end() ||
+            poolThrottled != resp.additionalStats.end()) {
+            std::cout << "  Resource Pools (IPC):\n";
+            if (poolSize != resp.additionalStats.end())
+                std::cout << "    Size:           " << poolSize->second << "\n";
+            if (poolResizes != resp.additionalStats.end())
+                std::cout << "    Resizes:        " << poolResizes->second << "\n";
+            if (poolRejected != resp.additionalStats.end())
+                std::cout << "    Rejected@Cap:   " << poolRejected->second << "\n";
+            if (poolThrottled != resp.additionalStats.end())
+                std::cout << "    Throttled:      " << poolThrottled->second << "\n";
+        }
+
+        // Embedding/model usage (when available)
+        auto et = resp.additionalStats.find("embed_total_texts");
+        auto tok = resp.additionalStats.find("embed_total_tokens");
+        auto ttot = resp.additionalStats.find("embed_total_time_ms");
+        auto tavg = resp.additionalStats.find("embed_avg_time_ms");
+        auto ttps = resp.additionalStats.find("embed_throughput_txtps");
+        auto tkps = resp.additionalStats.find("embed_throughput_tokps");
+        auto mname = resp.additionalStats.find("embed_model_name");
+        auto edim = resp.additionalStats.find("embed_dim");
+        if (et != resp.additionalStats.end() || tok != resp.additionalStats.end() ||
+            ttot != resp.additionalStats.end() || tavg != resp.additionalStats.end() ||
+            ttps != resp.additionalStats.end() || tkps != resp.additionalStats.end() ||
+            mname != resp.additionalStats.end() || edim != resp.additionalStats.end()) {
+            std::cout << "  Embeddings:\n";
+            if (mname != resp.additionalStats.end())
+                std::cout << "    Model:          " << mname->second
+                          << (edim != resp.additionalStats.end() ? " (dim " + edim->second + ")"
+                                                                 : "")
+                          << "\n";
+            if (et != resp.additionalStats.end())
+                std::cout << "    Texts:          " << et->second << "\n";
+            if (tok != resp.additionalStats.end())
+                std::cout << "    Tokens:         " << tok->second << "\n";
+            if (ttot != resp.additionalStats.end())
+                std::cout << "    Time (total):   " << ttot->second << " ms\n";
+            if (tavg != resp.additionalStats.end())
+                std::cout << "    Time (avg):     " << tavg->second << " ms\n";
+            if (ttps != resp.additionalStats.end())
+                std::cout << "    Throughput:     " << ttps->second << " texts/s\n";
+            if (tkps != resp.additionalStats.end())
+                std::cout << "                     " << tkps->second << " tokens/s\n";
+        }
     }
 
     void renderServiceStatusSection(const yams::daemon::GetStatsResponse& resp) {
-        printSectionHeader("Service Status");
+        std::cout << "\nService Status:\n";
 
         // Parse daemon JSON for service keys when proto didn't carry them
         json j;
@@ -1082,13 +1224,12 @@ private:
         }
 
         // Show daemon version and uptime
-        std::vector<yams::cli::ui::Row> statusRows;
         auto versionIt = resp.additionalStats.find("daemon_version");
         auto uptimeIt = resp.additionalStats.find("daemon_uptime");
         if (versionIt != resp.additionalStats.end() && uptimeIt != resp.additionalStats.end()) {
             std::string uptimeStr = formatUptime(std::stoll(uptimeIt->second));
-            std::string daemonInfo = versionIt->second + " (uptime: " + uptimeStr + ")";
-            statusRows.push_back({"Daemon", daemonInfo, ""});
+            std::cout << "  Daemon:         " << versionIt->second << " (uptime: " << uptimeStr
+                      << ")\n";
         }
 
         // ContentStore status
@@ -1104,7 +1245,7 @@ private:
         } else {
             contentStoreStatus = "✓ Running (" + formatNumber(resp.totalDocuments) + " objects)";
         }
-        statusRows.push_back({"ContentStore", contentStoreStatus, ""});
+        std::cout << "  ContentStore:   " << contentStoreStatus << "\n";
 
         // MetadataRepo status
         auto metadataIt = resp.additionalStats.find("service_metadatarepo");
@@ -1118,12 +1259,12 @@ private:
         } else {
             metadataStatus = "✓ Running (" + formatNumber(resp.indexedDocuments) + " indexed)";
         }
-        statusRows.push_back({"MetadataRepo", metadataStatus, ""});
+        std::cout << "  MetadataRepo:   " << metadataStatus << "\n";
 
         // Configured data directory (helps debug path mismatches)
         auto dataDirIt = resp.additionalStats.find("data_dir");
         if (dataDirIt != resp.additionalStats.end() && !dataDirIt->second.empty()) {
-            statusRows.push_back({"Data Dir", dataDirIt->second, ""});
+            std::cout << "  Data Dir:       " << dataDirIt->second << "\n";
         }
 
         // SearchExecutor status
@@ -1150,17 +1291,47 @@ private:
         } else {
             searchStatus = "⚠ Unknown";
         }
-        statusRows.push_back({"SearchExecutor", searchStatus, ""});
+        std::cout << "  SearchExecutor: " << searchStatus << "\n";
 
-        yams::cli::ui::render_rows(std::cout, statusRows);
+        // Auto-repair visibility (compact summary line + details)
+        auto rq = resp.additionalStats.find("repair_queue_depth");
+        auto rb = resp.additionalStats.find("repair_batches_attempted");
+        auto rg = resp.additionalStats.find("repair_embeddings_generated");
+        auto rsk = resp.additionalStats.find("repair_embeddings_skipped");
+        auto rfl = resp.additionalStats.find("repair_failed_operations");
+        // Readiness progress percentage for vector index (reused as repair progress proxy)
+        int repairProgressPct = -1;
+        try {
+            // When status JSON is present in additionalStats["json"], use it to read progress
+            if (haveJson && j.contains("progress") && j["progress"].contains("vector_index")) {
+                repairProgressPct = j["progress"]["vector_index"].get<int>();
+            }
+        } catch (...) {
+        }
+        if (rq != resp.additionalStats.end() || rb != resp.additionalStats.end() ||
+            rg != resp.additionalStats.end() || rsk != resp.additionalStats.end() ||
+            rfl != resp.additionalStats.end() || repairProgressPct >= 0) {
+            std::ostringstream line;
+            line << "  Repair:        ";
+            if (repairProgressPct >= 0)
+                line << repairProgressPct << "%  | ";
+            if (rq != resp.additionalStats.end())
+                line << "queue=" << rq->second << " ";
+            if (rb != resp.additionalStats.end())
+                line << "batches=" << rb->second << " ";
+            if (rg != resp.additionalStats.end())
+                line << "gen=" << rg->second << " ";
+            if (rsk != resp.additionalStats.end())
+                line << "skip=" << rsk->second << " ";
+            if (rfl != resp.additionalStats.end())
+                line << "fail=" << rfl->second;
+            std::cout << line.str() << "\n";
+        }
 
         // Client/IPC self-check diagnostics
-        yams::cli::ui::render_rows(std::cout, {{"Client", YAMS_VERSION_STRING, ""}});
-        yams::cli::ui::render_rows(
-            std::cout, {{"Client IPC", "Pool: enabled",
-                         yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string()}});
-
-        std::cout << "\n";
+        std::cout << "  Client:         " << YAMS_VERSION_STRING << "\n";
+        std::cout << "  Client IPC:     Pool enabled, "
+                  << yams::daemon::DaemonClient::resolveSocketPathConfigFirst().string() << "\n";
 
         // VectorDatabase detailed status
         auto vectorServiceIt = resp.additionalStats.find("service_vectordb");
@@ -1190,21 +1361,26 @@ private:
         }
 
         if (vectorServiceIt == resp.additionalStats.end() || vectorServiceIt->second != "error") {
-            yams::cli::ui::render_rows(std::cout, {{"Vector DB", vectorStatus, ""}});
+            std::cout << "  Vector DB:      " << vectorStatus << "\n";
             auto vdbPathIt = resp.additionalStats.find("vectordb_path");
             if (vdbPathIt != resp.additionalStats.end() && !vdbPathIt->second.empty()) {
-                yams::cli::ui::render_rows(std::cout, {{"", vdbPathIt->second, ""}});
+                std::cout << "                  " << vdbPathIt->second << "\n";
+            }
+            auto vrows = resp.additionalStats.find("vector_rows");
+            if (vrows != resp.additionalStats.end()) {
+                std::cout << "                  Rows: " << formatNumber(std::stoull(vrows->second))
+                          << "\n";
             }
             if (resp.vectorIndexSize == 0) {
-                yams::cli::ui::render_rows(std::cout,
-                                           {{"", "", "Will initialize on first search"}});
+                std::cout << "                  Will initialize on first search\n";
             }
         }
 
-        // ONNX Models status
+        // ONNX / Embeddings Provider status
         auto embeddingServiceIt = resp.additionalStats.find("service_embeddingservice");
         auto modelsLoadedIt = resp.additionalStats.find("onnx_models_loaded");
         auto modelsErrorIt = resp.additionalStats.find("onnx_models_error");
+        auto onnxRtIt = resp.additionalStats.find("onnx_runtime");
 
         // Determine service state from proto or JSON
         std::string embeddingSvcState;
@@ -1222,34 +1398,65 @@ private:
                         ? modelsLoadedIt->second
                         : (haveJson && j.contains("services") &&
                                    j["services"].contains("onnx_models_loaded")
-                               ? j["services"]["onnx_models_loaded"].dump()
+                               ? (j["services"]["onnx_models_loaded"].is_string()
+                                      ? j["services"]["onnx_models_loaded"].get<std::string>()
+                                      : (j["services"]["onnx_models_loaded"].is_number_integer()
+                                             ? std::to_string(
+                                                   j["services"]["onnx_models_loaded"].get<int>())
+                                             : j["services"]["onnx_models_loaded"].dump()))
                                : std::string{"0"});
                 if (modelsCount == "0") {
-                    yams::cli::ui::render_rows(std::cout,
-                                               {{"ONNX Models", "⚠ No models loaded (0)", ""}});
-                    yams::cli::ui::render_rows(
-                        std::cout, {{"", "", "Run 'yams model download all-MiniLM-L6-v2'"}});
+                    std::cout << "  ONNX Models:    ⚠ No models loaded (0)\n";
+                    std::cout << "                  Run 'yams model download --apply-config "
+                                 "all-MiniLM-L6-v2'\n";
                 } else {
-                    yams::cli::ui::render_rows(
-                        std::cout, {{"ONNX Models", "✓ " + modelsCount + " models loaded", ""}});
+                    std::cout << "  ONNX Models:    ✓ " << modelsCount << " models loaded\n";
+                }
+                // Show preferred model hints when available
+                if (auto itpm = resp.additionalStats.find("preferred_model");
+                    itpm != resp.additionalStats.end()) {
+                    std::cout << "                  Preferred: " << itpm->second;
+                    if (auto itpath = resp.additionalStats.find("preferred_model_path_exists");
+                        itpath != resp.additionalStats.end()) {
+                        std::cout << " (" << (itpath->second == "true" ? "found" : "missing")
+                                  << ")";
+                    }
+                    std::cout << "\n";
                 }
             } else if (embeddingSvcState == "unavailable") {
-                yams::cli::ui::render_rows(std::cout,
-                                           {{"ONNX Models", "⚠ Service unavailable", ""}});
+                // Distinguish runtime-disabled vs. just not yet adopted/loaded
+                if (onnxRtIt != resp.additionalStats.end() && onnxRtIt->second == "disabled") {
+                    std::cout << "  ONNX Models:    ✗ Runtime not compiled in\n";
+                    std::cout << "                  Rebuild with ONNX or install ONNX-enabled "
+                                 "binaries.\n";
+                } else {
+                    std::cout << "  ONNX Models:    ⚠ Service unavailable\n";
+                }
                 if (modelsErrorIt != resp.additionalStats.end()) {
-                    yams::cli::ui::render_rows(std::cout, {{"", "", modelsErrorIt->second}});
+                    std::cout << "                  " << modelsErrorIt->second << "\n";
+                }
+                // Print preferred model hint even when unavailable
+                if (auto itpm = resp.additionalStats.find("preferred_model");
+                    itpm != resp.additionalStats.end()) {
+                    std::cout << "                  Preferred: " << itpm->second;
+                    if (auto itpath = resp.additionalStats.find("preferred_model_path_exists");
+                        itpath != resp.additionalStats.end()) {
+                        std::cout << " (" << (itpath->second == "true" ? "found" : "missing")
+                                  << ")";
+                    }
+                    std::cout << "\n";
                 }
             } else if (embeddingSvcState == "error") {
-                yams::cli::ui::render_rows(std::cout, {{"ONNX Models", "✗ Service error", ""}});
+                std::cout << "  ONNX Models:    ✗ Service error\n";
                 if (modelsErrorIt != resp.additionalStats.end()) {
-                    yams::cli::ui::render_rows(std::cout, {{"", "", modelsErrorIt->second}});
+                    std::cout << "                  " << modelsErrorIt->second << "\n";
                 }
             }
         } else {
-            yams::cli::ui::render_rows(std::cout, {{"ONNX Models", "⚠ Status unknown", ""}});
+            std::cout << "  ONNX Models:    ⚠ Status unknown\n";
         }
 
-        // Embedding Service status
+        // Embedding Service status (duplicated view for clarity)
         if (embeddingServiceIt != resp.additionalStats.end()) {
             std::string embeddingStatus;
             if (embeddingServiceIt->second == "available") {
@@ -1259,21 +1466,44 @@ private:
             } else {
                 embeddingStatus = "⚠ Unavailable (" + embeddingServiceIt->second + ")";
             }
-            yams::cli::ui::render_rows(std::cout, {{"Embedding Service", embeddingStatus, ""}});
-        }
+            std::cout << "  Embedding Svc:  " << embeddingStatus << "\n";
 
-        std::cout << "\n";
+            // Show dynamic batching metrics when available
+            auto effTok = resp.additionalStats.find("embed_batch_effective_tokens");
+            auto avgDocs = resp.additionalStats.find("embed_batch_recent_avg_docs");
+            auto succ = resp.additionalStats.find("embed_batch_successes");
+            auto fails = resp.additionalStats.find("embed_batch_failures");
+            auto backs = resp.additionalStats.find("embed_batch_backoffs");
+            if (effTok != resp.additionalStats.end() || avgDocs != resp.additionalStats.end() ||
+                succ != resp.additionalStats.end() || fails != resp.additionalStats.end() ||
+                backs != resp.additionalStats.end()) {
+                std::ostringstream bl;
+                bl << "  Batching:       ";
+                if (effTok != resp.additionalStats.end())
+                    bl << "budget_tokens=" << effTok->second << " ";
+                if (avgDocs != resp.additionalStats.end())
+                    bl << "avg_docs=" << avgDocs->second << " ";
+                if (succ != resp.additionalStats.end())
+                    bl << "ok=" << succ->second << " ";
+                if (fails != resp.additionalStats.end())
+                    bl << "fail=" << fails->second << " ";
+                if (backs != resp.additionalStats.end())
+                    bl << "backoff=" << backs->second;
+                std::cout << bl.str() << "\n";
+            }
+        }
     }
 
 private:
     YamsCLI* cli_ = nullptr;
     std::string format_;
-    bool localOnly_ = false;  // Force local-only mode
-    bool watchMode_ = false;  // Live refresh mode
-    bool verbose_ = false;    // Show comprehensive technical details
-    bool forceColor_ = false; // --color flag
-    bool noColor_ = false;    // --no-color flag
-    bool daemonOnly_ = false; // Force daemon-only, disable local fallback
+    bool localOnly_ = false;   // Force local-only mode
+    bool vectorsMode_ = false; // Subcommand: vectors mode
+    bool watchMode_ = false;   // Live refresh mode
+    bool verbose_ = false;     // Show comprehensive technical details
+    bool forceColor_ = false;  // --color flag
+    bool noColor_ = false;     // --no-color flag
+    bool daemonOnly_ = false;  // Force daemon-only, disable local fallback
 };
 
 // Factory function

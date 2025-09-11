@@ -2,7 +2,7 @@
 #include <thread>
 #include <gtest/gtest.h>
 
-#include <yams/cli/async_bridge.h>
+#include "test_async_helpers.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 using yams::cli::run_sync;

@@ -30,6 +30,8 @@ public:
     std::string getDescription() const override;
     void registerCommand(CLI::App& app, YamsCLI* cli) override;
     Result<void> execute() override;
+    // Async path to avoid blocking the client pipeline
+    boost::asio::awaitable<Result<void>> executeAsync() override;
 
     // Testing interface
     void setHash(const std::string& hash) { hash_ = hash; }

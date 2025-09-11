@@ -134,7 +134,6 @@ public:
      * - AudioContentHandler (priority 120)
      * - ArchiveContentHandler (priority 100)
      * - TextContentHandler
-     * - PdfContentHandler
      * - BinaryContentHandler (fallback)
      */
     void initializeDefaultHandlers();

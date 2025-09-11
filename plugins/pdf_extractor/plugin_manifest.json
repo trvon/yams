@@ -1,0 +1,24 @@
+{
+  "name": "pdf_extractor",
+  "version": "1.0.0",
+  "abi": 1,
+  "interfaces": [
+    {
+      "id": "content_extractor_v1",
+      "version": 1
+    },
+    {
+      "id": "search_provider_v1",
+      "version": 1
+    }
+  ],
+  "capabilities": [],
+  "health": {
+    "has_health": false
+  },
+  "authors": [
+    {
+      "name": "YAMS Team"
+    }
+  ]
+}

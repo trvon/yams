@@ -123,6 +123,11 @@ public:
     void registerCommand(std::unique_ptr<ICommand> command);
 
     /**
+     * Defer execution of a command until after parsing; runner will execute once via async spawn.
+     */
+    void setPendingCommand(ICommand* cmd);
+
+    /**
      * Find the magic_numbers.json file in standard locations
      */
     static std::filesystem::path findMagicNumbersFile();
@@ -191,6 +196,9 @@ private:
     std::filesystem::path dataPath_;
     bool verbose_ = false;
     bool jsonOutput_ = false;
+
+    // Deferred execution: a single command to run post-parse
+    ICommand* pendingCommand_ = nullptr;
 };
 
 } // namespace yams::cli

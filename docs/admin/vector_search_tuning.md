@@ -153,6 +153,26 @@ Concise guidance to select, size, and tune vector search for YAMS. Calibrate par
 
 ---
 
+## Model management and runtime discovery
+
+- Preferred model
+  - Configure with embeddings.preferred_model (or via CLI: yams config embeddings model <name>).
+  - The CLI model suite helps you inspect and verify: yams model list | download | info | check.
+- Model root and autodiscovery
+  - embeddings.model_path sets the root for name-based models.
+  - Resolution order for name-based models: configured root → ~/.yams/models → models/ → /usr/local/share/yams/models. Full absolute paths are used as-is.
+  - yams model list enumerates models found under the resolved roots (expects model.onnx in a per-model directory).
+- ONNX provider/plugin discovery
+  - The ONNX model provider is loaded dynamically. Builds define an install prefix so runtime discovery includes $prefix/lib/yams/plugins.
+  - You can also point discovery to a custom directory with YAMS_PLUGIN_DIR when developing or in CI.
+  - Use yams model check to verify ONNX runtime support and plugin directory status.
+- Keep‑hot vs lazy loading
+  - embeddings.keep_model_hot=true pre-creates sessions so embeddings are immediately usable after preload; embeddings.preload_on_startup controls startup behavior.
+  - On constrained systems or when startup delays matter, prefer lazy loading (keep_model_hot=false; preload_on_startup=false). You can also disable preload with YAMS_DISABLE_MODEL_PRELOAD=1.
+- Readiness and observability
+  - If models are not ready, hybrid/semantic paths may degrade to keyword-only until the provider becomes available.
+  - yams status shows service readiness and a WAIT line during initialization; yams stats -v surfaces recommendations and service status details.
+
 ## References
 
 - Architecture → Vector Search: ../architecture/vector_search_architecture.md

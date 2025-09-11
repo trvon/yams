@@ -15,6 +15,7 @@ add_library(yams_vector
     vector_database.cpp
     embedding_generator.cpp
     embedding_service.cpp    # Simple embedding service (replaces complex worker)
+    batch_metrics.cpp
     document_chunker.cpp
     vector_index_manager.cpp
     vector_index_optimizer.cpp
@@ -23,6 +24,7 @@ add_library(yams_vector
     model_loader.cpp
     sqlite_vec_backend.cpp  # SQLite-vec backend implementation
     mock_embedding_provider.cpp  # Mock provider for testing
+    dim_resolver.cpp
     # Compile sqlite-vec directly into the library
     ${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
 )

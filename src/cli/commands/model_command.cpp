@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <array>
@@ -5,15 +6,24 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_migration.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/downloader/downloader.hpp>
+#include <yams/integrity/repair_utils.h>
 #include <yams/profiling.h>
 
 namespace yams::cli {
@@ -35,11 +45,10 @@ static const std::vector<ModelInfo> AVAILABLE_MODELS = {
      "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
     {"all-mpnet-base-v2",
      "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
-     "High-quality 768-dim embeddings", 420, "embedding"},
-    // Nomic model support (embedding). If the default URL changes, users can override with --url.
-    {"nomic-embed-text-v1.5",
-     "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx",
-     "Nomic embedding model (v1.5)", 0 /*unknown*/, "embedding"}};
+     "High-quality 768-dim embeddings", 420, "embedding"}
+    // Note: Nomic ONNX embedding model is currently not recommended due to provider limitations
+    // (no batch embeddings/preload). You can still download via --hf or --url manually.
+};
 
 class ModelCommand : public ICommand {
 private:
@@ -47,8 +56,17 @@ private:
     bool list_ = false;
     std::string downloadModel_;
     std::string infoModel_;
+    // Positional argument storage (must outlive CLI11 option bindings)
+    std::string positional_download_name_;
+    std::string positional_info_name_;
     std::string customUrl_;
+    std::string hfRepo_;
+    std::string revision_ = "main";
+    std::string token_;
+    bool offline_ = false;
     bool check_ = false;
+    bool applyConfig_ = false; // when true, write detected dims into config
+    bool executed_ = false;
 
     // Helper function to check if a command exists in PATH
     bool commandExists(const std::string& cmd) const {
@@ -68,6 +86,160 @@ private:
             }
         }
         return false;
+    }
+
+    // Simple JSON loader
+    static nlohmann::json load_json_file(const fs::path& p) {
+        try {
+            std::ifstream in(p);
+            if (!in.good())
+                return {};
+            nlohmann::json j;
+            in >> j;
+            return j;
+        } catch (...) {
+            return {};
+        }
+    }
+
+    struct DetectedProps {
+        size_t dim = 0;
+        size_t max_seq = 0;
+        std::string pooling;
+    };
+
+    static DetectedProps detect_model_props(const std::string& model_name,
+                                            const fs::path& model_dir) {
+        DetectedProps out;
+        auto cfg = load_json_file(model_dir / "config.json");
+        auto sbert = load_json_file(model_dir / "sentence_bert_config.json");
+        try {
+            if (cfg.contains("hidden_size"))
+                out.dim = static_cast<size_t>(cfg["hidden_size"].get<int>());
+            if (cfg.contains("max_position_embeddings"))
+                out.max_seq = static_cast<size_t>(cfg["max_position_embeddings"].get<int>());
+        } catch (...) {
+        }
+        try {
+            if (sbert.contains("output_embedding_size") && out.dim == 0)
+                out.dim = static_cast<size_t>(sbert["output_embedding_size"].get<int>());
+            if (sbert.contains("pooling_mode_mean_tokens") &&
+                sbert["pooling_mode_mean_tokens"].get<bool>())
+                out.pooling = "mean";
+            if (sbert.contains("pooling_mode_cls_token") &&
+                sbert["pooling_mode_cls_token"].get<bool>())
+                out.pooling = out.pooling.empty() ? "cls" : (out.pooling + "+cls");
+        } catch (...) {
+        }
+        // Heuristics by well-known model names
+        if (out.dim == 0) {
+            if (model_name.find("MiniLM-L6") != std::string::npos)
+                out.dim = 384;
+            else if (model_name.find("mpnet") != std::string::npos)
+                out.dim = 768;
+            else if (model_name.find("nomic") != std::string::npos)
+                out.dim = 768;
+        }
+        if (out.max_seq == 0)
+            out.max_seq = 512; // safe default
+        return out;
+    }
+
+    static fs::path resolveConfigPath() {
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        const char* home = std::getenv("HOME");
+        fs::path base;
+        if (xdg && *xdg)
+            base = fs::path(xdg);
+        else if (home && *home)
+            base = fs::path(home) / ".config";
+        else
+            base = fs::path("~/.config");
+        return base / "yams" / "config.toml";
+    }
+
+    static void
+    toml_write(std::ostream& file,
+               const std::map<std::string, std::map<std::string, std::string>>& config) {
+        // Basic TOML writer (order not preserved; comments lost)
+        for (const auto& [section, kv] : config) {
+            file << "[" << section << "]\n";
+            for (const auto& [k, v] : kv) {
+                if (v == "true" || v == "false")
+                    file << k << " = " << v << "\n";
+                else {
+                    // numeric?
+                    bool is_num = !v.empty() && std::all_of(v.begin(), v.end(), [](char c) {
+                        return std::isdigit(static_cast<unsigned char>(c));
+                    });
+                    if (!is_num) {
+                        // float?
+                        bool is_float =
+                            !v.empty() && std::count(v.begin(), v.end(), '.') == 1 &&
+                            std::all_of(v.begin(), v.end(), [](char c) {
+                                return std::isdigit(static_cast<unsigned char>(c)) || c == '.';
+                            });
+                        if (is_float)
+                            is_num = true;
+                    }
+                    if (is_num)
+                        file << k << " = " << v << "\n";
+                    else
+                        file << k << " = \"" << v << "\"\n";
+                }
+            }
+            file << "\n";
+        }
+    }
+
+    Result<void> apply_detected_to_config(const std::string& model_name,
+                                          const DetectedProps& props) {
+        try {
+            using yams::config::ConfigMigrator;
+            fs::path cfgPath = resolveConfigPath();
+            ConfigMigrator migrator;
+            if (!fs::exists(cfgPath)) {
+                // Create default v2 config
+                auto mk = migrator.createDefaultV2Config(cfgPath);
+                if (!mk)
+                    return Error{mk.error()};
+            }
+            auto parsed = migrator.parseTomlConfig(cfgPath);
+            if (!parsed)
+                return Error{parsed.error()};
+            auto c = parsed.value();
+            auto& emb = c["embeddings"];
+            emb["preferred_model"] = model_name;
+            if (props.dim > 0) {
+                emb["embedding_dim"] = std::to_string(props.dim);
+            }
+            if (props.max_seq > 0) {
+                emb["max_sequence_length"] = std::to_string(props.max_seq);
+            }
+            auto& vdb = c["vector_database"];
+            if (props.dim > 0)
+                vdb["embedding_dim"] = std::to_string(props.dim);
+            auto& vidx = c["vector_index"];
+            if (props.dim > 0)
+                vidx["dimension"] = std::to_string(props.dim);
+            // Write back
+            fs::create_directories(cfgPath.parent_path());
+            std::ofstream out(cfgPath);
+            if (!out.good())
+                return Error{ErrorCode::WriteError,
+                             "Failed to open config for write: " + cfgPath.string()};
+            toml_write(out, c);
+            out.close();
+            std::cout << "✓ Updated config: embeddings.preferred_model='" << model_name
+                      << "', embedding_dim=" << props.dim
+                      << ", max_sequence_length=" << props.max_seq << "\n";
+            std::cout
+                << "  Also updated vector_database.embedding_dim and vector_index.dimension to "
+                << props.dim << "\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::WriteError, e.what()};
+        }
     }
 
     // Helper function for safe command execution
@@ -150,6 +322,7 @@ public:
         auto* sub_list = cmd->add_subcommand("list", "List available and installed models");
         sub_list->callback([this]() {
             list_ = true;
+            executed_ = true;
             auto r = execute();
             if (!r) {
                 spdlog::error("Model list failed: {}", r.error().message);
@@ -158,19 +331,46 @@ public:
         });
 
         auto* sub_download = cmd->add_subcommand("download", "Download a model by name");
-        std::string positional_download_name;
-        sub_download->add_option("name", positional_download_name, "Model name");
+        sub_download->add_option("name", positional_download_name_, "Model name");
         sub_download->add_option("--output", outputDir_, "Output directory for downloads");
         sub_download->add_option("--url", customUrl_, "Custom URL to download the model");
+        sub_download->add_option("--hf", hfRepo_, "Hugging Face repo id (org/name)");
+        sub_download->add_option("--revision", revision_, "Hugging Face revision (default: main)");
+        sub_download->add_option("--token", token_, "Hugging Face access token");
+        sub_download->add_flag("--offline", offline_, "Offline mode: use cache only");
         sub_download->add_flag("--force", force_, "Force redownload if model exists");
-        sub_download->callback([this, &positional_download_name]() {
-            if (positional_download_name.empty()) {
-                std::cout << "Model name is required. Usage: yams model download <name> [--url "
-                             "<url>] [--output <dir>]"
-                          << std::endl;
-                std::exit(2);
+        sub_download->add_flag(
+            "--apply-config", applyConfig_,
+            "Update YAMS config with detected model dim/seq and set as preferred model");
+        sub_download->callback([this]() {
+            // Allow either a positional name, or --hf repo, or --url
+            if (positional_download_name_.empty()) {
+                if (!hfRepo_.empty()) {
+                    // Derive a sensible name from repo when no positional name was given
+                    auto pos = hfRepo_.find_last_of('/');
+                    downloadModel_ = (pos == std::string::npos) ? hfRepo_ : hfRepo_.substr(pos + 1);
+                } else if (!customUrl_.empty()) {
+                    // Name from URL filename
+                    try {
+                        std::string fname = customUrl_;
+                        auto p = fname.find_last_of('/');
+                        if (p != std::string::npos)
+                            fname = fname.substr(p + 1);
+                        if (auto dot = fname.find('.'); dot != std::string::npos)
+                            fname = fname.substr(0, dot);
+                        downloadModel_ = fname.empty() ? std::string("model") : fname;
+                    } catch (...) {
+                        downloadModel_ = "model";
+                    }
+                } else {
+                    std::cout << "Model name is required. Usage: yams model download <name> [--url "
+                                 "<url>] [--output <dir>] or provide --hf <org/name>\n";
+                    std::exit(2);
+                }
+            } else {
+                downloadModel_ = positional_download_name_;
             }
-            downloadModel_ = positional_download_name;
+            executed_ = true;
             auto r = execute();
             if (!r) {
                 spdlog::error("Model download failed: {}", r.error().message);
@@ -179,38 +379,125 @@ public:
         });
 
         auto* sub_info = cmd->add_subcommand("info", "Show model details");
-        std::string positional_info_name;
-        sub_info->add_option("name", positional_info_name, "Model name");
-        sub_info->callback([this, &positional_info_name]() {
-            if (positional_info_name.empty()) {
+        sub_info->add_option("name", positional_info_name_, "Model name");
+        sub_info->callback([this]() {
+            if (positional_info_name_.empty()) {
                 std::cout << "Model name is required. Usage: yams model info <name>" << std::endl;
                 std::exit(2);
             }
-            infoModel_ = positional_info_name;
-            auto r = execute();
-            if (!r) {
-                spdlog::error("Model info failed: {}", r.error().message);
-                std::exit(1);
-            }
+            infoModel_ = positional_info_name_;
+            executed_ = true;
+            cli_->setPendingCommand(this);
         });
 
         auto* sub_check =
             cmd->add_subcommand("check", "Check provider support and installed models");
         sub_check->callback([this]() {
             check_ = true;
-            auto r = execute();
-            if (!r) {
-                spdlog::error("Model check failed: {}", r.error().message);
-                std::exit(1);
+            executed_ = true;
+            cli_->setPendingCommand(this);
+        });
+
+        // model provider: print active backend and default/preferred model
+        auto* sub_provider =
+            cmd->add_subcommand("provider", "Show active model provider and preferred model");
+        sub_provider->callback([this]() {
+            try {
+                using namespace yams::daemon;
+                ClientConfig cfg;
+                cfg.singleUseConnections = true;
+                cfg.requestTimeout = std::chrono::milliseconds(3000);
+                DaemonClient client(cfg);
+                // Query model status (lists loaded models if any)
+                ModelStatusRequest msr;
+                msr.detailed = true;
+                std::promise<Result<ModelStatusResponse>> prom;
+                auto fut = prom.get_future();
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [&]() -> boost::asio::awaitable<void> {
+                        auto r = co_await client.call(msr);
+                        prom.set_value(std::move(r));
+                        co_return;
+                    },
+                    boost::asio::detached);
+                auto s =
+                    (fut.wait_for(std::chrono::seconds(3)) == std::future_status::ready)
+                        ? fut.get()
+                        : Result<ModelStatusResponse>(Error{ErrorCode::Timeout, "status timeout"});
+                std::cout << "Model Provider\n==============\n";
+                if (!s) {
+                    std::cout << "Status: unavailable - " << s.error().message << "\n";
+                } else {
+                    const auto& r = s.value();
+                    std::cout << "Status: " << (r.models.empty() ? "idle" : "active") << "\n";
+                    if (!r.models.empty()) {
+                        std::cout << "Loaded models (" << r.models.size() << "):\n";
+                        for (const auto& m : r.models)
+                            std::cout << "  - " << m.name << (m.loaded ? " (loaded)" : "") << "\n";
+                    }
+                }
+                // Read preferred model from config
+                std::string preferred;
+                {
+                    namespace fs = std::filesystem;
+                    fs::path cfgp;
+                    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                        cfgp = fs::path(xdg) / "yams" / "config.toml";
+                    else if (const char* home = std::getenv("HOME"))
+                        cfgp = fs::path(home) / ".config" / "yams" / "config.toml";
+                    std::ifstream in(cfgp);
+                    if (in) {
+                        std::string line, section;
+                        auto trim = [](std::string& str) {
+                            if (str.empty())
+                                return;
+                            str.erase(0, str.find_first_not_of(" \t"));
+                            auto p = str.find_last_not_of(" \t");
+                            if (p != std::string::npos)
+                                str.erase(p + 1);
+                        };
+                        while (std::getline(in, line)) {
+                            std::string l = line;
+                            trim(l);
+                            if (l.empty() || l[0] == '#')
+                                continue;
+                            if (l.front() == '[') {
+                                auto e = l.find(']');
+                                section =
+                                    e != std::string::npos ? l.substr(1, e - 1) : std::string();
+                                continue;
+                            }
+                            auto eq = l.find('=');
+                            if (eq == std::string::npos)
+                                continue;
+                            std::string key = l.substr(0, eq);
+                            std::string val = l.substr(eq + 1);
+                            trim(key);
+                            trim(val);
+                            if (!val.empty() && val.front() == '"' && val.back() == '"')
+                                val = val.substr(1, val.size() - 2);
+                            if (section == "embeddings" && key == "preferred_model") {
+                                preferred = val;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!preferred.empty())
+                    std::cout << "Preferred model: " << preferred << "\n";
+                else
+                    std::cout << "Preferred model: (not set)\n";
+            } catch (const std::exception& e) {
+                std::cout << "Model provider: error - " << e.what() << "\n";
             }
         });
 
+        // Parent callback should not run when a subcommand already executed (avoids duplicate
+        // output)
         cmd->callback([this]() {
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Model command failed: {}", result.error().message);
-                std::exit(1);
-            }
+            if (!executed_)
+                cli_->setPendingCommand(this);
         });
     }
 
@@ -268,6 +555,105 @@ private:
         return locals;
     }
     Result<void> listModels() {
+        using json = nlohmann::json;
+
+        // Preferred model from config/env
+        std::string preferred;
+        try {
+            namespace fs = std::filesystem;
+            fs::path cfgp;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                cfgp = fs::path(xdg) / "yams" / "config.toml";
+            else if (const char* home = std::getenv("HOME"))
+                cfgp = fs::path(home) / ".config" / "yams" / "config.toml";
+            std::ifstream in(cfgp);
+            if (in) {
+                std::string line, section;
+                auto trim = [](std::string& str) {
+                    if (str.empty())
+                        return;
+                    str.erase(0, str.find_first_not_of(" \t"));
+                    auto p = str.find_last_not_of(" \t");
+                    if (p != std::string::npos)
+                        str.erase(p + 1);
+                };
+                while (std::getline(in, line)) {
+                    std::string l = line;
+                    trim(l);
+                    if (l.empty() || l[0] == '#')
+                        continue;
+                    if (l.front() == '[') {
+                        auto e = l.find(']');
+                        section = e != std::string::npos ? l.substr(1, e - 1) : std::string();
+                        continue;
+                    }
+                    auto eq = l.find('=');
+                    if (eq == std::string::npos)
+                        continue;
+                    std::string key = l.substr(0, eq);
+                    std::string val = l.substr(eq + 1);
+                    trim(key);
+                    trim(val);
+                    if (!val.empty() && val.front() == '"' && val.back() == '"')
+                        val = val.substr(1, val.size() - 2);
+                    if (section == "embeddings" && key == "preferred_model") {
+                        preferred = val;
+                        break;
+                    }
+                }
+            }
+            if (preferred.empty()) {
+                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
+                    preferred = p;
+            }
+        } catch (...) {
+        }
+
+        // Query daemon for active models (dims/seq) — opt-in to avoid starting/stopping daemon
+        // unexpectedly
+        std::vector<std::string> activeLines;
+        if (const char* withd = std::getenv("YAMS_MODEL_LIST_WITH_DAEMON")) {
+            if (std::string(withd) == "1" || std::string(withd) == "true") {
+                try {
+                    yams::daemon::ClientConfig cfg;
+                    cfg.singleUseConnections = true;
+                    cfg.requestTimeout = std::chrono::milliseconds(800);
+                    yams::daemon::DaemonClient client(cfg);
+                    yams::daemon::ModelStatusRequest msr;
+                    msr.detailed = true;
+                    std::promise<Result<yams::daemon::ModelStatusResponse>> prom;
+                    auto fut = prom.get_future();
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor{},
+                        [&]() -> boost::asio::awaitable<void> {
+                            auto r = co_await client.getModelStatus(msr);
+                            prom.set_value(std::move(r));
+                            co_return;
+                        },
+                        boost::asio::detached);
+                    auto s =
+                        (fut.wait_for(std::chrono::milliseconds(800)) == std::future_status::ready)
+                            ? fut.get()
+                            : Result<yams::daemon::ModelStatusResponse>(
+                                  Error{ErrorCode::Timeout, "model status timeout"});
+                    if (s) {
+                        for (const auto& m : s.value().models) {
+                            std::ostringstream ln;
+                            ln << "  - " << m.name;
+                            if (m.embeddingDim)
+                                ln << "  dim=" << m.embeddingDim;
+                            if (m.maxSequenceLength)
+                                ln << "  seq=" << m.maxSequenceLength;
+                            if (m.loaded)
+                                ln << "  [loaded]";
+                            activeLines.push_back(ln.str());
+                        }
+                    }
+                } catch (...) {
+                }
+            }
+        }
+
         std::cout << "\nAvailable ONNX Models:\n";
         std::cout << "=====================\n\n";
 
@@ -282,10 +668,63 @@ private:
         if (!locals.empty()) {
             std::cout << "Installed Models:\n";
             for (const auto& m : locals) {
+                // Try to read config.json or sentence_bert_config.json for dim/seq
+                size_t dim = 0, seq = 0;
+                try {
+                    const char* home = std::getenv("HOME");
+                    if (home) {
+                        auto base = std::filesystem::path(home) / ".yams" / "models" / m.name;
+                        for (auto file : {std::string("config.json"),
+                                          std::string("sentence_bert_config.json")}) {
+                            auto p = base / file;
+                            if (!std::filesystem::exists(p))
+                                continue;
+                            std::ifstream jin(p);
+                            json j;
+                            jin >> j;
+                            if (!dim) {
+                                if (j.contains("embedding_dimension") &&
+                                    j["embedding_dimension"].is_number_integer())
+                                    dim = j["embedding_dimension"].get<int>();
+                                else if (j.contains("hidden_size") &&
+                                         j["hidden_size"].is_number_integer())
+                                    dim = j["hidden_size"].get<int>();
+                            }
+                            if (!seq) {
+                                if (j.contains("max_seq_length") &&
+                                    j["max_seq_length"].is_number_integer())
+                                    seq = j["max_seq_length"].get<int>();
+                                else if (j.contains("model_max_length") &&
+                                         j["model_max_length"].is_number_integer())
+                                    seq = j["model_max_length"].get<int>();
+                                else if (j.contains("max_position_embeddings") &&
+                                         j["max_position_embeddings"].is_number_integer())
+                                    seq = j["max_position_embeddings"].get<int>();
+                            }
+                        }
+                    }
+                } catch (...) {
+                }
                 std::cout << "  " << m.name << " (installed";
                 if (m.size_mb)
                     std::cout << ", ~" << m.size_mb << " MB";
+                if (dim)
+                    std::cout << ", dim=" << dim;
+                if (seq)
+                    std::cout << ", seq=" << seq;
                 std::cout << ")\n";
+            }
+            std::cout << "\n";
+        }
+
+        // Show preferred and active models summary
+        if (!preferred.empty() || !activeLines.empty()) {
+            if (!preferred.empty())
+                std::cout << "Preferred: " << preferred << "\n";
+            if (!activeLines.empty()) {
+                std::cout << "Active (daemon):\n";
+                for (const auto& l : activeLines)
+                    std::cout << l << "\n";
             }
             std::cout << "\n";
         }
@@ -302,26 +741,61 @@ private:
                                const std::string& override_url) {
         YAMS_ZONE_SCOPED_N("ModelCommand::downloadModel");
 
+        // Built-in map: common names -> HF repos
+        auto mapKnown = [](const std::string& name) -> std::string {
+            if (name == "all-MiniLM-L6-v2")
+                return "sentence-transformers/all-MiniLM-L6-v2";
+            if (name == "all-mpnet-base-v2")
+                return "sentence-transformers/all-mpnet-base-v2";
+            if (name == "nomic-embed-text-v1")
+                return "nomic-ai/nomic-embed-text-v1";
+            if (name == "nomic-embed-text-v1.5")
+                return "nomic-ai/nomic-embed-text-v1.5";
+            return {};
+        };
+
         // Find model info
         auto it = std::find_if(AVAILABLE_MODELS.begin(), AVAILABLE_MODELS.end(),
                                [&](const ModelInfo& m) { return m.name == model_name; });
 
         ModelInfo model;
         if (it == AVAILABLE_MODELS.end()) {
-            // Allow custom download when URL is provided
+            // If no URL override, treat model_name (or --hf) as HF repo id
             if (override_url.empty()) {
-                std::cout << "Unknown model: " << model_name << "\n";
-                std::cout << "Use 'yams model --list' to see available models or provide --url"
-                          << "\n";
-                return Error{ErrorCode::InvalidArgument,
-                             "Unknown model and no --url provided: " + model_name};
+                std::string repo = !hfRepo_.empty() ? hfRepo_ : model_name;
+                if (repo.find('/') == std::string::npos) {
+                    // Try known mappings
+                    std::string mapped = mapKnown(repo);
+                    if (!mapped.empty())
+                        repo = mapped;
+                }
+                if (repo.find('/') == std::string::npos) {
+                    std::cout << "Unknown model: " << model_name << "\n";
+                    std::cout << "Use 'yams model --list', or provide --hf org/name, or a direct "
+                                 "--url.\n";
+                    return Error{ErrorCode::InvalidArgument, "Unknown model: " + model_name};
+                }
+                // In offline mode, we will copy from HF cache later; otherwise, build resolve URL
+                std::string url =
+                    offline_ ? std::string("")
+                             : (std::string("https://huggingface.co/") + repo + "/resolve/" +
+                                (revision_.empty() ? "main" : revision_) + "/onnx/model.onnx");
+                model = ModelInfo{model_name, url, std::string{"HF model"}, 0, "embedding"};
+            } else {
+                model = ModelInfo{model_name, override_url, std::string{"Custom model"}, 0,
+                                  "embedding"};
             }
-            model =
-                ModelInfo{model_name, override_url, std::string{"Custom model"}, 0, "embedding"};
         } else {
             model = *it;
             if (!override_url.empty()) {
                 model.url = override_url; // explicit user override
+            } else if (!revision_.empty() && revision_ != "main") {
+                const std::string needle = "/resolve/main/";
+                auto pos = model.url.find(needle);
+                if (pos != std::string::npos) {
+                    model.url.replace(pos, needle.size(),
+                                      std::string("/resolve/") + revision_ + "/");
+                }
             }
         }
 
@@ -363,96 +837,359 @@ private:
             return Result<void>{};
         }
 
-        std::cout << "Downloading " << model.name;
-        if (model.size_mb > 0) {
-            std::cout << " (" << model.size_mb << " MB)";
-        }
-        std::cout << "...\n";
-        std::cout << "From: " << model.url << "\n";
-        std::cout << "To: " << model_file << "\n\n";
+        // Download/copy model and companion files using downloader or HF cache
+        auto summary = [&](const std::string& item, const fs::path& dst) {
+            std::cout << "  - " << item << " -> " << dst << "\n";
+        };
 
-        // Check for curl or wget using safe method
-        bool has_curl = commandExists("curl");
-        bool has_wget = commandExists("wget");
+        if (offline_) {
+            std::string repo = !hfRepo_.empty() ? hfRepo_ : model_name;
+            const std::string rev = revision_.empty() ? std::string("main") : revision_;
 
-        if (!has_curl && !has_wget) {
-            return Error{ErrorCode::NotFound,
-                         "Neither curl nor wget found. Please install one to download models."};
-        }
-
-        // Build command arguments safely - no shell interpretation
-        std::vector<std::string> download_args;
-        if (has_curl) {
-            download_args = {
-                "curl",
-                "-L",             // Follow redirects
-                "--progress-bar", // Show progress
-                "-o",
-                model_file.string(), // Output file
-                model.url            // URL to download
+            auto findInCacheFile = [&](const std::string& filename) -> fs::path {
+                const char* home = std::getenv("HOME");
+                const std::string homeDir = home ? home : "";
+                const char* hfhome = std::getenv("HF_HOME");
+                const char* ycache = std::getenv("YAMS_ONNX_HF_CACHE");
+                std::vector<fs::path> roots;
+                if (ycache)
+                    roots.emplace_back(ycache);
+                if (hfhome) {
+                    roots.emplace_back(hfhome);
+                    roots.emplace_back(fs::path(hfhome) / "hub");
+                }
+                if (!homeDir.empty()) {
+                    roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface");
+                    roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface" / "hub");
+                }
+                std::string repo_dir = "models--";
+                for (char c : repo)
+                    repo_dir += (c == '/') ? std::string("--") : std::string(1, c);
+                for (const auto& root : roots) {
+                    std::error_code ec;
+                    fs::path base = root / repo_dir;
+                    if (!fs::exists(base, ec))
+                        continue;
+                    fs::path snapdir = base / "snapshots" / rev;
+                    fs::path ref = base / "refs" / rev;
+                    if (fs::exists(ref, ec)) {
+                        try {
+                            std::ifstream in(ref);
+                            std::string hash;
+                            std::getline(in, hash);
+                            if (!hash.empty())
+                                snapdir = base / "snapshots" / hash;
+                        } catch (...) {
+                        }
+                    }
+                    if (fs::exists(snapdir, ec)) {
+                        for (auto& p : fs::recursive_directory_iterator(snapdir, ec)) {
+                            if (p.is_regular_file() && p.path().filename() == filename)
+                                return p.path();
+                        }
+                    }
+                }
+                return {};
             };
+
+            // Required: model.onnx
+            auto cached = findInCacheFile("model.onnx");
+            if (cached.empty())
+                return Error{ErrorCode::NotFound, "model.onnx not found in HF cache"};
+            std::error_code cec;
+            fs::copy_file(cached, model_file, fs::copy_options::overwrite_existing, cec);
+            if (cec)
+                return Error{ErrorCode::IOError, std::string("Copy failed: ") + cec.message()};
+            summary("model.onnx (cache)", model_file);
+
+            // Optional companions
+            fs::path cfg_dst = output_path / "config.json";
+            if (auto p = findInCacheFile("config.json"); !p.empty()) {
+                std::error_code ec;
+                fs::copy_file(p, cfg_dst, fs::copy_options::overwrite_existing, ec);
+                if (!ec)
+                    summary("config.json (cache)", cfg_dst);
+            }
+            fs::path tok_dst = output_path / "tokenizer.json";
+            if (auto p = findInCacheFile("tokenizer.json"); !p.empty()) {
+                std::error_code ec;
+                fs::copy_file(p, tok_dst, fs::copy_options::overwrite_existing, ec);
+                if (!ec)
+                    summary("tokenizer.json (cache)", tok_dst);
+            }
+            fs::path sb_dst = output_path / "sentence_bert_config.json";
+            if (auto p = findInCacheFile("sentence_bert_config.json"); !p.empty()) {
+                std::error_code ec;
+                fs::copy_file(p, sb_dst, fs::copy_options::overwrite_existing, ec);
+                if (!ec)
+                    summary("sentence_bert_config.json (cache)", sb_dst);
+            }
+
         } else {
-            download_args = {
-                "wget",
-                "--show-progress",         // Show progress
-                "-O", model_file.string(), // Output file
-                model.url                  // URL to download
+            // Downloader-backed online fetch
+            yams::downloader::StorageConfig storage{};
+            // Prefer configured data dir for CAS objects; stage under configured staging or /tmp
+            try {
+                std::filesystem::path dataDir =
+                    cli_ ? cli_->getDataPath() : std::filesystem::path{};
+                if (!dataDir.empty()) {
+                    storage.objectsDir = dataDir / "storage" / "objects";
+                    storage.stagingDir = dataDir / "staging" / "downloader";
+                } else {
+                    auto tmp = std::filesystem::temp_directory_path();
+                    storage.objectsDir = tmp / "yams" / "objects";
+                    storage.stagingDir = tmp / "yams" / "downloader";
+                }
+            } catch (...) {
+                // Fallback to /tmp if any path errors occur
+                try {
+                    auto tmp = std::filesystem::temp_directory_path();
+                    storage.objectsDir = tmp / "yams" / "objects";
+                    storage.stagingDir = tmp / "yams" / "downloader";
+                } catch (...) {
+                    // keep defaults if temp_directory_path throws
+                }
+            }
+
+            yams::downloader::DownloaderConfig dcfg{};
+            auto manager = yams::downloader::makeDownloadManager(storage, dcfg);
+
+            std::vector<yams::downloader::Header> headers;
+            if (!token_.empty())
+                headers.push_back({"Authorization", std::string("Bearer ") + token_});
+
+            auto dl_one = [&](const std::string& url, const fs::path& out,
+                              const std::string& label) -> Result<void> {
+                yams::downloader::DownloadRequest req{};
+                req.url = url;
+                req.headers = headers;
+                req.storeOnly = true;
+                req.exportPath = out;
+                // In-place progress (single line), with proper spacing to avoid overlap
+                auto onProgress = [label, lastStage = yams::downloader::ProgressStage::Resolving,
+                                   lastPct = -1.0f, lastLen = std::size_t{0}](
+                                      const yams::downloader::ProgressEvent& ev) mutable {
+                    auto stageName = [](yams::downloader::ProgressStage s) {
+                        switch (s) {
+                            case yams::downloader::ProgressStage::Resolving:
+                                return "resolving";
+                            case yams::downloader::ProgressStage::Connecting:
+                                return "connecting";
+                            case yams::downloader::ProgressStage::Downloading:
+                                return "downloading";
+                            case yams::downloader::ProgressStage::Verifying:
+                                return "verifying";
+                            case yams::downloader::ProgressStage::Finalizing:
+                                return "finalizing";
+                            default:
+                                return "";
+                        }
+                    };
+                    float pct = ev.percentage.value_or(0.0f);
+                    bool stageChanged = ev.stage != lastStage;
+                    bool pctDelta = (pct - lastPct) >= 1.0f; // update every 1%
+                    if (!stageChanged && !pctDelta &&
+                        ev.stage == yams::downloader::ProgressStage::Downloading)
+                        return;
+                    lastStage = ev.stage;
+                    lastPct = pct;
+
+                    // Build content string with aligned fields
+                    std::uint64_t done = ev.downloadedBytes;
+                    double done_mb = static_cast<double>(done) / (1024.0 * 1024.0);
+                    std::string content;
+                    if (ev.totalBytes) {
+                        double total_mb = static_cast<double>(*ev.totalBytes) / (1024.0 * 1024.0);
+                        content = fmt::format("  - {}: {:11s} {:3.0f}% [{:6.1f}/{:6.1f} MiB]",
+                                              label, stageName(ev.stage), pct, done_mb, total_mb);
+                    } else {
+                        content = fmt::format("  - {}: {:11s}       [{:6.1f} MiB]", label,
+                                              stageName(ev.stage), done_mb);
+                    }
+                    // Clear previous line if new content is shorter
+                    std::string out = "\r" + content;
+                    if (lastLen > content.size())
+                        out += std::string(lastLen - content.size(), ' ');
+                    fmt::print("{}", out);
+                    std::fflush(stdout);
+                    lastLen = content.size();
+                    if (ev.stage == yams::downloader::ProgressStage::Finalizing) {
+                        fmt::print("\n");
+                        lastLen = 0;
+                    }
+                };
+                auto res = manager->download(req, onProgress, [] { return false; }, {});
+                if (!res.ok() || !res.value().success) {
+                    std::string msg;
+                    int http = -1;
+                    if (res.ok()) {
+                        if (res.value().httpStatus)
+                            http = *res.value().httpStatus;
+                        msg = res.value().error ? res.value().error->message
+                                                : std::string("download failed");
+                    } else {
+                        msg = res.error().message;
+                    }
+                    if (http == 401 || http == 403) {
+                        msg += "; authentication may be required (try --token <HF_TOKEN>)";
+                    }
+                    return Error{ErrorCode::InternalError, label + ": " + msg};
+                }
+                summary(label, out);
+                return Result<void>{};
             };
+
+            auto dl_candidates = [&](const std::vector<std::string>& candidates,
+                                     const fs::path& out,
+                                     const std::string& label) -> Result<void> {
+                // Try to parse repo/rev from a known HF URL if present
+                auto parseHf = [](const std::string& url) -> std::pair<std::string, std::string> {
+                    // Expect: https://huggingface.co/<repo>/resolve/<rev>/...
+                    const std::string host = "https://huggingface.co/";
+                    if (url.rfind(host, 0) != 0)
+                        return {"", ""};
+                    auto rest = url.substr(host.size());
+                    auto p = rest.find("/resolve/");
+                    if (p == std::string::npos)
+                        return {"", ""};
+                    std::string repo = rest.substr(0, p);
+                    auto rest2 = rest.substr(p + std::string("/resolve/").size());
+                    auto slash = rest2.find('/');
+                    if (slash == std::string::npos)
+                        return {repo, "main"};
+                    std::string rev = rest2.substr(0, slash);
+                    return {repo, rev.empty() ? "main" : rev};
+                };
+                std::string parsedRepo, parsedRev;
+                if (!model.url.empty()) {
+                    auto pr = parseHf(model.url);
+                    parsedRepo = pr.first;
+                    parsedRev = pr.second;
+                }
+                std::string rev = !parsedRev.empty()
+                                      ? parsedRev
+                                      : (revision_.empty() ? std::string("main") : revision_);
+                if (!override_url.empty()) {
+                    return dl_one(override_url, out, label);
+                }
+                std::string repo =
+                    !parsedRepo.empty() ? parsedRepo : (!hfRepo_.empty() ? hfRepo_ : model_name);
+                if (repo.find('/') == std::string::npos) {
+                    // Try mapping
+                    std::string mapped = mapKnown(repo);
+                    if (!mapped.empty())
+                        repo = mapped;
+                }
+                if (repo.find('/') == std::string::npos) {
+                    // As a last resort, if we still lack a repo but we have a direct model URL, try
+                    // that
+                    if (!model.url.empty() && label == "model.onnx") {
+                        return dl_one(model.url, out, label);
+                    }
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Missing --hf <org/name> (could not infer repo)"};
+                }
+                std::vector<std::string> tried;
+                for (const auto& p : candidates) {
+                    std::string url =
+                        std::string("https://huggingface.co/") + repo + "/resolve/" + rev + "/" + p;
+                    tried.push_back(url);
+                    auto r = dl_one(url, out, label);
+                    if (r)
+                        return r;
+                }
+                std::ostringstream oss;
+                oss << label << " not found at expected locations:\n";
+                for (const auto& u : tried)
+                    oss << "    - " << u << "\n";
+                return Error{ErrorCode::NotFound, oss.str()};
+            };
+
+            // Required model: try multiple common names
+            {
+                std::vector<std::string> model_candidates = {
+                    "onnx/model.onnx", "model.onnx", "onnx/model_fp16.onnx", "onnx/model-f16.onnx",
+                    "onnx/model_float32.onnx"};
+                auto r = dl_candidates(model_candidates, model_file, "model.onnx");
+                if (!r) {
+                    // If the file appears to exist with non-zero size despite a reported error,
+                    // treat as success
+                    std::error_code fec;
+                    auto sz = fs::file_size(model_file, fec);
+                    if (fec || sz == 0)
+                        return r; // truly failed
+                }
+            }
+            // Optional companions
+            (void)dl_candidates({"config.json"}, output_path / "config.json", "config.json");
+            (void)dl_candidates({"tokenizer.json"}, output_path / "tokenizer.json",
+                                "tokenizer.json");
+            (void)dl_candidates({"sentence_bert_config.json"},
+                                output_path / "sentence_bert_config.json",
+                                "sentence_bert_config.json");
         }
 
-        // Execute download safely without shell
-        int result = executeCommand(download_args);
+        std::cout << "\n✓ Model files ready in: " << output_path << "\n";
 
-        if (result != 0) {
-            // Clean up partial download
-            if (fs::exists(model_file)) {
-                fs::remove(model_file);
-            }
-            std::string reason;
-            if (has_curl) {
-                if (result == 6)
-                    reason = " (Could not resolve host)";
-                else if (result == 7)
-                    reason = " (Failed to connect to host)";
-            }
-            return Error{ErrorCode::InternalError,
-                         "Download failed with code: " + std::to_string(result) + reason};
+        // Detect properties for improved hints
+        auto props = detect_model_props(model_name, output_path);
+        if (props.dim > 0 || props.max_seq > 0) {
+            std::cout << "\nDetected properties:\n";
+            if (props.dim > 0)
+                std::cout << "  • embedding_dim: " << props.dim << "\n";
+            if (props.max_seq > 0)
+                std::cout << "  • max_sequence_length: " << props.max_seq << "\n";
+            if (!props.pooling.empty())
+                std::cout << "  • pooling: " << props.pooling << "\n";
         }
 
-        // Create model config file
-        fs::path config_file = output_path / "config.json";
-        std::ofstream config(config_file);
-        config << "{\n";
-        config << "  \"name\": \"" << model.name << "\",\n";
-        config << "  \"type\": \"" << model.type << "\",\n";
-        config << "  \"model_path\": \"model.onnx\",\n";
-        if (model.type == "embedding") {
-            if (model.name.find("MiniLM") != std::string::npos) {
-                config << "  \"embedding_dim\": 384,\n";
-            } else if (model.name.find("mpnet") != std::string::npos) {
-                config << "  \"embedding_dim\": 768,\n";
-            }
-            config << "  \"max_sequence_length\": 512,\n";
-        }
-        config << "  \"downloaded_at\": \""
-               << std::chrono::system_clock::now().time_since_epoch().count() << "\"\n";
-        config << "}\n";
-        config.close();
-
-        std::cout << "\n✓ Model downloaded successfully to: " << output_path << "\n";
         std::cout << "\nTo use this model:\n";
-        if (model.type == "embedding") {
+        {
             std::cout << "  Configure YAMS to use: " << model_file << "\n";
-            std::cout << "  for embedding generation in vector database operations\n";
+            std::cout << "  The ONNX provider auto-detects dim/seq/pooling from config.json if "
+                         "present.\n";
             std::cout << "\n  Set this as the preferred embedding model:\n";
-            std::cout << "    yams config embeddings model " << model.name << "\n";
+            std::cout << "    yams config embeddings model " << model_name << "\n";
+            if (props.dim > 0) {
+                std::cout << "  Update embedding/vector dimensions (recommended):\n";
+                std::cout << "    yams config set embeddings.embedding_dim " << props.dim << "\n";
+                std::cout << "    yams config set vector_database.embedding_dim " << props.dim
+                          << "\n";
+                std::cout << "    yams config set vector_index.dimension " << props.dim << "\n";
+            }
+            if (props.max_seq > 0) {
+                std::cout << "  Update max sequence length (optional):\n";
+                std::cout << "    yams config set embeddings.max_sequence_length " << props.max_seq
+                          << "\n";
+            }
             std::cout << "  Check embedding status:\n";
             std::cout << "    yams config embeddings status\n";
             std::cout << "  Enable automatic embedding generation (optional):\n";
             std::cout << "    yams config embeddings enable\n";
-        } else {
-            std::cout << "  Configure YAMS to use: " << model_file << "\n";
-            std::cout << "  for text generation tasks\n";
+        }
+
+        if (applyConfig_) {
+            auto ar = apply_detected_to_config(model_name, props);
+            if (!ar) {
+                spdlog::warn("Failed to update config automatically: {}", ar.error().message);
+            } else {
+                // Align vector DB schema to new embedding dim by dropping/recreating tables
+                try {
+                    auto dataDir = cli_ ? cli_->getDataPath() : std::filesystem::path{};
+                    if (!dataDir.empty() && props.dim > 0) {
+                        auto al = yams::integrity::ensureVectorSchemaAligned(
+                            dataDir, props.dim, /*recreateIfMismatch=*/true);
+                        if (!al) {
+                            spdlog::warn("Vector schema alignment failed: {}", al.error().message);
+                        } else {
+                            spdlog::info("Vector schema aligned to dim {} at {}", props.dim,
+                                         (dataDir / "vectors.db").string());
+                        }
+                    }
+                } catch (const std::exception& ex) {
+                    spdlog::warn("Exception during vector schema alignment: {}", ex.what());
+                }
+            }
         }
 
         return Result<void>{};
@@ -574,6 +1311,69 @@ Available Models:
 
 Default download location: ~/.yams/models/<model-name>/
 )";
+    }
+
+    // Build a Hugging Face resolve URL for a given repo and revision
+    static std::string buildHfUrl(const std::string& repo, const std::string& revision) {
+        const std::string rev = revision.empty() ? std::string("main") : revision;
+        return std::string("https://huggingface.co/") + repo + "/resolve/" + rev +
+               "/onnx/model.onnx";
+    }
+
+    // Find model.onnx for a repo/revision in the local HF cache (no network)
+    static fs::path findInHfCache(const std::string& repo, const std::string& revision) {
+        const char* home = std::getenv("HOME");
+        const std::string homeDir = home ? home : "";
+        const char* hfhome = std::getenv("HF_HOME");
+        const char* ycache = std::getenv("YAMS_ONNX_HF_CACHE");
+
+        std::vector<fs::path> roots;
+        if (ycache)
+            roots.emplace_back(ycache);
+        if (hfhome) {
+            roots.emplace_back(hfhome);
+            roots.emplace_back(fs::path(hfhome) / "hub");
+        }
+        if (!homeDir.empty()) {
+            roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface");
+            roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface" / "hub");
+        }
+
+        // HF cache repo dir format: models--org--name
+        std::string repo_dir = "models--";
+        for (char c : repo)
+            repo_dir += (c == '/') ? std::string("--") : std::string(1, c);
+        const std::string rev = revision.empty() ? std::string("main") : revision;
+
+        for (const auto& root : roots) {
+            std::error_code ec;
+            fs::path base = root / repo_dir;
+            if (!fs::exists(base, ec))
+                continue;
+
+            // Prefer refs/<rev> to map to snapshot hash under snapshots/
+            fs::path snapdir = base / "snapshots" / rev;
+            fs::path ref = base / "refs" / rev;
+            if (fs::exists(ref, ec)) {
+                try {
+                    std::ifstream in(ref);
+                    std::string hash;
+                    std::getline(in, hash);
+                    if (!hash.empty())
+                        snapdir = base / "snapshots" / hash;
+                } catch (...) {
+                }
+            }
+            if (fs::exists(snapdir, ec)) {
+                for (auto& p : fs::recursive_directory_iterator(snapdir, ec)) {
+                    if (!p.is_regular_file())
+                        continue;
+                    if (p.path().filename() == "model.onnx")
+                        return p.path();
+                }
+            }
+        }
+        return {};
     }
 };
 

@@ -3,9 +3,13 @@
 #include <yams/daemon/resource/plugin_loader.h>
 
 #include <climits> // For PATH_MAX
+#include <cstring>
 #include <dlfcn.h> // For dlopen, dlsym, dlclose
 #include <filesystem>
 #include <regex>
+#ifndef _WIN32
+#include <unistd.h> // For readlink on Unix-like systems
+#endif
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h> // For _NSGetExecutablePath
@@ -96,7 +100,7 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
 
         // Get the provider name
         const char* providerName = getProviderName();
-        if (!providerName || strlen(providerName) == 0) {
+        if (!providerName || std::strlen(providerName) == 0) {
             dlclose(handle);
             return Error{ErrorCode::InvalidArgument, "Plugin returned invalid provider name"};
         }
@@ -145,8 +149,8 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
             filePattern = std::string(".*\\.") + getPlatformLibraryExtension() + "$";
         }
 
-        std::regex pluginRegex(filePattern);
         size_t loadedCount = 0;
+        size_t totalFiles = 0;
 
         spdlog::info("Scanning for plugins in: {}", directory.string());
 
@@ -154,11 +158,16 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
             if (!entry.is_regular_file()) {
                 continue;
             }
+            totalFiles++;
 
             std::string filename = entry.path().filename().string();
 
-            // Check if filename matches pattern
-            if (!std::regex_match(filename, pluginRegex)) {
+            // Manual extension check instead of regex
+            std::string extension = getPlatformLibraryExtension();
+            if (filename.size() <= extension.size() ||
+                filename.compare(filename.size() - extension.size(), extension.size(), extension) !=
+                    0 ||
+                (filename[0] != '.' && filename.find('.') == std::string::npos)) {
                 continue;
             }
 
@@ -176,7 +185,8 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
             }
         }
 
-        spdlog::info("Loaded {} plugins from {}", loadedCount, directory.string());
+        spdlog::info("Loaded {} out of {} potential plugins from {}", loadedCount, totalFiles,
+                     directory.string());
         return Result<size_t>(loadedCount);
 
     } catch (const std::exception& e) {
@@ -186,27 +196,32 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
 }
 
 Result<void> PluginLoader::unloadPlugin(const std::string& pluginName) {
-    auto it = plugins_.find(pluginName);
-    if (it == plugins_.end()) {
-        return Error{ErrorCode::NotFound, "Plugin not found: " + pluginName};
-    }
-
-    if (!it->second.loaded) {
-        return Result<void>(); // Already unloaded
-    }
-
-    if (it->second.handle) {
-        if (dlclose(it->second.handle) != 0) {
-            std::string error = dlerror() ? dlerror() : "Unknown error";
-            return Error{ErrorCode::InternalError, "Failed to unload plugin: " + error};
+    try {
+        auto it = plugins_.find(pluginName);
+        if (it == plugins_.end()) {
+            return Error{ErrorCode::NotFound, "Plugin not found: " + pluginName};
         }
+
+        if (!it->second.loaded) {
+            return Result<void>(); // Already unloaded
+        }
+
+        if (it->second.handle) {
+            if (dlclose(it->second.handle) != 0) {
+                std::string error = dlerror() ? dlerror() : "Unknown error";
+                return Error{ErrorCode::InternalError, "Failed to unload plugin: " + error};
+            }
+        }
+
+        it->second.loaded = false;
+        it->second.handle = nullptr;
+
+        spdlog::info("Unloaded plugin: {}", pluginName);
+        return Result<void>();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError,
+                     std::string("Exception unloading plugin: ") + e.what()};
     }
-
-    it->second.loaded = false;
-    it->second.handle = nullptr;
-
-    spdlog::info("Unloaded plugin: {}", pluginName);
-    return Result<void>();
 }
 
 void PluginLoader::unloadAllPlugins() {
@@ -266,16 +281,19 @@ std::vector<std::filesystem::path> PluginLoader::getDefaultPluginDirectories() {
             fs::path exeDir = fs::path(exePath).parent_path();
 #endif
 
-            // Check common build layouts
+            // Check common build layouts: plugin adjacent to binaries
             if (fs::exists(exeDir / "libyams_onnx_plugin.dylib") ||
                 fs::exists(exeDir / "libyams_onnx_plugin.so")) {
                 directories.push_back(exeDir);
             }
 
-            // Check relative paths from build directory
-            fs::path buildPluginDir = exeDir / ".." / "src" / "daemon";
-            if (fs::exists(buildPluginDir)) {
-                directories.push_back(buildPluginDir);
+            // Dev convenience: look for build plugins/ tree next to the executable
+            fs::path devPluginsDir = exeDir / ".." / "plugins";
+            if (fs::exists(devPluginsDir)) {
+                directories.push_back(devPluginsDir);
+                if (fs::exists(devPluginsDir / "onnx")) {
+                    directories.push_back(devPluginsDir / "onnx");
+                }
             }
         }
     } catch (...) {
@@ -293,7 +311,8 @@ std::vector<std::filesystem::path> PluginLoader::getDefaultPluginDirectories() {
 
     // 5. Installation prefix (if configured via compile definition)
     // Note: CMAKE_INSTALL_PREFIX is not defined as a preprocessor macro by default.
-    // We pass YAMS_INSTALL_PREFIX from CMake to enable runtime discovery of installed plugins.
+    // We pass YAMS_INSTALL_PREFIX from CMake to enable runtime discovery of
+    // installed plugins.
 #ifdef YAMS_INSTALL_PREFIX
     directories.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
 #endif
@@ -314,7 +333,8 @@ Result<size_t> PluginLoader::autoLoadPlugins() {
         }
     }
 
-    // Also try to load specific known plugins from build directory if in development
+    // Also try to load specific known plugins from build directory if in
+    // development
     if (totalLoaded == 0) {
         // Try to find and load the ONNX plugin specifically
         std::vector<fs::path> searchPaths = {fs::path("build/yams-release/src/daemon"),

@@ -1,5 +1,7 @@
 #include <yams/app/services/grep_mode_tls.h>
 #include <yams/app/services/services.hpp>
+// Hot/Cold mode helpers (env-driven)
+#include "../../cli/hot_cold_utils.h"
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
@@ -18,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace yams::app::services {
@@ -180,10 +183,44 @@ public:
         if (afterContext < 0)
             afterContext = 0;
 
-        auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
-        if (!docsRes) {
-            return Error{ErrorCode::InternalError,
-                         "Failed to enumerate documents: " + docsRes.error().message};
+        // Build candidate document set using index-backed prefilters when possible
+        std::vector<metadata::DocumentInfo> docs;
+        if (!req.tags.empty()) {
+            auto tRes = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+            if (!tRes) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to query documents by tags: " + tRes.error().message};
+            }
+            docs = std::move(tRes.value());
+        } else {
+            bool canUseFTS = req.literalText || req.word;
+            if (canUseFTS) {
+                // Use FTS to preselect candidate docs; fall back to full scan on failure
+                auto sRes = ctx_.metadataRepo->search(req.pattern, /*limit*/ 2000, /*offset*/ 0);
+                if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
+                    std::unordered_set<int64_t> allow;
+                    allow.reserve(sRes.value().results.size());
+                    for (const auto& r : sRes.value().results)
+                        allow.insert(r.document.id);
+                    auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                    if (!allRes) {
+                        return Error{ErrorCode::InternalError,
+                                     "Failed to enumerate documents: " + allRes.error().message};
+                    }
+                    for (auto& d : allRes.value()) {
+                        if (allow.find(d.id) != allow.end())
+                            docs.push_back(std::move(d));
+                    }
+                }
+            }
+            if (docs.empty()) {
+                auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                if (!allRes) {
+                    return Error{ErrorCode::InternalError,
+                                 "Failed to enumerate documents: " + allRes.error().message};
+                }
+                docs = std::move(allRes.value());
+            }
         }
 
         GrepResponse response;
@@ -191,7 +228,6 @@ public:
         response.regexMatches = 0;
         response.semanticMatches = 0;
 
-        const auto& docs = docsRes.value();
         response.filesSearched = docs.size();
 
         // Mode selection for tiered grep
@@ -206,13 +242,20 @@ public:
                 mode = Mode::ColdOnly;
                 break;
             default: {
-                if (const char* m = std::getenv("YAMS_GREP_MODE")) {
-                    std::string v(m);
-                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                    if (v == "hot_only" || v == "hot")
+                yams::cli::HotColdMode grepMode = yams::cli::getGrepMode();
+                switch (get_grep_mode_tls()) {
+                    case GrepExecMode::HotOnly:
                         mode = Mode::HotOnly;
-                    else if (v == "cold_only" || v == "cold")
+                        break;
+                    case GrepExecMode::ColdOnly:
                         mode = Mode::ColdOnly;
+                        break;
+                    default:
+                        if (grepMode == yams::cli::HotColdMode::HotOnly)
+                            mode = Mode::HotOnly;
+                        else if (grepMode == yams::cli::HotColdMode::ColdOnly)
+                            mode = Mode::ColdOnly;
+                        break;
                 }
                 break;
             }

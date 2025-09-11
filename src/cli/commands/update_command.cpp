@@ -5,7 +5,11 @@
 #include <yams/cli/commands/update_command.h>
 #include <yams/cli/yams_cli.h>
 // Daemon client API for daemon-first update
-#include <yams/cli/async_bridge.h>
+#include <future>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -40,13 +44,7 @@ void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     // Flags
     cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
 
-    cmd->callback([this]() {
-        auto result = execute();
-        if (!result) {
-            spdlog::error("Command failed: {}", result.error().message);
-            throw CLI::RuntimeError(1);
-        }
-    });
+    cmd->callback([this]() { cli_->setPendingCommand(this); });
 }
 
 Result<void> UpdateCommand::execute() {
@@ -95,12 +93,24 @@ Result<void> UpdateCommand::execute() {
                 cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
                 yams::daemon::DaemonClient client(cfg);
-                auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
-                if (result) {
-                    auto r = render(result.value());
-                    if (!r)
-                        return r.error();
-                    return Result<void>();
+                std::promise<Result<yams::daemon::UpdateDocumentResponse>> prom;
+                auto fut = prom.get_future();
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [&]() -> boost::asio::awaitable<void> {
+                        auto r = co_await client.call(dreq);
+                        prom.set_value(std::move(r));
+                        co_return;
+                    },
+                    boost::asio::detached);
+                if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+                    auto result = fut.get();
+                    if (result) {
+                        auto r = render(result.value());
+                        if (!r)
+                            return r.error();
+                        return Result<void>();
+                    }
                 }
             } catch (...) {
                 // fall through to local execution
@@ -112,6 +122,66 @@ Result<void> UpdateCommand::execute() {
 
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+    }
+}
+
+// New: non-blocking async implementation leveraging DaemonClient coroutines
+boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
+    try {
+        if (cli_) {
+            yams::daemon::UpdateDocumentRequest dreq;
+            dreq.hash = hash_;
+            dreq.name = name_;
+
+            for (const auto& kv : metadata_) {
+                auto pos = kv.find('=');
+                if (pos != std::string::npos) {
+                    std::string key = kv.substr(0, pos);
+                    std::string value = kv.substr(pos + 1);
+                    dreq.metadata[key] = value;
+                }
+            }
+
+            auto render = [&](const yams::daemon::UpdateDocumentResponse& resp) -> Result<void> {
+                if (cli_ && (cli_->getJsonOutput() || cli_->getVerbose())) {
+                    json output;
+                    output["document_hash"] = resp.hash;
+                    output["metadata_updated"] = resp.metadataUpdated;
+                    std::cout << output.dump(2) << std::endl;
+                } else {
+                    std::cout << "Document metadata updated successfully!" << std::endl;
+                    std::cout << "Hash: " << resp.hash.substr(0, 12) << "..." << std::endl;
+                    std::cout << "Metadata updated: " << resp.metadataUpdated << std::endl;
+                }
+                return Result<void>();
+            };
+
+            // Daemon-first using a short, safe header timeout; fallback to local if unavailable
+            yams::daemon::ClientConfig cfg;
+            if (cli_)
+                cfg.dataDir = cli_->getDataPath();
+            cfg.enableChunkedResponses = false;
+            cfg.singleUseConnections = true;
+            cfg.requestTimeout = std::chrono::milliseconds(30000);
+            cfg.headerTimeout = std::chrono::milliseconds(3000);
+            cfg.bodyTimeout = std::chrono::milliseconds(20000);
+            yams::daemon::DaemonClient client(cfg);
+
+            auto result = co_await client.call(dreq);
+            if (result) {
+                auto r = render(result.value());
+                if (!r)
+                    co_return r.error();
+                co_return Result<void>();
+            }
+            spdlog::warn("Update: daemon unavailable or failed ({}); using local path.",
+                         result.error().message);
+        }
+
+        co_return executeLocal();
+
+    } catch (const std::exception& e) {
+        co_return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
     }
 }
 

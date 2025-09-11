@@ -7,12 +7,22 @@
 #include <iostream>
 #include <thread>
 #include <unistd.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/metadata_repository.h>
+
+#include <yams/app/services/services.hpp>
+#include <yams/daemon/client/asio_transport.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/extraction/extraction_util.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
@@ -33,13 +43,26 @@ public:
         cmd->add_flag("--mime", repairMime_, "Repair missing MIME types");
         cmd->add_flag("--chunks", repairChunks_, "Clean orphaned chunk files");
         cmd->add_flag("--embeddings", repairEmbeddings_, "Generate missing vector embeddings");
+        cmd->add_flag("--fts5", repairFts5_, "Rebuild FTS5 index for documents (best-effort)");
         cmd->add_flag("--optimize", optimizeDb_, "Optimize and vacuum database");
         cmd->add_flag("--checksums", verifyChecksums_, "Verify and repair checksums");
         cmd->add_flag("--duplicates", mergeDuplicates_, "Find and optionally merge duplicates");
         cmd->add_flag("--downloads", repairDownloads_,
                       "Repair download documents: add tags/metadata and normalize names");
+        // Embeddings-specific options
+        cmd->add_option("--include-mime", includeMime_,
+                        "Additional MIME types to embed (e.g., application/pdf). Repeatable.")
+            ->type_size(-1);
+        cmd->add_option("--model", embeddingModel_, "Embedding model to use (overrides preferred)");
         cmd->add_flag("--all", repairAll_, "Run all repair operations");
+        cmd->add_flag("--stop-daemon", stopDaemon_,
+                      "Attempt to stop daemon before vector DB operations");
+        cmd->add_option("--embed-timeout-ms", embedTimeoutMs_, "Timeout for daemon embed RPC (ms)");
+        cmd->add_option("--embed-retries", embedRetries_,
+                        "Retries for daemon embed RPC (default 2)");
         cmd->add_flag("--dry-run", dryRun_, "Preview changes without applying");
+        cmd->add_flag("--foreground", foreground_,
+                      "Run embeddings repair in the foreground (stream progress)");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed progress");
         cmd->add_flag("--force", force_, "Skip confirmation prompts");
 
@@ -54,6 +77,28 @@ public:
 
     Result<void> execute() override {
         try {
+            if (stopDaemon_) {
+                // Best-effort stop daemon like doctor command
+                try {
+                    yams::daemon::ClientConfig ccfg;
+                    ccfg.singleUseConnections = true;
+                    ccfg.requestTimeout = std::chrono::seconds(5);
+                    yams::daemon::DaemonClient shut(ccfg);
+                    std::promise<Result<void>> prom;
+                    auto fut = prom.get_future();
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor{},
+                        [&]() -> boost::asio::awaitable<void> {
+                            auto r = co_await shut.shutdown(true);
+                            prom.set_value(std::move(r));
+                            co_return;
+                        },
+                        boost::asio::detached);
+                    (void)fut.wait_for(std::chrono::seconds(6));
+                } catch (...) {
+                }
+            }
+
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;
@@ -71,7 +116,8 @@ public:
 
             // If no specific repair requested, default to orphans
             if (!repairOrphans_ && !repairMime_ && !repairChunks_ && !repairEmbeddings_ &&
-                !optimizeDb_ && !verifyChecksums_ && !mergeDuplicates_ && !repairAll_) {
+                !repairFts5_ && !optimizeDb_ && !verifyChecksums_ && !mergeDuplicates_ &&
+                !repairAll_) {
                 repairOrphans_ = true;
             }
 
@@ -81,6 +127,7 @@ public:
                 repairMime_ = true;
                 repairChunks_ = true;
                 repairEmbeddings_ = true;
+                repairFts5_ = true;
                 optimizeDb_ = true;
                 repairDownloads_ = true;
                 // verifyChecksums_ = true;  // Not implemented yet
@@ -127,6 +174,20 @@ public:
             // Generate missing embeddings
             if (repairEmbeddings_) {
                 auto result = generateMissingEmbeddings(store, metadataRepo);
+                if (!result) {
+                    return result;
+                }
+                anyRepairs = true;
+            }
+
+            // Rebuild FTS5 index (best-effort)
+            if (repairFts5_) {
+                auto appCtx = cli_->getAppContext();
+                if (!appCtx) {
+                    return Error{ErrorCode::NotInitialized,
+                                 "AppContext not available for FTS5 rebuild"};
+                }
+                auto result = rebuildFts5Index(*appCtx);
                 if (!result) {
                     return result;
                 }
@@ -180,14 +241,24 @@ private:
     bool repairMime_ = false;
     bool repairChunks_ = false;
     bool repairEmbeddings_ = false;
+    bool repairFts5_ = false;
     bool optimizeDb_ = false;
     bool verifyChecksums_ = false;
     bool mergeDuplicates_ = false;
     bool repairDownloads_ = false;
+    bool foreground_ = false; // default background
+    std::vector<std::string> includeMime_;
+    std::string embeddingModel_;
     bool repairAll_ = false;
     bool dryRun_ = false;
     bool verbose_ = false;
     bool force_ = false;
+    bool stopDaemon_ = false;
+    int embedTimeoutMs_ = 600000;
+    int embedRetries_ = 2;
+
+    // Helper to rebuild FTS5 index for all documents (best-effort)
+    Result<void> rebuildFts5Index(const app::services::AppContext& ctx);
 
     Result<void>
     cleanOrphanedMetadata(std::shared_ptr<api::IContentStore> store,
@@ -200,7 +271,6 @@ private:
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};
         }
-
         int orphanedCount = 0;
         int cleanedCount = 0;
         std::vector<int64_t> orphanedIds;
@@ -724,6 +794,164 @@ private:
         std::cout << "Generating Missing Embeddings\n";
         std::cout << "─────────────────────────────\n";
 
+        // Ensure vector DB schema dimension matches target before generating
+        // Determine target dimension: config > env > generator > heuristic
+        size_t targetDim = 0;
+        // Config (best-effort parse of ~/.config/yams/config.toml or XDG)
+        try {
+            namespace fs = std::filesystem;
+            fs::path cfgHome;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                cfgHome = fs::path(xdg);
+            else if (const char* h = std::getenv("HOME"))
+                cfgHome = fs::path(h) / ".config";
+            fs::path cfgPath = cfgHome / "yams" / "config.toml";
+            if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                std::ifstream in(cfgPath);
+                std::string line;
+                auto trim = [&](std::string& t) {
+                    if (t.empty())
+                        return;
+                    t.erase(0, t.find_first_not_of(" \t"));
+                    auto p = t.find_last_not_of(" \t");
+                    if (p != std::string::npos)
+                        t.erase(p + 1);
+                };
+                while (std::getline(in, line)) {
+                    std::string l = line;
+                    trim(l);
+                    if (l.empty() || l[0] == '#')
+                        continue;
+                    if (l.find("embeddings.embedding_dim") != std::string::npos) {
+                        auto eq = l.find('=');
+                        if (eq != std::string::npos) {
+                            std::string v = l.substr(eq + 1);
+                            trim(v);
+                            if (!v.empty() && v.front() == '"' && v.back() == '"')
+                                v = v.substr(1, v.size() - 2);
+                            try {
+                                targetDim = static_cast<size_t>(std::stoul(v));
+                            } catch (...) {
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+        // Env
+        if (targetDim == 0) {
+            if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
+                try {
+                    targetDim = static_cast<size_t>(std::stoul(envd));
+                } catch (...) {
+                }
+            }
+        }
+        // Generator
+        if (targetDim == 0) {
+            try {
+                if (auto emb = cli_->getEmbeddingGenerator()) {
+                    auto d = emb->getEmbeddingDimension();
+                    if (d > 0)
+                        targetDim = d;
+                }
+            } catch (...) {
+            }
+        }
+        if (targetDim == 0)
+            targetDim = 384; // final fallback
+
+        // Align vectors.db schema dimension if needed (no daemon required)
+        try {
+            namespace fs = std::filesystem;
+            fs::path dbPath = cli_->getDataPath() / "vectors.db";
+            yams::vector::SqliteVecBackend be;
+            bool dbExists = fs::exists(dbPath);
+            // For safety, ensure parent exists
+            try {
+                fs::create_directories(dbPath.parent_path());
+            } catch (...) {
+            }
+            if (!be.initialize(dbPath.string())) {
+                std::cout << "  ⚠ Vector DB open failed; proceeding without schema alignment\n";
+            } else {
+                (void)be.ensureVecLoaded();
+                auto stored = be.getStoredEmbeddingDimension();
+                bool needCreate = !stored.has_value() && !dbExists;
+                bool needRecreate = stored.has_value() && (*stored != targetDim);
+                auto promptYesNo = [&](const std::string& msg, bool defNo = true) {
+                    if (force_)
+                        return true; // honor --force to skip prompts
+                    std::cout << msg;
+                    std::string line;
+                    std::getline(std::cin, line);
+                    if (line.empty())
+                        return !defNo;
+                    char c = static_cast<char>(std::tolower(line[0]));
+                    return c == 'y';
+                };
+
+                if (needCreate) {
+                    if (!dryRun_) {
+                        if (promptYesNo(std::string("Create vector tables now (dim=") +
+                                        std::to_string(targetDim) + ")? [y/N]: ")) {
+                            auto cr = be.createTables(targetDim);
+                            if (cr) {
+                                std::cout << "  ✓ Created vector tables (dim=" << targetDim
+                                          << ")\n";
+                            } else {
+                                std::cout
+                                    << "  ⚠ Create vector tables failed: " << cr.error().message
+                                    << "\n";
+                            }
+                        } else {
+                            std::cout << "  Skipped creating vector tables\n";
+                        }
+                    } else {
+                        std::cout << "  [DRY RUN] Would create vector tables (dim=" << targetDim
+                                  << ")\n";
+                    }
+                } else if (needRecreate) {
+                    std::cout << "  ⚠ Vector schema dimension mismatch (stored="
+                              << (stored ? std::to_string(*stored) : std::string("unknown"))
+                              << ", target=" << targetDim << ")\n";
+                    if (!dryRun_) {
+                        if (promptYesNo(std::string("Drop and recreate vector tables to dim ") +
+                                        std::to_string(targetDim) + "? [y/N]: ")) {
+                            auto dr = be.dropTables();
+                            if (!dr) {
+                                std::cout << "  ✗ Drop tables failed: " << dr.error().message
+                                          << "\n";
+                            } else {
+                                auto cr = be.createTables(targetDim);
+                                if (cr) {
+                                    std::cout << "  ✓ Recreated vector tables (dim=" << targetDim
+                                              << ")\n";
+                                } else {
+                                    std::cout << "  ✗ Create tables failed: " << cr.error().message
+                                              << "\n";
+                                }
+                            }
+                        } else {
+                            std::cout << "  Skipped schema recreation\n";
+                        }
+                    } else {
+                        std::cout << "  [DRY RUN] Would drop and recreate vector tables (dim="
+                                  << targetDim << ")\n";
+                    }
+                } else {
+                    std::cout << "  ✓ Vector schema aligned (dim="
+                              << (stored ? std::to_string(*stored) : std::to_string(targetDim))
+                              << ")\n";
+                }
+                be.close();
+            }
+        } catch (const std::exception& e) {
+            std::cout << "  ⚠ Vector DB schema alignment skipped: " << e.what() << "\n";
+        }
+
         // Check for available ONNX models
         namespace fs = std::filesystem;
         const char* home = std::getenv("HOME");
@@ -754,89 +982,89 @@ private:
 
         if (!dryRun_) {
             std::cout << "  ℹ Generating embeddings for all documents\n";
-            std::cout << "    Using model: " << availableModels[0] << "\n";
-
-            try {
-                // 1. Configure embedding generation
-                vector::EmbeddingConfig embConfig;
-                embConfig.model_path = (modelsPath / availableModels[0] / "model.onnx").string();
-                embConfig.model_name = availableModels[0];
-
-                // Adjust settings based on model
-                if (availableModels[0] == "all-MiniLM-L6-v2") {
-                    embConfig.embedding_dim = 384;
-                } else if (availableModels[0] == "all-mpnet-base-v2") {
-                    embConfig.embedding_dim = 768;
+            // Resolve model selection: explicit --model > preferred (config/env/CLI) > known order
+            // > first available
+            auto pickPreferred = [&]() -> std::string {
+                if (!embeddingModel_.empty())
+                    return embeddingModel_;
+                // 1) Prefer model from active EmbeddingGenerator
+                try {
+                    if (auto emb = cli_->getEmbeddingGenerator()) {
+                        auto n = emb->getConfig().model_name;
+                        if (!n.empty())
+                            return n;
+                    }
+                } catch (...) {
                 }
-
-                // 2. Initialize embedding generator
-                auto embGenerator = std::make_unique<vector::EmbeddingGenerator>(embConfig);
-                if (!embGenerator->initialize()) {
-                    std::cout << "  ✗ Failed to initialize embedding generator\n";
-                    return Error{ErrorCode::InternalError,
-                                 "Embedding generator initialization failed"};
-                }
-
-                // 3. Initialize vector database
-                vector::VectorDatabaseConfig vdbConfig;
-                vdbConfig.database_path = (cli_->getDataPath() / "vectors.db").string();
-                vdbConfig.embedding_dim = embConfig.embedding_dim;
-
-                // Cross-process single-writer lock on vectors.db
-                struct FileLock {
-                    int fd{-1};
-                    std::filesystem::path path;
-                    explicit FileLock(const std::filesystem::path& p) : path(p) {
-                        fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
-                        if (fd >= 0) {
-                            struct flock fl{};
-                            fl.l_type = F_WRLCK;
-                            fl.l_whence = SEEK_SET;
-                            fl.l_start = 0;
-                            fl.l_len = 0;
-                            if (fcntl(fd, F_SETLK, &fl) == -1) {
-                                ::close(fd);
-                                fd = -1;
+                // 2) Read from config/env
+                try {
+                    namespace fs = std::filesystem;
+                    fs::path cfgp;
+                    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                        cfgp = fs::path(xdg) / "yams" / "config.toml";
+                    else if (const char* home = std::getenv("HOME"))
+                        cfgp = fs::path(home) / ".config" / "yams" / "config.toml";
+                    std::ifstream in(cfgp);
+                    if (in) {
+                        std::string line, section;
+                        auto trim = [](std::string& str) {
+                            if (str.empty())
+                                return;
+                            str.erase(0, str.find_first_not_of(" \t"));
+                            auto p = str.find_last_not_of(" \t");
+                            if (p != std::string::npos)
+                                str.erase(p + 1);
+                        };
+                        while (std::getline(in, line)) {
+                            std::string l = line;
+                            trim(l);
+                            if (l.empty() || l[0] == '#')
+                                continue;
+                            if (l.front() == '[') {
+                                auto e = l.find(']');
+                                section =
+                                    e != std::string::npos ? l.substr(1, e - 1) : std::string();
+                                continue;
                             }
+                            auto eq = l.find('=');
+                            if (eq == std::string::npos)
+                                continue;
+                            std::string key = l.substr(0, eq);
+                            std::string val = l.substr(eq + 1);
+                            trim(key);
+                            trim(val);
+                            if (!val.empty() && val.front() == '"' && val.back() == '"')
+                                val = val.substr(1, val.size() - 2);
+                            if (section == "embeddings" && key == "preferred_model" && !val.empty())
+                                return val;
                         }
                     }
-                    bool locked() const { return fd >= 0; }
-                    ~FileLock() {
-                        if (fd >= 0) {
-                            struct flock fl{};
-                            fl.l_type = F_UNLCK;
-                            fl.l_whence = SEEK_SET;
-                            fl.l_start = 0;
-                            fl.l_len = 0;
-                            (void)fcntl(fd, F_SETLK, &fl);
-                            ::close(fd);
-                        }
-                    }
-                } vlock(cli_->getDataPath() / "vectors.db.lock");
-                if (!vlock.locked()) {
-                    std::cout << "  ℹ Another process is updating the vector database; skipping "
-                                 "embeddings\n";
-                    return Error{ErrorCode::InvalidState,
-                                 "vectors.db is locked by another process"};
+                } catch (...) {
                 }
+                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
+                    return std::string(p);
+                // 3) Known preference order
+                auto has = [&](const std::string& n) {
+                    return std::find(availableModels.begin(), availableModels.end(), n) !=
+                           availableModels.end();
+                };
+                if (has("nomic-embed-text-v1.5"))
+                    return "nomic-embed-text-v1.5";
+                if (has("nomic-embed-text-v1"))
+                    return "nomic-embed-text-v1";
+                if (has("all-MiniLM-L6-v2"))
+                    return "all-MiniLM-L6-v2";
+                if (has("all-mpnet-base-v2"))
+                    return "all-mpnet-base-v2";
+                // 4) First available
+                return availableModels[0];
+            };
+            const std::string chosenModel = pickPreferred();
+            std::cout << "    Using model: " << chosenModel << "\n";
 
-                auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-                if (!vectorDb->initialize()) {
-                    std::cout << "  ✗ Failed to initialize vector database: "
-                              << vectorDb->getLastError() << "\n";
-                    return Error{ErrorCode::DatabaseError,
-                                 "Vector database initialization failed: " +
-                                     vectorDb->getLastError()};
-                }
-
-                // Verify vector database is ready
-                std::cout << "  ✓ Vector database initialized successfully\n";
-                if (vectorDb->tableExists()) {
-                    auto vectorCount = vectorDb->getVectorCount();
-                    std::cout << "  ✓ Found " << vectorCount << " existing embeddings\n";
-                }
-
-                // 4. Query all documents from metadata
+            // Stream embeddings via daemon and show progress (preferred path)
+            try {
+                // Query all documents from metadata
                 auto allDocs = metadataRepo->findDocumentsByPath("%");
                 if (!allDocs) {
                     std::cout << "  ✗ Failed to query documents: " << allDocs.error().message
@@ -845,26 +1073,43 @@ private:
                 }
 
                 const auto& documents = allDocs.value();
-                std::cout << "  Found " << documents.size() << " documents to process\n";
+                std::cout << "  Found " << documents.size()
+                          << " documents (will filter for embedding)\n";
 
-                // Initialize progress indicator with threading support
-                ProgressIndicator progress(ProgressIndicator::Style::Bar, false);
-                progress.setShowCount(true);
-                progress.start("Generating embeddings");
-
-                // Atomic counters for thread-safe progress tracking
-                std::atomic<size_t> processed{0};
-                std::atomic<size_t> skipped{0};
-                std::atomic<size_t> failed{0};
-                std::atomic<bool> processing{true};
-
-                // Start progress update thread
-                std::thread progressThread([&progress, &documents, &processed, &processing]() {
-                    while (processing.load()) {
-                        progress.update(processed.load(), documents.size());
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // Build list of document hashes to embed, respecting MIME filters
+                auto is_embeddable_mime = [this](const std::string& m) -> bool {
+                    if (m.rfind("text/", 0) == 0)
+                        return true;
+                    if (m == "application/json" || m == "application/xml" ||
+                        m == "application/x-yaml" || m == "application/yaml")
+                        return true;
+                    for (const auto& inc : includeMime_) {
+                        if (!inc.empty() && (m == inc || m.rfind(inc, 0) == 0))
+                            return true;
                     }
-                });
+                    return false;
+                };
+
+                std::vector<std::string> hashes;
+                hashes.reserve(documents.size());
+                for (const auto& d : documents) {
+                    if (is_embeddable_mime(d.mimeType))
+                        hashes.push_back(d.sha256Hash);
+                }
+                if (hashes.empty()) {
+                    std::cout << "  ✓ No eligible documents for embeddings after MIME filtering\n";
+                    return Result<void>();
+                }
+
+                if (!foreground_) {
+                    std::cout
+                        << "  ✓ Background repair requested. The daemon's RepairCoordinator will\n"
+                           "    process missing embeddings opportunistically based on live load.\n"
+                           "    Monitor with 'yams stats --verbose'.\n";
+                    return Result<void>();
+                }
+
+                // Configure batch size
                 size_t batchSize = 32; // safe default
                 if (const char* envBatch = std::getenv("YAMS_EMBED_BATCH")) {
                     try {
@@ -875,115 +1120,74 @@ private:
                             v = 128UL;
                         batchSize = static_cast<size_t>(v);
                     } catch (...) {
-                        // keep default
                     }
                 }
 
-                for (size_t i = 0; i < documents.size(); i += batchSize) {
-                    size_t end = std::min(i + batchSize, documents.size());
-                    std::vector<std::string> texts;
-                    std::vector<metadata::DocumentInfo> batchDocs;
-
-                    // Collect texts for this batch
-                    for (size_t j = i; j < end; ++j) {
-                        const auto& doc = documents[j];
-
-                        // Check if embedding already exists
-                        if (vectorDb->hasEmbedding(doc.sha256Hash)) {
-                            skipped.fetch_add(1);
-                            continue;
-                        }
-
-                        // Get document content
-                        auto content = store->retrieveBytes(doc.sha256Hash);
-                        if (!content) {
-                            failed.fetch_add(1);
-                            continue;
-                        }
-
-                        std::string text(reinterpret_cast<const char*>(content.value().data()),
-                                         content.value().size());
-                        texts.push_back(text);
-                        batchDocs.push_back(doc);
+                // Streaming RPC to daemon; server emits EmbeddingEvent progress
+                yams::daemon::ClientConfig cfg;
+                cfg.requestTimeout = std::chrono::milliseconds(embedTimeoutMs_);
+                cfg.headerTimeout = std::chrono::milliseconds(embedTimeoutMs_);
+                cfg.bodyTimeout = std::chrono::milliseconds(embedTimeoutMs_);
+                yams::daemon::DaemonClient client(cfg);
+                yams::daemon::EmbedDocumentsRequest ereq{};
+                ereq.modelName = chosenModel;
+                ereq.normalize = true;
+                ereq.batchSize = static_cast<std::size_t>(0); // let server dynamic batcher decide
+                ereq.skipExisting = true;
+                ereq.documentHashes = hashes; // stream a single request with all docs
+                Result<std::vector<yams::daemon::EmbeddingEvent>> evres = Error{ErrorCode::Unknown};
+                for (int attempt = 1; attempt <= std::max(1, embedRetries_); ++attempt) {
+                    std::promise<Result<std::vector<yams::daemon::EmbeddingEvent>>> prom;
+                    auto fut = prom.get_future();
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor{},
+                        [&]() -> boost::asio::awaitable<void> {
+                            auto r = co_await client.callEvents(ereq);
+                            prom.set_value(std::move(r));
+                            co_return;
+                        },
+                        boost::asio::detached);
+                    auto waitRes = fut.wait_for(std::chrono::milliseconds(embedTimeoutMs_ + 10000));
+                    if (waitRes == std::future_status::ready) {
+                        evres = fut.get();
+                        if (evres)
+                            break; // success
+                    } else {
+                        evres = Error{ErrorCode::Timeout, "embedding timeout"};
                     }
-
-                    if (!texts.empty()) {
-                        // Generate embeddings for batch
-                        auto embeddings = embGenerator->generateEmbeddings(texts);
-                        if (embeddings.empty()) {
-                            // Don't spam the user with too many error messages
-                            static int error_count = 0;
-                            if (++error_count <= 3) {
-                                progress.stop(); // Temporarily stop progress for error message
-                                std::cout << "\n  ⚠ Failed to generate embeddings for batch (texts "
-                                             "may contain unsupported characters)\n";
-                                progress.start("Generating embeddings"); // Resume progress
-                            }
-                            failed.fetch_add(texts.size());
-                            continue;
-                        }
-
-                        // Store embeddings in vector database using batch insert
-                        std::vector<vector::VectorRecord> records;
-                        records.reserve(embeddings.size());
-                        for (size_t k = 0; k < embeddings.size() && k < batchDocs.size(); ++k) {
-                            vector::VectorRecord record;
-                            record.document_hash = batchDocs[k].sha256Hash;
-                            record.chunk_id =
-                                vector::utils::generateChunkId(batchDocs[k].sha256Hash, 0);
-                            record.embedding = embeddings[k];
-                            record.content = texts[k].substr(0, 1000); // Store snippet
-                            record.metadata["name"] = batchDocs[k].fileName;
-                            record.metadata["mime_type"] = batchDocs[k].mimeType;
-                            records.push_back(std::move(record));
-                        }
-
-                        if (!records.empty()) {
-                            if (vectorDb->insertVectorsBatch(records)) {
-                                processed.fetch_add(records.size());
-                            } else {
-                                failed.fetch_add(records.size());
-                            }
-                        }
+                    if (attempt < std::max(1, embedRetries_)) {
+                        std::cout << "  ⚠ Embed RPC retry " << attempt << "/" << embedRetries_
+                                  << " after backoff\n";
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
                     }
                 }
-
-                // Stop progress thread and indicator
-                processing.store(false);
-                progressThread.join();
-                progress.stop();
-                std::cout << "  ✓ Embedding generation complete\n";
-                std::cout << "    Processed: " << processed.load() << " documents\n";
-                std::cout << "    Skipped (already exists): " << skipped.load() << " documents\n";
-                auto failed_count = failed.load();
-                if (failed_count > 0) {
-                    std::cout << "    Failed: " << failed_count << " documents\n";
-                    double failure_rate =
-                        (static_cast<double>(failed_count) / documents.size()) * 100.0;
-                    if (failure_rate > 10.0) {
-                        std::cout << "    ⚠ High failure rate (" << std::fixed
-                                  << std::setprecision(1) << failure_rate
-                                  << "%). Consider using a different model or preprocessing text "
-                                     "content.\n";
-                    }
+                if (!evres) {
+                    auto err = evres.error();
+                    std::cout << "  [FAIL] Embedding failed: " << err.message << "\n";
+                    return err;
                 }
-
-                // Show final vector database summary
-                std::cout << "  ✓ Vector database summary:\n";
-                auto finalVectorCount = vectorDb->getVectorCount();
-                std::cout << "    Total vectors: " << finalVectorCount << "\n";
-
-                // Calculate database size from file system
-                fs::path vectorDbPath = cli_->getDataPath() / "vectors.db";
-                if (fs::exists(vectorDbPath)) {
-                    auto dbSize = fs::file_size(vectorDbPath);
-                    std::cout << "    Database size: " << formatSize(dbSize) << "\n";
+                const auto& events = evres.value();
+                // Print compact progress based on collected events
+                for (const auto& e : events) {
+                    std::cout << "[embed] model=" << e.modelName << " " << e.processed << "/"
+                              << e.total << " success=" << e.success << " failure=" << e.failure
+                              << " inserted=" << e.inserted << " phase=" << e.phase
+                              << (e.message.empty() ? "" : (" " + e.message)) << "\n";
                 }
-
-            } catch (const std::exception& e) {
-                std::cout << "  ✗ Error during embedding generation: " << e.what() << "\n";
-                return Error{ErrorCode::InternalError, e.what()};
+                // Derive final stats from last event when available
+                if (!events.empty()) {
+                    const auto& last = events.back();
+                    std::cout << "  ✓ Embedding generation complete\n";
+                    std::cout << "    Requested:  " << last.total << "\n";
+                    std::cout << "    Embedded:   " << last.success << "\n";
+                    std::cout << "    Skipped:    " << 0 << "\n";
+                    std::cout << "    Failed:     " << last.failure << "\n\n";
+                }
+                return Result<void>();
+            } catch (...) {
+                // Swallow exceptions during embeddings generation in repair flow
             }
+
         } else {
             std::cout << "  [DRY RUN] Would generate embeddings for documents\n";
             std::cout << "  [DRY RUN] Using model: " << availableModels[0] << "\n";
@@ -1012,6 +1216,58 @@ private:
         return oss.str();
     }
 };
+
+// Out-of-class helper definition (below class end)
+Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ctx) {
+    std::cout << "Rebuilding FTS5 index (best-effort)...\n";
+    if (!ctx.store || !ctx.metadataRepo) {
+        return Error{ErrorCode::NotInitialized, "Store/Metadata not initialized"};
+    }
+    auto docs = ctx.metadataRepo->findDocumentsByPath("%");
+    if (!docs) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to enumerate documents: " + docs.error().message};
+    }
+
+    size_t ok = 0, fail = 0;
+    ProgressIndicator progress(ProgressIndicator::Style::Percentage);
+    if (!verbose_ && docs.value().size() > 100) {
+        progress.start("FTS5 reindex");
+    }
+    size_t current = 0, total = docs.value().size();
+    for (const auto& d : docs.value()) {
+        ++current;
+        std::string ext = d.fileExtension;
+        if (!ext.empty() && ext[0] == '.')
+            ext.erase(0, 1);
+        try {
+            auto extractedOpt = yams::extraction::util::extractDocumentText(
+                ctx.store, d.sha256Hash, d.mimeType, ext, ctx.contentExtractors);
+            if (extractedOpt && !extractedOpt->empty()) {
+                auto ir = ctx.metadataRepo->indexDocumentContent(d.id, d.fileName, *extractedOpt,
+                                                                 d.mimeType);
+                if (ir) {
+                    (void)ctx.metadataRepo->updateFuzzyIndex(d.id);
+                    ++ok;
+                } else {
+                    ++fail;
+                }
+            } else {
+                ++fail;
+            }
+        } catch (...) {
+            ++fail;
+        }
+
+        if (!verbose_ && total > 100) {
+            progress.update(current, total);
+        }
+    }
+    if (!verbose_ && total > 100)
+        progress.stop();
+    std::cout << "FTS5 reindex complete: ok=" << ok << ", fail=" << fail << "\n";
+    return {};
+}
 
 // Factory function
 std::unique_ptr<ICommand> createRepairCommand() {

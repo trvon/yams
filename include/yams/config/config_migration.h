@@ -230,6 +230,7 @@ struct ConfigV2 {
     struct Embeddings {
         bool enable = true;
         bool auto_generate = true;
+        bool auto_on_add = false;
         std::string preferred_model = "all-MiniLM-L6-v2";
         std::string model_path = "~/.yams/models";
         std::string tokenizer_path = "models/tokenizer.json";

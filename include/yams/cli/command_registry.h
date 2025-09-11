@@ -140,6 +140,13 @@ public:
      * Create daemon command (daemon management)
      */
     static std::unique_ptr<ICommand> createDaemonCommand();
+
+    /**
+     * Create plugin command (plugin management)
+     */
+    static std::unique_ptr<ICommand> createPluginCommand();
+
+    // Dr command factory is a free function; CommandRegistry calls it directly
 };
 
 } // namespace yams::cli

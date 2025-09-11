@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/plugins/manifest",
+  "title": "YAMS Plugin Manifest",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "minLength": 1 },
+    "abi": { "type": "integer", "minimum": 1 },
+    "interfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "version": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["id", "version"],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "config_schema": { "type": ["string", "object"] },
+    "health": {
+      "type": "object",
+      "properties": { "has_health": { "type": "boolean" } },
+      "required": ["has_health"],
+      "additionalProperties": true
+    },
+    "authors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "email": { "type": "string" },
+          "org": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["name", "version", "abi", "interfaces"],
+  "additionalProperties": true
+}
+

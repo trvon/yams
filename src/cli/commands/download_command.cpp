@@ -91,6 +91,14 @@ public:
                         "(default: never).")
             ->check(CLI::IsMember({"never", "if-different-etag", "always"}));
 
+        // Annotations
+        cmd->add_option("--tag", tags_, "Tag to attach to the stored document (repeatable). ")
+            ->take_all();
+        cmd->add_option("--meta", metadataKVs_,
+                        "Metadata key=value to attach (repeatable). Keys are strings; values are "
+                        "stored as strings.")
+            ->take_all();
+
         // Output / UX
         cmd->add_option("--progress", progress_,
                         "Progress format: [human|json|none] (default: human).")
@@ -211,6 +219,35 @@ public:
             serviceReq.overwrite = downloader::OverwritePolicy::Always;
         }
 
+        // User-supplied annotations
+        serviceReq.tags = tags_;
+        // Parse key=value pairs
+        for (const auto& kv : metadataKVs_) {
+            auto pos = kv.find('=');
+            if (pos == std::string::npos || pos == 0) {
+                spdlog::warn("Ignoring --meta without '=' or empty key: {}", kv);
+                continue;
+            }
+            std::string key = kv.substr(0, pos);
+            std::string value = kv.substr(pos + 1);
+            // Trim spaces around key/value
+            auto trim = [](std::string& s) {
+                if (s.empty())
+                    return;
+                s.erase(0, s.find_first_not_of(" \t"));
+                auto p = s.find_last_not_of(" \t");
+                if (p != std::string::npos)
+                    s.erase(p + 1);
+            };
+            trim(key);
+            trim(value);
+            if (key.empty()) {
+                spdlog::warn("Ignoring --meta with empty key: {}", kv);
+                continue;
+            }
+            serviceReq.metadata[key] = value;
+        }
+
         // Call the download service
         auto result = downloadService->download(serviceReq);
 
@@ -244,6 +281,10 @@ public:
                 j["last_modified"] = *resp.lastModified;
             if (resp.checksumOk)
                 j["checksum_ok"] = *resp.checksumOk;
+            if (!tags_.empty())
+                j["tags"] = tags_;
+            if (!serviceReq.metadata.empty())
+                j["metadata"] = serviceReq.metadata;
             std::cout << j.dump(2) << std::endl;
         } else {
             std::cout << "Download successful!" << std::endl;
@@ -294,6 +335,10 @@ private:
     std::string progress_{"human"}; // "human" | "json" | "none"
     bool jsonOutput_{false};
     bool quiet_{false};
+
+    // Annotations
+    std::vector<std::string> tags_{};
+    std::vector<std::string> metadataKVs_{}; // raw key=value pairs
 };
 
 // Factory function for registry

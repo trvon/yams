@@ -1,0 +1,523 @@
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+#include <future>
+#include <iostream>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
+#include <yams/cli/command.h>
+#include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+
+namespace yams::cli {
+
+class PluginCommand : public ICommand {
+public:
+    std::string getName() const override { return "plugin"; }
+    std::string getDescription() const override {
+        return "Manage plugins (list/scan/info/load/unload/trust)";
+    }
+
+    void registerCommand(CLI::App& app, YamsCLI* cli) override {
+        cli_ = cli;
+        auto register_subs = [this](CLI::App* plugin) {
+            plugin->require_subcommand(1);
+
+            // plugin search (catalog)
+            std::string indexPath;
+            auto* search =
+                plugin->add_subcommand("search", "Search plugin catalog (local index.json)");
+            search->add_option("--index", indexPath,
+                               "Path to catalog JSON (default: docs/plugins/index.json)");
+            search->callback([&indexPath]() {
+                namespace fs = std::filesystem;
+                fs::path idx =
+                    indexPath.empty() ? fs::path("docs/plugins/index.json") : fs::path(indexPath);
+                if (!fs::exists(idx)) {
+                    std::cout << "Catalog not found: " << idx << "\n";
+                    return;
+                }
+                try {
+                    std::ifstream in(idx);
+                    nlohmann::json j = nlohmann::json::parse(in);
+                    auto arr = j.value("plugins", nlohmann::json::array());
+                    std::cout << "Plugins (" << arr.size() << "):\n";
+                    for (auto& it : arr) {
+                        std::string name = it.value("name", "");
+                        std::string transport = it.value("transport", "");
+                        std::string repo = it.value("repo", "");
+                        auto ifaces = it.value("interfaces", std::vector<std::string>{});
+                        std::cout << "  - " << name << " [" << transport << "]";
+                        if (!ifaces.empty()) {
+                            std::cout << " interfaces=";
+                            for (size_t i = 0; i < ifaces.size(); ++i) {
+                                if (i)
+                                    std::cout << ",";
+                                std::cout << ifaces[i];
+                            }
+                        }
+                        if (!repo.empty())
+                            std::cout << " repo=" << repo;
+                        std::cout << "\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cout << "Failed to read catalog: " << e.what() << "\n";
+                }
+            });
+
+            // plugin list
+            plugin->add_subcommand("list", "List loaded plugins and their interfaces")
+                ->callback([this]() { listPlugins(); });
+
+            // plugin scan [--dir DIR] [TARGET]
+            auto* scan =
+                plugin->add_subcommand("scan", "Scan a directory or file for plugins (no init)");
+            scan->add_option("--dir", scanDir_, "Directory to scan (default: search paths)");
+            scan->add_option("target", scanTarget_, "Specific plugin file to scan (optional)");
+            scan->callback([this]() { scanPlugins(scanDir_, scanTarget_); });
+
+            // plugin info NAME
+            auto* info = plugin->add_subcommand("info", "Show manifest/health for a plugin");
+            info->add_option("name", infoName_, "Plugin name")->required();
+            info->callback([this]() { showPluginInfo(infoName_); });
+
+            // plugin load PATH|NAME [--config FILE] [--dry-run]
+            auto* load = plugin->add_subcommand("load", "Load a plugin by path or name");
+            load->add_option("path_or_name", loadArg_, "Plugin path or registered name")
+                ->required();
+            load->add_option("--config", configFile_,
+                             "Configuration JSON/TOML for init (optional)");
+            load->add_flag("--dry-run", dryRun_, "Scan only; do not initialize");
+            load->callback([this]() { loadPlugin(loadArg_, configFile_, dryRun_); });
+
+            // plugin unload NAME
+            auto* unload = plugin->add_subcommand("unload", "Unload a plugin by name");
+            unload->add_option("name", unloadName_, "Plugin name")->required();
+            unload->callback([this]() { unloadPlugin(unloadName_); });
+
+            // plugin trust (add/list/remove)
+            auto* trust = plugin->add_subcommand("trust", "Manage plugin trust policy");
+            trust->require_subcommand(1);
+
+            trust->add_subcommand("add", "Trust a plugin directory or file")
+                ->add_option("path", trustPath_, "Path to trust")
+                ->required();
+            trust->get_subcommand("add")->callback([this]() { trustAdd(trustPath_); });
+
+            trust->add_subcommand("list", "List trusted plugin paths")->callback([this]() {
+                trustList();
+            });
+
+            trust->add_subcommand("remove", "Remove a trusted plugin path")
+                ->add_option("path", untrustPath_, "Path to remove")
+                ->required();
+            trust->get_subcommand("remove")->callback([this]() { trustRemove(untrustPath_); });
+
+            // plugin install (stub)
+            plugin->add_subcommand("install", "Install plugin from URL or path (stub)")
+                ->add_option("src", installSrc_, "URL or local path")
+                ->required();
+            plugin->get_subcommand("install")->callback(
+                [this]() { std::cout << "yams plugin install: TODO src=" << installSrc_ << "\n"; });
+
+            // plugin enable/disable/verify (stubs)
+            plugin->add_subcommand("enable", "Enable a previously loaded plugin (stub)")
+                ->add_option("name", nameToggle_, "Plugin name")
+                ->required();
+            plugin->get_subcommand("enable")->callback(
+                [this]() { std::cout << "yams plugin enable: TODO name=" << nameToggle_ << "\n"; });
+
+            plugin->add_subcommand("disable", "Disable a plugin (stub)")
+                ->add_option("name", nameToggle_, "Plugin name")
+                ->required();
+            plugin->get_subcommand("disable")->callback([this]() {
+                std::cout << "yams plugin disable: TODO name=" << nameToggle_ << "\n";
+            });
+
+            plugin->add_subcommand("verify", "Verify plugin signature/hash (stub)")
+                ->add_option("name", nameToggle_, "Plugin name")
+                ->required();
+            plugin->get_subcommand("verify")->callback(
+                [this]() { std::cout << "yams plugin verify: TODO name=" << nameToggle_ << "\n"; });
+        };
+
+        auto* plugin = app.add_subcommand(getName(), getDescription());
+        register_subs(plugin);
+        // Alias: "plugins" behaves the same as "plugin"
+        auto* plugins = app.add_subcommand("plugins", getDescription());
+        register_subs(plugins);
+    }
+
+    Result<void> execute() override { return Result<void>(); }
+
+private:
+    void listPlugins();
+    void showPluginInfo(const std::string& name);
+    void scanPlugins(const std::string& dir, const std::string& target);
+    void loadPlugin(const std::string& arg, const std::string& cfg, bool dryRun);
+    void unloadPlugin(const std::string& name);
+    void trustList();
+    void trustAdd(const std::string& path);
+    void trustRemove(const std::string& path);
+
+    YamsCLI* cli_{nullptr};
+    // Persistent option storage to avoid dangling references in callbacks
+    std::string scanDir_;
+    std::string scanTarget_;
+    std::string infoName_;
+    std::string loadArg_;
+    std::string configFile_;
+    bool dryRun_{false};
+    std::string unloadName_;
+    std::string trustPath_;
+    std::string untrustPath_;
+    std::string installSrc_;
+    std::string nameToggle_;
+};
+
+// Factory
+std::unique_ptr<ICommand> createPluginCommand() {
+    return std::make_unique<PluginCommand>();
+}
+
+} // namespace yams::cli
+
+namespace yams::cli {
+
+void PluginCommand::listPlugins() {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.enableChunkedResponses = false;
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        DaemonClient client(cfg);
+        GetStatsRequest req;
+        req.detailed = true; // request detailed stats so plugins_json is populated
+        std::promise<Result<yams::daemon::GetStatsResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<yams::daemon::GetStatsResponse>(
+                             Error{ErrorCode::Timeout, "stats timeout"});
+        if (!res) {
+            std::cout << "Failed to query daemon stats for plugins\n";
+            return;
+        }
+        const auto& resp = res.value();
+        auto it = resp.additionalStats.find("plugins_json");
+        if (it == resp.additionalStats.end()) {
+            std::cout << "No plugin information available.\n";
+            return;
+        }
+        nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
+        if (pj.is_discarded()) {
+            std::cout << "Invalid plugin JSON.\n";
+            return;
+        }
+        std::cout << "Loaded plugins (" << pj.size() << "):\n";
+        for (const auto& rec : pj) {
+            std::string name = rec.value("name", "");
+            std::string path = rec.value("path", "");
+            std::cout << "  - " << name;
+            if (!path.empty())
+                std::cout << " (" << path << ")";
+            std::cout << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::showPluginInfo(const std::string& name) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.enableChunkedResponses = false;
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        DaemonClient client(cfg);
+        GetStatsRequest req;
+        req.detailed = true; // ensure plugin details are included
+        std::promise<Result<yams::daemon::GetStatsResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<yams::daemon::GetStatsResponse>(
+                             Error{ErrorCode::Timeout, "stats timeout"});
+        if (!res) {
+            std::cout << "Failed to query daemon stats for plugins\n";
+            return;
+        }
+        const auto& resp = res.value();
+        auto it = resp.additionalStats.find("plugins_json");
+        if (it == resp.additionalStats.end()) {
+            std::cout << "No plugin information available.\n";
+            return;
+        }
+        nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
+        if (pj.is_discarded()) {
+            std::cout << "Invalid plugin JSON.\n";
+            return;
+        }
+        for (const auto& rec : pj) {
+            if (rec.value("name", std::string()) == name) {
+                std::cout << rec.dump(2) << "\n";
+                return;
+            }
+        }
+        std::cout << "Plugin not found: " << name << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+} // namespace yams::cli
+
+namespace yams::cli {
+
+void PluginCommand::scanPlugins(const std::string& dir, const std::string& target) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
+        DaemonClient client(cfg);
+        PluginScanRequest req;
+        req.dir = dir;
+        req.target = target;
+        std::promise<Result<yams::daemon::PluginScanResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(15)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<yams::daemon::PluginScanResponse>(
+                             Error{ErrorCode::Timeout, "scan timeout"});
+        if (!res) {
+            std::cout << "Scan failed: " << res.error().message << "\n";
+            return;
+        }
+        const auto& r = res.value();
+        std::cout << "Discovered plugins (" << r.plugins.size() << "):\n";
+        for (const auto& pr : r.plugins) {
+            std::cout << "  - " << pr.name << " v" << pr.version << " (ABI " << pr.abiVersion
+                      << ")\n";
+            std::cout << "    path: " << pr.path << "\n";
+            if (!pr.interfaces.empty()) {
+                std::cout << "    interfaces: ";
+                for (size_t i = 0; i < pr.interfaces.size(); ++i) {
+                    if (i)
+                        std::cout << ", ";
+                    std::cout << pr.interfaces[i];
+                }
+                std::cout << "\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJson, bool dryRun) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(20000);
+        DaemonClient client(cfg);
+        PluginLoadRequest req;
+        req.pathOrName = arg;
+        req.configJson = cfgJson;
+        req.dryRun = dryRun;
+        std::promise<Result<PluginLoadResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(20)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<PluginLoadResponse>(Error{ErrorCode::Timeout, "load timeout"});
+        if (!res) {
+            std::cout << "Load failed: " << res.error().message << "\n";
+            return;
+        }
+        const auto& r = res.value();
+        std::cout << (r.loaded ? "Loaded" : "Scanned") << ": " << r.record.name << " v"
+                  << r.record.version << " (ABI " << r.record.abiVersion << ")\n";
+        if (!r.message.empty())
+            std::cout << "  note: " << r.message << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::unloadPlugin(const std::string& name) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        DaemonClient client(cfg);
+        PluginUnloadRequest req;
+        req.name = name;
+        std::promise<Result<SuccessResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<SuccessResponse>(Error{ErrorCode::Timeout, "unload timeout"});
+        if (!res) {
+            std::cout << "Unload failed: " << res.error().message << "\n";
+            return;
+        }
+        std::cout << "Unloaded: " << name << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::trustList() {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(8000);
+        DaemonClient client(cfg);
+        PluginTrustListRequest req;
+        std::promise<Result<PluginTrustListResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res =
+            (fut.wait_for(std::chrono::seconds(8)) == std::future_status::ready)
+                ? fut.get()
+                : Result<PluginTrustListResponse>(Error{ErrorCode::Timeout, "trust list timeout"});
+        if (!res) {
+            std::cout << "Trust list failed: " << res.error().message << "\n";
+            return;
+        }
+        const auto& r = res.value();
+        std::cout << "Trusted plugin paths (" << r.paths.size() << "):\n";
+        for (const auto& p : r.paths)
+            std::cout << "  - " << p << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::trustAdd(const std::string& path) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(8000);
+        DaemonClient client(cfg);
+        PluginTrustAddRequest req;
+        req.path = path;
+        std::promise<Result<SuccessResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(8)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<SuccessResponse>(Error{ErrorCode::Timeout, "trust add timeout"});
+        if (!res) {
+            std::cout << "Trust add failed: " << res.error().message << "\n";
+            return;
+        }
+        std::cout << "Trusted: " << path << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::trustRemove(const std::string& path) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        cfg.dataDir = cli_->getDataPath();
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(8000);
+        DaemonClient client(cfg);
+        PluginTrustRemoveRequest req;
+        req.path = path;
+        std::promise<Result<SuccessResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.call(req);
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto res = (fut.wait_for(std::chrono::seconds(8)) == std::future_status::ready)
+                       ? fut.get()
+                       : Result<SuccessResponse>(Error{ErrorCode::Timeout, "trust remove timeout"});
+        if (!res) {
+            std::cout << "Trust remove failed: " << res.error().message << "\n";
+            return;
+        }
+        std::cout << "Untrusted: " << path << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+} // namespace yams::cli

@@ -66,13 +66,13 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& message,
                                                                  uint64_t /*total_size*/) {
-    // Protocol invariant: header-only frames MUST have zero payload.
-    // We still serialize to validate size constraints, but do not include it on the wire.
+    // Emit a header-only frame that carries the serialized response payload so clients can parse
+    // header metadata immediately in onHeader(). This has been exercised by integration tests
+    // that assert a header event precedes chunks.
     auto serialized = serialize_message(message);
     if (!serialized) {
         return serialized.error();
     }
-
     const auto& data = serialized.value();
     if (data.size() > max_message_size_) {
         return Error{ErrorCode::InvalidData, "Message size " + std::to_string(data.size()) +
@@ -81,17 +81,18 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& 
     }
 
     FrameHeader header;
-    header.payload_size = 0; // invariant for header-only
-    header.checksum = 0;     // no payload => zero checksum
+    header.payload_size = static_cast<uint32_t>(data.size());
+    header.checksum = calculate_crc32(data);
     header.set_chunked(true);
     header.set_header_only(true);
 
     std::vector<uint8_t> frame;
-    frame.reserve(sizeof(FrameHeader));
+    frame.reserve(sizeof(FrameHeader) + data.size());
 
     header.to_network();
     frame.insert(frame.end(), reinterpret_cast<const uint8_t*>(&header),
                  reinterpret_cast<const uint8_t*>(&header) + sizeof(header));
+    frame.insert(frame.end(), data.begin(), data.end());
 
     return frame;
 }

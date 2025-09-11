@@ -23,13 +23,7 @@ void CompletionCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
         ->required()
         ->check(CLI::IsMember({"bash", "zsh", "fish"}));
 
-    cmd->callback([this]() {
-        auto result = execute();
-        if (!result) {
-            spdlog::error("Completion generation failed: {}", result.error().message);
-            std::exit(1);
-        }
-    });
+    cmd->callback([this]() { cli_->setPendingCommand(this); });
 }
 
 Result<void> CompletionCommand::execute() {

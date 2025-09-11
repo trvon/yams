@@ -73,6 +73,41 @@ target_compile_features(storage_backend_unit_tests PRIVATE cxx_std_20)
 # Register with CTest
 add_test(NAME StorageBackendUnitTests COMMAND storage_backend_unit_tests)
 
+# S3 signer unit tests
+add_executable(s3_signer_tests
+    s3_signer_test.cpp
+)
+
+target_link_libraries(s3_signer_tests
+    PRIVATE
+        test_utils
+        gtest_main
+        yams::storage_engine
+        yams::core
+        CURL::libcurl
+)
+
+target_compile_features(s3_signer_tests PRIVATE cxx_std_20)
+
+add_test(NAME S3SignerUnitTests COMMAND s3_signer_tests)
+
+# Object storage adapter tests
+add_executable(object_storage_adapter_tests
+    object_storage_adapter_test.cpp
+)
+
+target_link_libraries(object_storage_adapter_tests
+    PRIVATE
+        test_utils
+        gtest_main
+        yams::storage_engine
+        yams::core
+)
+
+target_compile_features(object_storage_adapter_tests PRIVATE cxx_std_20)
+
+add_test(NAME ObjectStorageAdapterUnitTests COMMAND object_storage_adapter_tests)
+
 # Compressed storage engine tests - TODO: Fix API mismatch issues
 # add_executable(compressed_storage_engine_unit_tests
 #     compressed_storage_engine_test.cpp

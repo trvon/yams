@@ -28,7 +28,7 @@ struct ClientConfig {
     bool autoStart = true;
     bool enableCircuitBreaker = true;
     bool enableChunkedResponses = true;
-    size_t maxChunkSize = 256 * 1024;
+    size_t maxChunkSize = 512 * 1024; // increased default max chunk size
     size_t maxInflight = 128; // multiplexing: cap concurrent in-flight requests per connection
     bool progressiveOutput = true;
     bool singleUseConnections = true;
@@ -47,7 +47,9 @@ public:
     DaemonClient& operator=(DaemonClient&&) noexcept;
 
     // Connection management
-    Result<void> connect();
+    Task<Result<void>> connect();
+    // Compatibility alias for codepaths expecting connectAsync()
+    Task<Result<void>> connectAsync() { co_return co_await connect(); }
     void disconnect();
     bool isConnected() const;
 
@@ -81,7 +83,7 @@ public:
 
     // High-level streaming helpers
     Task<Result<void>> getToStdout(const GetInitRequest& req) {
-        if (auto c = connect(); !c)
+        if (auto c = co_await connectAsync(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
         if (!init)
@@ -138,7 +140,7 @@ public:
 
     Task<Result<void>> getToFile(const GetInitRequest& req,
                                  const std::filesystem::path& outputPath) {
-        if (auto c = connect(); !c)
+        if (auto c = co_await connectAsync(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
         if (!init)
@@ -194,6 +196,16 @@ public:
     // Embedding request methods
     Task<Result<EmbeddingResponse>> generateEmbedding(const GenerateEmbeddingRequest& req);
     Task<Result<BatchEmbeddingResponse>> generateBatchEmbeddings(const BatchEmbeddingRequest& req);
+    // Streaming progress variants (emit EmbeddingEvent progress, return final response)
+    Task<Result<BatchEmbeddingResponse>> streamingBatchEmbeddings(const BatchEmbeddingRequest& req);
+    Task<Result<EmbedDocumentsResponse>> streamingEmbedDocuments(const EmbedDocumentsRequest& req);
+    // Unified call overload for embeddings: uses streaming under the hood
+    Task<Result<EmbedDocumentsResponse>> call(const EmbedDocumentsRequest& req) {
+        co_return co_await streamingEmbedDocuments(req);
+    }
+
+    // Collect progress events for embeddings (no stdout printing)
+    Task<Result<std::vector<EmbeddingEvent>>> callEvents(const EmbedDocumentsRequest& req);
     Task<Result<ModelLoadResponse>> loadModel(const LoadModelRequest& req);
     Task<Result<SuccessResponse>> unloadModel(const UnloadModelRequest& req);
     Task<Result<ModelStatusResponse>> getModelStatus(const ModelStatusRequest& req);
@@ -337,38 +349,33 @@ private:
 
 // Generic typed call helper using ResponseOf trait
 template <class Req> Task<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& req) {
-    static_assert(std::disjunction_v<
-                      std::is_same<Req, SearchRequest>, std::is_same<Req, AddRequest>,
-                      std::is_same<Req, GetRequest>, std::is_same<Req, GetInitRequest>,
-                      std::is_same<Req, GetChunkRequest>, std::is_same<Req, GetEndRequest>,
-                      std::is_same<Req, DeleteRequest>, std::is_same<Req, ListRequest>,
-                      std::is_same<Req, ShutdownRequest>, std::is_same<Req, StatusRequest>,
-                      std::is_same<Req, PingRequest>, std::is_same<Req, GenerateEmbeddingRequest>,
-                      std::is_same<Req, BatchEmbeddingRequest>, std::is_same<Req, LoadModelRequest>,
-                      std::is_same<Req, UnloadModelRequest>, std::is_same<Req, ModelStatusRequest>,
-                      std::is_same<Req, AddDocumentRequest>, std::is_same<Req, GrepRequest>,
-                      std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
-                      std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>>,
-                  "Req must be a valid daemon Request alternative");
+    static_assert(
+        std::disjunction_v<
+            std::is_same<Req, SearchRequest>, std::is_same<Req, AddRequest>,
+            std::is_same<Req, GetRequest>, std::is_same<Req, GetInitRequest>,
+            std::is_same<Req, GetChunkRequest>, std::is_same<Req, GetEndRequest>,
+            std::is_same<Req, DeleteRequest>, std::is_same<Req, ListRequest>,
+            std::is_same<Req, ShutdownRequest>, std::is_same<Req, StatusRequest>,
+            std::is_same<Req, PingRequest>, std::is_same<Req, GenerateEmbeddingRequest>,
+            std::is_same<Req, BatchEmbeddingRequest>, std::is_same<Req, LoadModelRequest>,
+            std::is_same<Req, UnloadModelRequest>, std::is_same<Req, ModelStatusRequest>,
+            std::is_same<Req, AddDocumentRequest>, std::is_same<Req, GrepRequest>,
+            std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
+            std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>,
+            std::is_same<Req, EmbedDocumentsRequest>,
+            // Plugin management requests
+            std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
+            std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,
+            std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>>,
+        "Req must be a valid daemon Request alternative");
 
-    // Prefer streaming for streaming-capable requests unless disabled in config
+    // Force streaming for streaming-capable requests
     if constexpr (std::is_same_v<Req, SearchRequest>) {
-        if (config_.enableChunkedResponses) {
-            co_return co_await streamingSearch(req);
-        }
-        // fall through to unary path below
+        co_return co_await streamingSearch(req);
     } else if constexpr (std::is_same_v<Req, ListRequest>) {
-        if (config_.enableChunkedResponses) {
-            co_return co_await streamingList(req);
-        }
-        // fall through to unary path below
+        co_return co_await streamingList(req);
     } else if constexpr (std::is_same_v<Req, GrepRequest>) {
-        if (config_.enableChunkedResponses) {
-            co_return co_await streamingGrep(req);
-        }
-        // fall through to unary path below
-    } else if constexpr (std::is_same_v<Req, AddDocumentRequest>) {
-        co_return co_await streamingAddDocument(req);
+        co_return co_await streamingGrep(req);
     }
 
     auto r = co_await sendRequest(Request{req});

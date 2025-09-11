@@ -1,6 +1,4 @@
--P ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-22.04
--P ubuntu-22.04=ghcr.io/catthehacker/ubuntu:act-22.04
-
-# Speed up cache-enabled jobs (actions/cache)
---bind
---container-options --network=host
+-P ubuntu-latest=catthehacker/ubuntu:full-22.04
+--artifact-server-path ./.act/artifacts
+# Helpful defaults; override per-run as needed
+-s GITHUB_TOKEN=fake

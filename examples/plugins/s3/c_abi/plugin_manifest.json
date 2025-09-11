@@ -1,0 +1,13 @@
+{
+  "name": "yams-s3",
+  "version": "0.1.0",
+  "abi": 1,
+  "interfaces": [
+    { "id": "object_storage_v1", "version": 1 },
+    { "id": "dr_provider_v1", "version": 1 }
+  ],
+  "capabilities": ["net:aws", "object_lock", "rtc_metrics"],
+  "config_schema": "schema://yams/plugins/object_storage_v1",
+  "health": { "has_health": false },
+  "authors": [{"name": "YAMS Team"}]
+}

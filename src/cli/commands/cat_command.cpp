@@ -28,6 +28,13 @@ public:
         group->add_option("hash", hash_, "Hash of the document to display");
         group->add_option("--name", name_, "Name of the document to display");
         group->require_option(1);
+        // Disambiguation flags: select newest/oldest when multiple matches exist
+        cmd->add_flag(
+            "--latest", getLatest_,
+            "Select the most recently indexed match when multiple documents share the same name");
+        cmd->add_flag(
+            "--oldest", getOldest_,
+            "Select the oldest indexed match when multiple documents share the same name");
 
         // Add flag for raw content output
         cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
@@ -298,8 +305,17 @@ private:
         // First try as a path suffix (for real files)
         auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
         if (documentsResult && !documentsResult.value().empty()) {
-            const auto& results = documentsResult.value();
+            auto results = documentsResult.value();
             if (results.size() > 1) {
+                if (getLatest_ || getOldest_) {
+                    std::sort(
+                        results.begin(), results.end(),
+                        [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                            return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                              : (a.indexedTime > b.indexedTime);
+                        });
+                    return results.front().sha256Hash;
+                }
                 std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
                 for (const auto& doc : results) {
                     std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
@@ -315,7 +331,16 @@ private:
         // Try exact path match
         documentsResult = metadataRepo->findDocumentsByPath(name);
         if (documentsResult && !documentsResult.value().empty()) {
-            return documentsResult.value()[0].sha256Hash;
+            auto docs = documentsResult.value();
+            if (docs.size() > 1 && (getLatest_ || getOldest_)) {
+                std::sort(docs.begin(), docs.end(),
+                          [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                              return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                                : (a.indexedTime > b.indexedTime);
+                          });
+                return docs.front().sha256Hash;
+            }
+            return docs[0].sha256Hash;
         }
 
         // Try fuzzy path matching (partial path components)
@@ -418,6 +443,28 @@ private:
         // If multiple matches with same top score, show ambiguity
         if (candidatesWithScores.size() > 1 &&
             candidatesWithScores[0].second == candidatesWithScores[1].second) {
+            if (getLatest_ || getOldest_) {
+                // Collect tied matches
+                std::vector<metadata::DocumentInfo> tiedMatches;
+                for (size_t i = 0; i < candidatesWithScores.size() &&
+                                   candidatesWithScores[i].second == candidatesWithScores[0].second;
+                     ++i) {
+                    for (const auto& doc : documentsResult.value()) {
+                        if (doc.sha256Hash == candidatesWithScores[i].first) {
+                            tiedMatches.push_back(doc);
+                            break;
+                        }
+                    }
+                }
+                // Sort by indexed time according to flags
+                std::sort(tiedMatches.begin(), tiedMatches.end(),
+                          [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                              return getOldest_ ? (a.indexedTime < b.indexedTime)
+                                                : (a.indexedTime > b.indexedTime);
+                          });
+                return tiedMatches.front().sha256Hash;
+            }
+
             std::cerr << "Ambiguous fuzzy path '" << pathQuery
                       << "' matches multiple documents:" << std::endl;
 
@@ -507,7 +554,9 @@ private:
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
-    bool raw_ = false; // Flag to output raw content without text extraction
+    bool raw_ = false;       // Flag to output raw content without text extraction
+    bool getLatest_ = false; // When ambiguous, select newest
+    bool getOldest_ = false; // When ambiguous, select oldest
 };
 
 // Factory function

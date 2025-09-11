@@ -1,9 +1,14 @@
 #include <yams/app/services/services.hpp>
+// Hot/Cold mode helpers (env-driven)
+#include "../../cli/hot_cold_utils.h"
 
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
+#include <yams/detection/file_type_detector.h>
+#include <yams/extraction/extraction_util.h>
 #include <yams/extraction/format_handlers/format_handler.hpp>
 #include <yams/extraction/format_handlers/text_basic_handler.hpp>
+
 #include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
@@ -204,27 +209,86 @@ public:
             metadata::DocumentInfo info;
             std::filesystem::path p = usePath;
             info.filePath = p.string();
-            info.fileName = p.filename().string();
-            info.fileExtension = p.extension().string();
+            // If we created a temporary file from content+name, prefer the logical name
+            if (!req.path.empty()) {
+                info.fileName = p.filename().string();
+                info.fileExtension = p.extension().string();
+            } else {
+                // Use the provided document name for metadata visibility and queries
+                info.fileName = req.name;
+                std::filesystem::path np = req.name;
+                info.fileExtension = np.extension().string();
+            }
             std::error_code ec;
             info.fileSize = static_cast<int64_t>(std::filesystem::exists(p, ec)
                                                      ? std::filesystem::file_size(p, ec)
                                                      : req.content.size());
             info.sha256Hash = out.hash;
-            info.mimeType = !req.mimeType.empty() ? req.mimeType : "application/octet-stream";
+            // Detect MIME when not provided or generic
+            info.mimeType = !req.mimeType.empty() ? req.mimeType : "";
+            if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
+                try {
+                    (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                    auto& det = yams::detection::FileTypeDetector::instance();
+                    if (auto sig = det.detectFromFile(p)) {
+                        if (!sig.value().mimeType.empty())
+                            info.mimeType = sig.value().mimeType;
+                    }
+                    if (info.mimeType.empty()) {
+                        info.mimeType = yams::detection::FileTypeDetector::getMimeTypeFromExtension(
+                            p.extension().string());
+                    }
+                } catch (...) {
+                    // fallback below
+                }
+            }
+            if (info.mimeType.empty())
+                info.mimeType = "application/octet-stream";
             auto now = std::chrono::system_clock::now();
             info.createdTime = now;
             info.modifiedTime = now;
             info.indexedTime = now;
             info.contentExtracted = isTextMime(info.mimeType);
             info.extractionStatus = info.contentExtracted ? metadata::ExtractionStatus::Success
-                                                          : metadata::ExtractionStatus::Skipped;
+                                                          : metadata::ExtractionStatus::Pending;
 
             auto ins = ctx_.metadataRepo->insertDocument(info);
             if (ins) {
                 int64_t docId = ins.value();
                 for (const auto& [k, v] : md.tags) {
                     (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
+                }
+                // Best-effort: index content into FTS5 using robust extraction (plugins +
+                // built-ins)
+                try {
+                    auto extractedOpt = yams::extraction::util::extractDocumentText(
+                        ctx_.store, out.hash, info.mimeType, info.fileExtension,
+                        ctx_.contentExtractors);
+                    if (extractedOpt && !extractedOpt->empty()) {
+                        const std::string& extracted = *extractedOpt;
+                        (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
+                                                                      extracted, info.mimeType);
+                        (void)ctx_.metadataRepo->updateFuzzyIndex(docId);
+                        // Try to update extraction flags on the document row
+                        auto d = ctx_.metadataRepo->getDocument(docId);
+                        if (d && d.value().has_value()) {
+                            auto updated = d.value().value();
+                            updated.contentExtracted = true;
+                            updated.extractionStatus = metadata::ExtractionStatus::Success;
+                            (void)ctx_.metadataRepo->updateDocument(updated);
+                        }
+                    } else {
+                        // Mark as attempted but possibly skipped/failed for non-text types
+                        auto d = ctx_.metadataRepo->getDocument(docId);
+                        if (d && d.value().has_value()) {
+                            auto updated = d.value().value();
+                            updated.contentExtracted = false;
+                            updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                            (void)ctx_.metadataRepo->updateDocument(updated);
+                        }
+                    }
+                } catch (...) {
+                    // Non-fatal: indexing is opportunistic here
                 }
             }
         }
@@ -523,16 +587,7 @@ public:
 
         // Tiered retrieval: hot (metadata text) vs cold (CAS reconstruct)
         // Mode: YAMS_RETRIEVAL_MODE = hot_only|cold_only|auto (default: auto)
-        enum class Mode { Auto, HotOnly, ColdOnly };
-        Mode mode = Mode::Auto;
-        if (const char* m = std::getenv("YAMS_RETRIEVAL_MODE")) {
-            std::string v(m);
-            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-            if (v == "hot_only" || v == "hot")
-                mode = Mode::HotOnly;
-            else if (v == "cold_only" || v == "cold")
-                mode = Mode::ColdOnly;
-        }
+        yams::cli::HotColdMode mode = yams::cli::getRetrievalMode();
 
         // Honor per-document force_cold tag/metadata
         bool forceCold = false;
@@ -564,7 +619,8 @@ public:
             }
         }
 
-        if (mode == Mode::HotOnly && !forceCold && ctx_.metadataRepo && targetDoc) {
+        if (mode == yams::cli::HotColdMode::HotOnly && !forceCold && ctx_.metadataRepo &&
+            targetDoc) {
             auto c = ctx_.metadataRepo->getContent(targetDoc->id);
             if (c && c.value().has_value()) {
                 CatDocumentResponse out;
@@ -575,13 +631,13 @@ public:
                 return out;
             }
             // if no hot content available, fall through to cold path only when in Auto mode
-            if (mode == Mode::HotOnly) {
+            if (mode == yams::cli::HotColdMode::HotOnly) {
                 return Error{ErrorCode::NotFound, "Hot content not available for document"};
             }
         }
 
         // Auto: prefer hot content when available; otherwise cold
-        if (mode == Mode::Auto && !forceCold && ctx_.metadataRepo && targetDoc) {
+        if (mode == yams::cli::HotColdMode::Auto && !forceCold && ctx_.metadataRepo && targetDoc) {
             auto c = ctx_.metadataRepo->getContent(targetDoc->id);
             if (c && c.value().has_value() && !c.value()->contentText.empty()) {
                 CatDocumentResponse out;
@@ -710,12 +766,8 @@ public:
 
         // Hot path: paths-only/minimal listing avoids metadata/snippet hydration entirely.
         // Also engage when environment forces hot mode.
-        bool forceHot = false;
-        if (const char* m = std::getenv("YAMS_LIST_MODE")) {
-            std::string mode(m);
-            std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
-            forceHot = (mode == "hot_only" || mode == "hot");
-        }
+        yams::cli::HotColdMode listMode = yams::cli::getListMode();
+        bool forceHot = yams::cli::isForceHot(listMode);
         if (req.pathsOnly || forceHot) {
             out.documents.reserve(page.size());
             for (const auto& d : page) {

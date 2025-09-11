@@ -5,6 +5,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto/ipc_envelope.pb.h>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <concepts>
@@ -164,6 +165,22 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_before_context(r.beforeContext);
         o->set_context(r.context);
         o->set_hash_query(r.hashQuery);
+        // New filtering fields
+        o->set_path_pattern(r.pathPattern);
+        for (const auto& t : r.tags)
+            o->add_tags(t);
+        o->set_match_all_tags(r.matchAllTags);
+        o->set_extension(r.extension);
+        o->set_mime_type(r.mimeType);
+        o->set_file_type(r.fileType);
+        o->set_text_only(r.textOnly);
+        o->set_binary_only(r.binaryOnly);
+        o->set_created_after(r.createdAfter);
+        o->set_created_before(r.createdBefore);
+        o->set_modified_after(r.modifiedAfter);
+        o->set_modified_before(r.modifiedBefore);
+        o->set_indexed_after(r.indexedAfter);
+        o->set_indexed_before(r.indexedBefore);
     }
     static SearchRequest get(const Envelope& env) {
         const auto& i = env.search_request();
@@ -184,6 +201,21 @@ template <> struct ProtoBinding<SearchRequest> {
         r.beforeContext = i.before_context();
         r.context = i.context();
         r.hashQuery = i.hash_query();
+        // New filtering fields (proto3 scalars default when absent)
+        r.pathPattern = i.path_pattern();
+        r.tags.assign(i.tags().begin(), i.tags().end());
+        r.matchAllTags = i.match_all_tags();
+        r.extension = i.extension();
+        r.mimeType = i.mime_type();
+        r.fileType = i.file_type();
+        r.textOnly = i.text_only();
+        r.binaryOnly = i.binary_only();
+        r.createdAfter = i.created_after();
+        r.createdBefore = i.created_before();
+        r.modifiedAfter = i.modified_after();
+        r.modifiedBefore = i.modified_before();
+        r.indexedAfter = i.indexed_after();
+        r.indexedBefore = i.indexed_before();
         return r;
     }
 };
@@ -510,18 +542,48 @@ template <> struct ProtoBinding<BatchEmbeddingRequest> {
     }
 };
 
+// EmbedDocumentsRequest (daemon-side embedding/persist)
+template <> struct ProtoBinding<EmbedDocumentsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kEmbedDocumentsRequest;
+    static void set(Envelope& env, const EmbedDocumentsRequest& r) {
+        auto* o = env.mutable_embed_documents_request();
+        for (const auto& h : r.documentHashes)
+            o->add_document_hashes(h);
+        o->set_model_name(r.modelName);
+        o->set_normalize(r.normalize);
+        o->set_batch_size(static_cast<uint32_t>(r.batchSize));
+        o->set_skip_existing(r.skipExisting);
+    }
+    static EmbedDocumentsRequest get(const Envelope& env) {
+        const auto& i = env.embed_documents_request();
+        EmbedDocumentsRequest r{};
+        r.documentHashes.reserve(i.document_hashes_size());
+        for (const auto& h : i.document_hashes())
+            r.documentHashes.push_back(h);
+        r.modelName = i.model_name();
+        r.normalize = i.normalize();
+        r.batchSize = i.batch_size();
+        r.skipExisting = i.skip_existing();
+        return r;
+    }
+};
+
+// EmbedDocumentsRequest (daemon-side embedding/persist)
+
 template <> struct ProtoBinding<LoadModelRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kLoadModelRequest;
     static void set(Envelope& env, const LoadModelRequest& r) {
         auto* o = env.mutable_load_model_request();
         o->set_model_name(r.modelName);
         o->set_preload(r.preload);
+        o->set_options_json(r.optionsJson);
     }
     static LoadModelRequest get(const Envelope& env) {
         const auto& i = env.load_model_request();
         LoadModelRequest r{};
         r.modelName = i.model_name();
         r.preload = i.preload();
+        r.optionsJson = i.options_json();
         return r;
     }
 };
@@ -672,6 +734,9 @@ template <> struct ProtoBinding<UpdateDocumentRequest> {
         set_string_list(r.addTags, o->mutable_add_tags());
         set_string_list(r.removeTags, o->mutable_remove_tags());
         to_kv_pairs(r.metadata, o->mutable_metadata());
+        o->set_atomic(r.atomic);
+        o->set_create_backup(r.createBackup);
+        o->set_verbose(r.verbose);
     }
     static UpdateDocumentRequest get(const Envelope& env) {
         const auto& i = env.update_document_request();
@@ -682,6 +747,9 @@ template <> struct ProtoBinding<UpdateDocumentRequest> {
         r.addTags = get_string_list(i.add_tags());
         r.removeTags = get_string_list(i.remove_tags());
         r.metadata = from_kv_pairs(i.metadata());
+        r.atomic = i.atomic();
+        r.createBackup = i.create_backup();
+        r.verbose = i.verbose();
         return r;
     }
 };
@@ -758,6 +826,91 @@ template <> struct ProtoBinding<PrepareSessionRequest> {
         r.aggressive = i.aggressive();
         r.limit = static_cast<size_t>(i.limit());
         r.snippetLen = static_cast<size_t>(i.snippet_len());
+        return r;
+    }
+};
+
+// --------------------------- Plugin: Requests ---------------------------
+template <> struct ProtoBinding<PluginScanRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginScanRequest;
+    static void set(Envelope& env, const PluginScanRequest& r) {
+        auto* o = env.mutable_plugin_scan_request();
+        o->set_dir(r.dir);
+        o->set_target(r.target);
+    }
+    static PluginScanRequest get(const Envelope& env) {
+        const auto& i = env.plugin_scan_request();
+        PluginScanRequest r{};
+        r.dir = i.dir();
+        r.target = i.target();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PluginLoadRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginLoadRequest;
+    static void set(Envelope& env, const PluginLoadRequest& r) {
+        auto* o = env.mutable_plugin_load_request();
+        o->set_path_or_name(r.pathOrName);
+        o->set_config_json(r.configJson);
+        o->set_dry_run(r.dryRun);
+    }
+    static PluginLoadRequest get(const Envelope& env) {
+        const auto& i = env.plugin_load_request();
+        PluginLoadRequest r{};
+        r.pathOrName = i.path_or_name();
+        r.configJson = i.config_json();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PluginUnloadRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginUnloadRequest;
+    static void set(Envelope& env, const PluginUnloadRequest& r) {
+        auto* o = env.mutable_plugin_unload_request();
+        o->set_name(r.name);
+    }
+    static PluginUnloadRequest get(const Envelope& env) {
+        const auto& i = env.plugin_unload_request();
+        PluginUnloadRequest r{};
+        r.name = i.name();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PluginTrustListRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginTrustListRequest;
+    static void set(Envelope& env, const PluginTrustListRequest&) {
+        (void)env.mutable_plugin_trust_list_request();
+    }
+    static PluginTrustListRequest get(const Envelope&) { return PluginTrustListRequest{}; }
+};
+
+template <> struct ProtoBinding<PluginTrustAddRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginTrustAddRequest;
+    static void set(Envelope& env, const PluginTrustAddRequest& r) {
+        auto* o = env.mutable_plugin_trust_add_request();
+        o->set_path(r.path);
+    }
+    static PluginTrustAddRequest get(const Envelope& env) {
+        const auto& i = env.plugin_trust_add_request();
+        PluginTrustAddRequest r{};
+        r.path = i.path();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PluginTrustRemoveRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginTrustRemoveRequest;
+    static void set(Envelope& env, const PluginTrustRemoveRequest& r) {
+        auto* o = env.mutable_plugin_trust_remove_request();
+        o->set_path(r.path);
+    }
+    static PluginTrustRemoveRequest get(const Envelope& env) {
+        const auto& i = env.plugin_trust_remove_request();
+        PluginTrustRemoveRequest r{};
+        r.path = i.path();
         return r;
     }
 };
@@ -960,6 +1113,34 @@ template <> struct ProtoBinding<StatusResponse> {
         o->set_memory_mb(r.memoryUsageMb);
         o->set_cpu_pct(r.cpuUsagePercent);
         o->set_version(r.version);
+        // v3 additions: readiness/progress/overall/request_counts
+        o->set_overall_status(r.overallStatus);
+        // lifecycle_state preferred by clients; mirror overallStatus if not provided
+        // (no dedicated proto field available yet)
+        // Encode last_error via request_counts with a reserved key for now
+        // request_counts
+        for (const auto& [k, v] : r.requestCounts) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(k);
+            kv->set_value(std::to_string(static_cast<uint64_t>(v)));
+        }
+        if (!r.lastError.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("last_error");
+            kv->set_value(r.lastError);
+        }
+        // readiness: bool->string
+        for (const auto& [k, v] : r.readinessStates) {
+            auto* kv = o->add_readiness();
+            kv->set_key(k);
+            kv->set_value(v ? "true" : "false");
+        }
+        // progress
+        for (const auto& [k, v] : r.initProgress) {
+            auto* kv = o->add_progress();
+            kv->set_key(k);
+            kv->set_value(std::to_string(static_cast<uint32_t>(v)));
+        }
     }
     static StatusResponse get(const Envelope& env) {
         StatusResponse r{};
@@ -975,6 +1156,43 @@ template <> struct ProtoBinding<StatusResponse> {
         r.memoryUsageMb = i.memory_mb();
         r.cpuUsagePercent = i.cpu_pct();
         r.version = i.version();
+        // v3 additions
+        if (!i.overall_status().empty()) {
+            r.overallStatus = i.overall_status();
+        }
+        r.lifecycleState = r.overallStatus; // prefer explicit field for clients
+        // request_counts
+        for (const auto& kv : i.request_counts()) {
+            if (kv.key() == "last_error") {
+                r.lastError = kv.value();
+                continue;
+            }
+            try {
+                uint64_t n = static_cast<uint64_t>(std::stoull(kv.value()));
+                r.requestCounts[kv.key()] = n;
+            } catch (...) {
+                // ignore parse errors for numeric map
+            }
+        }
+        // readiness
+        for (const auto& kv : i.readiness()) {
+            std::string v = kv.value();
+            for (auto& c : v)
+                c = static_cast<char>(std::tolower(c));
+            bool b = (v == "1" || v == "true" || v == "yes");
+            r.readinessStates[kv.key()] = b;
+        }
+        // progress
+        for (const auto& kv : i.progress()) {
+            try {
+                uint64_t n = static_cast<uint64_t>(std::stoull(kv.value()));
+                if (n > 100)
+                    n = 100;
+                r.initProgress[kv.key()] = static_cast<uint8_t>(n);
+            } catch (...) {
+                // ignore parse errors
+            }
+        }
         // If older daemon (proto v1) set only state, derive minimal booleans
         if (r.version.empty() && r.uptimeSeconds == 0 && r.memoryUsageMb == 0 &&
             r.cpuUsagePercent == 0) {
@@ -1046,6 +1264,57 @@ template <> struct ProtoBinding<BatchEmbeddingResponse> {
     }
 };
 
+// Streaming events
+template <> struct ProtoBinding<EmbeddingEvent> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kEmbedEvent;
+    static void set(Envelope& env, const EmbeddingEvent& r) {
+        auto* o = env.mutable_embed_event();
+        o->set_model_name(r.modelName);
+        o->set_processed(static_cast<uint64_t>(r.processed));
+        o->set_total(static_cast<uint64_t>(r.total));
+        o->set_success(static_cast<uint64_t>(r.success));
+        o->set_failure(static_cast<uint64_t>(r.failure));
+        o->set_inserted(static_cast<uint64_t>(r.inserted));
+        o->set_phase(r.phase);
+        o->set_message(r.message);
+    }
+    static EmbeddingEvent get(const Envelope& env) {
+        const auto& i = env.embed_event();
+        EmbeddingEvent r{};
+        r.modelName = i.model_name();
+        r.processed = i.processed();
+        r.total = i.total();
+        r.success = i.success();
+        r.failure = i.failure();
+        r.inserted = i.inserted();
+        r.phase = i.phase();
+        r.message = i.message();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<ModelLoadEvent> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kModelLoadEvent;
+    static void set(Envelope& env, const ModelLoadEvent& r) {
+        auto* o = env.mutable_model_load_event();
+        o->set_model_name(r.modelName);
+        o->set_phase(r.phase);
+        o->set_bytes_total(r.bytesTotal);
+        o->set_bytes_loaded(r.bytesLoaded);
+        o->set_message(r.message);
+    }
+    static ModelLoadEvent get(const Envelope& env) {
+        const auto& i = env.model_load_event();
+        ModelLoadEvent r{};
+        r.modelName = i.model_name();
+        r.phase = i.phase();
+        r.bytesTotal = i.bytes_total();
+        r.bytesLoaded = i.bytes_loaded();
+        r.message = i.message();
+        return r;
+    }
+};
+
 template <> struct ProtoBinding<ModelLoadResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kModelLoadResponse;
     static void set(Envelope& env, const ModelLoadResponse& r) {
@@ -1068,7 +1337,6 @@ template <> struct ProtoBinding<ModelStatusResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kModelStatusResponse;
     static void set(Envelope& env, const ModelStatusResponse& r) {
         auto* o = env.mutable_model_status_response();
-        // Best-effort: if any model present, emit first name and a simple status
         if (!r.models.empty()) {
             o->set_model_name(r.models.front().name);
             o->set_status(r.models.front().loaded ? "loaded" : "unloaded");
@@ -1089,6 +1357,26 @@ template <> struct ProtoBinding<ModelStatusResponse> {
     }
 };
 
+// EmbedDocumentsResponse
+template <> struct ProtoBinding<EmbedDocumentsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kEmbedDocumentsResponse;
+    static void set(Envelope& env, const EmbedDocumentsResponse& r) {
+        auto* o = env.mutable_embed_documents_response();
+        o->set_requested(static_cast<uint64_t>(r.requested));
+        o->set_embedded(static_cast<uint64_t>(r.embedded));
+        o->set_skipped(static_cast<uint64_t>(r.skipped));
+        o->set_failed(static_cast<uint64_t>(r.failed));
+    }
+    static EmbedDocumentsResponse get(const Envelope& env) {
+        const auto& i = env.embed_documents_response();
+        EmbedDocumentsResponse r{};
+        r.requested = i.requested();
+        r.embedded = i.embedded();
+        r.skipped = i.skipped();
+        r.failed = i.failed();
+        return r;
+    }
+};
 template <> struct ProtoBinding<AddDocumentResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kAddDocumentResponse;
     static void set(Envelope& env, const AddDocumentResponse& r) {
@@ -1130,6 +1418,83 @@ template <> struct ProtoBinding<GrepResponse> {
     }
 };
 
+// --------------------------- Plugin: Responses ---------------------------
+template <> struct ProtoBinding<PluginScanResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginScanResponse;
+    static void set(Envelope& env, const PluginScanResponse& r) {
+        auto* o = env.mutable_plugin_scan_response();
+        for (const auto& pr : r.plugins) {
+            auto* rec = o->add_plugins();
+            rec->set_name(pr.name);
+            rec->set_version(pr.version);
+            rec->set_abi_version(pr.abiVersion);
+            rec->set_path(pr.path);
+            rec->set_manifest_json(pr.manifestJson);
+            set_string_list(pr.interfaces, rec->mutable_interfaces());
+        }
+    }
+    static PluginScanResponse get(const Envelope& env) {
+        const auto& i = env.plugin_scan_response();
+        PluginScanResponse r{};
+        r.plugins.reserve(i.plugins_size());
+        for (const auto& rec : i.plugins()) {
+            PluginRecord pr{};
+            pr.name = rec.name();
+            pr.version = rec.version();
+            pr.abiVersion = rec.abi_version();
+            pr.path = rec.path();
+            pr.manifestJson = rec.manifest_json();
+            pr.interfaces = get_string_list(rec.interfaces());
+            r.plugins.emplace_back(std::move(pr));
+        }
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PluginLoadResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginLoadResponse;
+    static void set(Envelope& env, const PluginLoadResponse& r) {
+        auto* o = env.mutable_plugin_load_response();
+        o->set_loaded(r.loaded);
+        o->set_message(r.message);
+        auto* rec = o->mutable_record();
+        rec->set_name(r.record.name);
+        rec->set_version(r.record.version);
+        rec->set_abi_version(r.record.abiVersion);
+        rec->set_path(r.record.path);
+        rec->set_manifest_json(r.record.manifestJson);
+        set_string_list(r.record.interfaces, rec->mutable_interfaces());
+    }
+    static PluginLoadResponse get(const Envelope& env) {
+        const auto& i = env.plugin_load_response();
+        PluginLoadResponse r{};
+        r.loaded = i.loaded();
+        r.message = i.message();
+        const auto& rec = i.record();
+        r.record.name = rec.name();
+        r.record.version = rec.version();
+        r.record.abiVersion = rec.abi_version();
+        r.record.path = rec.path();
+        r.record.manifestJson = rec.manifest_json();
+        r.record.interfaces = get_string_list(rec.interfaces());
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<PluginTrustListResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPluginTrustListResponse;
+    static void set(Envelope& env, const PluginTrustListResponse& r) {
+        auto* o = env.mutable_plugin_trust_list_response();
+        set_string_list(r.paths, o->mutable_paths());
+    }
+    static PluginTrustListResponse get(const Envelope& env) {
+        const auto& i = env.plugin_trust_list_response();
+        PluginTrustListResponse r{};
+        r.paths = get_string_list(i.paths());
+        return r;
+    }
+};
+
 template <> struct ProtoBinding<UpdateDocumentResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kUpdateDocumentResponse;
     static void set(Envelope& env, const UpdateDocumentResponse& r) {
@@ -1150,10 +1515,22 @@ template <> struct ProtoBinding<GetStatsResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGetStatsResponse;
     static void set(Envelope& env, const GetStatsResponse& r) {
         auto* o = env.mutable_get_stats_response();
-        // Best-effort: provide a minimal JSON string if additionalStats has a json key
-        auto it = r.additionalStats.find("json");
-        if (it != r.additionalStats.end())
-            o->set_json(it->second);
+        // Best-effort: provide JSON string and smuggle selected additionalStats keys inside it
+        std::string jstr = "{}";
+        if (auto it = r.additionalStats.find("json"); it != r.additionalStats.end())
+            jstr = it->second;
+        nlohmann::json j = nlohmann::json::parse(jstr, nullptr, false);
+        if (j.is_discarded())
+            j = nlohmann::json::object();
+        if (auto pit = r.additionalStats.find("plugins_json"); pit != r.additionalStats.end()) {
+            // Try to embed as JSON; fallback to string
+            nlohmann::json pj = nlohmann::json::parse(pit->second, nullptr, false);
+            if (!pj.is_discarded())
+                j["plugins_json"] = pj;
+            else
+                j["plugins_json"] = pit->second;
+        }
+        o->set_json(j.dump());
         // Populate numeric fields alongside JSON so non-JSON clients don't see zeros
         o->set_total_documents(static_cast<uint64_t>(r.totalDocuments));
         o->set_total_size(static_cast<uint64_t>(r.totalSize));
@@ -1166,6 +1543,15 @@ template <> struct ProtoBinding<GetStatsResponse> {
         const auto& g = env.get_stats_response();
         if (!g.json().empty()) {
             r.additionalStats["json"] = g.json();
+            // Extract embedded plugins_json if present
+            nlohmann::json j = nlohmann::json::parse(g.json(), nullptr, false);
+            if (!j.is_discarded() && j.contains("plugins_json")) {
+                const auto& v = j["plugins_json"];
+                if (v.is_string())
+                    r.additionalStats["plugins_json"] = v.get<std::string>();
+                else
+                    r.additionalStats["plugins_json"] = v.dump();
+            }
         }
         // Also hydrate numeric fields for non-JSON consumers
         r.totalDocuments = static_cast<size_t>(g.total_documents());
@@ -1425,6 +1811,41 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kEmbedDocumentsRequest: {
+            auto v = ProtoBinding<EmbedDocumentsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPluginScanRequest: {
+            auto v = ProtoBinding<PluginScanRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPluginLoadRequest: {
+            auto v = ProtoBinding<PluginLoadRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPluginUnloadRequest: {
+            auto v = ProtoBinding<PluginUnloadRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPluginTrustListRequest: {
+            auto v = ProtoBinding<PluginTrustListRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPluginTrustAddRequest: {
+            auto v = ProtoBinding<PluginTrustAddRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPluginTrustRemoveRequest: {
+            auto v = ProtoBinding<PluginTrustRemoveRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -1520,6 +1941,36 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
         case Envelope::kPrepareSessionResponse: {
             auto v = ProtoBinding<PrepareSessionResponse>::get(env);
             m.payload = Response{std::in_place_type<PrepareSessionResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kEmbedDocumentsResponse: {
+            auto v = ProtoBinding<EmbedDocumentsResponse>::get(env);
+            m.payload = Response{std::in_place_type<EmbedDocumentsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kPluginScanResponse: {
+            auto v = ProtoBinding<PluginScanResponse>::get(env);
+            m.payload = Response{std::in_place_type<PluginScanResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kPluginLoadResponse: {
+            auto v = ProtoBinding<PluginLoadResponse>::get(env);
+            m.payload = Response{std::in_place_type<PluginLoadResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kPluginTrustListResponse: {
+            auto v = ProtoBinding<PluginTrustListResponse>::get(env);
+            m.payload = Response{std::in_place_type<PluginTrustListResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kEmbedEvent: {
+            auto v = ProtoBinding<EmbeddingEvent>::get(env);
+            m.payload = Response{std::in_place_type<EmbeddingEvent>, std::move(v)};
+            break;
+        }
+        case Envelope::kModelLoadEvent: {
+            auto v = ProtoBinding<ModelLoadEvent>::get(env);
+            m.payload = Response{std::in_place_type<ModelLoadEvent>, std::move(v)};
             break;
         }
         case Envelope::PAYLOAD_NOT_SET:

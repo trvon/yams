@@ -12,9 +12,12 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 
 using json = nlohmann::json;
 
@@ -27,6 +30,8 @@ struct PinItem {
     std::map<std::string, std::string> metadata;
 };
 
+static std::mutex
+    sessionMutex_; // Global mutex for JSON access in multi-threaded contexts (e.g., MCP)
 static std::filesystem::path resolveStateFile() {
     const char* xdgState = std::getenv("XDG_STATE_HOME");
     const char* home = std::getenv("HOME");
@@ -45,6 +50,7 @@ static std::filesystem::path resolveStateFile() {
 }
 
 static std::vector<PinItem> loadPins() {
+    std::lock_guard<std::mutex> lock(sessionMutex_);
     std::vector<PinItem> out;
     auto f = resolveStateFile();
     if (!std::filesystem::exists(f))
@@ -74,6 +80,7 @@ static std::vector<PinItem> loadPins() {
 }
 
 static void savePins(const std::vector<PinItem>& pins) {
+    std::lock_guard<std::mutex> lock(sessionMutex_);
     json j = json::array();
     for (const auto& p : pins) {
         j.push_back({{"path", p.path}, {"tags", p.tags}, {"metadata", p.metadata}});
@@ -270,6 +277,9 @@ private:
     static std::filesystem::path sessionsDir() { return yams::cli::session_store::sessions_dir(); }
     static std::filesystem::path indexPath() { return yams::cli::session_store::index_path(); }
     static std::optional<std::string> currentSession() {
+        if (const char* env = std::getenv("YAMS_SESSION_CURRENT"); env && *env) {
+            return std::string(env);
+        }
         return yams::cli::session_store::current_session();
     }
     static json loadSessionJson(const std::string& name) {
@@ -291,6 +301,7 @@ private:
         out << j.dump(2) << std::endl;
     }
     static void setCurrent(const std::string& name) {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
         json idx;
         auto ip = indexPath();
         if (std::filesystem::exists(ip)) {
@@ -560,13 +571,15 @@ private:
                 dreq.aggressive = budgetAggressive_;
                 dreq.limit = static_cast<std::size_t>(warmLimit_);
                 dreq.snippetLen = static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160);
-                auto res =
-                    yams::cli::run_sync(lease->call<yams::daemon::PrepareSessionRequest>(dreq));
-                if (res) {
-                    warmedCount = res.value().warmedCount;
-                    std::cout << "Warmed (daemon) " << warmedCount << " document(s)." << std::endl;
-                    return Result<void>();
-                }
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [l = std::move(lease), dreq]() mutable -> boost::asio::awaitable<void> {
+                        (void)co_await l->call<yams::daemon::PrepareSessionRequest>(dreq);
+                        co_return;
+                    },
+                    boost::asio::detached);
+                std::cout << "Warming (daemon) requested." << std::endl;
+                return Result<void>();
             }
         } catch (...) {
             // ignore and fallback

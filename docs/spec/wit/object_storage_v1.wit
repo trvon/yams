@@ -1,0 +1,33 @@
+package yams:plugins/object-storage-v1@1.0.0
+
+// Draft WIT for object_storage_v1 interface. Error codes map to YAMS ErrorCode u32.
+// This is a skeleton to be refined; hostcalls are mediated by the YAMS WASM host.
+
+world object-storage-v1 {
+  export object-storage-v1;
+}
+
+interface object-storage-v1 {
+  put-object: func(path: string, bytes: list<u8>, sha256hex: string) -> result<string, u32>;
+  get-object: func(path: string) -> result<list<u8>, u32>;
+  head-object: func(path: string) -> result<record { size: u64, etag: string }, u32>;
+  delete-object: func(path: string) -> result<(), u32>;
+
+  // Listing (prefix/continuation)
+  list-objects: func(prefix: string, continuation: option<string>, max: u32)
+    -> result<record { items: list<string>, next: option<string> }, u32>;
+
+  // Multipart (opaque upload id)
+  multipart-start: func(path: string) -> result<string, u32>;
+  multipart-upload-part: func(upload_id: string, part_number: u32, bytes: list<u8>, sha256hex: string)
+    -> result<string, u32>; // etag
+  multipart-complete: func(upload_id: string, etags: list<string>) -> result<string, u32>;
+  multipart-abort: func(upload_id: string) -> result<(), u32>;
+
+  // Optional: Object Lock
+  object-lock-set: func(path: string, mode: string, until_iso8601: string) -> result<(), u32>;
+
+  // Optional: Replication metrics
+  get-replication-metrics: func() -> result<record { lag_seconds: u64 }, u32>;
+}
+

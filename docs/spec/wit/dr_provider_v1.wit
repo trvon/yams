@@ -1,0 +1,22 @@
+package yams:plugins/dr-provider-v1@1.0.0
+
+// Draft WIT for dr_provider_v1. Error codes map to YAMS ErrorCode u32.
+
+world dr-provider-v1 {
+  export dr-provider-v1;
+}
+
+interface dr-provider-v1 {
+  // Check whether all objects referenced by manifest are replicated/ready in DR
+  is-replication-ready: func(manifest_id: string)
+    -> result<record { ready: bool, reason: option<string>, lag_seconds: option<u64> }, u32>;
+
+  // Perform a verification sample
+  verify-sample: func(manifest_id: string, sample_spec: string)
+    -> result<record { passed: bool, failures: list<string> }, u32>;
+
+  // Gate pointer advance
+  pointer-gate: func(manifest_id: string)
+    -> result<record { allow_advance: bool, reason: option<string> }, u32>;
+}
+

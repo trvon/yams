@@ -5,6 +5,13 @@
       "args": ["serve"],
       "env": {}
     },
+    "yams-http": {
+      "command": "yams",
+      "args": ["serve"],
+      "env": {
+        "YAMS_MCP_HTTP_BIND": "127.0.0.1:8757"
+      }
+    },
     "yams-docker": {
       "command": "docker",
       "args": [

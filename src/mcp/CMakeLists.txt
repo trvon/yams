@@ -4,6 +4,7 @@
 set(MCP_SOURCES
     mcp_server.cpp
     tool_registry.cpp
+    http_server.cpp
 )
 
 # Create MCP library

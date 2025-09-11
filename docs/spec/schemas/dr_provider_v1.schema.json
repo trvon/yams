@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/plugins/dr_provider_v1",
+  "title": "YAMS DR Provider v1 Plugin Config",
+  "type": "object",
+  "properties": {
+    "mode": { "type": "string", "enum": ["presence_only", "rtc_aware"], "default": "presence_only" },
+    "rtc_metrics": { "type": "boolean", "default": false },
+    "verification_sample_size": { "type": "integer", "minimum": 0, "default": 10000 }
+  },
+  "additionalProperties": true
+}
+

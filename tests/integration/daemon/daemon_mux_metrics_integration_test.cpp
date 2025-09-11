@@ -1,6 +1,6 @@
 #include <chrono>
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
-#include <yams/cli/async_bridge.h>
 #include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;

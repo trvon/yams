@@ -4,7 +4,9 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/as_tuple.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -49,26 +51,21 @@ namespace this_coro = boost::asio::this_coro;
 using namespace boost::asio::experimental::awaitable_operators;
 
 AsioTransportAdapter::AsioTransportAdapter(const Options& opts) : opts_(opts) {
-    // Enable FSM observability based on daemon logging configuration
-    // Metrics are enabled when FSM metrics registry is enabled (controlled by log level)
     bool metrics_on = FsmMetricsRegistry::instance().enabled();
-
-    // Snapshots can still be controlled via environment for debugging
     const char* s = std::getenv("YAMS_FSM_SNAPSHOTS");
     bool snaps_on = (s && (std::strcmp(s, "1") == 0 || std::strcmp(s, "true") == 0 ||
                            std::strcmp(s, "TRUE") == 0 || std::strcmp(s, "on") == 0 ||
                            std::strcmp(s, "ON") == 0));
-
     fsm_.enable_metrics(metrics_on);
     fsm_.enable_snapshots(snaps_on);
 }
 
-// -----------------------------------------------------------------------------
-// Multiplexed connection shared per socket path
-// -----------------------------------------------------------------------------
-
 struct AsioTransportAdapter::Connection {
     using socket_t = boost::asio::local::stream_protocol::socket;
+    using response_channel_t = boost::asio::experimental::channel<void(
+        boost::system::error_code, std::shared_ptr<Result<Response>>)>;
+    using void_channel_t =
+        boost::asio::experimental::channel<void(boost::system::error_code, Result<void>)>;
 
     explicit Connection(const Options& o)
         : opts(o), strand(GlobalIOContext::instance().get_io_context()) {}
@@ -78,32 +75,32 @@ struct AsioTransportAdapter::Connection {
     std::unique_ptr<socket_t> socket;
     std::atomic<bool> read_started{false};
     std::atomic<bool> alive{false};
+    // When any streaming request has delivered its first header, switch header reads to bodyTimeout
+    std::atomic<bool> streaming_started{false};
 
     struct UnaryHandler {
-        std::promise<Result<Response>> promise;
+        std::shared_ptr<response_channel_t> channel;
     };
     struct StreamingHandler {
         HeaderCallback onHeader;
         ChunkCallback onChunk;
         ErrorCallback onError;
         CompleteCallback onComplete;
-        std::promise<Result<void>> done;
+        std::shared_ptr<void_channel_t> done_channel;
 
         StreamingHandler() = default;
         StreamingHandler(HeaderCallback h, ChunkCallback c, ErrorCallback e, CompleteCallback comp)
             : onHeader(std::move(h)), onChunk(std::move(c)), onError(std::move(e)),
-              onComplete(std::move(comp)), done() {}
+              onComplete(std::move(comp)) {}
     };
     struct Handler {
         std::optional<UnaryHandler> unary;
         std::optional<StreamingHandler> streaming;
     };
 
-    std::mutex mtx;
-    std::unordered_map<uint64_t, Handler> handlers; // requestId -> handler
+    std::unordered_map<uint64_t, Handler> handlers;
     std::deque<std::vector<uint8_t>> write_queue;
     bool writing{false};
-    // Telemetry (lightweight)
     std::atomic<uint64_t> total_bytes_written{0};
     std::atomic<uint64_t> total_batches{0};
     std::atomic<uint64_t> total_frames{0};
@@ -111,7 +108,6 @@ struct AsioTransportAdapter::Connection {
     std::atomic<size_t> batch_cap{256 * 1024};
     std::chrono::steady_clock::time_point last_adjust{std::chrono::steady_clock::now()};
 
-    // Enqueue write on strand to serialize writes and coalesce small frames
     boost::asio::awaitable<Result<void>> async_write_frame(std::vector<uint8_t> frame) {
         co_await boost::asio::dispatch(strand, use_awaitable);
         write_queue.emplace_back(std::move(frame));
@@ -140,14 +136,10 @@ struct AsioTransportAdapter::Connection {
             total_batches.fetch_add(1, std::memory_order_relaxed);
             total_frames.fetch_add(frames, std::memory_order_relaxed);
             total_bytes_written.fetch_add(batched, std::memory_order_relaxed);
-            // Adaptive tuning (coarse): adjust batch cap up if many frames, down if singletons
             auto now = std::chrono::steady_clock::now();
             if (now - last_adjust > std::chrono::seconds(1)) {
                 size_t handlers_sz = 0;
-                {
-                    std::lock_guard<std::mutex> lk(mtx);
-                    handlers_sz = handlers.size();
-                }
+                handlers_sz = handlers.size();
                 peak_handlers.store(std::max(peak_handlers.load(), handlers_sz));
                 auto f = total_frames.exchange(0);
                 auto b = total_batches.exchange(0);
@@ -160,7 +152,6 @@ struct AsioTransportAdapter::Connection {
                         batch_cap.store(cap / 2, std::memory_order_relaxed);
                     }
                 }
-                // Adjust maxInflight gently if persistent pressure
                 if (handlers_sz > opts.maxInflight * 3 / 4 && opts.maxInflight < 1024) {
                     opts.maxInflight *= 2;
                 } else if (handlers_sz < opts.maxInflight / 4 && opts.maxInflight > 64) {
@@ -180,62 +171,57 @@ struct ConnRegistry {
 } g_conn_registry;
 } // namespace
 
-std::shared_ptr<AsioTransportAdapter::Connection>
+Task<std::shared_ptr<AsioTransportAdapter::Connection>>
 AsioTransportAdapter::get_or_create_connection(const Options& opts) {
-    std::lock_guard<std::mutex> lock(g_conn_registry.m);
+    std::unique_lock lock(g_conn_registry.m);
     auto key = opts.socketPath.string();
     if (auto it = g_conn_registry.map.find(key); it != g_conn_registry.map.end()) {
         if (auto sp = it->second.lock()) {
-            return sp;
+            co_return sp;
         }
     }
     auto conn = std::make_shared<Connection>(opts);
     g_conn_registry.map[key] = conn;
+    lock.unlock();
 
-    // Establish socket synchronously via async bridge
-    std::promise<Result<std::unique_ptr<Connection::socket_t>>> p;
-    auto fut = p.get_future();
-    auto& io = GlobalIOContext::instance().get_io_context();
-    co_spawn(
-        io,
-        [opts, conn, &p]() -> awaitable<void> {
-            auto sres = co_await AsioTransportAdapter(opts).async_connect_with_timeout(
-                opts.socketPath, opts.requestTimeout);
-            if (!sres) {
-                p.set_value(Error{sres.error().code, sres.error().message});
-                co_return;
-            }
-            p.set_value(std::move(sres).value());
-        },
-        detached);
-    auto s = fut.get();
-    if (!s) {
-        return nullptr;
+    auto sres = co_await AsioTransportAdapter(opts).async_connect_with_timeout(opts.socketPath,
+                                                                               opts.requestTimeout);
+    if (!sres) {
+        std::lock_guard<std::mutex> lock(g_conn_registry.m);
+        g_conn_registry.map.erase(key);
+        co_return nullptr;
     }
-    // Move unique_ptr from result into connection safely
-    conn->socket = std::move(s).value();
+    conn->socket = std::move(sres.value());
     conn->alive = true;
 
-    // Start demux read loop once per connection
     if (!conn->read_started.exchange(true)) {
+        auto& io = GlobalIOContext::instance().get_io_context();
         co_spawn(
             io,
             [conn]() -> awaitable<void> {
+                // Run the entire read loop on the per-connection strand to serialize
+                // access to connection state (handlers map, lifecycle flags, etc.).
+                co_await boost::asio::dispatch(conn->strand, use_awaitable);
                 MessageFramer framer;
                 for (;;) {
-                    auto hres =
-                        co_await AsioTransportAdapter(conn->opts)
-                            .async_read_exact(*conn->socket, sizeof(MessageFramer::FrameHeader),
-                                              conn->opts.headerTimeout);
+                    auto hres = co_await AsioTransportAdapter(conn->opts)
+                                    .async_read_exact(
+                                        *conn->socket, sizeof(MessageFramer::FrameHeader),
+                                        // After initial streaming header, tolerate longer gaps
+                                        // between chunks
+                                        (conn->streaming_started.load(std::memory_order_relaxed)
+                                             ? conn->opts.bodyTimeout
+                                             : conn->opts.headerTimeout));
                     if (!hres) {
                         Error e = hres.error();
-                        std::lock_guard<std::mutex> lk(conn->mtx);
                         for (auto& [rid, h] : conn->handlers) {
                             if (h.unary)
-                                h.unary->promise.set_value(e);
+                                h.unary->channel->try_send(
+                                    make_error_code(boost::system::errc::io_error),
+                                    std::make_shared<Result<Response>>(e));
                             if (h.streaming) {
                                 h.streaming->onError(e);
-                                h.streaming->done.set_value(e);
+                                h.streaming->done_channel->try_send(boost::system::error_code{}, e);
                             }
                         }
                         conn->handlers.clear();
@@ -254,13 +240,15 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
                                                           conn->opts.bodyTimeout);
                         if (!pres) {
                             Error e = pres.error();
-                            std::lock_guard<std::mutex> lk(conn->mtx);
                             for (auto& [rid, h] : conn->handlers) {
                                 if (h.unary)
-                                    h.unary->promise.set_value(e);
+                                    h.unary->channel->try_send(
+                                        make_error_code(boost::system::errc::io_error),
+                                        std::make_shared<Result<Response>>(e));
                                 if (h.streaming) {
                                     h.streaming->onError(e);
-                                    h.streaming->done.set_value(e);
+                                    h.streaming->done_channel->try_send(boost::system::error_code{},
+                                                                        e);
                                 }
                             }
                             conn->handlers.clear();
@@ -279,7 +267,6 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
                     if (!msgRes)
                         continue;
                     auto& msg = msgRes.value();
-                    // Compatibility guard: warn once if protocol version is older/newer
                     static std::atomic<bool> warned{false};
                     if (!warned.load()) {
                         if (msg.version < PROTOCOL_VERSION) {
@@ -297,12 +284,10 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
                     uint64_t reqId = msg.requestId;
 
                     AsioTransportAdapter::Connection::Handler* handlerPtr = nullptr;
-                    std::unique_lock<std::mutex> lk(conn->mtx);
                     if (auto it = conn->handlers.find(reqId); it != conn->handlers.end()) {
                         handlerPtr = &it->second;
                     }
                     if (!handlerPtr) {
-                        lk.unlock();
                         continue;
                     }
 
@@ -313,37 +298,43 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
                     const Response& r = std::get<Response>(msg.payload);
                     if (!isChunked) {
                         if (handlerPtr->unary) {
-                            handlerPtr->unary->promise.set_value(r);
+                            handlerPtr->unary->channel->try_send(
+                                boost::system::error_code{}, std::make_shared<Result<Response>>(r));
                             conn->handlers.erase(reqId);
                         } else if (handlerPtr->streaming) {
                             handlerPtr->streaming->onHeader(r);
                             handlerPtr->streaming->onComplete();
-                            handlerPtr->streaming->done.set_value(Result<void>());
+                            handlerPtr->streaming->done_channel->try_send(
+                                boost::system::error_code{}, Result<void>());
                             conn->handlers.erase(reqId);
                         }
-                        lk.unlock();
                         continue;
                     }
 
                     if (handlerPtr->streaming) {
+                        // Mark that a streaming session has begun after receiving its first
+                        // header-only frame
+                        if (isHeaderOnly)
+                            conn->streaming_started.store(true, std::memory_order_relaxed);
                         if (isHeaderOnly) {
                             handlerPtr->streaming->onHeader(r);
                         } else {
-                            handlerPtr->streaming->onChunk(r, isLast);
-                            if (isLast) {
+                            bool cont = handlerPtr->streaming->onChunk(r, isLast);
+                            if (!cont || isLast) {
                                 handlerPtr->streaming->onComplete();
-                                handlerPtr->streaming->done.set_value(Result<void>());
+                                handlerPtr->streaming->done_channel->try_send(
+                                    boost::system::error_code{}, Result<void>());
                                 conn->handlers.erase(reqId);
                             }
                         }
                     }
-                    lk.unlock();
+                    // remain on strand until next iteration
                 }
             },
             detached);
     }
 
-    return conn;
+    co_return conn;
 }
 
 awaitable<Result<std::unique_ptr<boost::asio::local::stream_protocol::socket>>>
@@ -351,18 +342,14 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
                                                  std::chrono::milliseconds timeout) {
     auto& io_ctx = GlobalIOContext::instance().get_io_context();
     auto socket = std::make_unique<boost::asio::local::stream_protocol::socket>(io_ctx);
-
     boost::asio::local::stream_protocol::endpoint endpoint(path.string());
-
     try {
-        // Preflight: ensure the socket path exists to catch mismatches early
         if (!std::filesystem::exists(path)) {
             std::string msg = "Daemon not started (socket not found at '" + path.string() +
                               "'). Set YAMS_DAEMON_SOCKET or update config (daemon.socket_path).";
             spdlog::debug("AsioTransportAdapter preflight: {}", msg);
             co_return Error{ErrorCode::NetworkError, std::move(msg)};
         }
-        // Verify it is actually a socket (not a stale regular file)
 #ifndef _WIN32
         {
             struct stat st;
@@ -375,21 +362,14 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
             }
         }
 #endif
-        // Set up a timer for timeout
         boost::asio::steady_timer timer(co_await this_coro::executor);
         timer.expires_after(timeout);
-
-        // Start both the connect and the timer
         auto connect_result = co_await (socket->async_connect(endpoint, use_awaitable) ||
                                         timer.async_wait(use_awaitable));
-
         if (connect_result.index() == 1) {
-            // Timer fired first - timeout
             socket->close();
             co_return Error{ErrorCode::Timeout, "Connection timeout"};
         }
-
-        // Connection succeeded
         co_return std::move(socket);
     } catch (const std::exception& e) {
         co_return Error{ErrorCode::NetworkError, yams::format("Connection failed: {}", e.what())};
@@ -401,19 +381,14 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
                                        size_t size, std::chrono::milliseconds timeout) {
     try {
         std::vector<uint8_t> buffer(size);
-
         boost::asio::steady_timer timer(co_await this_coro::executor);
         timer.expires_after(timeout);
-
         auto read_result =
             co_await (boost::asio::async_read(socket, boost::asio::buffer(buffer), use_awaitable) ||
                       timer.async_wait(use_awaitable));
-
         if (read_result.index() == 1) {
-            // Timer fired first - timeout
             co_return Error{ErrorCode::Timeout, "Read timeout"};
         }
-
         co_return buffer;
     } catch (const std::exception& e) {
         co_return Error{ErrorCode::NetworkError, yams::format("Read failed: {}", e.what())};
@@ -427,209 +402,24 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
     try {
         boost::asio::steady_timer timer(co_await this_coro::executor);
         timer.expires_after(timeout);
-
         auto write_result =
             co_await (boost::asio::async_write(socket, boost::asio::buffer(data), use_awaitable) ||
                       timer.async_wait(use_awaitable));
-
         if (write_result.index() == 1) {
-            // Timer fired first - timeout
             co_return Error{ErrorCode::Timeout, "Write timeout"};
         }
-
         co_return Result<void>{};
     } catch (const std::exception& e) {
         co_return Error{ErrorCode::NetworkError, yams::format("Write failed: {}", e.what())};
     }
 }
 
-awaitable<Result<void>>
-AsioTransportAdapter::receive_frames(boost::asio::local::stream_protocol::socket& socket,
-                                     MessageFramer& framer, HeaderCallback onHeader,
-                                     ChunkCallback onChunk, ErrorCallback onError,
-                                     CompleteCallback onComplete) {
-    fsm_.on_readable(0); // Transition to reading
-
-    // Read response frames (non-chunked completes in first iteration)
-    bool expectingMore = true;
-    bool headerReceived = false; // Initial header-only frame received
-    bool headerNotified = false; // onHeader() delivered to client
-
-    spdlog::debug("AsioTransportAdapter::receive_frames: waiting for response frames");
-
-    while (expectingMore) {
-        // Read frame header
-        auto header_result = co_await async_read_exact(socket, sizeof(MessageFramer::FrameHeader),
-                                                       opts_.headerTimeout);
-        if (!header_result) {
-            fsm_.on_error(static_cast<int>(header_result.error().code));
-            onError(header_result.error());
-            co_return header_result.error();
-        }
-        FsmMetricsRegistry::instance().incrementHeaderReads(1);
-        FsmMetricsRegistry::instance().addBytesReceived(header_result.value().size());
-
-        MessageFramer::FrameHeader netHeader;
-        std::memcpy(&netHeader, header_result.value().data(), sizeof(MessageFramer::FrameHeader));
-        MessageFramer::FrameHeader header = netHeader;
-        header.from_network();
-
-        {
-            ConnectionFsm::FrameInfo info{0u, header.flags, header.payload_size};
-            fsm_.on_header_parsed(info);
-        }
-
-        if (header.payload_size > 100 * 1024 * 1024) {
-            auto err = Error{ErrorCode::InvalidData, "Payload too large"};
-            fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-            onError(err);
-            co_return err;
-        }
-
-        bool isHeaderOnly = header.is_header_only();
-        bool isLastChunk = header.is_last_chunk();
-        bool isChunked = header.is_chunked();
-
-        spdlog::debug("AsioTransportAdapter: received frame - header_only={}, last_chunk={}, "
-                      "chunked={}, payload_size={}",
-                      isHeaderOnly, isLastChunk, isChunked, header.payload_size);
-
-        // Non-chunked complete response
-        if (!isChunked && !headerReceived) {
-            if (header.payload_size > 0) {
-                auto payload_result =
-                    co_await async_read_exact(socket, header.payload_size, opts_.bodyTimeout);
-                if (!payload_result) {
-                    fsm_.on_error(static_cast<int>(payload_result.error().code));
-                    onError(payload_result.error());
-                    co_return payload_result.error();
-                }
-
-                // Reconstruct complete frame
-                std::vector<uint8_t> complete_frame;
-                complete_frame.reserve(sizeof(MessageFramer::FrameHeader) +
-                                       payload_result.value().size());
-                complete_frame.insert(complete_frame.end(), header_result.value().begin(),
-                                      header_result.value().end());
-                complete_frame.insert(complete_frame.end(), payload_result.value().begin(),
-                                      payload_result.value().end());
-
-                auto respMsg = framer.parse_frame(complete_frame);
-                if (!respMsg) {
-                    fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                    onError(respMsg.error());
-                    co_return respMsg.error();
-                }
-
-                if (!std::holds_alternative<Response>(respMsg.value().payload)) {
-                    auto err = Error{ErrorCode::InvalidData, "Expected Response but got Request"};
-                    onError(err);
-                    co_return err;
-                }
-
-                const auto& response = std::get<Response>(respMsg.value().payload);
-                // Warn once on version mismatch
-                static std::atomic<bool> warned2{false};
-                if (!warned2.load()) {
-                    auto v = respMsg.value().version;
-                    if (v < PROTOCOL_VERSION) {
-                        spdlog::warn("Daemon protocol v{} < client v{}; consider upgrading daemon",
-                                     v, PROTOCOL_VERSION);
-                        warned2.store(true);
-                    } else if (v > PROTOCOL_VERSION) {
-                        spdlog::warn("Daemon protocol v{} > client v{}; consider upgrading client",
-                                     v, PROTOCOL_VERSION);
-                        warned2.store(true);
-                    }
-                }
-                spdlog::debug(
-                    "AsioTransportAdapter: delivering complete non-chunked response to handler");
-                onHeader(response);
-                onChunk(response, true);
-                onComplete();
-                break;
-            }
-        } else if (isHeaderOnly && !headerReceived) {
-            // Initial header-only frame: no payload; wait for first chunk
-            headerReceived = true;
-            spdlog::debug("AsioTransportAdapter: header-only frame received (stream start)");
-        } else if (header.payload_size > 0) {
-            // Chunk frame
-            auto payload_result =
-                co_await async_read_exact(socket, header.payload_size, opts_.bodyTimeout);
-            if (!payload_result) {
-                fsm_.on_error(static_cast<int>(payload_result.error().code));
-                onError(payload_result.error());
-                co_return payload_result.error();
-            }
-            FsmMetricsRegistry::instance().incrementPayloadReads(1);
-            FsmMetricsRegistry::instance().addBytesReceived(payload_result.value().size());
-
-            // Reconstruct complete frame
-            std::vector<uint8_t> complete_frame;
-            complete_frame.reserve(sizeof(MessageFramer::FrameHeader) +
-                                   payload_result.value().size());
-            complete_frame.insert(complete_frame.end(), header_result.value().begin(),
-                                  header_result.value().end());
-            complete_frame.insert(complete_frame.end(), payload_result.value().begin(),
-                                  payload_result.value().end());
-
-            auto respMsg = framer.parse_frame(complete_frame);
-            if (!respMsg || !std::holds_alternative<Response>(respMsg.value().payload)) {
-                auto err = Error{ErrorCode::InvalidData, "Invalid chunk response"};
-                fsm_.on_error(static_cast<int>(ErrorCode::InvalidData));
-                onError(err);
-                co_return err;
-            }
-
-            const auto& parsed = std::get<Response>(respMsg.value().payload);
-            static std::atomic<bool> warned3{false};
-            if (!warned3.load()) {
-                auto v = respMsg.value().version;
-                if (v < PROTOCOL_VERSION) {
-                    spdlog::warn("Daemon protocol v{} < client v{}; consider upgrading daemon", v,
-                                 PROTOCOL_VERSION);
-                    warned3.store(true);
-                } else if (v > PROTOCOL_VERSION) {
-                    spdlog::warn("Daemon protocol v{} > client v{}; consider upgrading client", v,
-                                 PROTOCOL_VERSION);
-                    warned3.store(true);
-                }
-            }
-            if (!headerNotified) {
-                spdlog::debug("AsioTransportAdapter: delivering onHeader to handler");
-                onHeader(parsed);
-                headerNotified = true;
-            }
-            spdlog::debug("AsioTransportAdapter: delivering onChunk to handler (last={})",
-                          isLastChunk);
-            bool continueReading = onChunk(parsed, isLastChunk);
-            if (!continueReading) {
-                expectingMore = false;
-            }
-        }
-
-        if (isLastChunk) {
-            expectingMore = false;
-        }
-    }
-
-    fsm_.on_close_request();
-    onComplete();
-    co_return Result<void>{};
-}
-
 Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
-    spdlog::debug("AsioTransportAdapter::send_request called (NON-STREAMING) with request type: {}",
-                  req.index());
-    auto conn = get_or_create_connection(opts_);
+    auto conn = co_await get_or_create_connection(opts_);
     if (!conn || !conn->alive) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
     }
 
-    // Generate a globally unique request ID to avoid collisions under high concurrency.
-    // Using a process-wide atomic counter avoids duplicate IDs when many requests are queued
-    // within the same steady_clock tick.
     static std::atomic<uint64_t> g_req_id{
         static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
 
@@ -647,37 +437,32 @@ Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    AsioTransportAdapter::Connection::UnaryHandler uh;
-    auto fut = uh.promise.get_future();
+    auto& io = GlobalIOContext::instance().get_io_context();
+    auto response_ch = std::make_shared<Connection::response_channel_t>(io, 1);
+
+    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+    if (conn->handlers.size() >= conn->opts.maxInflight) {
+        co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
+    }
     {
-        std::lock_guard<std::mutex> lk(conn->mtx);
-        if (conn->handlers.size() >= conn->opts.maxInflight) {
-            co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
-        }
-        AsioTransportAdapter::Connection::Handler h;
-        h.unary = std::move(uh);
+        Connection::Handler h;
+        h.unary.emplace(Connection::UnaryHandler{response_ch});
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
-    auto frame = framed.value();
-    std::promise<Result<void>> _pw;
-    auto _pf = _pw.get_future();
-    auto& _io = GlobalIOContext::instance().get_io_context();
-    co_spawn(
-        _io,
-        [conn, frame = std::move(frame), &_pw]() -> awaitable<void> {
-            auto wres = co_await conn->async_write_frame(std::move(frame));
-            _pw.set_value(std::move(wres));
-        },
-        detached);
-    auto wres = _pf.get();
+    auto wres = co_await conn->async_write_frame(framed.value());
     if (!wres) {
-        std::lock_guard<std::mutex> lk(conn->mtx);
+        co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);
         co_return wres.error();
     }
 
-    co_return fut.get();
+    auto [ec, response_result] =
+        co_await response_ch->async_receive(boost::asio::experimental::as_tuple(use_awaitable));
+    if (ec) {
+        co_return Error{ErrorCode::NetworkError, "Failed to receive response: " + ec.message()};
+    }
+    co_return *response_result;
 }
 
 Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& req,
@@ -685,15 +470,11 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
                                                                 ChunkCallback onChunk,
                                                                 ErrorCallback onError,
                                                                 CompleteCallback onComplete) {
-    spdlog::debug(
-        "AsioTransportAdapter::send_request_streaming called (STREAMING) with request type: {}",
-        req.index());
-    auto conn = get_or_create_connection(opts_);
+    auto conn = co_await get_or_create_connection(opts_);
     if (!conn || !conn->alive) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
     }
 
-    // Generate a globally unique request ID to avoid collisions under high concurrency.
     static std::atomic<uint64_t> g_req_id{
         static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
 
@@ -703,7 +484,7 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
     msg.timestamp = std::chrono::steady_clock::now();
     msg.payload = req;
     msg.clientVersion = "yams-client-0.3.4";
-    msg.expectsStreamingResponse = true; // Streaming request
+    msg.expectsStreamingResponse = true;
 
     MessageFramer framer;
     auto framed = framer.frame_message(msg);
@@ -711,37 +492,34 @@ Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& r
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    AsioTransportAdapter::Connection::StreamingHandler sh(onHeader, onChunk, onError, onComplete);
-    auto fut = sh.done.get_future();
+    auto& io = GlobalIOContext::instance().get_io_context();
+    auto done_ch = std::make_shared<Connection::void_channel_t>(io, 1);
+
+    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+    if (conn->handlers.size() >= conn->opts.maxInflight) {
+        co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
+    }
     {
-        std::lock_guard<std::mutex> lk(conn->mtx);
-        if (conn->handlers.size() >= conn->opts.maxInflight) {
-            co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
-        }
-        AsioTransportAdapter::Connection::Handler h;
-        h.streaming = std::move(sh);
+        Connection::Handler h;
+        h.streaming.emplace(onHeader, onChunk, onError, onComplete);
+        h.streaming->done_channel = done_ch;
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
-    auto frame = framed.value();
-    std::promise<Result<void>> _pw;
-    auto _pf = _pw.get_future();
-    auto& _io = GlobalIOContext::instance().get_io_context();
-    co_spawn(
-        _io,
-        [conn, frame = std::move(frame), &_pw]() -> awaitable<void> {
-            auto wres = co_await conn->async_write_frame(std::move(frame));
-            _pw.set_value(std::move(wres));
-        },
-        detached);
-    auto wres = _pf.get();
+    auto wres = co_await conn->async_write_frame(framed.value());
     if (!wres) {
-        std::lock_guard<std::mutex> lk(conn->mtx);
+        co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);
         co_return wres.error();
     }
 
-    co_return fut.get();
+    auto [ec, void_result] =
+        co_await done_ch->async_receive(boost::asio::experimental::as_tuple(use_awaitable));
+    if (ec) {
+        co_return Error{ErrorCode::NetworkError,
+                        "Failed to receive stream completion: " + ec.message()};
+    }
+    co_return void_result;
 }
 
 } // namespace yams::daemon

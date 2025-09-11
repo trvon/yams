@@ -1,7 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/session_store.h>
@@ -22,11 +21,16 @@ namespace yamsfmt = fmt;
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 
 namespace yams::cli {
 
@@ -142,6 +146,20 @@ public:
     }
 
     Result<void> execute() override {
+        std::promise<Result<void>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [this, &prom]() -> boost::asio::awaitable<void> {
+                auto r = co_await this->executeAsync();
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        return fut.get();
+    }
+
+    boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             // Always try daemon-first approach with full protocol mapping for PBI-001 compliance
             yams::daemon::ListRequest dreq;
@@ -300,26 +318,45 @@ public:
 
             // Direct daemon call (no pooling) for determinism
             yams::daemon::ClientConfig cfg;
+            // Align storage with CLI data path (parity with SearchCommand)
+            if (cli_) {
+                auto dp = cli_->getDataPath();
+                if (!dp.empty()) {
+                    cfg.dataDir = dp;
+#ifndef _WIN32
+                    ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
+                    ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
+#endif
+                }
+            }
+            // Configure conservative-but-snappy timeouts for daemon path: if the daemon is not
+            // actually accepting/processing (e.g., stale socket or zero IO workers), we want to
+            // fall back quickly rather than block the CLI. Body can remain generous for large
+            // lists.
+            cfg.headerTimeout = std::chrono::milliseconds(3000); // fast header preflight
+            cfg.bodyTimeout = std::chrono::milliseconds(60000);  // allow up to 60s for body
+            yams::daemon::DaemonClient::setTimeoutEnvVars(cfg.headerTimeout, cfg.bodyTimeout);
             cfg.enableChunkedResponses = !disableStreaming_;
             cfg.singleUseConnections = false;
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             yams::daemon::DaemonClient client(cfg);
             client.setStreamingEnabled(cfg.enableChunkedResponses);
 
-            auto result = cfg.enableChunkedResponses
-                              ? run_sync(client.streamingList(dreq), std::chrono::seconds(30))
-                              : run_sync(client.call(dreq), std::chrono::seconds(30));
+            auto result = co_await (cfg.enableChunkedResponses ? client.streamingList(dreq)
+                                                               : client.call(dreq));
             if (result) {
                 auto r = render(result.value());
                 if (!r)
-                    return r.error();
-                return Result<void>();
+                    co_return r.error();
+                co_return Result<void>();
             }
-            // Fallback to service-based approach
-            return executeWithServices();
+            // Explicit fallback with a user-visible hint to aid debugging
+            spdlog::warn("List: daemon unavailable or timed out ({}). Falling back to local.",
+                         result.error().message);
+            co_return executeWithServices();
 
         } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
+            co_return Error{ErrorCode::Unknown, std::string(e.what())};
         }
     }
 

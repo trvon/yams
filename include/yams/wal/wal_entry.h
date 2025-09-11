@@ -44,8 +44,17 @@ struct WALEntry {
 
         // Validate header integrity
         [[nodiscard]] bool isValid() const noexcept {
-            return magic == 0x57414C31 && version == 1 && sequenceNum > 0 &&
-                   static_cast<uint8_t>(operation) >= 1 && static_cast<uint8_t>(operation) <= 8;
+            // Accept v1 and v2 for dual-read compatibility
+            if (magic != 0x57414C31)
+                return false;
+            if (!(version == 1 || version == 2))
+                return false;
+            if (sequenceNum == 0)
+                return false;
+            auto opv = static_cast<uint8_t>(operation);
+            if (opv < 1 || opv > 8)
+                return false;
+            return true;
         }
 
         // Calculate header size

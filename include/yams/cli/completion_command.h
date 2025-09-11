@@ -22,6 +22,7 @@ public:
     std::string getDescription() const override;
     void registerCommand(CLI::App& app, YamsCLI* cli) override;
     Result<void> execute() override;
+    boost::asio::awaitable<Result<void>> executeAsync() override { co_return execute(); }
 
 private:
     YamsCLI* cli_ = nullptr;

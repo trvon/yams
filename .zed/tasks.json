@@ -42,5 +42,17 @@
   {
     "label": "full: clean+conan+configure+build+test (Release)",
     "command": "rm -rf build/yams-release CMakeUserPresets.json && conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-release -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-release && ctest --preset yams-release --output-on-failure"
+  },
+  {
+    "label": "release: act push (tag)",
+    "command": "gh act push -j build-release -e .act/release.tag.json"
+  },
+  {
+    "label": "release: act push (tag, full image)",
+    "command": "gh act push -j build-release -e .act/release.tag.json -P ubuntu-latest=catthehacker/ubuntu:full-22.04 -s GITHUB_TOKEN=fake"
+  },
+  {
+    "label": "release: act push (tag, linux-only)",
+    "command": "gh act push -j build-release -e .act/release.tag.json -M os=linux-hosted"
   }
 ]

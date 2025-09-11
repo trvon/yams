@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <yams/core/types.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::daemon {
 // Forward declaration
@@ -40,6 +41,11 @@ class IModelProvider {
 public:
     virtual ~IModelProvider() = default;
 
+    // Optional: progress callback for long-running model operations (e.g., preload)
+    // Default no-op; providers may invoke with phases like
+    // started/downloading/initializing/warming/completed
+    virtual void setProgressCallback(std::function<void(const ModelLoadEvent&)> /*cb*/) {}
+
     // ========================================================================
     // Model Operations
     // ========================================================================
@@ -59,6 +65,14 @@ public:
     virtual Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) = 0;
 
+    // Generate embedding(s) using a specific model name when provided by the caller
+    // Implementations should prefer this over the default model selection logic.
+    virtual Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                            const std::string& text) = 0;
+    virtual Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) = 0;
+
     // ========================================================================
     // Model Management
     // ========================================================================
@@ -69,6 +83,12 @@ public:
      * @return Success or error
      */
     virtual Result<void> loadModel(const std::string& modelName) = 0;
+    // Optional: load model with provider-specific options (JSON). Default forwards to loadModel.
+    virtual Result<void> loadModelWithOptions(const std::string& modelName,
+                                              const std::string& optionsJson) {
+        (void)optionsJson;
+        return loadModel(modelName);
+    }
 
     /**
      * Unload a model from memory

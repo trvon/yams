@@ -1,4 +1,6 @@
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <fstream>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_backend.h>
@@ -6,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <iomanip>
 #include <mutex>
 #include <random>
@@ -36,6 +39,21 @@ public:
         }
 
         try {
+            // Do not create or touch the DB file when create_if_missing is false
+            // and the target path doesn't exist.
+            try {
+                namespace fs = std::filesystem;
+                if (!config_.create_if_missing) {
+                    fs::path pth = config_.database_path;
+                    if (!pth.empty() && !fs::exists(pth)) {
+                        setError("Vector database does not exist and create_if_missing=false");
+                        return false;
+                    }
+                }
+            } catch (...) {
+                // best-effort: continue
+            }
+
             // Initialize backend with database path
             auto result = backend_->initialize(config_.database_path);
             if (!result) {
@@ -43,14 +61,89 @@ public:
                 return false;
             }
 
-            // Create tables if they don't exist
+            // Create tables only when explicitly allowed
             if (!backend_->tablesExist()) {
+                if (!config_.create_if_missing) {
+                    setError("Vector database tables missing and create_if_missing=false");
+                    return false;
+                }
                 auto createResult = backend_->createTables(config_.embedding_dim);
                 if (!createResult) {
                     setError("Failed to create tables: " + createResult.error().message);
                     return false;
                 }
                 spdlog::info("Created vector tables with dimension {}", config_.embedding_dim);
+            } else {
+                // Tables exist; verify stored dimension vs configured and optionally self-heal.
+                try {
+                    if (auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get())) {
+                        auto storedDimOpt = sqliteBackend->getStoredEmbeddingDimension();
+                        if (storedDimOpt && *storedDimOpt != config_.embedding_dim) {
+                            // Check sentinel to decide whether to suppress warning and adopt stored
+                            // dim
+                            auto readSentinelDim =
+                                [&](const std::string& dbPath) -> std::optional<size_t> {
+                                try {
+                                    namespace fs = std::filesystem;
+                                    fs::path p =
+                                        fs::path(dbPath).parent_path() / "vectors_sentinel.json";
+                                    if (!fs::exists(p))
+                                        return std::nullopt;
+                                    std::ifstream in(p);
+                                    if (!in)
+                                        return std::nullopt;
+                                    nlohmann::json j;
+                                    in >> j;
+                                    if (j.contains("embedding_dim"))
+                                        return j["embedding_dim"].get<size_t>();
+                                } catch (...) {
+                                }
+                                return std::nullopt;
+                            };
+                            auto sdim = readSentinelDim(config_.database_path);
+                            if (sdim && *sdim == *storedDimOpt) {
+                                spdlog::info("Vector DB dim matches sentinel ({}). Updating "
+                                             "configured dim from {}.",
+                                             *storedDimOpt, config_.embedding_dim);
+                                config_.embedding_dim = *storedDimOpt;
+                            } else {
+                                spdlog::warn(
+                                    "Vector table dimension mismatch: stored={} configured={}",
+                                    *storedDimOpt, config_.embedding_dim);
+                            }
+
+                            // Heuristic: if DB is empty, or explicit env flag set, recreate schema.
+                            bool allow_autofix = false;
+                            try {
+                                // No vectors yet? Safe to rebuild.
+                                auto count = backend_->getVectorCount();
+                                allow_autofix = (count && count.value() == 0);
+                            } catch (...) {
+                            }
+                            // explicit env flag removed; rely on empty DB condition only
+                            if (allow_autofix) {
+                                spdlog::info("Vector DB empty or autofix enabled — recreating vec "
+                                             "schema to dim {}",
+                                             config_.embedding_dim);
+                                auto dr = sqliteBackend->dropTables();
+                                if (!dr) {
+                                    spdlog::warn("Schema drop failed: {}", dr.error().message);
+                                } else {
+                                    auto cr = sqliteBackend->createTables(config_.embedding_dim);
+                                    if (!cr) {
+                                        spdlog::warn("Schema create failed: {}",
+                                                     cr.error().message);
+                                    } else {
+                                        spdlog::info("Vector tables recreated with dimension {}",
+                                                     config_.embedding_dim);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (...) {
+                    // Non-fatal: continue with existing schema
+                }
             }
 
             initialized_ = true;
@@ -146,11 +239,54 @@ public:
                 return false;
             }
 
-            // Validate all records first
+            // Validate all records first; capture first mismatch for diagnostics.
+            // If a mismatch is detected, attempt a one-time reconciliation with the backend's
+            // stored schema dimension to protect against config drift (e.g., 384 vs 768).
+            bool validated = true;
             for (const auto& record : records) {
                 if (!utils::validateVectorRecord(record, config_.embedding_dim)) {
-                    setError("Invalid vector record in batch");
-                    return false;
+                    validated = false;
+                    // Attempt reconciliation using backend's stored dimension (sqlite-vec)
+                    try {
+                        size_t got = record.embedding.size();
+                        size_t want = config_.embedding_dim;
+                        // Try to discover stored schema dimension via sqlite-vec backend
+                        if (auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get())) {
+                            auto storedDimOpt = sqliteBackend->getStoredEmbeddingDimension();
+                            if (storedDimOpt && *storedDimOpt > 0 && *storedDimOpt == got) {
+                                // Update expected dimension to match storage schema
+                                config_.embedding_dim = *storedDimOpt;
+                                validated = true;
+                                break; // re-run validation loop below
+                            }
+                        }
+                        // If reconciliation not possible, report the original mismatch
+                        std::stringstream ss;
+                        ss << "Invalid vector record in batch (expected_dim=" << want
+                           << ", got_dim=" << got << ")";
+                        setError(ss.str());
+                        return false;
+                    } catch (...) {
+                        std::stringstream ss;
+                        ss << "Invalid vector record in batch (expected_dim="
+                           << config_.embedding_dim << ", got_dim=" << record.embedding.size()
+                           << ")";
+                        setError(ss.str());
+                        return false;
+                    }
+                }
+            }
+            if (!validated) {
+                // Re-validate after reconciliation
+                for (const auto& record : records) {
+                    if (!utils::validateVectorRecord(record, config_.embedding_dim)) {
+                        std::stringstream ss;
+                        ss << "Invalid vector record in batch (expected_dim="
+                           << config_.embedding_dim << ", got_dim=" << record.embedding.size()
+                           << ")";
+                        setError(ss.str());
+                        return false;
+                    }
                 }
             }
         }

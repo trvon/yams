@@ -1,17 +1,29 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/RepairCoordinator.h>
+#include <yams/daemon/components/StateComponent.h>
 
 #include <spdlog/spdlog.h>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <yams/core/repair_fsm.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/ipc/repair_scheduling_adapter.h>
+#include <yams/extraction/content_extractor.h>
+#include <yams/extraction/extraction_util.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/vector_database.h>
+// removed temporary maintenance lock coordination
+// Asio for coroutine-based loop
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 
 namespace yams::daemon {
 
@@ -29,19 +41,23 @@ void RepairCoordinator::start() {
     }
     // Initialize maintenance tokens based on config
     tokens_.store(cfg_.maintenanceTokens);
-    thread_ = yams::compat::jthread([this](yams::compat::stop_token st) { run(st); });
-    spdlog::info("RepairCoordinator started in event-driven mode (enable={}, batch={})",
-                 cfg_.enable, cfg_.maxBatch);
+    auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+    boost::asio::co_spawn(
+        io,
+        [this]() -> boost::asio::awaitable<void> {
+            co_await runAsync();
+            co_return;
+        },
+        boost::asio::detached);
+    spdlog::info("RepairCoordinator started (awaitable) (enable={}, batch={})", cfg_.enable,
+                 cfg_.maxBatch);
 }
 
 void RepairCoordinator::stop() {
     if (!running_.exchange(false)) {
         return;
     }
-    if (thread_.joinable()) {
-        thread_.request_stop();
-        thread_.join();
-    }
+    queueCv_.notify_all();
 }
 
 bool RepairCoordinator::maintenance_allowed() const {
@@ -58,6 +74,9 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         pendingDocuments_.push(event.hash);
+        // Update queue depth metric
+        if (state_)
+            state_->stats.repairQueueDepth.store(static_cast<uint64_t>(pendingDocuments_.size()));
     }
     queueCv_.notify_one();
     spdlog::debug("RepairCoordinator: queued document {} for embedding check", event.hash);
@@ -72,7 +91,11 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
     spdlog::debug("RepairCoordinator: document {} removed", event.hash);
 }
 
-void RepairCoordinator::run(yams::compat::stop_token st) {
+boost::asio::awaitable<void> RepairCoordinator::runAsync() {
+    using namespace std::chrono_literals;
+    auto ex = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(ex);
+
     core::RepairFsm::Config fsmConfig;
     fsmConfig.enable_online_repair = true;
     fsmConfig.max_repair_concurrency = cfg_.maintenanceTokens;
@@ -85,7 +108,233 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
     });
 
     bool initialScanEnqueued = false;
-    while (!st.stop_requested()) {
+    while (running_.load(std::memory_order_relaxed)) {
+        if (pendingDocuments_.empty() && !initialScanEnqueued && maintenance_allowed()) {
+            try {
+                auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+                if (meta) {
+                    auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+                    if (vectorDb) {
+                        auto allDocs = meta->findDocumentsByPath("%");
+                        if (allDocs && !allDocs.value().empty()) {
+                            size_t enq = 0;
+                            {
+                                std::lock_guard<std::mutex> ql(queueMutex_);
+                                for (const auto& d : allDocs.value()) {
+                                    if (!running_.load(std::memory_order_relaxed))
+                                        break;
+                                    if (!vectorDb->hasEmbedding(d.sha256Hash)) {
+                                        pendingDocuments_.push(d.sha256Hash);
+                                        ++enq;
+                                    }
+                                }
+                            }
+                            if (enq > 0) {
+                                totalBacklog_.store(static_cast<std::uint64_t>(enq),
+                                                    std::memory_order_relaxed);
+                                processed_.store(0, std::memory_order_relaxed);
+                            }
+                            initialScanEnqueued = true;
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
+
+        std::vector<std::string> batch;
+        {
+            std::lock_guard<std::mutex> lk(queueMutex_);
+            while (!pendingDocuments_.empty() && batch.size() < cfg_.maxBatch) {
+                batch.push_back(std::move(pendingDocuments_.front()));
+                pendingDocuments_.pop();
+            }
+            if (state_)
+                state_->stats.repairQueueDepth.store(
+                    static_cast<uint64_t>(pendingDocuments_.size()));
+        }
+        if (batch.empty()) {
+            timer.expires_after(100ms);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            continue;
+        }
+
+        // Build hints
+        RepairSchedulingAdapter::SchedulingHints adapterHints{};
+        size_t active = activeConnFn_ ? activeConnFn_() : 0;
+        adapterHints.streaming_high_load = (active > 0);
+        adapterHints.maintenance_allowed = maintenance_allowed();
+        adapterHints.closing = !running_.load(std::memory_order_relaxed);
+        core::RepairFsm::SchedulingHints fsmHints{adapterHints.streaming_high_load,
+                                                  adapterHints.maintenance_allowed,
+                                                  adapterHints.closing};
+        fsm.set_scheduling_hints(fsmHints);
+        if (adapterHints.closing || (adapterHints.streaming_high_load && batch.empty())) {
+            if (state_)
+                state_->stats.repairBusyTicks++;
+            continue;
+        }
+
+        if (state_)
+            state_->stats.repairIdleTicks++;
+        auto content = services_ ? services_->getContentStore() : nullptr;
+        auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
+        auto embed = services_ ? services_->getEmbeddingGenerator() : nullptr;
+        if (!(content && meta_repo && embed)) {
+            continue;
+        }
+
+        if (fsm.start()) {
+            fsm.on_scan_done();
+            std::vector<std::string> missing;
+            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+            if (vectorDb) {
+                for (const auto& hash : batch) {
+                    if (!vectorDb->hasEmbedding(hash))
+                        missing.push_back(hash);
+                }
+            }
+            fsm.on_detect_done();
+            if (!missing.empty()) {
+                fsm.on_classify_done();
+                fsm.on_isolate_done();
+                if (state_)
+                    state_->stats.repairBatchesAttempted++;
+                repair::EmbeddingRepairConfig rcfg;
+                rcfg.batchSize = cfg_.maxBatch;
+                rcfg.skipExisting = true;
+                rcfg.dataPath = cfg_.dataDir;
+                std::unique_ptr<yams::Result<repair::EmbeddingRepairStats>> statsPtr;
+                bool fixSuccess = false;
+                if (try_acquire_token()) {
+                    try {
+                        yams::daemon::ClientConfig ccfg;
+                        ccfg.dataDir = services_->getConfig().dataDir;
+                        ccfg.socketPath = services_->getConfig().socketPath;
+                        ccfg.singleUseConnections = true;
+                        ccfg.requestTimeout = std::chrono::seconds(120);
+                        yams::daemon::DaemonClient client(ccfg);
+                        yams::daemon::EmbedDocumentsRequest ed;
+                        ed.modelName = "";
+                        ed.documentHashes = missing;
+                        ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
+                        ed.skipExisting = rcfg.skipExisting;
+                        auto er = co_await client.streamingEmbedDocuments(ed);
+                        if (er) {
+                            repair::EmbeddingRepairStats statsLocal{};
+                            statsLocal.documentsProcessed = er.value().requested;
+                            statsLocal.embeddingsGenerated = er.value().embedded;
+                            statsLocal.embeddingsSkipped = er.value().skipped;
+                            statsLocal.failedOperations = er.value().failed;
+                            statsPtr = std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(
+                                statsLocal);
+                            fixSuccess = true;
+                        } else {
+                            spdlog::debug("RepairCoordinator: daemon EmbedDocuments failed: {} — "
+                                          "falling back",
+                                          er.error().message);
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug(
+                            "RepairCoordinator: daemon embed exception: {} — falling back",
+                            e.what());
+                    }
+                    if (!fixSuccess) {
+                        auto r = repair::repairMissingEmbeddings(content, meta_repo, embed, rcfg,
+                                                                 missing, nullptr,
+                                                                 services_->getContentExtractors());
+                        statsPtr = std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(
+                            std::move(r));
+                        fixSuccess = statsPtr && *statsPtr;
+                    }
+                    release_token();
+                }
+
+                fsm.on_fix_done(fixSuccess);
+                if (fixSuccess) {
+                    fsm.on_verify_done(true);
+                    try {
+                        auto store = services_ ? services_->getContentStore() : nullptr;
+                        auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+                        const auto& extractors =
+                            services_ ? services_->getContentExtractors()
+                                      : std::vector<
+                                            std::shared_ptr<yams::extraction::IContentExtractor>>{};
+                        if (store && meta) {
+                            size_t fts_ok = 0, fts_fail = 0;
+                            for (const auto& h : missing) {
+                                auto docRes = meta->getDocumentByHash(h);
+                                if (!docRes || !docRes.value().has_value()) {
+                                    ++fts_fail;
+                                    continue;
+                                }
+                                const auto& d = docRes.value().value();
+                                std::string ext = d.fileExtension;
+                                if (!ext.empty() && ext[0] == '.')
+                                    ext.erase(0, 1);
+                                auto extractedOpt = yams::extraction::util::extractDocumentText(
+                                    store, h, d.mimeType, ext, extractors);
+                                if (!extractedOpt || extractedOpt->empty()) {
+                                    ++fts_fail;
+                                    continue;
+                                }
+                                auto ir = meta->indexDocumentContent(d.id, d.fileName,
+                                                                     *extractedOpt, d.mimeType);
+                                if (ir) {
+                                    (void)meta->updateFuzzyIndex(d.id);
+                                    ++fts_ok;
+                                } else {
+                                    ++fts_fail;
+                                }
+                            }
+                            spdlog::info("RepairCoordinator: FTS5 reindex complete for batch "
+                                         "(ok={}, fail={})",
+                                         fts_ok, fts_fail);
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("RepairCoordinator: FTS5 reindex exception: {}", e.what());
+                    }
+                    fsm.on_reindex_done(true);
+                    if (state_ && statsPtr) {
+                        state_->stats.repairEmbeddingsGenerated +=
+                            static_cast<uint64_t>(statsPtr->value().embeddingsGenerated);
+                        state_->stats.repairEmbeddingsSkipped +=
+                            static_cast<uint64_t>(statsPtr->value().embeddingsSkipped);
+                        state_->stats.repairFailedOperations +=
+                            static_cast<uint64_t>(statsPtr->value().failedOperations);
+                        auto inc =
+                            static_cast<std::uint64_t>(statsPtr->value().embeddingsGenerated +
+                                                       statsPtr->value().embeddingsSkipped);
+                        if (inc > 0) {
+                            processed_.fetch_add(inc, std::memory_order_relaxed);
+                            update_progress_pct();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    spdlog::info("RepairCoordinator stopped");
+    co_return;
+}
+#if 0
+boost::asio::awaitable<void> RepairCoordinator::runAsync() {
+    auto ex = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(ex);
+    core::RepairFsm::Config fsmConfig;
+    fsmConfig.enable_online_repair = true;
+    fsmConfig.max_repair_concurrency = cfg_.maintenanceTokens;
+    fsmConfig.repair_backoff_ms = 250;
+    fsmConfig.max_retries = 3;
+
+    core::RepairFsm fsm(fsmConfig);
+    fsm.set_on_state_change([](core::RepairFsm::State state) {
+        spdlog::debug("RepairFsm state changed to: {}", core::RepairFsm::to_string(state));
+    });
+
+    bool initialScanEnqueued = false;
+    while (running_.load(std::memory_order_relaxed)) {
         // Wait for work (no timeout - purely event driven)
         std::unique_lock<std::mutex> lock(queueMutex_);
         // If no pending work yet, opportunistically enqueue an initial backlog scan once
@@ -95,18 +344,15 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
                 auto meta = services_ ? services_->getMetadataRepo() : nullptr;
                 if (meta) {
                     // Scan all docs to find those without embeddings
-                    vector::VectorDatabaseConfig vdbConfig;
-                    vdbConfig.database_path = (cfg_.dataDir / "vectors.db").string();
-                    vdbConfig.embedding_dim = 384;
-                    auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-                    if (vectorDb->initialize()) {
+                    auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+                    if (vectorDb) {
                         auto allDocs = meta->findDocumentsByPath("%");
                         if (allDocs && !allDocs.value().empty()) {
                             size_t enq = 0;
                             {
                                 std::lock_guard<std::mutex> ql(queueMutex_);
                                 for (const auto& d : allDocs.value()) {
-                                    if (st.stop_requested())
+                                    if (!running_.load(std::memory_order_relaxed))
                                         break;
                                     if (!vectorDb->hasEmbedding(d.sha256Hash)) {
                                         pendingDocuments_.push(d.sha256Hash);
@@ -118,6 +364,10 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
                                 spdlog::info(
                                     "RepairCoordinator: enqueued {} backlog documents for repair",
                                     enq);
+                                totalBacklog_.store(static_cast<std::uint64_t>(enq),
+                                                    std::memory_order_relaxed);
+                                processed_.store(0, std::memory_order_relaxed);
+                                update_progress_pct();
                                 queueCv_.notify_one();
                             }
                         }
@@ -131,12 +381,8 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
             lock.lock();
         }
 
-        queueCv_.wait(lock,
-                      [this, &st] { return !pendingDocuments_.empty() || st.stop_requested(); });
-
-        if (st.stop_requested()) {
-            break;
-        }
+        queueCv_.wait(lock, [this] { return !pendingDocuments_.empty() || !running_.load(std::memory_order_relaxed); });
+        if (!running_.load(std::memory_order_relaxed)) break;
 
         // Collect batch of documents to process
         std::vector<std::string> batch;
@@ -144,6 +390,9 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
             batch.push_back(pendingDocuments_.front());
             pendingDocuments_.pop();
         }
+        // Update queue depth after dequeueing
+        if (state_)
+            state_->stats.repairQueueDepth.store(static_cast<uint64_t>(pendingDocuments_.size()));
         lock.unlock();
 
         // Check scheduling hints
@@ -151,7 +400,7 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
         size_t active = activeConnFn_ ? activeConnFn_() : 0;
         adapterHints.streaming_high_load = (active > 0);
         adapterHints.maintenance_allowed = maintenance_allowed();
-        adapterHints.closing = st.stop_requested();
+        adapterHints.closing = !running_.load(std::memory_order_relaxed);
 
         // Convert to RepairFsm hints
         core::RepairFsm::SchedulingHints fsmHints;
@@ -174,10 +423,10 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
 
             try {
                 auto content = services_ ? services_->getContentStore() : nullptr;
-                auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+                auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
                 auto embed = services_ ? services_->getEmbeddingGenerator() : nullptr;
 
-                if (content && meta && embed) {
+                if (content && meta_repo && embed) {
                     // Start repair FSM
                     if (fsm.start()) {
                         // Scan phase
@@ -187,12 +436,8 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
                         std::vector<std::string> missing;
                         if (!batch.empty()) {
                             // Check specific documents from the queue
-                            vector::VectorDatabaseConfig vdbConfig;
-                            vdbConfig.database_path = (cfg_.dataDir / "vectors.db").string();
-                            vdbConfig.embedding_dim = 384;
-
-                            auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-                            if (vectorDb->initialize()) {
+                            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+                            if (vectorDb) {
                                 for (const auto& hash : batch) {
                                     if (!vectorDb->hasEmbedding(hash)) {
                                         missing.push_back(hash);
@@ -220,27 +465,103 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
                             rcfg.dataPath = cfg_.dataDir;
 
                             std::unique_ptr<yams::Result<repair::EmbeddingRepairStats>> statsPtr;
-                            bool executed = with_token([&] {
-                                auto r = repair::repairMissingEmbeddings(content, meta, embed, rcfg,
-                                                                         missing);
-                                statsPtr =
-                                    std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(
-                                        std::move(r));
-                            });
+
+                            // Prefer daemon RPC to ensure consistency with add-time embedding pipeline
+                            bool fixSuccess = false;
+                            bool executed = try_acquire_token();
+                            if (executed) {
+                                try {
+                                    yams::daemon::ClientConfig ccfg;
+                                    ccfg.dataDir = services_->getConfig().dataDir;
+                                    ccfg.socketPath = services_->getConfig().socketPath;
+                                    ccfg.singleUseConnections = true;
+                                    ccfg.requestTimeout = std::chrono::seconds(120);
+                                    yams::daemon::DaemonClient client(ccfg);
+                                    yams::daemon::EmbedDocumentsRequest ed;
+                                    ed.modelName = ""; // let provider decide
+                                    ed.documentHashes = missing;
+                                    ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
+                                    ed.skipExisting = rcfg.skipExisting;
+                                    {
+                                        auto er = co_await client.streamingEmbedDocuments(ed);
+                                        if (er) {
+                                            repair::EmbeddingRepairStats statsLocal{};
+                                            statsLocal.documentsProcessed = er.value().requested;
+                                            statsLocal.embeddingsGenerated = er.value().embedded;
+                                            statsLocal.embeddingsSkipped = er.value().skipped;
+                                            statsLocal.failedOperations = er.value().failed;
+                                            statsPtr = std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(statsLocal);
+                                            fixSuccess = true;
+                                        } else {
+                                            spdlog::debug(
+                                                "RepairCoordinator: daemon EmbedDocuments failed: {} — falling back",
+                                                er.error().message);
+                                        }
+                                    }
+                                } catch (const std::exception& ex) {
+                                    spdlog::debug("RepairCoordinator: daemon embed exception: {} — falling back", ex.what());
+                                }
+                                // Fallback to direct repair utility
+                                auto r = repair::repairMissingEmbeddings(content, meta_repo, embed, rcfg,
+                                                                         missing, nullptr,
+                                                                         services_->getContentExtractors());
+                                statsPtr = std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(std::move(r));
+                                fixSuccess = statsPtr && *statsPtr;
+                                release_token();
+                            }
 
                             if (!executed) {
                                 fsm.on_fix_done(false);
                                 continue;
                             }
 
-                            bool fixSuccess = statsPtr && *statsPtr;
+                            // for daemon path statsPtr is set above, fixSuccess already true
                             fsm.on_fix_done(fixSuccess);
 
                             if (fixSuccess) {
                                 // Verify phase
                                 fsm.on_verify_done(true);
 
-                                // Reindex phase
+                                // Reindex phase (FTS5): opportunistically rebuild text index for affected docs
+                                try {
+                                    auto store = services_ ? services_->getContentStore() : nullptr;
+                                    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+                                    const auto& extractors = services_ ? services_->getContentExtractors() : std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>{};
+                                    if (store && meta) {
+                                        size_t fts_ok = 0, fts_fail = 0;
+                                        for (const auto& h : missing) {
+                                            // Lookup document metadata
+                                            auto docRes = meta->getDocumentByHash(h);
+                                            if (!docRes || !docRes.value().has_value()) {
+                                                ++fts_fail;
+                                                continue;
+                                            }
+                                            const auto& d = docRes.value().value();
+                                            // Extract text using the same utility path as ingestion
+                                            std::string ext = d.fileExtension;
+                                            if (!ext.empty() && ext[0] == '.') ext.erase(0, 1);
+                                            auto extractedOpt = yams::extraction::util::extractDocumentText(
+                                                store, h, d.mimeType, ext, extractors);
+                                            if (!extractedOpt || extractedOpt->empty()) {
+                                                ++fts_fail;
+                                                continue;
+                                            }
+                                            // Upsert into FTS5 and fuzzy index; ignore failures (best-effort)
+                                            auto ir = meta->indexDocumentContent(d.id, d.fileName, *extractedOpt, d.mimeType);
+                                            if (ir) {
+                                                (void)meta->updateFuzzyIndex(d.id);
+                                                ++fts_ok;
+                                            } else {
+                                                ++fts_fail;
+                                            }
+                                        }
+                                        spdlog::info("RepairCoordinator: FTS5 reindex complete for batch (ok={}, fail={})",
+                                                     fts_ok, fts_fail);
+                                    }
+                                } catch (const std::exception& e) {
+                                    spdlog::debug("RepairCoordinator: FTS5 reindex exception: {}", e.what());
+                                }
+
                                 fsm.on_reindex_done(true);
 
                                 if (state_) {
@@ -251,6 +572,14 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
                                         static_cast<uint64_t>(statsPtr->value().embeddingsSkipped);
                                     state_->stats.repairFailedOperations +=
                                         static_cast<uint64_t>(statsPtr->value().failedOperations);
+                                    // Update coarse progress for initial backlog
+                                    auto inc = static_cast<std::uint64_t>(
+                                        statsPtr->value().embeddingsGenerated +
+                                        statsPtr->value().embeddingsSkipped);
+                                    if (inc > 0) {
+                                        processed_.fetch_add(inc, std::memory_order_relaxed);
+                                        update_progress_pct();
+                                    }
                                 }
 
                                 spdlog::info("RepairCoordinator: repaired batch (generated={}, "
@@ -267,6 +596,14 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
                                 }
                             }
                         }
+static bool vector_maintenance_lock_exists(ServiceManager* services) {
+    try {
+        if (!services) return false;
+        auto dir = services->getResolvedDataDir();
+        std::error_code ec;
+        return std::filesystem::exists(dir / "vector_db_maintenance.lock", ec);
+    } catch (...) { return false; }
+}
                     }
                 }
             } catch (const std::exception& e) {
@@ -276,8 +613,21 @@ void RepairCoordinator::run(yams::compat::stop_token st) {
     }
 
     spdlog::info("RepairCoordinator stopped");
+    co_return;
 }
+#endif
 
 // token helpers implemented inline in header
+
+void RepairCoordinator::update_progress_pct() {
+    if (!state_)
+        return;
+    auto tot = totalBacklog_.load(std::memory_order_relaxed);
+    if (tot == 0)
+        return;
+    auto done = processed_.load(std::memory_order_relaxed);
+    int pct = static_cast<int>(std::min<std::uint64_t>(100, (done * 100) / tot));
+    state_->readiness.vectorIndexProgress.store(pct, std::memory_order_relaxed);
+}
 
 } // namespace yams::daemon

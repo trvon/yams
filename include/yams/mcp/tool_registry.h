@@ -16,6 +16,21 @@ namespace yams::mcp {
 
 using json = nlohmann::json;
 
+static nlohmann::json wrapToolResult(const nlohmann::json& structured, bool isError = false) {
+    nlohmann::json result;
+    // Format according to MCP spec - content array with text items
+    if (isError) {
+        // For errors, return the error object directly without wrapping in content
+        return structured;
+    }
+
+    // For successful results, wrap in content array as per MCP spec
+    result["content"] =
+        nlohmann::json::array({nlohmann::json{{"type", "text"}, {"text", structured.dump()}}});
+
+    return result;
+}
+
 // C++20 concepts for tool system
 template <typename T>
 concept ToolRequest = requires {
@@ -243,6 +258,7 @@ struct MCPListDocumentsRequest {
     using RequestType = MCPListDocumentsRequest;
 
     std::string pattern;
+    std::string name;
     std::vector<std::string> tags;
     std::string type;
     std::string mime;
@@ -309,6 +325,9 @@ struct MCPAddDirectoryRequest {
     json metadata;
     bool recursive = true;
     bool followSymlinks = false;
+    std::string snapshotId;
+    std::string snapshotLabel;
+    std::vector<std::string> tags;
 
     static MCPAddDirectoryRequest fromJson(const json& j);
     json toJson() const;
@@ -348,6 +367,8 @@ struct MCPGetByNameRequest {
     std::string name;
     bool rawContent = false; // Return raw content without processing
     bool extractText = true; // Apply text extraction for HTML/supported formats
+    bool latest = false;     // When ambiguous, select newest
+    bool oldest = false;     // When ambiguous, select oldest
 
     static MCPGetByNameRequest fromJson(const json& j);
     json toJson() const;
@@ -399,6 +420,8 @@ struct MCPCatDocumentRequest {
     std::string name;
     bool rawContent = false; // Return raw content without processing
     bool extractText = true; // Apply text extraction for HTML/supported formats
+    bool latest = false;     // When ambiguous, select newest
+    bool oldest = false;     // When ambiguous, select oldest
 
     static MCPCatDocumentRequest fromJson(const json& j);
     json toJson() const;
@@ -606,7 +629,45 @@ struct MCPSessionStopResponse {
     json toJson() const { return json{{"name", name}, {"cleared", cleared}}; }
 };
 
-// Generic tool wrapper template
+// Session pin/unpin DTOs
+struct MCPSessionPinRequest {
+    using RequestType = MCPSessionPinRequest;
+
+    std::string path;
+    std::vector<std::string> tags;
+    json metadata;
+
+    static MCPSessionPinRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSessionPinResponse {
+    using ResponseType = MCPSessionPinResponse;
+
+    size_t updated = 0;
+
+    static MCPSessionPinResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSessionUnpinRequest {
+    using RequestType = MCPSessionUnpinRequest;
+
+    std::string path;
+
+    static MCPSessionUnpinRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSessionUnpinResponse {
+    using ResponseType = MCPSessionUnpinResponse;
+
+    size_t updated = 0;
+
+    static MCPSessionUnpinResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 template <ToolRequest RequestType, ToolResponse ResponseType>
 requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
 class ToolWrapper {
@@ -621,25 +682,31 @@ public:
             auto result = handler_(req);
 
             if (!result) {
-                // Return structured error with code for consistency
-                return json{{"error",
-                             {{"code", -32603}, // Internal error
-                              {"message", result.error().message}}}};
+                // Return error wrapped in content array as per MCP spec
+                json errorContent = {
+                    {"content", json::array({json{{"type", "text"},
+                                                  {"text", "Error: " + result.error().message}}})},
+                    {"isError", true}};
+                return errorContent;
             }
 
-            // Wrap response in content field as per MCP protocol (content must be an array per MCP
-            // spec)
             auto responseJson = result.value().toJson();
-            return json{
-                {"content", json::array({json{{"type", "text"}, {"text", responseJson.dump()}}})}};
+            return wrapToolResult(responseJson, false);
+
         } catch (const json::exception& e) {
-            return json{{"error",
-                         {{"code", -32700}, // Parse error
-                          {"message", "JSON error: " + std::string(e.what())}}}};
+            // Return error wrapped in content array as per MCP spec
+            json errorContent = {
+                {"content", json::array({json{{"type", "text"},
+                                              {"text", "JSON error: " + std::string(e.what())}}})},
+                {"isError", true}};
+            return errorContent;
         } catch (const std::exception& e) {
-            return json{{"error",
-                         {{"code", -32603}, // Internal error
-                          {"message", "Error: " + std::string(e.what())}}}};
+            // Return error wrapped in content array as per MCP spec
+            json errorContent = {
+                {"content", json::array({json{{"type", "text"},
+                                              {"text", "Error: " + std::string(e.what())}}})},
+                {"isError", true}};
+            return errorContent;
         }
     }
 
@@ -661,25 +728,31 @@ public:
             auto result = co_await handler_(req);
 
             if (!result) {
-                // Return structured error with code for consistency
-                co_return json{{"error",
-                                {{"code", -32603}, // Internal error
-                                 {"message", result.error().message}}}};
+                // Return error wrapped in content array as per MCP spec
+                json errorContent = {
+                    {"content", json::array({json{{"type", "text"},
+                                                  {"text", "Error: " + result.error().message}}})},
+                    {"isError", true}};
+                co_return errorContent;
             }
 
-            // Wrap response in content field as per MCP protocol (content must be an array per MCP
-            // spec)
             auto responseJson = result.value().toJson();
-            co_return json{
-                {"content", json::array({json{{"type", "text"}, {"text", responseJson.dump()}}})}};
+            co_return wrapToolResult(responseJson, false);
+
         } catch (const json::exception& e) {
-            co_return json{{"error",
-                            {{"code", -32700}, // Parse error
-                             {"message", "JSON error: " + std::string(e.what())}}}};
+            // Return error wrapped in content array as per MCP spec
+            json errorContent = {
+                {"content", json::array({json{{"type", "text"},
+                                              {"text", "JSON error: " + std::string(e.what())}}})},
+                {"isError", true}};
+            co_return errorContent;
         } catch (const std::exception& e) {
-            co_return json{{"error",
-                            {{"code", -32603}, // Internal error
-                             {"message", "Error: " + std::string(e.what())}}}};
+            // Return error wrapped in content array as per MCP spec
+            json errorContent = {
+                {"content", json::array({json{{"type", "text"},
+                                              {"text", "Error: " + std::string(e.what())}}})},
+                {"isError", true}};
+            co_return errorContent;
         }
     }
 
@@ -719,7 +792,12 @@ public:
         if (auto it = handlers_.find(std::string(name)); it != handlers_.end()) {
             co_return co_await it->second(arguments);
         }
-        co_return json{{"error", "Unknown tool: " + std::string(name)}};
+        // Return error wrapped in content array as per MCP spec
+        json errorContent = {
+            {"content",
+             json::array({json{{"type", "text"}, {"text", "Unknown tool: " + std::string(name)}}})},
+            {"isError", true}};
+        co_return errorContent;
     }
 
     json listTools() const {

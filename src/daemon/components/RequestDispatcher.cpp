@@ -5,9 +5,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <regex>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/task.h>
@@ -18,9 +20,11 @@
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/name_resolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/latency_registry.h>
@@ -28,14 +32,29 @@
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/plugin_host.h>
+#include <yams/daemon/resource/plugin_loader.h>
+#include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
+
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/dispatch.hpp>
+#include <boost/asio/system_executor.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <yams/extraction/extraction_util.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/repair/embedding_repair_util.h>
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_executor.h>
 #include <yams/search/search_results.h>
+#include <yams/vector/batch_metrics.h>
+#include <yams/vector/dynamic_batcher.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/embedding_service.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
 
@@ -108,121 +127,284 @@ RequestDispatcher::RequestDispatcher(YamsDaemon* daemon, ServiceManager* service
                                      StateComponent* state)
     : daemon_(daemon), serviceManager_(serviceManager), state_(state) {}
 
+RequestDispatcher::RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager,
+                                     StateComponent* state, DaemonMetrics* metrics)
+    : daemon_(daemon), serviceManager_(serviceManager), state_(state), metrics_(metrics) {}
+
 RequestDispatcher::~RequestDispatcher() = default;
 
-Response RequestDispatcher::dispatch(const Request& req) {
-    // Check lifecycle state for all non-status requests
-    bool is_status_or_ping =
-        std::holds_alternative<StatusRequest>(req) || std::holds_alternative<PingRequest>(req);
+ServiceManager* RequestDispatcher::getServiceManager() const {
+    return serviceManager_;
+}
 
-    if (!is_status_or_ping) {
-        auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
-        if (lifecycleSnapshot.state != LifecycleState::Ready &&
-            lifecycleSnapshot.state != LifecycleState::Degraded) {
-            // Return status response for all requests when not ready
-            // This prevents hanging and gives clients current state info
+boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req) {
+    // Immediately handle status and ping requests for responsiveness, bypassing other checks.
+    if (std::holds_alternative<StatusRequest>(req)) {
+        co_return co_await handleStatusRequest(std::get<StatusRequest>(req));
+    }
+    if (std::holds_alternative<PingRequest>(req)) {
+        co_return co_await handlePingRequest(std::get<PingRequest>(req));
+    }
+
+    // For all other requests, check daemon readiness.
+    auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+    if (lifecycleSnapshot.state != LifecycleState::Ready &&
+        lifecycleSnapshot.state != LifecycleState::Degraded) {
+        // Core services must be ready to proceed.
+        bool coreReady = state_ && state_->readiness.metadataRepoReady.load() &&
+                         state_->readiness.contentStoreReady.load();
+        if (!coreReady) {
+            // If not ready, return a status response to inform the client.
             StatusRequest statusReq;
             statusReq.detailed = true;
-            return handleStatusRequest(statusReq);
+            co_return co_await handleStatusRequest(statusReq);
+        } else {
+            spdlog::debug("Proceeding with request during initialization (core ready)");
         }
     }
 
     // For requests that need services, check readiness.
-    bool needs_services = !std::holds_alternative<StatusRequest>(req) &&
-                          !std::holds_alternative<ShutdownRequest>(req) &&
-                          !std::holds_alternative<PingRequest>(req);
+    bool needs_services = !std::holds_alternative<ShutdownRequest>(req) &&
+                          !std::holds_alternative<GetStatsRequest>(req);
 
     if (needs_services) {
         if (!state_->readiness.metadataRepoReady.load()) {
-            return ErrorResponse{ErrorCode::InvalidState,
-                                 "Metadata repository not ready. Please try again shortly."};
+            co_return ErrorResponse{ErrorCode::InvalidState,
+                                    "Metadata repository not ready. Please try again shortly."};
         }
         if (!state_->readiness.contentStoreReady.load()) {
-            return ErrorResponse{ErrorCode::InvalidState,
-                                 "Content store not ready. Please try again shortly."};
+            co_return ErrorResponse{ErrorCode::InvalidState,
+                                    "Content store not ready. Please try again shortly."};
         }
     }
 
-    return std::visit(
-        [this](auto&& arg) -> Response {
-            using T = std::decay_t<decltype(arg)>;
-            if constexpr (std::is_same_v<T, StatusRequest>) {
-                return handleStatusRequest(arg);
-            } else if constexpr (std::is_same_v<T, ShutdownRequest>) {
-                return handleShutdownRequest(arg);
-            } else if constexpr (std::is_same_v<T, PingRequest>) {
-                return handlePingRequest(arg);
-            } else if constexpr (std::is_same_v<T, SearchRequest>) {
-                return handleSearchRequest(arg);
-            } else if constexpr (std::is_same_v<T, GetRequest>) {
-                return handleGetRequest(arg);
-            } else if constexpr (std::is_same_v<T, GetInitRequest>) {
-                return handleGetInitRequest(arg);
-            } else if constexpr (std::is_same_v<T, GetChunkRequest>) {
-                return handleGetChunkRequest(arg);
-            } else if constexpr (std::is_same_v<T, GetEndRequest>) {
-                return handleGetEndRequest(arg);
-            } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
-                return handleAddDocumentRequest(arg);
-            } else if constexpr (std::is_same_v<T, ListRequest>) {
-                return handleListRequest(arg);
-            } else if constexpr (std::is_same_v<T, DeleteRequest>) {
-                return handleDeleteRequest(arg);
-            } else if constexpr (std::is_same_v<T, GetStatsRequest>) {
-                return handleGetStatsRequest(arg);
-            } else if constexpr (std::is_same_v<T, GenerateEmbeddingRequest>) {
-                return handleGenerateEmbeddingRequest(arg);
-            } else if constexpr (std::is_same_v<T, BatchEmbeddingRequest>) {
-                return handleBatchEmbeddingRequest(arg);
-            } else if constexpr (std::is_same_v<T, LoadModelRequest>) {
-                return handleLoadModelRequest(arg);
-            } else if constexpr (std::is_same_v<T, UnloadModelRequest>) {
-                return handleUnloadModelRequest(arg);
-            } else if constexpr (std::is_same_v<T, ModelStatusRequest>) {
-                return handleModelStatusRequest(arg);
-            } else if constexpr (std::is_same_v<T, UpdateDocumentRequest>) {
-                return handleUpdateDocumentRequest(arg);
-            } else if constexpr (std::is_same_v<T, GrepRequest>) {
-                return handleGrepRequest(arg);
-            } else if constexpr (std::is_same_v<T, DownloadRequest>) {
-                return handleDownloadRequest(arg);
-            } else if constexpr (std::is_same_v<T, PrepareSessionRequest>) {
-                return handlePrepareSessionRequest(arg);
-            } else if constexpr (std::is_same_v<T, CancelRequest>) {
-                return handleCancelRequest(arg);
-            } else {
-                return ErrorResponse{ErrorCode::NotImplemented, "Request type not yet implemented"};
-            }
-        },
-        req);
+    Response out;
+    try {
+        if (req.valueless_by_exception()) {
+            spdlog::warn(
+                "RequestDispatcher: received valueless request variant; replying with error");
+            co_return ErrorResponse{ErrorCode::InvalidData,
+                                    "Malformed request (variant is valueless)"};
+        }
+    } catch (...) {
+        co_return ErrorResponse{ErrorCode::InvalidData, "Malformed request (variant check failed)"};
+    }
+    try {
+        out = co_await std::visit(
+            [this](auto&& arg) -> boost::asio::awaitable<Response> {
+                using T = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<T, StatusRequest>) {
+                    co_return co_await handleStatusRequest(arg);
+                } else if constexpr (std::is_same_v<T, ShutdownRequest>) {
+                    co_return co_await handleShutdownRequest(arg);
+                } else if constexpr (std::is_same_v<T, PingRequest>) {
+                    co_return co_await handlePingRequest(arg);
+                } else if constexpr (std::is_same_v<T, SearchRequest>) {
+                    co_return co_await handleSearchRequest(arg);
+                } else if constexpr (std::is_same_v<T, GetRequest>) {
+                    co_return co_await handleGetRequest(arg);
+                } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
+                    co_return co_await handleAddDocumentRequest(arg);
+                } else if constexpr (std::is_same_v<T, ListRequest>) {
+                    co_return co_await handleListRequest(arg);
+                } else if constexpr (std::is_same_v<T, DeleteRequest>) {
+                    co_return co_await handleDeleteRequest(arg);
+                } else if constexpr (std::is_same_v<T, GetStatsRequest>) {
+                    co_return co_await handleGetStatsRequest(arg);
+                } else if constexpr (std::is_same_v<T, GenerateEmbeddingRequest>) {
+                    co_return co_await handleGenerateEmbeddingRequest(arg);
+                } else if constexpr (std::is_same_v<T, BatchEmbeddingRequest>) {
+                    co_return co_await handleBatchEmbeddingRequest(arg);
+                } else if constexpr (std::is_same_v<T, LoadModelRequest>) {
+                    co_return co_await handleLoadModelRequest(arg);
+                } else if constexpr (std::is_same_v<T, UnloadModelRequest>) {
+                    co_return co_await handleUnloadModelRequest(arg);
+                } else if constexpr (std::is_same_v<T, ModelStatusRequest>) {
+                    co_return co_await handleModelStatusRequest(arg);
+                } else if constexpr (std::is_same_v<T, UpdateDocumentRequest>) {
+                    co_return co_await handleUpdateDocumentRequest(arg);
+                } else if constexpr (std::is_same_v<T, GrepRequest>) {
+                    co_return co_await handleGrepRequest(arg);
+                } else if constexpr (std::is_same_v<T, DownloadRequest>) {
+                    co_return co_await handleDownloadRequest(arg);
+                } else if constexpr (std::is_same_v<T, PrepareSessionRequest>) {
+                    co_return co_await handlePrepareSessionRequest(arg);
+                } else if constexpr (std::is_same_v<T, PluginScanRequest>) {
+                    co_return co_await handlePluginScanRequest(arg);
+                } else if constexpr (std::is_same_v<T, PluginLoadRequest>) {
+                    co_return co_await handlePluginLoadRequest(arg);
+                } else if constexpr (std::is_same_v<T, PluginUnloadRequest>) {
+                    co_return co_await handlePluginUnloadRequest(arg);
+                } else if constexpr (std::is_same_v<T, PluginTrustListRequest>) {
+                    co_return co_await handlePluginTrustListRequest(arg);
+                } else if constexpr (std::is_same_v<T, PluginTrustAddRequest>) {
+                    co_return co_await handlePluginTrustAddRequest(arg);
+                } else if constexpr (std::is_same_v<T, PluginTrustRemoveRequest>) {
+                    co_return co_await handlePluginTrustRemoveRequest(arg);
+                } else if constexpr (std::is_same_v<T, CancelRequest>) {
+                    co_return co_await handleCancelRequest(arg);
+                } else if constexpr (std::is_same_v<T, EmbedDocumentsRequest>) {
+                    co_return co_await handleEmbedDocumentsRequest(arg);
+                } else {
+                    co_return ErrorResponse{ErrorCode::NotImplemented,
+                                            "Request type not yet implemented"};
+                }
+            },
+            req);
+    } catch (const std::exception& e) {
+        spdlog::error("RequestDispatcher::dispatch exception: {}", e.what());
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Failed to process request: ") + e.what()};
+    } catch (...) {
+        spdlog::error("RequestDispatcher::dispatch unknown exception");
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                "Failed to process request: unknown error"};
+    }
+
+    try {
+        if (state_) {
+            state_->stats.requestsProcessed.fetch_add(1, std::memory_order_relaxed);
+        }
+    } catch (...) {
+    }
+
+    co_return out;
 }
 
-Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
-    // Minimal and safe status path to avoid early-crash scenarios
+boost::asio::any_io_executor RequestDispatcher::getWorkerExecutor() const {
+    try {
+        if (serviceManager_) {
+            return serviceManager_->getWorkerExecutor();
+        }
+    } catch (...) {
+    }
+    return boost::asio::system_executor();
+}
+std::function<void(bool)> RequestDispatcher::getWorkerJobSignal() const {
+    try {
+        if (serviceManager_)
+            return serviceManager_->getWorkerJobSignal();
+    } catch (...) {
+    }
+    return {};
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
+    // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
     try {
-        auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
-        res.running = true;
-        res.version = YAMS_VERSION_STRING;
-        res.uptimeSeconds = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
-        res.requestsProcessed = state_->stats.requestsProcessed.load();
-        res.activeConnections = state_->stats.activeConnections.load();
-        // Keep resource probes simple and resilient
-        res.memoryUsageMb = getMemoryUsage();
-        res.cpuUsagePercent = getCpuUsage();
+        // Fast mode toggles optional, potentially noisy probes or payloads
+        const bool fastMode = []() {
+            if (const char* v = std::getenv("YAMS_STATUS_FAST")) {
+                std::string s(v);
+                std::transform(s.begin(), s.end(), s.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return (s == "1" || s == "true" || s == "on" || s == "yes");
+            }
+            return false;
+        }();
+        if (metrics_) {
+            // Ensure snapshot reflects current worker pool state (avoid stale cache)
+            metrics_->refresh();
+            auto snap = metrics_->getSnapshot();
+            res.running = snap.running;
+            res.version = snap.version;
+            res.uptimeSeconds = snap.uptimeSeconds;
+            res.requestsProcessed = snap.requestsProcessed;
+            res.activeConnections = snap.activeConnections;
+            res.memoryUsageMb = snap.memoryUsageMb;
+            res.cpuUsagePercent = snap.cpuUsagePercent;
+            res.ready = snap.ready;
+            res.overallStatus = snap.overallStatus;
+            res.lifecycleState = snap.lifecycleState;
+            res.lastError = snap.lastError;
+            res.fsmTransitions = snap.fsmTransitions;
+            res.fsmHeaderReads = snap.fsmHeaderReads;
+            res.fsmPayloadReads = snap.fsmPayloadReads;
+            res.fsmPayloadWrites = snap.fsmPayloadWrites;
+            res.fsmBytesSent = snap.fsmBytesSent;
+            res.fsmBytesReceived = snap.fsmBytesReceived;
+            res.muxActiveHandlers = snap.muxActiveHandlers;
+            res.muxQueuedBytes = snap.muxQueuedBytes;
+            res.muxWriterBudgetBytes = snap.muxWriterBudgetBytes;
+            res.requestCounts["worker_threads"] = snap.workerThreads;
+            res.requestCounts["worker_active"] = snap.workerActive;
+            res.requestCounts["worker_queued"] = snap.workerQueued;
+            res.retryAfterMs = snap.retryAfterMs;
+            for (const auto& [k, v] : snap.readinessStates)
+                res.readinessStates[k] = v;
+            for (const auto& [k, v] : snap.initProgress)
+                res.initProgress[k] = v;
+        } else {
+            // Fallback to legacy direct reads
+            auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
+            res.running = true;
+            res.version = YAMS_VERSION_STRING;
+            res.uptimeSeconds = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
+            res.requestsProcessed = state_->stats.requestsProcessed.load();
+            res.activeConnections = state_->stats.activeConnections.load();
+            try {
+                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                if (lifecycleSnapshot.state == LifecycleState::Ready ||
+                    lifecycleSnapshot.state == LifecycleState::Degraded) {
+                    res.memoryUsageMb = getMemoryUsage();
+                    res.cpuUsagePercent = getCpuUsage();
+                }
+            } catch (...) {
+            }
+        }
 
-        // Overall readiness (back-compat)
-        res.ready = state_->readiness.fullyReady();
+        // If metrics are not present, keep legacy readiness fill
+        if (!metrics_) {
+            res.ready = state_->readiness.fullyReady();
+            res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
+            res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
+            res.readinessStates["database"] = state_->readiness.databaseReady.load();
+            res.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
+            res.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
+            res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
+            res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
+            res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+        }
+        // Expose degraded flag when hybrid engine is not yet available
+        try {
+            bool searchDegraded = true;
+            if (serviceManager_) {
+                auto engine = serviceManager_->getSearchEngineSnapshot();
+                searchDegraded = (engine == nullptr);
+            }
+            res.readinessStates["search_engine_degraded"] = searchDegraded;
+        } catch (...) {
+            res.readinessStates["search_engine_degraded"] = true;
+        }
 
-        // Detailed readiness states
-        res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
-        res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
-        res.readinessStates["database"] = state_->readiness.databaseReady.load();
-        res.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
-        res.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
-        res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
-        res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
-        res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+        // Surface vector scoring availability for doctor/status consumers
+        try {
+            bool vectorEmbeddingsAvailable = false;
+            bool vectorScoringEnabled = false;
+            if (serviceManager_) {
+                auto eng = serviceManager_->getSearchEngineSnapshot();
+                auto gen = serviceManager_->getEmbeddingGenerator();
+                if (gen) {
+                    try {
+                        vectorEmbeddingsAvailable = gen->isInitialized();
+                    } catch (...) {
+                    }
+                }
+                if (eng) {
+                    try {
+                        const auto& cfg = eng->getConfig();
+                        vectorScoringEnabled =
+                            (cfg.vector_weight > 0.0f) && vectorEmbeddingsAvailable;
+                    } catch (...) {
+                    }
+                }
+            }
+            res.readinessStates["vector_embeddings_available"] = vectorEmbeddingsAvailable;
+            res.readinessStates["vector_scoring_enabled"] = vectorScoringEnabled;
+        } catch (...) {
+        }
 
         // Progress for long-running initializations
         if (!state_->readiness.searchEngineReady.load())
@@ -232,16 +414,42 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
         if (!state_->readiness.modelProviderReady.load())
             res.initProgress["model_provider"] = state_->readiness.modelLoadProgress.load();
 
-        // Populate model provider presence only (avoid potential blocking calls while models load)
+        // Populate model provider and loaded model details when ready (expose memory usage)
         try {
-            auto provider = serviceManager_->getModelProvider();
-            if (provider) {
-                StatusResponse::ModelInfo mi;
-                mi.name = "(provider)";
-                mi.type = provider->getProviderName();
-                mi.memoryMb = 0;
-                mi.requestCount = 0;
-                res.models.push_back(std::move(mi));
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            if ((lifecycleSnapshot.state == LifecycleState::Ready ||
+                 lifecycleSnapshot.state == LifecycleState::Degraded) &&
+                !fastMode) {
+                auto provider = serviceManager_->getModelProvider();
+                if (provider) {
+                    // Provider summary row
+                    StatusResponse::ModelInfo mi;
+                    mi.name = "(provider)";
+                    mi.type = provider->getProviderName();
+                    mi.memoryMb = provider->getMemoryUsage() / (1024ull * 1024ull);
+                    mi.requestCount = 0;
+                    res.models.push_back(std::move(mi));
+                    // Loaded models with per-model memory when available
+                    try {
+                        auto loaded = provider->getLoadedModels();
+                        for (const auto& m : loaded) {
+                            StatusResponse::ModelInfo di;
+                            di.name = m;
+                            di.type = provider->getProviderName();
+                            size_t memBytes = 0;
+                            uint64_t reqCount = 0;
+                            if (auto infoR = provider->getModelInfo(m); infoR) {
+                                const auto& info = infoR.value();
+                                memBytes = info.memoryUsageBytes;
+                                reqCount = info.requestCount;
+                            }
+                            di.memoryMb = memBytes / (1024ull * 1024ull);
+                            di.requestCount = reqCount;
+                            res.models.push_back(std::move(di));
+                        }
+                    } catch (...) {
+                    }
+                }
             }
         } catch (...) {
         }
@@ -253,56 +461,92 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             switch (lifecycleSnapshot.state) {
                 case LifecycleState::Ready:
                     res.overallStatus = "ready";
+                    res.lifecycleState = "ready";
                     break;
                 case LifecycleState::Degraded:
                     res.overallStatus = "degraded";
+                    res.lifecycleState = "degraded";
                     break;
                 case LifecycleState::Initializing:
                     res.overallStatus = "initializing";
+                    res.lifecycleState = "initializing";
                     break;
                 case LifecycleState::Starting:
                     res.overallStatus = "starting";
+                    res.lifecycleState = "starting";
                     break;
                 case LifecycleState::Failed:
                     res.overallStatus = "failed";
+                    res.lifecycleState = "failed";
                     break;
                 case LifecycleState::Stopping:
                     res.overallStatus = "stopping";
+                    res.lifecycleState = "stopping";
                     break;
                 case LifecycleState::Stopped:
                     res.overallStatus = "stopped";
+                    res.lifecycleState = "stopped";
                     break;
                 case LifecycleState::Unknown:
                 default:
                     res.overallStatus = "initializing";
+                    res.lifecycleState = "initializing";
                     break;
+            }
+            if (!lifecycleSnapshot.lastError.empty()) {
+                res.lastError = lifecycleSnapshot.lastError;
             }
         } catch (...) {
             // Fallback to legacy readiness view
             res.overallStatus = state_->readiness.overallStatus();
+            res.lifecycleState = res.overallStatus;
         }
 
         // FSM/MUX metrics: expose only when daemon is Ready/Degraded to avoid early init races
-        try {
-            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
-            if (lifecycleSnapshot.state == LifecycleState::Ready ||
-                lifecycleSnapshot.state == LifecycleState::Degraded) {
-                auto snap = FsmMetricsRegistry::instance().snapshot();
-                res.fsmTransitions = snap.transitions;
-                res.fsmHeaderReads = snap.headerReads;
-                res.fsmPayloadReads = snap.payloadReads;
-                res.fsmPayloadWrites = snap.payloadWrites;
-                res.fsmBytesSent = snap.bytesSent;
-                res.fsmBytesReceived = snap.bytesReceived;
+        if (!metrics_) {
+            try {
+                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                if (lifecycleSnapshot.state == LifecycleState::Ready ||
+                    lifecycleSnapshot.state == LifecycleState::Degraded) {
+                    auto snap = FsmMetricsRegistry::instance().snapshot();
+                    res.fsmTransitions = snap.transitions;
+                    res.fsmHeaderReads = snap.headerReads;
+                    res.fsmPayloadReads = snap.payloadReads;
+                    res.fsmPayloadWrites = snap.payloadWrites;
+                    res.fsmBytesSent = snap.bytesSent;
+                    res.fsmBytesReceived = snap.bytesReceived;
 
-                auto msnap = MuxMetricsRegistry::instance().snapshot();
-                res.muxActiveHandlers = msnap.activeHandlers;
-                res.muxQueuedBytes = msnap.queuedBytes;
-                res.muxWriterBudgetBytes = msnap.writerBudgetBytes;
+                    auto msnap = MuxMetricsRegistry::instance().snapshot();
+                    res.muxActiveHandlers = msnap.activeHandlers;
+                    res.muxQueuedBytes = msnap.queuedBytes;
+                    res.muxWriterBudgetBytes = msnap.writerBudgetBytes;
+                }
+            } catch (...) {
+                // best-effort only
             }
-        } catch (...) {
-            // best-effort only
         }
+
+        if (!metrics_) {
+            try {
+                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                if (lifecycleSnapshot.state == LifecycleState::Ready ||
+                    lifecycleSnapshot.state == LifecycleState::Degraded) {
+                    std::size_t threads = 0, active = 0, queued = 0;
+                    if (serviceManager_) {
+                        threads = serviceManager_->getWorkerThreads();
+                        active = serviceManager_->getWorkerActive();
+                        queued = 0;
+                    } else {
+                        threads = std::max(1u, std::thread::hardware_concurrency());
+                    }
+                    res.requestCounts["worker_threads"] = threads;
+                    res.requestCounts["worker_active"] = active;
+                    res.requestCounts["worker_queued"] = queued;
+                }
+            } catch (...) {
+            }
+        }
+
     } catch (...) {
         // On any unexpected issue, return a minimal running=false stub to avoid crash
         StatusResponse fallback;
@@ -315,139 +559,423 @@ Response RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
         fallback.cpuUsagePercent = 0;
         fallback.version = YAMS_VERSION_STRING;
         fallback.overallStatus = "Starting";
-        return fallback;
+        co_return fallback;
     }
-    return res;
+    co_return res;
 }
 
-Response RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
     spdlog::info("Received shutdown request (graceful={})", req.graceful);
 
-    // Request graceful shutdown via daemon
+    // Important: ensure the shutdown response is flushed back to the client before the
+    // socket server begins tearing down the IO context. Schedule the stop slightly later
+    // on a detached thread to give RequestHandler time to write the response frame.
     if (daemon_) {
-        if (req.graceful) {
-            // Graceful shutdown - request stop and let daemon handle cleanup
-            daemon_->requestStop();
-        } else {
-            // Force immediate shutdown
-            daemon_->requestStop();
-        }
+        bool graceful = req.graceful;
+        std::thread([d = daemon_, graceful]() {
+            try {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } catch (...) {
+            }
+            d->requestStop();
+            (void)graceful; // reserved for future policy differences
+        }).detach();
     }
 
-    return SuccessResponse{"Shutdown initiated"};
+    co_return SuccessResponse{"Shutdown initiated"};
 }
 
-Response RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req) {
+// Ensure error messages are valid UTF-8 for protobuf transport
+static inline std::string sanitizeUtf8(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
+    size_t i = 0, n = s.size();
+    auto append_replacement = [&]() { out += "\xEF\xBF\xBD"; };
+    while (i < n) {
+        unsigned char c = p[i];
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+            i++;
+            continue;
+        }
+        // 2-byte
+        if ((c & 0xE0) == 0xC0 && i + 1 < n) {
+            unsigned char c1 = p[i + 1];
+            if ((c1 & 0xC0) == 0x80 && (c >= 0xC2)) {
+                out.push_back(static_cast<char>(c));
+                out.push_back(static_cast<char>(c1));
+                i += 2;
+                continue;
+            }
+        }
+        // 3-byte
+        if ((c & 0xF0) == 0xE0 && i + 2 < n) {
+            unsigned char c1 = p[i + 1], c2 = p[i + 2];
+            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
+                // Avoid surrogates
+                if (!(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0)) {
+                    out.push_back(static_cast<char>(c));
+                    out.push_back(static_cast<char>(c1));
+                    out.push_back(static_cast<char>(c2));
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        // 4-byte
+        if ((c & 0xF8) == 0xF0 && i + 3 < n) {
+            unsigned char c1 = p[i + 1], c2 = p[i + 2], c3 = p[i + 3];
+            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
+                // valid range 0x010000..0x10FFFF
+                if (!(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90) && c <= 0xF4) {
+                    out.push_back(static_cast<char>(c));
+                    out.push_back(static_cast<char>(c1));
+                    out.push_back(static_cast<char>(c2));
+                    out.push_back(static_cast<char>(c3));
+                    i += 4;
+                    continue;
+                }
+            }
+        }
+        append_replacement();
+        i++;
+    }
+    return out;
+}
+
+static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
+    return ErrorResponse{code, sanitizeUtf8(msg)};
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req) {
     try {
         auto provider = serviceManager_->getModelProvider();
         if (!provider || !provider->isAvailable()) {
-            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
-        }
-        // If a model name is provided, best-effort load it first
-        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
-            auto lr = provider->loadModel(req.modelName);
-            if (!lr) {
-                return ErrorResponse{lr.error().code, lr.error().message};
+            // Opportunistic adoption: try to adopt a provider from loaded hosts
+            try {
+                if (serviceManager_) {
+                    (void)serviceManager_->adoptModelProviderFromHosts();
+                    provider = serviceManager_->getModelProvider();
+                }
+            } catch (...) {
+            }
+            if (!provider || !provider->isAvailable()) {
+                co_return makeError(ErrorCode::InvalidState, "Model provider unavailable");
             }
         }
-        auto r = provider->generateEmbedding(req.text);
+        spdlog::info("Embedding request: model='{}' normalize={} text_len={}", req.modelName,
+                     req.normalize ? "true" : "false", req.text.size());
+        // If a model name is provided, best-effort load it first with soft timeout
+        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
+            int timeout_ms = 30000;
+            if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+                try {
+                    timeout_ms = std::stoi(env);
+                    if (timeout_ms < 1000)
+                        timeout_ms = 1000;
+                } catch (...) {
+                }
+            }
+            auto fut = std::async(std::launch::async,
+                                  [&]() { return provider->loadModel(req.modelName); });
+            if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+                std::future_status::timeout) {
+                co_return makeError(ErrorCode::Timeout, "Model load timed out");
+            }
+            auto lr = fut.get();
+            if (!lr) {
+                co_return makeError(lr.error().code, lr.error().message);
+            }
+        }
+        Result<std::vector<float>> r =
+            req.modelName.empty() ? provider->generateEmbedding(req.text)
+                                  : provider->generateEmbeddingFor(req.modelName, req.text);
         if (!r) {
-            return ErrorResponse{r.error().code, r.error().message};
+            co_return makeError(r.error().code, r.error().message);
         }
         EmbeddingResponse resp;
         resp.embedding = std::move(r.value());
         resp.dimensions = resp.embedding.size();
         resp.modelUsed = req.modelName;
         resp.processingTimeMs = 0;
-        return resp;
+        co_return resp;
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Embedding generation failed: ") + e.what()};
+        co_return makeError(ErrorCode::InternalError,
+                            std::string("Embedding generation failed: ") + e.what());
     }
 }
 
-Response RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req) {
     try {
+        auto t0 = std::chrono::steady_clock::now();
+        auto hex_preview = [](const std::string& s, std::size_t n = 8) {
+            std::ostringstream oss;
+            oss << std::hex;
+            std::size_t lim = std::min(n, s.size());
+            for (std::size_t i = 0; i < lim; ++i) {
+                oss << static_cast<unsigned int>(static_cast<unsigned char>(s[i]));
+                if (i + 1 < lim)
+                    oss << ' ';
+            }
+            return oss.str();
+        };
+        spdlog::info("BatchEmbedding dispatch: model='{}' (len={}, hex[:8]={}) count={} "
+                     "normalize={} batchSize={}",
+                     req.modelName, req.modelName.size(), hex_preview(req.modelName),
+                     req.texts.size(), req.normalize ? "true" : "false", req.batchSize);
         auto provider = serviceManager_->getModelProvider();
         if (!provider || !provider->isAvailable()) {
-            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
-        }
-        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
-            auto lr = provider->loadModel(req.modelName);
-            if (!lr) {
-                return ErrorResponse{lr.error().code, lr.error().message};
+            // Opportunistic adoption: try to adopt a provider from loaded hosts
+            try {
+                if (serviceManager_) {
+                    (void)serviceManager_->adoptModelProviderFromHosts();
+                    provider = serviceManager_->getModelProvider();
+                }
+            } catch (...) {
+            }
+            if (!provider || !provider->isAvailable()) {
+                co_return makeError(ErrorCode::InvalidState, "Model provider unavailable");
             }
         }
-        auto r = provider->generateBatchEmbeddings(req.texts);
-        if (!r) {
-            return ErrorResponse{r.error().code, r.error().message};
+        spdlog::info("Batch embedding request: model='{}' count={} normalize={} batchSize={}",
+                     req.modelName, req.texts.size(), req.normalize ? "true" : "false",
+                     req.batchSize);
+        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
+            int timeout_ms = 30000;
+            if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+                try {
+                    timeout_ms = std::stoi(env);
+                    if (timeout_ms < 1000)
+                        timeout_ms = 1000;
+                } catch (...) {
+                }
+            }
+            auto fut = std::async(std::launch::async,
+                                  [&]() { return provider->loadModel(req.modelName); });
+            if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+                std::future_status::timeout) {
+                co_return makeError(ErrorCode::Timeout, "Model load timed out");
+            }
+            auto lr = fut.get();
+            if (!lr) {
+                co_return makeError(lr.error().code, lr.error().message);
+            }
         }
+        Result<std::vector<std::vector<float>>> r =
+            req.modelName.empty() ? provider->generateBatchEmbeddings(req.texts)
+                                  : provider->generateBatchEmbeddingsFor(req.modelName, req.texts);
+
+        // Fallback: some providers do not implement batch APIs. Fall back to per-item generation.
+        if (!r && (r.error().code == ErrorCode::NotImplemented ||
+                   r.error().code == ErrorCode::NotSupported)) {
+            spdlog::warn("Batch embeddings not implemented for provider; falling back to per-item "
+                         "generation (count={})",
+                         req.texts.size());
+            std::vector<std::vector<float>> out;
+            out.reserve(req.texts.size());
+            for (const auto& t : req.texts) {
+                Result<std::vector<float>> one =
+                    req.modelName.empty() ? provider->generateEmbedding(t)
+                                          : provider->generateEmbeddingFor(req.modelName, t);
+                if (!one) {
+                    co_return makeError(one.error().code, one.error().message);
+                }
+                out.push_back(std::move(one.value()));
+            }
+            r = std::move(out);
+        }
+
+        if (!r) {
+            co_return makeError(r.error().code, r.error().message);
+        }
+        auto embeddings = std::move(r.value());
+        const size_t dim = embeddings.empty() ? 0 : embeddings.front().size();
+        const size_t count = embeddings.size();
+        auto t1 = std::chrono::steady_clock::now();
+        const uint32_t proc_ms = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+        spdlog::info("BatchEmbedding completed: model='{}' count={} dim={} time_ms={} batchSize={}",
+                     req.modelName, count, dim, proc_ms, req.batchSize);
+
+        // Prefer handle-based finalization to avoid large frames: create a retrieval session
+        bool use_handle = true;
+        if (const char* env = std::getenv("YAMS_EMBED_RETURN_HANDLE")) {
+            std::string s(env);
+            for (auto& c : s)
+                c = static_cast<char>(std::tolower(c));
+            if (s == "0" || s == "false" || s == "off" || s == "no")
+                use_handle = false;
+        }
+        if (use_handle && serviceManager_ && serviceManager_->getRetrievalSessionManager()) {
+            try {
+                // Serialize embeddings as contiguous f32 little-endian row-major
+                std::vector<std::byte> bytes;
+                bytes.reserve(dim * count * sizeof(float));
+                for (const auto& v : embeddings) {
+                    const float* p = v.data();
+                    bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(p),
+                                 reinterpret_cast<const std::byte*>(p) +
+                                     (v.size() * sizeof(float)));
+                }
+                auto* rsm = serviceManager_->getRetrievalSessionManager();
+                const uint32_t chunk = TuneAdvisor::chunkSize();
+                const uint64_t tid = rsm->create(std::move(bytes), chunk, 0);
+                GetInitResponse init;
+                init.transferId = tid;
+                init.totalSize = static_cast<uint64_t>(dim * count * sizeof(float));
+                init.chunkSize = chunk;
+                init.metadata["format"] = "embeddings_f32le";
+                init.metadata["dim"] = std::to_string(dim);
+                init.metadata["count"] = std::to_string(count);
+                init.metadata["model"] = req.modelName;
+                init.metadata["processing_ms"] = std::to_string(proc_ms);
+                co_return init;
+            } catch (const std::exception& ex) {
+                spdlog::debug("Handle-based embedding finalize failed: {} — falling back to inline",
+                              ex.what());
+            }
+        }
+
+        // Fallback: inline response
         BatchEmbeddingResponse resp;
-        resp.embeddings = std::move(r.value());
-        resp.dimensions = resp.embeddings.empty() ? 0 : resp.embeddings.front().size();
+        resp.embeddings = std::move(embeddings);
+        resp.dimensions = dim;
         resp.modelUsed = req.modelName;
-        resp.processingTimeMs = 0;
-        resp.successCount = resp.embeddings.size();
+        resp.processingTimeMs = proc_ms;
+        resp.successCount = count;
         resp.failureCount = 0;
-        return resp;
+
+        // Best-effort: upsert embeddings into in-memory vector index when available
+        try {
+            auto vecMgr = serviceManager_->getVectorIndexManager();
+            if (vecMgr && vecMgr->isInitialized() && !resp.embeddings.empty()) {
+                std::vector<std::string> ids;
+                ids.reserve(resp.embeddings.size());
+                // Create deterministic but ad-hoc IDs from input text
+                auto to_hex = [](uint64_t v) {
+                    char buf[17];
+                    snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+                    return std::string(buf);
+                };
+                for (size_t i = 0; i < resp.embeddings.size(); ++i) {
+                    uint64_t h = std::hash<std::string>{}(i < req.texts.size() ? req.texts[i]
+                                                                               : std::to_string(i));
+                    ids.emplace_back(std::string("adhoc_") + to_hex(h));
+                }
+                std::vector<std::map<std::string, std::string>> meta(ids.size());
+                auto addRes = vecMgr->addVectors(ids, resp.embeddings, meta);
+                if (!addRes) {
+                    spdlog::debug("VectorIndexManager addVectors failed: {}",
+                                  addRes.error().message);
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Vector index upsert skipped: {}", e.what());
+        }
+        co_return resp;
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Batch embedding failed: ") + e.what()};
+        co_return makeError(ErrorCode::InternalError,
+                            std::string("Batch embedding failed: ") + e.what());
     }
 }
 
-Response RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
     try {
         auto provider = serviceManager_->getModelProvider();
         if (!provider || !provider->isAvailable()) {
-            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
+            // Opportunistic adoption: try to adopt a provider from loaded hosts before failing
+            try {
+                if (serviceManager_) {
+                    (void)serviceManager_->adoptModelProviderFromHosts();
+                    provider = serviceManager_->getModelProvider();
+                }
+            } catch (...) {
+            }
+            if (!provider || !provider->isAvailable()) {
+                co_return makeError(ErrorCode::InvalidState, "Model provider unavailable");
+            }
         }
         if (req.modelName.empty()) {
-            return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
+            co_return makeError(ErrorCode::InvalidData, "modelName is required");
         }
-        auto r = provider->loadModel(req.modelName);
+        // Load model with soft timeout (options-aware)
+        int timeout_ms = 30000;
+        if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+            try {
+                timeout_ms = std::stoi(env);
+                if (timeout_ms < 1000)
+                    timeout_ms = 1000;
+            } catch (...) {
+            }
+        }
+        Result<void> r;
+        if (!req.optionsJson.empty()) {
+            auto fut = std::async(std::launch::async, [&]() {
+                return provider->loadModelWithOptions(req.modelName, req.optionsJson);
+            });
+            if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+                std::future_status::timeout) {
+                co_return makeError(ErrorCode::Timeout, "Model load timed out");
+            }
+            r = fut.get();
+        } else {
+            auto fut = std::async(std::launch::async,
+                                  [&]() { return provider->loadModel(req.modelName); });
+            if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+                std::future_status::timeout) {
+                co_return makeError(ErrorCode::Timeout, "Model load timed out");
+            }
+            r = fut.get();
+        }
         if (!r) {
-            return ErrorResponse{r.error().code, r.error().message};
+            co_return makeError(r.error().code, r.error().message);
         }
         ModelLoadResponse resp;
         resp.success = true;
         resp.modelName = req.modelName;
         resp.memoryUsageMb = provider->getMemoryUsage() / (1024 * 1024);
         resp.loadTimeMs = 0;
-        return resp;
+        co_return resp;
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Load model failed: ") + e.what()};
+        co_return makeError(ErrorCode::InternalError,
+                            std::string("Load model failed: ") + e.what());
     }
 }
 
-Response RequestDispatcher::handleUnloadModelRequest(const UnloadModelRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleUnloadModelRequest(const UnloadModelRequest& req) {
     try {
         auto provider = serviceManager_->getModelProvider();
         if (!provider || !provider->isAvailable()) {
-            return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
+            co_return ErrorResponse{ErrorCode::InvalidState, "Model provider unavailable"};
         }
         if (req.modelName.empty()) {
-            return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
+            co_return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
         }
         auto r = provider->unloadModel(req.modelName);
         if (!r) {
-            return ErrorResponse{r.error().code, r.error().message};
+            co_return ErrorResponse{r.error().code, r.error().message};
         }
         SuccessResponse resp{"Model unloaded"};
-        return resp;
+        co_return resp;
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Unload model failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Unload model failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
     try {
         auto provider = serviceManager_->getModelProvider();
         ModelStatusResponse resp;
         if (!provider || !provider->isAvailable()) {
-            return resp;
+            co_return resp;
         }
         auto loaded = provider->getLoadedModels();
         for (const auto& name : loaded) {
@@ -458,10 +986,14 @@ Response RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& r
             d.name = name;
             d.path = "";
             d.loaded = true;
-            d.isHot = false;
-            d.memoryMb = 0; // per-model memory not exposed
+            // After loadModel warmup, a loaded model has a ready session; treat as hot
+            d.isHot = true;
+            d.memoryMb = 0;
+            if (auto mi = provider->getModelInfo(name); mi) {
+                d.memoryMb = mi.value().memoryUsageBytes / (1024 * 1024);
+                d.maxSequenceLength = mi.value().maxSequenceLength;
+            }
             d.embeddingDim = provider->getEmbeddingDim(name);
-            d.maxSequenceLength = 0;
             d.requestCount = 0;
             d.errorCount = 0;
             d.loadTime = {};
@@ -470,33 +1002,36 @@ Response RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& r
         }
         resp.totalMemoryMb = provider->getMemoryUsage() / (1024 * 1024);
         resp.maxMemoryMb = 0;
-        return resp;
+        co_return resp;
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Model status failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Model status failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handlePingRequest(const PingRequest& /*req*/) {
+boost::asio::awaitable<Response> RequestDispatcher::handlePingRequest(const PingRequest& /*req*/) {
     PongResponse res;
     res.serverTime = std::chrono::steady_clock::now();
-    return res;
+    co_return res;
 }
 
-Response RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
+boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
     try {
-        // Use app services for search
         auto appContext = serviceManager_->getAppContext();
+        appContext.workerExecutor = getWorkerExecutor();
         auto searchService = app::services::makeSearchService(appContext);
 
-        // Map daemon SearchRequest to app::services::SearchRequest
         app::services::SearchRequest serviceReq;
         serviceReq.query = req.query;
         serviceReq.limit = req.limit;
         serviceReq.fuzzy = req.fuzzy;
         serviceReq.similarity = static_cast<float>(req.similarity);
         serviceReq.hash = req.hashQuery;
-        serviceReq.type = req.searchType.empty() ? "hybrid" : req.searchType;
+        // Default type; may be overridden by fallback below
+        // Prefer keyword search by default to maximize portability in environments
+        // where vector acceleration may be unavailable. Clients can still request
+        // explicit types via req.searchType.
+        serviceReq.type = req.searchType.empty() ? "keyword" : req.searchType;
         serviceReq.verbose = req.verbose;
         serviceReq.literalText = req.literalText;
         serviceReq.showHash = req.showHash;
@@ -506,21 +1041,46 @@ Response RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
         serviceReq.beforeContext = req.beforeContext;
         serviceReq.afterContext = req.afterContext;
         serviceReq.context = req.context;
-        // pathPattern, tags, matchAllTags not available in daemon protocol yet
+        // New: map engine-level filters from daemon request
+        serviceReq.pathPattern = req.pathPattern;
+        serviceReq.tags = req.tags;
+        serviceReq.matchAllTags = req.matchAllTags;
+        serviceReq.extension = req.extension;
+        serviceReq.mimeType = req.mimeType;
+        serviceReq.fileType = req.fileType;
+        serviceReq.textOnly = req.textOnly;
+        serviceReq.binaryOnly = req.binaryOnly;
+        serviceReq.createdAfter = req.createdAfter;
+        serviceReq.createdBefore = req.createdBefore;
+        serviceReq.modifiedAfter = req.modifiedAfter;
+        serviceReq.modifiedBefore = req.modifiedBefore;
+        serviceReq.indexedAfter = req.indexedAfter;
+        serviceReq.indexedBefore = req.indexedBefore;
 
-        auto result = searchService->search(serviceReq);
+        // If vector scoring is disabled via env, prefer metadata search.
+        if (const char* disVec = std::getenv("YAMS_DISABLE_VECTOR");
+            disVec && *disVec && std::string(disVec) != "0" && std::string(disVec) != "false") {
+            serviceReq.type = "metadata";
+            spdlog::debug("YAMS_DISABLE_VECTOR set; forcing metadata-only search.");
+        }
+
+        // If the hybrid engine is not ready, fall back to a metadata-only search.
+        if (!state_->readiness.searchEngineReady.load()) {
+            serviceReq.type = "metadata";
+            spdlog::debug("Hybrid search engine not ready, falling back to metadata search.");
+        }
+
+        auto result = co_await searchService->search(serviceReq); // Task<Result<...>> is awaitable
         if (!result) {
-            return ErrorResponse{result.error().code, result.error().message};
+            co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
 
-        // Map app::services::SearchResponse to daemon SearchResponse
         SearchResponse response;
         response.totalCount = serviceResp.total;
         response.elapsed = std::chrono::milliseconds(serviceResp.executionTimeMs);
 
-        // Convert results
         for (const auto& item : serviceResp.results) {
             SearchResult resultItem;
             resultItem.id = std::to_string(item.id);
@@ -528,8 +1088,6 @@ Response RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
             resultItem.path = item.path;
             resultItem.score = item.score;
             resultItem.snippet = item.snippet;
-
-            // Add metadata
             if (!item.hash.empty()) {
                 resultItem.metadata["hash"] = item.hash;
             }
@@ -539,56 +1097,40 @@ Response RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
             if (!item.title.empty()) {
                 resultItem.metadata["title"] = item.title;
             }
-
             response.results.push_back(std::move(resultItem));
         }
 
-        // Ensure results are sorted by score (descending) for stable ranking
         std::stable_sort(
             response.results.begin(), response.results.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError, std::string("Search failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Search failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleGetRequest(const GetRequest& req) {
+boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRequest& req) {
     try {
-        // Get DocumentService for service-based retrieval
         auto appContext = serviceManager_->getAppContext();
         auto documentService = app::services::makeDocumentService(appContext);
 
-        // Map daemon GetRequest to service RetrieveDocumentRequest
         app::services::RetrieveDocumentRequest serviceReq;
-
-        // Target selection
         serviceReq.hash = req.hash;
         serviceReq.name = req.name;
-
-        // File type filters
         serviceReq.fileType = req.fileType;
         serviceReq.mimeType = req.mimeType;
         serviceReq.extension = req.extension;
-        // Note: binaryOnly/textOnly handled by service filtering logic
-
-        // Selection options
         serviceReq.latest = req.latest;
         serviceReq.oldest = req.oldest;
-
-        // Output options
         serviceReq.outputPath = req.outputPath;
         serviceReq.metadataOnly = req.metadataOnly;
         serviceReq.maxBytes = req.maxBytes;
         serviceReq.chunkSize = req.chunkSize;
-
-        // Content options
-        serviceReq.includeContent = !req.metadataOnly; // include content unless metadata-only
+        serviceReq.includeContent = !req.metadataOnly;
         serviceReq.raw = req.raw;
         serviceReq.extract = req.extract;
-
-        // Knowledge graph options
         serviceReq.graph = req.showGraph;
         serviceReq.depth = req.graphDepth;
 
@@ -596,24 +1138,17 @@ Response RequestDispatcher::handleGetRequest(const GetRequest& req) {
                       "name='{}', metadataOnly={})",
                       req.hash, req.name, req.metadataOnly);
 
-        // Call DocumentService
         auto result = documentService->retrieve(serviceReq);
         if (!result) {
             spdlog::warn("RequestDispatcher: DocumentService::retrieve failed: {}",
                          result.error().message);
-            return ErrorResponse{result.error().code, result.error().message};
+            co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
-        spdlog::debug("RequestDispatcher: DocumentService returned {} documents, graphEnabled={}",
-                      serviceResp.document ? 1 : serviceResp.documents.size(),
-                      serviceResp.graphEnabled);
-
-        // Map service RetrieveDocumentResponse to daemon GetResponse
         GetResponse response;
 
         if (serviceResp.document.has_value()) {
-            // Single document result
             const auto& doc = serviceResp.document.value();
             response.hash = doc.hash;
             response.path = doc.path;
@@ -622,27 +1157,19 @@ Response RequestDispatcher::handleGetRequest(const GetRequest& req) {
             response.size = doc.size;
             response.mimeType = doc.mimeType;
             response.fileType = doc.fileType;
-
-            // Time information
             response.created = doc.created;
             response.modified = doc.modified;
             response.indexed = doc.indexed;
-
-            // Content (if included)
             if (doc.content.has_value()) {
                 response.content = doc.content.value();
                 response.hasContent = true;
             } else {
                 response.hasContent = false;
             }
-
-            // Metadata (convert unordered_map to map)
             for (const auto& [key, value] : doc.metadata) {
                 response.metadata[key] = value;
             }
-
         } else if (!serviceResp.documents.empty()) {
-            // Multiple documents - return the first one (similar to current behavior)
             const auto& doc = serviceResp.documents[0];
             response.hash = doc.hash;
             response.path = doc.path;
@@ -651,27 +1178,22 @@ Response RequestDispatcher::handleGetRequest(const GetRequest& req) {
             response.size = doc.size;
             response.mimeType = doc.mimeType;
             response.fileType = doc.fileType;
-
             response.created = doc.created;
             response.modified = doc.modified;
             response.indexed = doc.indexed;
-
             if (doc.content.has_value()) {
                 response.content = doc.content.value();
                 response.hasContent = true;
             } else {
                 response.hasContent = false;
             }
-
-            // Metadata (convert unordered_map to map)
             for (const auto& [key, value] : doc.metadata) {
                 response.metadata[key] = value;
             }
         } else {
-            return ErrorResponse{ErrorCode::NotFound, "No documents found matching criteria"};
+            co_return ErrorResponse{ErrorCode::NotFound, "No documents found matching criteria"};
         }
 
-        // Knowledge graph results
         response.graphEnabled = serviceResp.graphEnabled;
         if (serviceResp.graphEnabled) {
             response.related.reserve(serviceResp.related.size());
@@ -687,20 +1209,15 @@ Response RequestDispatcher::handleGetRequest(const GetRequest& req) {
             }
         }
 
-        // Result information
         response.totalBytes = serviceResp.totalBytes;
         response.outputWritten = serviceResp.outputPath.has_value();
 
-        spdlog::debug(
-            "RequestDispatcher: Mapped to GetResponse (hash='{}', hasContent={}, graphRelated={})",
-            response.hash, response.hasContent, response.related.size());
-
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
         spdlog::error("RequestDispatcher: GetRequest handling failed: {}", e.what());
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Get request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Get request failed: ") + e.what()};
     }
 }
 
@@ -728,7 +1245,8 @@ int RequestDispatcher::prepareSession(const PrepareSessionOptions& opts) {
     }
 }
 
-Response RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequest& req) {
     PrepareSessionOptions opts;
     opts.sessionName = req.sessionName;
     opts.maxCores = req.cores;
@@ -740,129 +1258,100 @@ Response RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequ
 
     int warmed = prepareSession(opts);
     if (warmed < 0) {
-        return ErrorResponse{ErrorCode::InternalError, "Session prepare failed"};
+        co_return ErrorResponse{ErrorCode::InternalError, "Session prepare failed"};
     }
     PrepareSessionResponse resp;
     resp.warmedCount = static_cast<uint64_t>(warmed);
     resp.message = "OK";
-    return resp;
+    co_return resp;
 }
 
-Response RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
-    try {
-        auto metadataRepo = serviceManager_->getMetadataRepo();
-        auto contentStore = serviceManager_->getContentStore();
-        auto sessionManager = serviceManager_->getRetrievalSessionManager();
-
-        if (!metadataRepo || !contentStore || !sessionManager) {
-            return ErrorResponse{ErrorCode::NotInitialized, "Required services not available"};
-        }
-
-        // Resolve hash from request
-        auto hashResult = yams::common::resolve_hash_or_name(*metadataRepo, req.hash, req.name);
-        if (!hashResult) {
-            return ErrorResponse{hashResult.error().code, hashResult.error().message};
-        }
-
-        // Get document metadata
-        auto docResult = metadataRepo->getDocumentByHash(hashResult.value());
-        if (!docResult || !docResult.value()) {
-            return ErrorResponse{ErrorCode::NotFound, "Document not found"};
-        }
-
-        if (req.metadataOnly) {
-            // Return metadata without creating session
-            GetInitResponse response;
-            response.transferId = 0; // No session created
-            const auto& doc = docResult.value().value();
-            response.totalSize = doc.fileSize;
-            response.metadata["path"] = doc.filePath;
-            response.metadata["mimeType"] = doc.mimeType;
-            response.metadata["fileName"] = doc.fileName;
-            return response;
-        }
-
-        // Retrieve full content for streaming
-        auto contentResult = contentStore->retrieveBytes(hashResult.value());
-        if (!contentResult) {
-            return ErrorResponse{ErrorCode::NotFound, "Document content not found"};
-        }
-
-        // Apply maxBytes limit if specified
-        auto content = std::move(contentResult.value());
-        if (req.maxBytes > 0 && content.size() > req.maxBytes) {
-            content.resize(req.maxBytes);
-        }
-
-        // Save size before moving content
-        uint64_t contentSize = content.size();
-
-        // Create streaming session
-        uint32_t chunkSize = req.chunkSize > 0 ? req.chunkSize : 256 * 1024; // 256KB default
-        auto transferId = sessionManager->create(std::move(content), chunkSize, req.maxBytes);
-
-        // Create response
-        GetInitResponse response;
-        response.transferId = transferId;
-        response.totalSize = contentSize;
-        response.chunkSize = chunkSize;
-
-        const auto& doc = docResult.value().value();
-        response.metadata["path"] = doc.filePath;
-        response.metadata["mimeType"] = doc.mimeType;
-        response.metadata["fileName"] = doc.fileName;
-        response.metadata["hash"] = doc.sha256Hash;
-
-        return response;
-    } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("GetInit request failed: ") + e.what()};
+boost::asio::awaitable<Response>
+RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req) {
+    if (!serviceManager_) {
+        co_return ErrorResponse{ErrorCode::NotInitialized, "ServiceManager not available"};
     }
-}
 
-Response RequestDispatcher::handleGetChunkRequest(const GetChunkRequest& req) {
-    try {
-        auto sessionManager = serviceManager_->getRetrievalSessionManager();
-        if (!sessionManager) {
-            return ErrorResponse{ErrorCode::NotInitialized, "Session manager not available"};
-        }
-
-        uint64_t bytesRemaining = 0;
-        auto chunkResult =
-            sessionManager->chunk(req.transferId, req.offset, req.length, bytesRemaining);
-
-        if (!chunkResult) {
-            return ErrorResponse{ErrorCode::InvalidArgument, chunkResult.error().message};
-        }
-
-        GetChunkResponse response;
-        response.data = chunkResult.value();
-        response.bytesRemaining = bytesRemaining;
-
-        return response;
-    } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("GetChunk request failed: ") + e.what()};
+    auto executor = getWorkerExecutor();
+    auto signal = getWorkerJobSignal();
+    if (signal) {
+        signal(true);
     }
-}
 
-Response RequestDispatcher::handleGetEndRequest(const GetEndRequest& req) {
-    try {
-        auto sessionManager = serviceManager_->getRetrievalSessionManager();
-        if (!sessionManager) {
-            return ErrorResponse{ErrorCode::NotInitialized, "Session manager not available"};
-        }
+    // Run the potentially long-running operation on a worker thread.
+    auto result = co_await boost::asio::co_spawn(
+        executor,
+        [this, req]() -> boost::asio::awaitable<
+                          std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>> {
+            auto contentStore = serviceManager_->getContentStore();
+            auto metadataRepo = serviceManager_->getMetadataRepo();
+            auto embeddingGenerator = serviceManager_->getEmbeddingGenerator();
+            auto contentExtractors = serviceManager_->getContentExtractors();
 
-        sessionManager->end(req.transferId);
+            if (!embeddingGenerator) {
+                auto ensure = serviceManager_->ensureEmbeddingGeneratorReady();
+                if (ensure) {
+                    embeddingGenerator = serviceManager_->getEmbeddingGenerator();
+                }
+            }
 
-        return SuccessResponse{"Transfer session ended successfully"};
-    } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("GetEnd request failed: ") + e.what()};
+            if (!embeddingGenerator) {
+                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
+                    Error{ErrorCode::NotInitialized, "Embedding generator not available (provider "
+                                                     "not adopted or model not loaded)"}};
+            }
+            if (!contentStore) {
+                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
+                    Error{ErrorCode::NotInitialized, "Content store not available"}};
+            }
+            if (!metadataRepo) {
+                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
+                    Error{ErrorCode::NotInitialized, "Metadata repository not available"}};
+            }
+
+            yams::repair::EmbeddingRepairConfig repairConfig;
+            repairConfig.batchSize = req.batchSize;
+            repairConfig.skipExisting = req.skipExisting;
+            // Ensure repair uses the daemon's resolved data directory for vectors.db
+            try {
+                repairConfig.dataPath = serviceManager_->getResolvedDataDir();
+            } catch (...) {
+            }
+
+            auto stats = yams::repair::repairMissingEmbeddings(
+                contentStore, metadataRepo, embeddingGenerator, repairConfig, req.documentHashes,
+                nullptr, // progress callback
+                contentExtractors);
+
+            co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
+                std::move(stats)};
+        },
+        boost::asio::use_awaitable);
+
+    if (signal) {
+        signal(false);
     }
+
+    if (!result) {
+        co_return ErrorResponse{ErrorCode::InternalError, "Embedding repair failed"};
+    }
+
+    if (!result->has_value()) {
+        co_return ErrorResponse{result->error().code, result->error().message};
+    }
+
+    const auto& stats = result->value();
+
+    EmbedDocumentsResponse resp;
+    resp.requested = stats.documentsProcessed;
+    resp.embedded = stats.embeddingsGenerated;
+    resp.skipped = stats.embeddingsSkipped;
+    resp.failed = stats.failedOperations;
+    co_return resp;
 }
 
-Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     try {
         // Check if this is a directory operation
         if (req.recursive && !req.path.empty() && std::filesystem::is_directory(req.path)) {
@@ -884,21 +1373,90 @@ Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& r
 
             auto result = indexingService->addDirectory(serviceReq);
             if (!result) {
-                return ErrorResponse{result.error().code, result.error().message};
+                co_return ErrorResponse{result.error().code, result.error().message};
             }
 
             const auto& serviceResp = result.value();
 
             // Map app::services::AddDirectoryResponse to daemon AddDocumentResponse
+            // Use filesIndexed (successfully added) rather than filesProcessed for accuracy
             AddDocumentResponse response;
             response.hash = ""; // Directory operations don't have a single hash
             response.path = req.path;
-            response.documentsAdded = static_cast<size_t>(serviceResp.filesProcessed);
+            response.documentsAdded = static_cast<size_t>(serviceResp.filesIndexed);
 
             // Note: For directory operations, individual files are notified via the indexing
             // service No need to notify here as it would be redundant
+            // Optionally trigger embeddings for all added files when enabled
+            try {
+                if (!req.noEmbeddings && serviceManager_ &&
+                    serviceManager_->isEmbeddingsAutoOnAdd()) {
+                    std::vector<std::string> hashes;
+                    hashes.reserve(serviceResp.results.size());
+                    for (const auto& r : serviceResp.results) {
+                        if (r.success && !r.hash.empty())
+                            hashes.push_back(r.hash);
+                    }
+                    if (!hashes.empty()) {
+                        // Auto-embed policy via TuneAdvisor (no env dependency)
+                        auto shouldAuto = [this]() -> bool {
+                            using TA = yams::daemon::TuneAdvisor;
+                            try {
+                                auto pol = TA::autoEmbedPolicy();
+                                if (pol == TA::AutoEmbedPolicy::Never)
+                                    return false;
+                                if (pol == TA::AutoEmbedPolicy::Always)
+                                    return true;
+                                if (metrics_) {
+                                    auto snap = metrics_->getSnapshot();
+                                    if (snap.activeConnections > 0)
+                                        return false;
+                                    if (snap.cpuUsagePercent > TA::cpuIdleThresholdPercent())
+                                        return false;
+                                    if (snap.muxQueuedBytes >
+                                        static_cast<int64_t>(TA::muxBacklogHighBytes() / 8))
+                                        return false; // conservative
+                                    return true;
+                                }
+                            } catch (...) {
+                            }
+                            return false;
+                        }();
 
-            return response;
+                        if (!shouldAuto) {
+                            // Defer to RepairCoordinator by notifying daemon about each doc
+                            if (daemon_) {
+                                for (const auto& h : hashes) {
+                                    daemon_->onDocumentAdded(h, "");
+                                }
+                            }
+                        } else {
+                            auto ex = getWorkerExecutor();
+                            auto signal = getWorkerJobSignal();
+                            if (signal)
+                                signal(true);
+                            auto* sm = this->serviceManager_;
+                            boost::asio::dispatch(ex, [sm, hs = std::move(hashes),
+                                                       signal]() mutable {
+                                try {
+                                    if (sm) {
+                                        auto store = sm->getContentStore();
+                                        auto meta = sm->getMetadataRepo();
+                                        auto dataDir = sm->getConfig().dataDir;
+                                        yams::vector::EmbeddingService esvc(store, meta, dataDir);
+                                        (void)esvc.generateEmbeddingsForDocuments(hs);
+                                    }
+                                } catch (...) {
+                                }
+                                if (signal)
+                                    signal(false);
+                            });
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+            co_return response;
         } else {
             // Use DocumentService for single file operations
             auto documentService =
@@ -921,11 +1479,12 @@ Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& r
             serviceReq.snapshotLabel = req.snapshotLabel;
             serviceReq.noEmbeddings = req.noEmbeddings;
 
+            auto t0 = std::chrono::steady_clock::now();
             auto result = documentService->store(serviceReq);
             if (!result) {
-                return ErrorResponse{result.error().code, result.error().message};
+                co_return ErrorResponse{result.error().code, result.error().message};
             }
-
+            auto t1 = std::chrono::steady_clock::now();
             const auto& serviceResp = result.value();
 
             // Map app::services::StoreDocumentResponse to daemon AddDocumentResponse
@@ -939,12 +1498,81 @@ Response RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& r
                 daemon_->onDocumentAdded(serviceResp.hash, response.path);
             }
 
-            return response;
+            // Optionally trigger embeddings automatically after indexing
+            try {
+                if (!req.noEmbeddings && serviceManager_ &&
+                    serviceManager_->isEmbeddingsAutoOnAdd() && !response.hash.empty()) {
+                    // Auto-embed policy via TuneAdvisor (no env dependency)
+                    auto shouldAuto = [this]() -> bool {
+                        using TA = yams::daemon::TuneAdvisor;
+                        try {
+                            auto pol = TA::autoEmbedPolicy();
+                            if (pol == TA::AutoEmbedPolicy::Never)
+                                return false;
+                            if (pol == TA::AutoEmbedPolicy::Always)
+                                return true;
+                            if (metrics_) {
+                                auto snap = metrics_->getSnapshot();
+                                if (snap.activeConnections > 0)
+                                    return false;
+                                if (snap.cpuUsagePercent > TA::cpuIdleThresholdPercent())
+                                    return false;
+                                if (snap.muxQueuedBytes >
+                                    static_cast<int64_t>(TA::muxBacklogHighBytes() / 8))
+                                    return false;
+                                return true;
+                            }
+                        } catch (...) {
+                        }
+                        return false;
+                    }();
+
+                    if (!shouldAuto) {
+                        if (daemon_)
+                            daemon_->onDocumentAdded(response.hash, response.path);
+                    } else {
+                        auto ex = getWorkerExecutor();
+                        auto signal = getWorkerJobSignal();
+                        if (signal)
+                            signal(true);
+                        auto* sm = this->serviceManager_;
+                        boost::asio::dispatch(ex, [sm, h = response.hash, signal]() {
+                            try {
+                                if (sm) {
+                                    auto store = sm->getContentStore();
+                                    auto meta = sm->getMetadataRepo();
+                                    auto dataDir = sm->getConfig().dataDir;
+                                    yams::vector::EmbeddingService esvc(store, meta, dataDir);
+                                    (void)esvc.generateEmbeddingsForDocuments(
+                                        std::vector<std::string>{h});
+                                }
+                            } catch (...) {
+                            }
+                            if (signal)
+                                signal(false);
+                        });
+                    }
+                }
+            } catch (...) {
+            }
+
+            // Diagnostics: per-stage timing for singleton AddDocument
+            try {
+                auto ms_store =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+                spdlog::info("AddDocument(store): hash={} name='{}' size={}B mime='{}' store_ms={}",
+                             serviceResp.hash, response.path,
+                             static_cast<long long>(serviceReq.content.size()), serviceReq.mimeType,
+                             static_cast<long long>(ms_store));
+            } catch (...) {
+            }
+
+            co_return response;
         }
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("AddDocument request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("AddDocument request failed: ") + e.what()};
     }
 }
 
@@ -959,16 +1587,28 @@ RequestDispatcher::handleSingleFileAdd(const std::filesystem::path& filePath,
 
     // Auto-detect MIME type if not provided and not disabled
     if (metadata.mimeType.empty() && !req.disableAutoMime) {
-        // TODO: Add file type detection logic here
-        // For now, leave empty and let content store handle it
+        // Initialize detector (best-effort)
+        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+        auto& det = yams::detection::FileTypeDetector::instance();
+        std::string detected;
+        if (auto sig = det.detectFromFile(filePath)) {
+            detected = sig.value().mimeType;
+        }
+        if (detected.empty()) {
+            detected = yams::detection::FileTypeDetector::getMimeTypeFromExtension(
+                filePath.extension().string());
+        }
+        if (!detected.empty())
+            metadata.mimeType = detected;
     }
 
     // Store the file
+    auto t_store0 = std::chrono::steady_clock::now();
     auto storeResult = contentStore->store(filePath, metadata);
     if (!storeResult) {
         return Error{storeResult.error().code, storeResult.error().message};
     }
-
+    auto t_store1 = std::chrono::steady_clock::now();
     const auto& result = storeResult.value();
 
     // Store metadata in database
@@ -1004,10 +1644,14 @@ RequestDispatcher::handleSingleFileAdd(const std::filesystem::path& filePath,
     }
 
     // Insert new document if it doesn't exist
+    bool did_insert = false;
+    std::chrono::steady_clock::time_point t_db0;
     if (isNewDocument) {
+        t_db0 = std::chrono::steady_clock::now();
         auto insertResult = metadataRepo->insertDocument(docInfo);
         if (insertResult) {
             docId = insertResult.value();
+            did_insert = true;
         } else {
             return Error{insertResult.error().code,
                          "Failed to store metadata: " + insertResult.error().message};
@@ -1016,7 +1660,26 @@ RequestDispatcher::handleSingleFileAdd(const std::filesystem::path& filePath,
 
     // Add tags and custom metadata
     if (docId > 0) {
+        auto t_tags0 = std::chrono::steady_clock::now();
         addTagsAndMetadata(docId, req.tags, req.metadata, metadataRepo);
+        auto t_tags1 = std::chrono::steady_clock::now();
+        // Diagnostics summary
+        try {
+            auto ms_store =
+                std::chrono::duration_cast<std::chrono::milliseconds>(t_store1 - t_store0).count();
+            long long ms_db = 0;
+            if (did_insert) {
+                ms_db =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t_tags0 - t_db0).count();
+            }
+            auto ms_tags =
+                std::chrono::duration_cast<std::chrono::milliseconds>(t_tags1 - t_tags0).count();
+            spdlog::info(
+                "AddDocument(file): hash={} path='{}' mime='{}' store_ms={} db_ms={} tags_ms={}",
+                result.contentHash, filePath.string(), metadata.mimeType,
+                static_cast<long long>(ms_store), ms_db, static_cast<long long>(ms_tags));
+        } catch (...) {
+        }
     }
 
     return std::make_pair(result.contentHash, filePath.string());
@@ -1237,7 +1900,7 @@ void RequestDispatcher::addTagsAndMetadata(
     }
 }
 
-Response RequestDispatcher::handleListRequest(const ListRequest& req) {
+boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
     try {
         // Use app services for list with full feature parity
         auto appContext = serviceManager_->getAppContext();
@@ -1318,7 +1981,7 @@ Response RequestDispatcher::handleListRequest(const ListRequest& req) {
 
         auto result = docService->list(serviceReq);
         if (!result) {
-            return ErrorResponse{result.error().code, result.error().message};
+            co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
@@ -1376,15 +2039,15 @@ Response RequestDispatcher::handleListRequest(const ListRequest& req) {
 
         response.totalCount = serviceResp.totalFound;
 
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("List request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("List request failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
+boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
     try {
         // Use DocumentService for business logic
         auto documentService = app::services::makeDocumentService(serviceManager_->getAppContext());
@@ -1406,8 +2069,8 @@ Response RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
         // Handle directory deletion
         if (!req.directory.empty()) {
             if (!req.recursive) {
-                return ErrorResponse{ErrorCode::InvalidArgument,
-                                     "Directory deletion requires recursive flag for safety"};
+                co_return ErrorResponse{ErrorCode::InvalidArgument,
+                                        "Directory deletion requires recursive flag for safety"};
             }
             // Convert directory to pattern
             serviceReq.pattern = req.directory;
@@ -1419,7 +2082,7 @@ Response RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
 
         auto result = documentService->deleteByName(serviceReq);
         if (!result) {
-            return ErrorResponse{result.error().code, result.error().message};
+            co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
@@ -1465,24 +2128,76 @@ Response RequestDispatcher::handleDeleteRequest(const DeleteRequest& req) {
 
         // If no results at all, return error
         if (response.results.empty() && !response.dryRun) {
-            return ErrorResponse{ErrorCode::NotFound, "No documents found matching criteria"};
+            co_return ErrorResponse{ErrorCode::NotFound, "No documents found matching criteria"};
         }
 
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Delete request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Delete request failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
+    // Early fast-path: if lifecycle not ready/degraded, return minimal not_ready stats
+    {
+        auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+        if (lifecycleSnapshot.state != LifecycleState::Ready &&
+            lifecycleSnapshot.state != LifecycleState::Degraded) {
+            GetStatsResponse response;
+            response.totalDocuments = 0;
+            response.totalSize = 0;
+            response.indexedDocuments = 0;
+            response.vectorIndexSize = 0;
+            response.compressionRatio = 0.0;
+            response.additionalStats["not_ready"] = "true";
+            try {
+                response.additionalStats["daemon_version"] = YAMS_VERSION_STRING;
+            } catch (...) {
+            }
+            try {
+                auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
+                auto uptimeSeconds =
+                    std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
+                response.additionalStats["daemon_uptime"] = std::to_string(uptimeSeconds);
+            } catch (...) {
+            }
+            co_return response;
+        }
+    }
     try {
         auto contentStore = serviceManager_->getContentStore();
         auto metadataRepo = serviceManager_->getMetadataRepo();
 
         if (!contentStore || !metadataRepo) {
-            return ErrorResponse{ErrorCode::NotInitialized, "Required services not available"};
+            GetStatsResponse response;
+            response.totalDocuments = 0;
+            response.totalSize = 0;
+            response.indexedDocuments = 0;
+            response.vectorIndexSize = 0;
+            response.compressionRatio = 0.0;
+            // Explicit readiness indicator for consumers
+            response.additionalStats["not_ready"] = "true";
+            // Service availability hints
+            response.additionalStats["service_contentstore"] =
+                contentStore ? "running" : "unavailable";
+            response.additionalStats["service_metadatarepo"] =
+                metadataRepo ? "running" : "unavailable";
+            // Basic daemon info where available (non-blocking)
+            try {
+                response.additionalStats["daemon_version"] = YAMS_VERSION_STRING;
+            } catch (...) {
+            }
+            try {
+                auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
+                auto uptimeSeconds =
+                    std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
+                response.additionalStats["daemon_uptime"] = std::to_string(uptimeSeconds);
+            } catch (...) {
+            }
+            co_return response;
         }
 
         // Get content store statistics (authoritative on stored content)
@@ -1513,89 +2228,68 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         response.totalDocuments = (storeDocCount > 0) ? storeDocCount : metaDocCount;
         response.totalSize = storeStats.totalBytes;
 
-        // Get vector database stats
-        size_t vectorCount = 0;
+        // Get vector database stats from DaemonMetrics and resolved data dir (no legacy fallbacks)
         size_t vectorDbSize = 0;
-
-        // Try to get vector database size and count directly from vectors.db
-        // Use configured data directory first; then consider legacy env-based paths as fallbacks
-        std::vector<std::filesystem::path> possiblePaths;
+        size_t vectorRowsExact = 0;
         try {
-            auto cfg = serviceManager_->getConfig();
-            if (!cfg.dataDir.empty()) {
-                possiblePaths.push_back(cfg.dataDir / "vectors.db");
-            }
+            auto snap = metrics_->getSnapshot();
+            vectorDbSize = snap.vectorDbSizeBytes;
+            vectorRowsExact = snap.vectorRowsExact;
         } catch (...) {
-            // ignore
         }
-        // Legacy fallbacks
-        if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {
-            possiblePaths.push_back(std::filesystem::path(env) / "vectors.db");
-        } else if (const char* env2 = std::getenv("YAMS_DATA_DIR"); env2 && *env2) {
-            possiblePaths.push_back(std::filesystem::path(env2) / "vectors.db");
-        }
-        if (const char* home = std::getenv("HOME"); home && *home) {
-            possiblePaths.push_back(std::filesystem::path(home) / ".local" / "share" / "yams" /
-                                    "vectors.db");
-            possiblePaths.push_back(std::filesystem::path(home) / ".yams" / "vectors.db");
-        }
-        // Developer-specific path (kept as lowest-priority fallback)
-        possiblePaths.push_back(std::filesystem::path("/Volumes/picaso/yams/vectors.db"));
 
-        for (const auto& vectorDbPath : possiblePaths) {
-            if (!vectorDbPath.empty() && std::filesystem::exists(vectorDbPath)) {
+        // Try to get exact vector row count using VectorDatabase when possible (always),
+        // and open a temporary handle only in detailed mode.
+        try {
+            auto vdb = serviceManager_->getVectorDatabase();
+            if (vdb && vdb->isInitialized()) {
+                vectorRowsExact = vdb->getVectorCount();
+            } else if (req.detailed) {
+                // Fallback: resolved data dir only
                 try {
-                    vectorDbSize = std::filesystem::file_size(vectorDbPath);
-
-                    // Try to get vector count by querying the database directly
-                    // For now, just estimate based on file size (rough approximation)
-                    // A proper implementation would open the SQLite database and count
-                    if (vectorDbSize > 0) {
-                        // Rough estimate: ~5KB per vector (including metadata)
-                        vectorCount = vectorDbSize / 5000;
-                        // The actual count from repair was 3392, so let's use that if size matches
-                        if (vectorDbSize > 16000000 && vectorDbSize < 18000000) {
-                            vectorCount = 3392; // Known count from repair output
+                    auto dd = serviceManager_->getResolvedDataDir();
+                    if (!dd.empty()) {
+                        auto p = dd / "vectors.db";
+                        if (std::filesystem::exists(p)) {
+                            yams::vector::VectorDatabaseConfig cfg;
+                            cfg.database_path = p.string();
+                            auto tmp = std::make_unique<yams::vector::VectorDatabase>(cfg);
+                            if (tmp->initialize())
+                                vectorRowsExact = tmp->getVectorCount();
                         }
                     }
-                    break;
                 } catch (...) {
-                    // Ignore errors and try next path
                 }
             }
+        } catch (...) {
+            // best effort
         }
 
-        // Use vector count as indexed documents if we have it
-        size_t reportedIndexed = 0;
-        if (vectorCount > 0) {
-            reportedIndexed = vectorCount;
-        } else {
-            // Fall back to checking VectorIndexManager if available
-            auto vectorIndexManager = serviceManager_->getVectorIndexManager();
-            if (vectorIndexManager && vectorIndexManager->isInitialized()) {
-                auto stats = vectorIndexManager->getStats();
-                if (stats.num_vectors > 0) {
-                    reportedIndexed = stats.num_vectors;
-                } else {
-                    reportedIndexed = indexedCount;
-                }
-            } else {
-                reportedIndexed = indexedCount;
-            }
+        // Annotate vectordb path using resolved data dir
+        try {
+            auto dd = serviceManager_->getResolvedDataDir();
+            if (!dd.empty())
+                response.additionalStats["vectordb_path"] = (dd / "vectors.db").string();
+        } catch (...) {
         }
 
+        // Indexed documents: use metadata/FTS count; keep vector counts separate
+        size_t reportedIndexed = indexedCount;
         if (reportedIndexed > response.totalDocuments) {
             spdlog::warn(
-                "Reported indexed/vector count ({}) is greater than total documents ({}). This may "
-                "indicate orphaned data. Capping stats to total document count for display.",
+                "Reported indexed (metadata) count ({}) is greater than total documents ({}). "
+                "Capping to total for display.",
                 reportedIndexed, response.totalDocuments);
             response.indexedDocuments = response.totalDocuments;
         } else {
             response.indexedDocuments = reportedIndexed;
         }
-
         response.vectorIndexSize = vectorDbSize;
         response.compressionRatio = storeStats.dedupRatio();
+
+        // Surface exact vector row count when available
+        if (vectorRowsExact > 0)
+            response.additionalStats["vector_rows"] = std::to_string(vectorRowsExact);
 
         // Extraction progress indicators
         if (response.totalDocuments >= response.indexedDocuments) {
@@ -1623,11 +2317,98 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             // best effort
         }
 
-        // Always include basic additional stats
+        // Vector/embedding service status
+        try {
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            if (lifecycleSnapshot.state != LifecycleState::Ready &&
+                lifecycleSnapshot.state != LifecycleState::Degraded) {
+                response.additionalStats["service_embeddingservice"] = "unavailable";
+                response.additionalStats["onnx_models_loaded"] = "0";
+            } else {
+                // Centralized: DaemonMetrics
+                auto einfo = metrics_->getEmbeddingServiceInfo();
+                response.additionalStats["service_embeddingservice"] =
+                    einfo.available ? "available" : "unavailable";
+                response.additionalStats["onnx_models_loaded"] =
+                    std::to_string(std::max(0, einfo.modelsLoaded));
+                response.additionalStats["onnx_runtime"] =
+                    einfo.onnxRuntimeEnabled ? "enabled" : "disabled";
+            }
+            // Preferred model and local presence hint
+            try {
+                std::string preferred;
+                if (const char* env = std::getenv("YAMS_PREFERRED_MODEL"))
+                    preferred = env;
+                if (preferred.empty()) {
+                    const char* home = std::getenv("HOME");
+                    if (home) {
+                        namespace fs = std::filesystem;
+                        fs::path base = fs::path(home) / ".yams" / "models";
+                        std::error_code ec;
+                        if (fs::exists(base, ec) && fs::is_directory(base, ec)) {
+                            for (const auto& e : fs::directory_iterator(base, ec)) {
+                                if (!e.is_directory())
+                                    continue;
+                                if (fs::exists(e.path() / "model.onnx", ec)) {
+                                    preferred = e.path().filename().string();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!preferred.empty()) {
+                    response.additionalStats["preferred_model"] = preferred;
+                    bool exists = false;
+                    try {
+                        const char* home = std::getenv("HOME");
+                        if (home) {
+                            namespace fs = std::filesystem;
+                            exists = fs::exists(fs::path(home) / ".yams" / "models" / preferred /
+                                                "model.onnx");
+                        }
+                    } catch (...) {
+                    }
+                    response.additionalStats["preferred_model_path_exists"] =
+                        exists ? "true" : "false";
+                }
+            } catch (...) {
+            }
+        } catch (...) {
+            response.additionalStats["service_embeddingservice"] = "error";
+        }
+
+        // Always include basic additional stats and centralized service flags
         response.additionalStats["store_objects"] = std::to_string(storeStats.totalObjects);
         response.additionalStats["unique_blocks"] = std::to_string(storeStats.uniqueBlocks);
         response.additionalStats["deduplicated_bytes"] =
             std::to_string(storeStats.deduplicatedBytes);
+        try {
+            auto msnap = metrics_->getSnapshot();
+            if (!msnap.serviceContentStore.empty())
+                response.additionalStats["service_contentstore"] = msnap.serviceContentStore;
+            if (!msnap.serviceMetadataRepo.empty())
+                response.additionalStats["service_metadatarepo"] = msnap.serviceMetadataRepo;
+            if (!msnap.serviceSearchExecutor.empty())
+                response.additionalStats["service_searchexecutor"] = msnap.serviceSearchExecutor;
+            if (!msnap.searchExecutorReason.empty())
+                response.additionalStats["searchexecutor_reason"] = msnap.searchExecutorReason;
+        } catch (...) {
+        }
+
+        // Expose dynamic batching metrics for embeddings
+        try {
+            const auto& bm = yams::vector::batchmetrics::get();
+            response.additionalStats["embed_batch_effective_tokens"] =
+                std::to_string(bm.effectiveTokens.load());
+            response.additionalStats["embed_batch_recent_avg_docs"] =
+                std::to_string(bm.recentAvgDocs.load());
+            response.additionalStats["embed_batch_successes"] = std::to_string(bm.successes.load());
+            response.additionalStats["embed_batch_failures"] = std::to_string(bm.failures.load());
+            response.additionalStats["embed_batch_backoffs"] = std::to_string(bm.backoffs.load());
+        } catch (...) {
+            // best effort only
+        }
 
         // Expose RepairCoordinator metrics for observability
         response.additionalStats["repair_idle_ticks"] =
@@ -1680,10 +2461,40 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             response.additionalStats["meta_indexed_documents"] = std::to_string(indexedCount);
         }
 
+        // Always include currently loaded plugins (fast path; no directory scans)
+        try {
+            nlohmann::json pj = nlohmann::json::array();
+            size_t count = 0;
+            if (auto abi = serviceManager_->getAbiPluginHost()) {
+                auto descs = abi->listLoaded();
+                count += descs.size();
+                for (const auto& d : descs) {
+                    nlohmann::json rec;
+                    rec["name"] = d.name;
+                    rec["path"] = d.path.string();
+                    if (!d.interfaces.empty())
+                        rec["interfaces"] = d.interfaces;
+                    pj.push_back(rec);
+                }
+            } else {
+                auto plugins = serviceManager_->getLoadedPlugins();
+                count = plugins.size();
+                for (const auto& pi : plugins) {
+                    nlohmann::json rec;
+                    rec["name"] = pi.name;
+                    rec["path"] = pi.path.string();
+                    pj.push_back(rec);
+                }
+            }
+            response.additionalStats["plugins_loaded"] = std::to_string(count);
+            response.additionalStats["plugins_json"] = pj.dump();
+        } catch (...) {
+        }
+
         // Defensive fallback: if content store reports zero but configured storage exists,
         // scan objects directory to estimate counts and total size.
         // Cap the scan to avoid blocking status requests on large stores.
-        if (response.totalDocuments == 0 || response.totalSize == 0) {
+        if (req.detailed && (response.totalDocuments == 0 || response.totalSize == 0)) {
             try {
                 auto cfg = serviceManager_->getConfig();
                 std::filesystem::path objectsDir = cfg.dataDir / "storage" / "objects";
@@ -1835,7 +2646,6 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
 
             // Check vector database status
             try {
-                // TODO: Get actual vector database from service manager when available
                 response.additionalStats["service_vectordb"] =
                     response.vectorIndexSize > 0 ? "initialized" : "not_initialized";
                 if (response.vectorIndexSize > 0) {
@@ -1864,15 +2674,52 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             try {
                 auto provider = serviceManager_->getModelProvider();
                 auto generator = serviceManager_->getEmbeddingGenerator();
-                response.additionalStats["service_embeddingservice"] =
-                    generator ? "available" : "unavailable";
-                if (provider) {
-                    response.additionalStats["onnx_models_loaded"] = "unknown";
-                } else {
-                    response.additionalStats["onnx_models_loaded"] = "0";
+                // Set only if not already populated earlier with precise values
+                if (response.additionalStats.find("service_embeddingservice") ==
+                    response.additionalStats.end()) {
+                    response.additionalStats["service_embeddingservice"] =
+                        generator ? "available" : "unavailable";
+                }
+                if (response.additionalStats.find("onnx_models_loaded") ==
+                    response.additionalStats.end()) {
+                    if (provider) {
+                        response.additionalStats["onnx_models_loaded"] = "unknown";
+                    } else {
+                        response.additionalStats["onnx_models_loaded"] = "0";
+                    }
                 }
             } catch (...) {
                 response.additionalStats["service_embeddingservice"] = "unavailable";
+            }
+
+            // Embedding usage metrics (best-effort)
+            try {
+                auto generator = serviceManager_->getEmbeddingGenerator();
+                if (generator) {
+                    auto estats = generator->getStats();
+                    response.additionalStats["embed_total_texts"] =
+                        std::to_string(estats.total_texts_processed.load());
+                    response.additionalStats["embed_total_tokens"] =
+                        std::to_string(estats.total_tokens_processed.load());
+                    response.additionalStats["embed_total_time_ms"] =
+                        std::to_string(estats.total_inference_time.load());
+                    response.additionalStats["embed_avg_time_ms"] =
+                        std::to_string(estats.avg_inference_time.load());
+                    response.additionalStats["embed_throughput_txtps"] =
+                        std::to_string(estats.throughput_texts_per_sec.load());
+                    response.additionalStats["embed_throughput_tokps"] =
+                        std::to_string(estats.throughput_tokens_per_sec.load());
+                    // Model identity and dimension when available
+                    try {
+                        auto cfg = generator->getConfig();
+                        response.additionalStats["embed_model_name"] = cfg.model_name;
+                        response.additionalStats["embed_dim"] =
+                            std::to_string(generator->getEmbeddingDimension());
+                    } catch (...) {
+                    }
+                }
+            } catch (...) {
+                // best-effort only
             }
 
             // Service startup order and timing
@@ -1986,6 +2833,28 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                              lifecycleSnapshot.state == LifecycleState::Degraded);
             j["not_ready"] = !readyish;
 
+            // Add worker pool metrics into JSON for doctor scripting
+            try {
+                std::size_t threads = 0, active = 0, queued = 0, util = 0;
+                if (serviceManager_) {
+                    threads = serviceManager_->getWorkerThreads();
+                    active = serviceManager_->getWorkerActive();
+                    auto posted = serviceManager_->getWorkerPosted();
+                    auto completed = serviceManager_->getWorkerCompleted();
+                    if (posted >= completed + active)
+                        queued = posted - completed - active;
+                    if (threads > 0)
+                        util = static_cast<std::size_t>((100.0 * active) / threads);
+                }
+                nlohmann::json wj;
+                wj["threads"] = threads;
+                wj["active"] = active;
+                wj["queued"] = queued;
+                wj["utilizationPct"] = util;
+                j["worker_pool"] = wj;
+            } catch (...) {
+            }
+
             response.additionalStats["json"] = j.dump();
         } catch (...) {
             // ignore JSON build issues
@@ -2002,15 +2871,101 @@ Response RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             response.additionalStats["stream_ttfb_avg_ms"] = std::to_string(avg);
         }
 
-        return response;
+        // Worker pool metrics
+        try {
+            std::size_t threads = 0, active = 0, queued = 0, util = 0;
+            if (serviceManager_) {
+                threads = serviceManager_->getWorkerThreads();
+                active = serviceManager_->getWorkerActive();
+                auto posted = serviceManager_->getWorkerPosted();
+                auto completed = serviceManager_->getWorkerCompleted();
+                if (posted >= completed + active)
+                    queued = posted - completed - active;
+                if (threads > 0)
+                    util = static_cast<std::size_t>((100.0 * active) / threads);
+            }
+            response.additionalStats["worker_threads"] = std::to_string(threads);
+            response.additionalStats["worker_active"] = std::to_string(active);
+            response.additionalStats["worker_queued"] = std::to_string(queued);
+            response.additionalStats["worker_utilization_pct"] = std::to_string(util);
+        } catch (...) {
+        }
+
+        // Plugin loader snapshot (prefer host descriptors; include basic health when available)
+        if (req.detailed) {
+            try {
+                if (serviceManager_) {
+                    nlohmann::json pj = nlohmann::json::array();
+                    size_t count = 0;
+                    if (auto* abi = serviceManager_->getAbiPluginHost()) {
+                        auto descs = abi->listLoaded();
+                        count += descs.size();
+                        for (const auto& d : descs) {
+                            nlohmann::json rec;
+                            rec["name"] = d.name;
+                            rec["path"] = d.path.string();
+                            if (!d.interfaces.empty())
+                                rec["interfaces"] = d.interfaces;
+                            // Health best-effort
+                            try {
+                                if (auto hr = abi->health(d.name))
+                                    rec["health"] = hr.value();
+                            } catch (...) {
+                            }
+                            pj.push_back(rec);
+                        }
+                    } else {
+                        auto plugins = serviceManager_->getLoadedPlugins();
+                        count = plugins.size();
+                        for (const auto& pi : plugins) {
+                            nlohmann::json rec;
+                            rec["name"] = pi.name;
+                            rec["path"] = pi.path.string();
+                            pj.push_back(rec);
+                        }
+                    }
+                    response.additionalStats["plugins_loaded"] = std::to_string(count);
+                    response.additionalStats["plugins_json"] = pj.dump();
+                }
+            } catch (...) {
+            }
+        }
+
+        // Auto-repair metrics for doctor/stats visibility
+        response.additionalStats["repair_queue_depth"] =
+            std::to_string(state_->stats.repairQueueDepth.load());
+        response.additionalStats["repair_batches_attempted"] =
+            std::to_string(state_->stats.repairBatchesAttempted.load());
+        response.additionalStats["repair_embeddings_generated"] =
+            std::to_string(state_->stats.repairEmbeddingsGenerated.load());
+        response.additionalStats["repair_failed_operations"] =
+            std::to_string(state_->stats.repairFailedOperations.load());
+
+        // WAL metrics (via ServiceManager provider; returns zeros until attached)
+        try {
+            if (serviceManager_) {
+                auto wp = serviceManager_->getWalMetricsProvider();
+                if (wp) {
+                    auto w = wp->getStats();
+                    response.additionalStats["wal_active_transactions"] =
+                        std::to_string(w.activeTransactions);
+                    response.additionalStats["wal_pending_entries"] =
+                        std::to_string(w.pendingEntries);
+                }
+            }
+        } catch (...) {
+        }
+
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("GetStats request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("GetStats request failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req) {
     try {
         // Use DocumentService for business logic
         auto documentService = app::services::makeDocumentService(serviceManager_->getAppContext());
@@ -2033,12 +2988,14 @@ Response RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequ
         serviceReq.removeTags = req.removeTags;
 
         // Set atomic transaction mode (default true)
-        serviceReq.atomic = true;
+        serviceReq.atomic = req.atomic;
+        serviceReq.createBackup = req.createBackup;
+        serviceReq.verbose = req.verbose;
 
         // Execute the update
         auto result = documentService->updateMetadata(serviceReq);
         if (!result) {
-            return ErrorResponse{result.error().code, result.error().message};
+            co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
@@ -2050,15 +3007,15 @@ Response RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequ
         response.tagsUpdated = (serviceResp.tagsAdded > 0) || (serviceResp.tagsRemoved > 0);
         response.contentUpdated = serviceResp.contentUpdated;
 
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("UpdateDocument request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("UpdateDocument request failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
+boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
     try {
         // Use app services for grep
         auto appContext = serviceManager_->getAppContext();
@@ -2110,7 +3067,7 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
 
         auto result = grepService->grep(serviceReq);
         if (!result) {
-            return ErrorResponse{result.error().code, result.error().message};
+            co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
@@ -2150,15 +3107,16 @@ Response RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
 
         // Note: daemon protocol doesn't support filesWithMatches/filesWithoutMatches
 
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Grep request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Grep request failed: ") + e.what()};
     }
 }
 
-Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
+boost::asio::awaitable<Response>
+RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
     try {
         // Determine if daemon-side download is enabled.
         // Primary switch is intended to be a policy flag (daemon.download.enable=true).
@@ -2186,15 +3144,15 @@ Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
                 spdlog::info("Download request received; responding with policy reminder (daemon "
                              "downloads disabled by default).");
             }
-            return response;
+            co_return response;
         }
 
         // Execute via app::services::DownloadService
         auto appContext = serviceManager_->getAppContext();
         auto downloadService = app::services::makeDownloadService(appContext);
         if (!downloadService) {
-            return ErrorResponse{ErrorCode::NotInitialized,
-                                 "Download service not available in daemon"};
+            co_return ErrorResponse{ErrorCode::NotInitialized,
+                                    "Download service not available in daemon"};
         }
 
         // Map daemon DownloadRequest -> app::services::DownloadServiceRequest
@@ -2213,7 +3171,7 @@ Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
         // Execute download
         auto sres = downloadService->download(sreq);
         if (!sres) {
-            return ErrorResponse{sres.error().code, sres.error().message};
+            co_return ErrorResponse{sres.error().code, sres.error().message};
         }
 
         const auto& ok = sres.value();
@@ -2235,11 +3193,11 @@ Response RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
             }
         }
 
-        return response;
+        co_return response;
 
     } catch (const std::exception& e) {
-        return ErrorResponse{ErrorCode::InternalError,
-                             std::string("Download request failed: ") + e.what()};
+        co_return ErrorResponse{ErrorCode::InternalError,
+                                std::string("Download request failed: ") + e.what()};
     }
 }
 
@@ -2420,10 +3378,154 @@ RequestDispatcher::handleHybridSearch(const SearchRequest& req,
             builder.withEmbeddingGenerator(embeddingGen);
         }
 
-        // Configure build options
+        // Configure build options (defaults), then overlay from config.toml if present
         auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
         opts.hybrid.final_top_k = req.limit;
         opts.hybrid.generate_explanations = req.verbose || req.jsonOutput;
+
+        // Best-effort: overlay [search.hybrid] from ~/.config/yams/config.toml
+        // Lightweight parser (line-based) to avoid hard dependency here
+        auto trim = [](std::string& t) {
+            if (t.empty())
+                return;
+            t.erase(0, t.find_first_not_of(" \t"));
+            auto p = t.find_last_not_of(" \t");
+            if (p != std::string::npos)
+                t.erase(p + 1);
+        };
+        auto parseBool = [](const std::string& v) -> std::optional<bool> {
+            std::string s = v;
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            if (s == "true" || s == "1" || s == "yes" || s == "on")
+                return true;
+            if (s == "false" || s == "0" || s == "no" || s == "off")
+                return false;
+            return std::nullopt;
+        };
+        auto parseFloat = [](const std::string& v) -> std::optional<float> {
+            try {
+                return std::stof(v);
+            } catch (...) {
+                return std::nullopt;
+            }
+        };
+        auto parseU64 = [](const std::string& v) -> std::optional<uint64_t> {
+            try {
+                return static_cast<uint64_t>(std::stoull(v));
+            } catch (...) {
+                return std::nullopt;
+            }
+        };
+        auto parseSizeT = [](const std::string& v) -> std::optional<size_t> {
+            try {
+                return static_cast<size_t>(std::stoull(v));
+            } catch (...) {
+                return std::nullopt;
+            }
+        };
+        auto parseStrategy = [](const std::string& v)
+            -> std::optional<yams::search::HybridSearchConfig::FusionStrategy> {
+            std::string s = v;
+            std::transform(s.begin(), s.end(), s.begin(), ::toupper);
+            if (s == "LINEAR_COMBINATION")
+                return yams::search::HybridSearchConfig::FusionStrategy::LINEAR_COMBINATION;
+            if (s == "RECIPROCAL_RANK")
+                return yams::search::HybridSearchConfig::FusionStrategy::RECIPROCAL_RANK;
+            if (s == "CASCADE")
+                return yams::search::HybridSearchConfig::FusionStrategy::CASCADE;
+            if (s == "HYBRID_CASCADE")
+                return yams::search::HybridSearchConfig::FusionStrategy::HYBRID_CASCADE;
+            return std::nullopt;
+        };
+
+        try {
+            namespace fs = std::filesystem;
+            fs::path cfgHome;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                cfgHome = fs::path(xdg);
+            else if (const char* home = std::getenv("HOME"))
+                cfgHome = fs::path(home) / ".config";
+            fs::path cfgPath = cfgHome / "yams" / "config.toml";
+            if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                std::ifstream in(cfgPath);
+                std::string line;
+                while (std::getline(in, line)) {
+                    std::string l = line;
+                    trim(l);
+                    if (l.empty() || l[0] == '#')
+                        continue;
+                    // Only consider keys with prefix 'search.hybrid.'
+                    if (l.rfind("search.hybrid.", 0) != 0)
+                        continue;
+                    auto eq = l.find('=');
+                    if (eq == std::string::npos)
+                        continue;
+                    std::string key = l.substr(0, eq);
+                    trim(key);
+                    std::string val = l.substr(eq + 1);
+                    trim(val);
+                    if (!val.empty() && val.front() == '"' && val.back() == '"')
+                        val = val.substr(1, val.size() - 2);
+
+                    auto applyFloat = [&](const char* name, float& dst) {
+                        if (key == name) {
+                            if (auto f = parseFloat(val))
+                                dst = *f;
+                        }
+                    };
+                    auto applySize = [&](const char* name, size_t& dst) {
+                        if (key == name) {
+                            if (auto n = parseSizeT(val))
+                                dst = *n;
+                        }
+                    };
+                    auto applyBool = [&](const char* name, bool& dst) {
+                        if (key == name) {
+                            if (auto b = parseBool(val))
+                                dst = *b;
+                        }
+                    };
+
+                    applyFloat("search.hybrid.vector_weight", opts.hybrid.vector_weight);
+                    applyFloat("search.hybrid.keyword_weight", opts.hybrid.keyword_weight);
+                    applyFloat("search.hybrid.kg_entity_weight", opts.hybrid.kg_entity_weight);
+                    applyFloat("search.hybrid.structural_weight", opts.hybrid.structural_weight);
+                    applySize("search.hybrid.vector_top_k", opts.hybrid.vector_top_k);
+                    applySize("search.hybrid.keyword_top_k", opts.hybrid.keyword_top_k);
+                    applySize("search.hybrid.final_top_k", opts.hybrid.final_top_k);
+                    applySize("search.hybrid.rerank_top_k", opts.hybrid.rerank_top_k);
+                    applyBool("search.hybrid.enable_reranking", opts.hybrid.enable_reranking);
+                    applyBool("search.hybrid.enable_query_expansion",
+                              opts.hybrid.enable_query_expansion);
+                    applySize("search.hybrid.expansion_terms", opts.hybrid.expansion_terms);
+                    applyBool("search.hybrid.enable_kg", opts.hybrid.enable_kg);
+                    applySize("search.hybrid.kg_max_neighbors", opts.hybrid.kg_max_neighbors);
+                    applySize("search.hybrid.kg_max_hops", opts.hybrid.kg_max_hops);
+                    if (key == "search.hybrid.kg_budget_ms") {
+                        if (auto n = parseU64(val))
+                            opts.hybrid.kg_budget_ms = std::chrono::milliseconds{*n};
+                    }
+                    applyBool("search.hybrid.normalize_scores", opts.hybrid.normalize_scores);
+                    applyBool("search.hybrid.generate_explanations",
+                              opts.hybrid.generate_explanations);
+                    applyBool("search.hybrid.parallel_search", opts.hybrid.parallel_search);
+                    if (key == "search.hybrid.rrf_k") {
+                        if (auto f = parseFloat(val))
+                            opts.hybrid.rrf_k = *f;
+                    }
+                    if (key == "search.hybrid.fusion_strategy") {
+                        if (auto s = parseStrategy(val))
+                            opts.hybrid.fusion_strategy = *s;
+                    }
+                }
+                // Ensure weights are normalized after overlay
+                opts.hybrid.normalizeWeights();
+                // Honor request limit over config final_top_k
+                opts.hybrid.final_top_k = req.limit;
+            }
+        } catch (...) {
+            // Best-effort only; continue with defaults
+        }
 
         // Build and execute search
         auto engRes = builder.buildEmbedded(opts);
@@ -2439,11 +3541,224 @@ RequestDispatcher::handleHybridSearch(const SearchRequest& req,
                                  std::string("Hybrid search failed: ") + searchRes.error().message};
         }
 
+        // Optionally apply enhanced scoring hooks (no-op by default; bounded by timeout)
+        std::vector<yams::search::HybridSearchResult> items = searchRes.value();
+
+        // Read enhanced config (best-effort) from config.toml
+        struct EnhancedCfg {
+            bool enable{false};
+            float classification_weight{0.0f};
+            float kg_expansion_weight{0.0f};
+            float hotzone_weight{0.0f};
+            size_t max_expansion_concepts{0};
+            std::chrono::milliseconds timeout{2000};
+        } ecfg;
+        try {
+            namespace fs = std::filesystem;
+            fs::path cfgHome;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                cfgHome = fs::path(xdg);
+            else if (const char* home = std::getenv("HOME"))
+                cfgHome = fs::path(home) / ".config";
+            fs::path cfgPath = cfgHome / "yams" / "config.toml";
+            if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                std::ifstream in(cfgPath);
+                std::string line;
+                // Reuse outer trim/parse lambdas to avoid shadowing (-Wshadow)
+                while (std::getline(in, line)) {
+                    std::string l = line;
+                    trim(l);
+                    if (l.empty() || l[0] == '#')
+                        continue;
+                    if (l.rfind("search.enhanced.", 0) != 0)
+                        continue;
+                    auto eq = l.find('=');
+                    if (eq == std::string::npos)
+                        continue;
+                    std::string key = l.substr(0, eq);
+                    trim(key);
+                    std::string val = l.substr(eq + 1);
+                    trim(val);
+                    if (!val.empty() && val.front() == '"' && val.back() == '"')
+                        val = val.substr(1, val.size() - 2);
+                    if (key == "search.enhanced.enable") {
+                        if (auto b = parseBool(val))
+                            ecfg.enable = *b;
+                    }
+                    if (key == "search.enhanced.classification_weight") {
+                        if (auto f = parseFloat(val))
+                            ecfg.classification_weight = *f;
+                    }
+                    if (key == "search.enhanced.kg_expansion_weight") {
+                        if (auto f = parseFloat(val))
+                            ecfg.kg_expansion_weight = *f;
+                    }
+                    if (key == "search.enhanced.hotzone_weight") {
+                        if (auto f = parseFloat(val))
+                            ecfg.hotzone_weight = *f;
+                    }
+                    if (key == "search.enhanced.max_expansion_concepts") {
+                        if (auto u = parseU64(val))
+                            ecfg.max_expansion_concepts = static_cast<size_t>(*u);
+                    }
+                    if (key == "search.enhanced.enhanced_search_timeout_ms") {
+                        if (auto u = parseU64(val))
+                            ecfg.timeout = std::chrono::milliseconds{*u};
+                    }
+                }
+            }
+        } catch (...) {
+        }
+
+        auto analyze_simple = [](const std::string& q) {
+            std::string lower = q;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            // Tokenize to count words
+            size_t words = 0;
+            bool in = false;
+            for (char c : lower) {
+                if (std::isalnum(static_cast<unsigned char>(c))) {
+                    if (!in) {
+                        in = true;
+                        ++words;
+                    }
+                } else {
+                    in = false;
+                }
+            }
+            bool single = (words == 1);
+            bool structured = (lower.find('"') != std::string::npos) ||
+                              (lower.find(" and ") != std::string::npos) ||
+                              (lower.find(" or ") != std::string::npos) ||
+                              (lower.find(" not ") != std::string::npos) ||
+                              (lower.find('(') != std::string::npos) ||
+                              (lower.find(')') != std::string::npos);
+            return std::make_pair(single, structured);
+        };
+
+        if (ecfg.enable) {
+            auto [single, structured] = analyze_simple(req.query);
+            if (!single && !structured) {
+                // Compute lightweight enhancements within budget
+                auto t0 = std::chrono::steady_clock::now();
+                // Tokenize query
+                std::vector<std::string> qtokens;
+                qtokens.reserve(req.query.size() / 4 + 1);
+                {
+                    std::string s = req.query;
+                    std::string tok;
+                    for (char c : s) {
+                        if (std::isalnum(static_cast<unsigned char>(c))) {
+                            tok.push_back(static_cast<char>(std::tolower(c)));
+                        } else {
+                            if (!tok.empty()) {
+                                qtokens.push_back(tok);
+                                tok.clear();
+                            }
+                        }
+                    }
+                    if (!tok.empty())
+                        qtokens.push_back(tok);
+                    // dedup
+                    std::sort(qtokens.begin(), qtokens.end());
+                    qtokens.erase(std::unique(qtokens.begin(), qtokens.end()), qtokens.end());
+                }
+                auto contains_token = [](const std::string& hay, const std::string& needle) {
+                    if (needle.empty())
+                        return false;
+                    auto h = hay;
+                    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+                    return h.find(needle) != std::string::npos;
+                };
+                // Hotzone memory (simple static across process)
+                static std::unordered_map<std::string,
+                                          std::pair<size_t, std::chrono::steady_clock::time_point>>
+                    hot;
+                // Update hot counts
+                for (const auto& t : qtokens)
+                    hot[t] = {hot[t].first + 1, std::chrono::steady_clock::now()};
+
+                const float cw = std::max(0.0f, ecfg.classification_weight);
+                const float kw = std::max(0.0f, ecfg.kg_expansion_weight);
+                const float hw = std::max(0.0f, ecfg.hotzone_weight);
+                const float totalw = (cw + kw + hw);
+                if (totalw > 0.0f) {
+                    for (auto& it : items) {
+                        // Extract quick fields
+                        std::string title, path;
+                        if (auto t = it.metadata.find("title"); t != it.metadata.end())
+                            title = t->second;
+                        if (auto p = it.metadata.find("path"); p != it.metadata.end())
+                            path = p->second;
+
+                        // Classification-like: fraction of query tokens present in
+                        // snippet/title/path
+                        size_t match = 0;
+                        for (const auto& t : qtokens) {
+                            if (contains_token(it.content, t) || contains_token(title, t) ||
+                                contains_token(path, t))
+                                match++;
+                        }
+                        float cls = qtokens.empty() ? 0.0f
+                                                    : static_cast<float>(match) /
+                                                          static_cast<float>(qtokens.size());
+
+                        // KG expansion-like: simple boost if any token plural/singular variant
+                        // appears
+                        size_t expHits = 0;
+                        for (const auto& t : qtokens) {
+                            std::string v1 = t + "s";
+                            std::string v2 = t;
+                            if (!t.empty() && t.back() == 's')
+                                v2 = t.substr(0, t.size() - 1);
+                            if (contains_token(it.content, v1) || contains_token(title, v1) ||
+                                contains_token(path, v1))
+                                expHits++;
+                            if (v2 != t && (contains_token(it.content, v2) ||
+                                            contains_token(title, v2) || contains_token(path, v2)))
+                                expHits++;
+                        }
+                        float kgex = qtokens.empty()
+                                         ? 0.0f
+                                         : std::min(1.0f, static_cast<float>(expHits) /
+                                                              static_cast<float>(qtokens.size()));
+
+                        // Hotzone: boost by top hot token presence
+                        float hotb = 0.0f;
+                        for (const auto& t : qtokens) {
+                            auto itHot = hot.find(t);
+                            if (itHot == hot.end())
+                                continue;
+                            size_t freq = itHot->second.first;
+                            if (freq == 0)
+                                continue;
+                            float pres = (contains_token(title, t) || contains_token(path, t) ||
+                                          contains_token(it.content, t))
+                                             ? 1.0f
+                                             : 0.0f;
+                            hotb = std::max(hotb,
+                                            pres * std::min(2.0f, static_cast<float>(std::log1p(
+                                                                      static_cast<double>(freq)))));
+                        }
+
+                        // Combine
+                        float add = cw * cls + kw * kgex + hw * hotb;
+                        it.hybrid_score += add;
+                    }
+                    // Re-sort
+                    std::sort(items.begin(), items.end());
+                    if (items.size() > static_cast<size_t>(opts.hybrid.final_top_k))
+                        items.resize(opts.hybrid.final_top_k);
+                }
+                (void)t0; // future: enforce ecfg.timeout budget across computations
+            }
+        }
+
         // Convert results to response format
         SearchResponse response;
-        const auto& items = searchRes.value();
+        const auto& finalItems = items;
 
-        for (const auto& item : items) {
+        for (const auto& item : finalItems) {
             yams::daemon::SearchResult result;
             result.id = item.id;
             result.score = static_cast<double>(item.hybrid_score);
@@ -2504,12 +3819,328 @@ Response RequestDispatcher::handleMetadataSearch(
     }
 }
 
-Response RequestDispatcher::handleCancelRequest(const CancelRequest& req) {
+boost::asio::awaitable<Response> RequestDispatcher::handleCancelRequest(const CancelRequest& req) {
     bool ok = RequestContextRegistry::instance().cancel(req.targetRequestId);
     if (ok) {
-        return SuccessResponse{"Cancel accepted"};
+        co_return SuccessResponse{"Cancel accepted"};
     }
-    return ErrorResponse{ErrorCode::NotFound, "RequestId not found or already completed"};
+    co_return ErrorResponse{ErrorCode::NotFound, "RequestId not found or already completed"};
+}
+
+} // namespace yams::daemon
+
+// Re-open daemon namespace for plugin loader helpers and handlers
+namespace yams::daemon {
+static PluginRecord toRecord(const PluginDescriptor& sr) {
+    PluginRecord pr;
+    pr.name = sr.name;
+    pr.version = sr.version;
+    pr.abiVersion = sr.abiVersion;
+    pr.path = sr.path.string();
+    pr.manifestJson = sr.manifestJson;
+    pr.interfaces = sr.interfaces;
+    return pr;
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePluginScanRequest(const PluginScanRequest& req) {
+    try {
+        auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+        auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
+        auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+        if (!abi && !wasm && !ext)
+            co_return ErrorResponse{ErrorCode::NotImplemented, "No plugin host available"};
+        PluginScanResponse resp;
+        if (!req.target.empty()) {
+            bool any = false;
+            if (abi) {
+                if (auto r = abi->scanTarget(req.target)) {
+                    resp.plugins.push_back(toRecord(r.value()));
+                    any = true;
+                }
+            }
+            if (wasm) {
+                if (auto r = wasm->scanTarget(req.target)) {
+                    resp.plugins.push_back(toRecord(r.value()));
+                    any = true;
+                }
+            }
+            if (ext) {
+                if (auto r = ext->scanTarget(req.target)) {
+                    resp.plugins.push_back(toRecord(r.value()));
+                    any = true;
+                }
+            }
+            if (!any)
+                co_return ErrorResponse{ErrorCode::NotFound, "No plugin found at target"};
+        } else if (!req.dir.empty()) {
+            if (abi) {
+                if (auto r = abi->scanDirectory(req.dir))
+                    for (auto& sr : r.value())
+                        resp.plugins.push_back(toRecord(sr));
+            }
+            if (wasm) {
+                if (auto r = wasm->scanDirectory(req.dir))
+                    for (auto& sr : r.value())
+                        resp.plugins.push_back(toRecord(sr));
+            }
+            if (ext) {
+                if (auto r = ext->scanDirectory(req.dir))
+                    for (auto& sr : r.value())
+                        resp.plugins.push_back(toRecord(sr));
+            }
+        } else {
+            // Default directories: reuse existing model PluginLoader directories
+            for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
+                if (abi)
+                    if (auto r = abi->scanDirectory(dir))
+                        for (auto& sr : r.value())
+                            resp.plugins.push_back(toRecord(sr));
+                if (wasm)
+                    if (auto r = wasm->scanDirectory(dir))
+                        for (auto& sr : r.value())
+                            resp.plugins.push_back(toRecord(sr));
+                if (ext)
+                    if (auto r = ext->scanDirectory(dir))
+                        for (auto& sr : r.value())
+                            resp.plugins.push_back(toRecord(sr));
+            }
+        }
+        co_return resp;
+    } catch (const std::exception& e) {
+        co_return ErrorResponse{ErrorCode::Unknown, e.what()};
+    }
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
+    try {
+        auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+        auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
+        auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+        auto appContext =
+            serviceManager_ ? serviceManager_->getAppContext() : yams::app::services::AppContext{};
+        if (!abi && !wasm && !ext)
+            co_return ErrorResponse{ErrorCode::NotImplemented, "No plugin host available"};
+        PluginLoadResponse lr;
+        std::filesystem::path target(req.pathOrName);
+        if (req.dryRun) {
+            if (abi) {
+                if (auto r = abi->scanTarget(target)) {
+                    lr.loaded = false;
+                    lr.message = "dry-run";
+                    lr.record = toRecord(r.value());
+                    co_return lr;
+                }
+            }
+            if (wasm) {
+                if (auto r = wasm->scanTarget(target)) {
+                    lr.loaded = false;
+                    lr.message = "dry-run";
+                    lr.record = toRecord(r.value());
+                    co_return lr;
+                }
+            }
+            co_return ErrorResponse{ErrorCode::NotFound, "Plugin not found"};
+        }
+        if (!std::filesystem::exists(target)) {
+            // Try default directories by file name first
+            bool found = false;
+            for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
+                auto candidate = dir / req.pathOrName;
+                if (std::filesystem::exists(candidate)) {
+                    target = candidate;
+                    found = true;
+                    break;
+                }
+            }
+            // If still not found and arg looks like a logical name (no path separators),
+            // scan default directories and match by plugin descriptor name
+            if (!found && req.pathOrName.find('/') == std::string::npos &&
+                req.pathOrName.find('\\') == std::string::npos) {
+                for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
+                    // Prefer ABI host scan
+                    if (abi) {
+                        if (auto r = abi->scanDirectory(dir)) {
+                            for (const auto& d : r.value()) {
+                                if (d.name == req.pathOrName) {
+                                    target = d.path;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!found && wasm) {
+                        if (auto r = wasm->scanDirectory(dir)) {
+                            for (const auto& d : r.value()) {
+                                if (d.name == req.pathOrName) {
+                                    target = d.path;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (found)
+                        break;
+                }
+            }
+            if (!found)
+                co_return ErrorResponse{ErrorCode::FileNotFound, "Plugin not found"};
+        }
+        // Choose host by target type
+        auto extn = target.extension().string();
+        // External: directory with yams-plugin.json
+        if (ext && std::filesystem::is_directory(target) &&
+            std::filesystem::exists(target / "yams-plugin.json")) {
+            if (auto r = ext->load(target, req.configJson)) {
+                lr.loaded = true;
+                lr.message = "loaded";
+                lr.record = toRecord(r.value());
+                co_return lr;
+            }
+        }
+        if (extn == ".wasm" && wasm) {
+            if (auto r = wasm->load(target, req.configJson)) {
+                lr.loaded = true;
+                lr.message = "loaded";
+                lr.record = toRecord(r.value());
+                co_return lr;
+            }
+        }
+        if (abi) {
+            if (auto r = abi->load(target, req.configJson)) {
+                lr.loaded = true;
+                lr.message = "loaded";
+                lr.record = toRecord(r.value());
+                // Attempt to adopt model provider dynamically if this plugin provides it
+                if (serviceManager_) {
+                    (void)serviceManager_->adoptModelProviderFromHosts(lr.record.name);
+                }
+                co_return lr;
+            }
+        }
+        co_return ErrorResponse{ErrorCode::InvalidState, "Load failed"};
+    } catch (const std::exception& e) {
+        co_return ErrorResponse{ErrorCode::Unknown, e.what()};
+    }
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) {
+    try {
+        auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+        auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
+        auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+        bool ok = false;
+        if (abi) {
+            if (auto r = abi->unload(req.name))
+                ok = true;
+        }
+        if (wasm && !ok) {
+            if (auto r = wasm->unload(req.name))
+                ok = true;
+        }
+        if (ext && !ok) {
+            if (auto r = ext->unload(req.name))
+                ok = true;
+        }
+        if (!ok)
+            co_return ErrorResponse{ErrorCode::NotFound, "Plugin not found or unload failed"};
+        co_return SuccessResponse{"unloaded"};
+    } catch (const std::exception& e) {
+        co_return ErrorResponse{ErrorCode::Unknown, e.what()};
+    }
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePluginTrustListRequest(const PluginTrustListRequest& /*req*/) {
+    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
+    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+    PluginTrustListResponse resp;
+    if (abi)
+        for (auto& p : abi->trustList())
+            resp.paths.push_back(p.string());
+    if (wasm)
+        for (auto& p : wasm->trustList())
+            resp.paths.push_back(p.string());
+    if (ext)
+        for (auto& p : ext->trustList())
+            resp.paths.push_back(p.string());
+    // de-dup
+    std::sort(resp.paths.begin(), resp.paths.end());
+    resp.paths.erase(std::unique(resp.paths.begin(), resp.paths.end()), resp.paths.end());
+    co_return resp;
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req) {
+    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
+    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+    bool ok = false;
+    if (abi)
+        if (auto r = abi->trustAdd(req.path))
+            ok = true;
+    if (wasm)
+        if (auto r = wasm->trustAdd(req.path))
+            ok = true;
+    if (ext)
+        if (auto r = ext->trustAdd(req.path))
+            ok = true;
+    if (!ok)
+        co_return ErrorResponse{ErrorCode::Unknown, "Trust add failed"};
+    // Opportunistic autoload: if a directory/file was just trusted, load matching plugins now.
+    try {
+        std::filesystem::path p = req.path;
+        if (std::filesystem::is_directory(p)) {
+            if (abi) {
+                if (auto r = abi->scanDirectory(p)) {
+                    for (const auto& d : r.value())
+                        (void)abi->load(d.path, "");
+                }
+            }
+            if (wasm) {
+                if (auto r = wasm->scanDirectory(p)) {
+                    for (const auto& d : r.value())
+                        (void)wasm->load(d.path, "");
+                }
+            }
+        } else if (std::filesystem::is_regular_file(p)) {
+            if (abi)
+                (void)abi->load(p, "");
+            if (wasm && p.extension() == ".wasm")
+                (void)wasm->load(p, "");
+        }
+        // Attempt adoption of model provider if relevant
+        if (serviceManager_)
+            (void)serviceManager_->adoptModelProviderFromHosts();
+    } catch (...) {
+        // best-effort; ignore failures here
+    }
+    co_return SuccessResponse{"ok"};
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest& req) {
+    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
+    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+    bool ok = false;
+    if (abi)
+        if (auto r = abi->trustRemove(req.path))
+            ok = true;
+    if (wasm)
+        if (auto r = wasm->trustRemove(req.path))
+            ok = true;
+    if (ext)
+        if (auto r = ext->trustRemove(req.path))
+            ok = true;
+    if (!ok)
+        co_return ErrorResponse{ErrorCode::Unknown, "Trust remove failed"};
+    co_return SuccessResponse{"ok"};
 }
 
 } // namespace yams::daemon

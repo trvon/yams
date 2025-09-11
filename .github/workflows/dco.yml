@@ -1,0 +1,34 @@
+name: DCO
+
+on:
+  pull_request:
+
+jobs:
+  dco-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify DCO sign-off on all commits in PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "Checking commits from $BASE..$HEAD"
+          MISSING=0
+          while read -r commit; do
+            if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "❌ Missing Signed-off-by in commit $commit" >&2
+              git log -1 --format=%B "$commit" | sed 's/^/    /'
+              MISSING=1
+            else
+              echo "✅ DCO present for $commit"
+            fi
+          done < <(git rev-list "$BASE..$HEAD")
+          if [[ "$MISSING" -ne 0 ]]; then
+            echo "One or more commits are missing DCO sign-off." >&2
+            exit 1
+          fi
+          echo "All commits have DCO sign-off."

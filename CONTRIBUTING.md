@@ -31,3 +31,11 @@ Thanks for your interest in contributing!
 
 ## Code of Conduct
 - We follow the Contributor Covenant. See CODE_OF_CONDUCT.md.
+
+---
+
+## Governance and Process
+- Please review GOVERNANCE.md for roles, decision process, and releases.
+- Material changes require an RFC (`docs/rfcs`) and, once accepted, an ADR (`docs/adrs`).
+- All commits must include DCO sign-off: add a line `Signed-off-by: Your Name <you@example.com>` to your commit message.
+- CODEOWNERS reviews are required; see `.github/CODEOWNERS`.

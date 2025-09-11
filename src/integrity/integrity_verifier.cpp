@@ -157,9 +157,9 @@ struct IntegrityVerifier::Impl {
     // Hashing
     std::unique_ptr<crypto::IContentHasher> hasher;
 
-    explicit Impl(storage::StorageEngine& storage, storage::ReferenceCounter& refCounter,
-                  VerificationConfig config)
-        : storage(storage), refCounter(refCounter), config(std::move(config)),
+    explicit Impl(storage::StorageEngine& storageEngine, storage::ReferenceCounter& refCounterRef,
+                  VerificationConfig cfg)
+        : storage(storageEngine), refCounter(refCounterRef), config(std::move(cfg)),
           threadPool(
               std::make_unique<VerificationThreadPool>(this->config.maxConcurrentVerifications)),
           rateLimiter(std::make_unique<RateLimiter>(this->config.blocksPerSecond)),

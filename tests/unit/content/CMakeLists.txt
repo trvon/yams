@@ -1,21 +1,6 @@
 # Content handler tests
-add_executable(pdf_content_handler_test
-    pdf_content_handler_test.cpp
-)
-
-target_link_libraries(pdf_content_handler_test
-    PRIVATE
-        test_utils
-        gtest_main
-        yams::content
-        yams::detection
-)
-
-gtest_discover_tests(pdf_content_handler_test
-    PROPERTIES
-        LABELS "unit;content"
-        TIMEOUT 60
-)
+# Legacy PDF tests moved to plugin; do not build pdf_handler_test or pdf_content_handler_test here.
+# PDF content handler tests moved to plugin; core no longer builds them.
 
 # Test if existing content handler tests should be included
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/text_handler_test.cpp")
@@ -34,6 +19,26 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/text_handler_test.cpp")
     gtest_discover_tests(text_handler_test
         PROPERTIES
             LABELS "unit;content"
+            TIMEOUT 60
+    )
+endif()
+
+# EncodingDetector tests (extraction utilities)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/encoding_detector_test.cpp")
+    add_executable(encoding_detector_test
+        encoding_detector_test.cpp
+    )
+
+    target_link_libraries(encoding_detector_test
+        PRIVATE
+            test_utils
+            gtest_main
+            yams::extraction
+    )
+
+    gtest_discover_tests(encoding_detector_test
+        PROPERTIES
+            LABELS "unit;content;extraction"
             TIMEOUT 60
     )
 endif()

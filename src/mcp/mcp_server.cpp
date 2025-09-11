@@ -1,7 +1,7 @@
-#include <yams/cli/async_bridge.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
@@ -10,6 +10,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 
+#include <future>
 #include <mutex>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <errno.h>
@@ -25,7 +27,9 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <regex>
+#include <unordered_set>
 
 // Platform-specific includes for non-blocking I/O
 #ifdef _WIN32
@@ -59,76 +63,119 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 
 } // namespace
 
-// Forward declare helper for in-band logging
-static nlohmann::json createLogNotification(const std::string& level, const std::string& message);
+thread_local std::string MCPServer::tlsSessionId_;
+
+// In-band logging helper (level + message variant) - YAMS extension, not standard MCP
+static nlohmann::json createLogNotification(const std::string& level, const std::string& message) {
+    // NOTE: This is a YAMS-specific extension. Standard MCP only supports notifications/log from
+    // client->server Wrap simple textual message inside a data object for consistency with the
+    // (level,data,logger) overload
+    nlohmann::json params = {{"level", level}, {"data", nlohmann::json{{"message", message}}}};
+    return {{"jsonrpc", "2.0"}, {"method", "notifications/message"}, {"params", params}};
+}
 
 // Define static mutex for StdioTransport
 std::mutex StdioTransport::out_mutex_;
 
+// Unified send helper: prefers non-blocking transports and posts async sends when possible
+void MCPServer::sendResponse(const nlohmann::json& message) {
+    spdlog::debug("MCP server sending response: {}", message.dump());
+    // HTTP publish path (notifications). Do not short-circuit stdio delivery.
+    if (!tlsSessionId_.empty() && httpPublisher_) {
+        try {
+            if (message.is_object() && message.contains("method")) {
+                httpPublisher_(tlsSessionId_, message);
+            }
+        } catch (...) {
+            // best effort; always continue to stdio
+        }
+    }
+
+    // Serialize once for both telemetry and transport
+    std::string payload;
+    try {
+        payload = message.dump();
+    } catch (const std::exception& e) {
+        spdlog::error("sendResponse: serialization failed: {}", e.what());
+        return;
+    }
+    telemetrySentBytes_.fetch_add(static_cast<uint64_t>(payload.size()));
+    if (payload.find("\"jsonrpc\":null") != std::string::npos ||
+        payload.find("\"result\":null") != std::string::npos) {
+        spdlog::error("MCP CORRUPTION SUSPECTED BEFORE SEND: {}", payload);
+        telemetryIntegrityFailures_.fetch_add(1);
+    }
+
+    // Prefer immediate synchronous flush for stdio transport; fallback to queue
+    if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+        stdio->send(message); // sends one JSON object per line
+        return;
+    }
+
+    enqueueOutbound(std::move(payload));
+}
+
+// Enqueue payload and start drain coroutine if idle
+void MCPServer::enqueueOutbound(std::string payload) {
+    {
+        std::lock_guard<std::mutex> lk(outboundMutex_);
+        outboundQueue_.push_back(std::move(payload));
+        // If not currently draining, start the drain coroutine
+        bool expected = false;
+        if (!outboundDraining_.compare_exchange_strong(expected, true)) {
+            return; // drain already active
+        }
+    }
+    if (outboundStrand_) {
+        boost::asio::co_spawn(*outboundStrand_, outboundDrainAsync(), boost::asio::detached);
+    } else {
+        boost::asio::co_spawn(yams::daemon::GlobalIOContext::instance().get_io_context(),
+                              outboundDrainAsync(), boost::asio::detached);
+    }
+}
+
+// Drain queue sequentially; choose best transport per message
+boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
+    for (;;) {
+        std::string next;
+        {
+            std::lock_guard<std::mutex> lk(outboundMutex_);
+            if (outboundQueue_.empty()) {
+                // Mark not draining, but re-check in case a producer raced us
+                outboundDraining_.store(false);
+                if (outboundQueue_.empty()) {
+                    break;
+                }
+                // New item arrived after store(false); claim draining again
+                outboundDraining_.store(true);
+            }
+            next = std::move(outboundQueue_.front());
+            outboundQueue_.pop_front();
+        }
+
+        if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
+            // Synchronous path; still ordered by drain loop (framed output)
+            stdio->send(next);
+        } else {
+            // No supported transport for raw framed write; drop with error
+            spdlog::error("outboundDrainAsync: unsupported transport type for framed write; "
+                          "dropping message");
+        }
+    }
+    co_return;
+}
+
 // Non-blocking send: enqueue message for writer thread
-void StdioTransport::sendAsync(const json& message) {
+void StdioTransport::sendAsync(json message) {
     if (state_.load() != TransportState::Connected) {
         return;
     }
-    {
-        std::lock_guard<std::mutex> lk(queueMutex_);
-        outQueue_.push_back(message);
-    }
-    queueCv_.notify_one();
+    // Writer thread retired; fall back to immediate framed send
+    send(message.dump());
 }
 
 // Dedicated writer thread: drains queue and writes framed messages to stdout
-void StdioTransport::writerLoop() {
-    while (true) {
-        json message;
-        {
-            std::unique_lock<std::mutex> lk(queueMutex_);
-            queueCv_.wait(lk, [&] {
-                return !outQueue_.empty() || state_.load() == TransportState::Closing ||
-                       (externalShutdown_ && *externalShutdown_);
-            });
-            if (!outQueue_.empty()) {
-                message = std::move(outQueue_.front());
-                outQueue_.pop_front();
-            }
-        }
-
-        if (!message.is_null()) {
-            auto currentState = state_.load();
-            if (currentState == TransportState::Connected ||
-                currentState == TransportState::Closing) {
-                std::lock_guard<std::mutex> lock(out_mutex_);
-                const std::string payload = message.dump();
-                // Temporarily bind std::cout to captured buffer to honor test redirections
-                std::streambuf* saved = std::cout.rdbuf();
-                if (outbuf_) {
-                    (void)std::cout.rdbuf(outbuf_);
-                }
-                // LSP/MCP framing
-                std::cout << "Content-Length: " << payload.size() << "\r\n";
-                std::cout << "Content-Type: application/json\r\n\r\n";
-                std::cout << payload;
-                std::cout << "\r\n";
-                std::cout.flush();
-                if (saved) {
-                    (void)std::cout.rdbuf(saved);
-                }
-            }
-        }
-
-        // Graceful exit: on close and queue drained, or external shutdown
-        if (state_.load() == TransportState::Closing) {
-            std::unique_lock<std::mutex> lk(queueMutex_);
-            if (outQueue_.empty()) {
-                break;
-            }
-        }
-        if (externalShutdown_ && *externalShutdown_) {
-            break;
-        }
-    }
-    writerRunning_.store(false);
-}
+void StdioTransport::writerLoop() { /* retired */ }
 
 // StdioTransport implementation
 StdioTransport::StdioTransport() {
@@ -138,13 +185,41 @@ StdioTransport::StdioTransport() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 #endif
+
+    // Set stdin/stdout to binary mode on Windows to prevent CRLF translation
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     // Capture the current stdout buffer so we honor caller redirections (tests set rdbuf)
     outbuf_ = std::cout.rdbuf();
+    // Configure receive timeout from environment, enforce a sane minimum
+    if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
+        try {
+            recvTimeoutMs_ = std::stoi(env);
+            if (recvTimeoutMs_ < 50)
+                recvTimeoutMs_ = 50;
+        } catch (...) {
+            // ignore and keep default
+        }
+    }
     state_.store(TransportState::Connected);
-    // Start outbound writer thread for non-blocking sends
-    writerRunning_.store(true);
-    writerThread_ = std::thread(&StdioTransport::writerLoop, this);
-    writerThread_.detach();
+    // Writer thread retired; unified outbound path in MCPServer handles ordering
+    writerRunning_.store(false);
+}
+
+StdioTransport::~StdioTransport() {
+    state_.store(TransportState::Closing);
+    queueCv_.notify_all();
+    if (writerThread_.joinable()) {
+        try {
+            writerThread_.join();
+        } catch (...) {
+            // swallow any join exceptions
+        }
+    }
 }
 
 void StdioTransport::send(const json& message) {
@@ -171,9 +246,34 @@ void StdioTransport::send(const json& message) {
 
 bool StdioTransport::isInputAvailable(int timeoutMs) const {
 #ifdef _WIN32
-    // Windows implementation using WaitForSingleObject
+    // Windows: Prefer PeekNamedPipe for pipes, fallback to console wait
     HANDLE stdinHandle = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD waitResult = WaitForSingleObject(stdinHandle, timeoutMs);
+    if (stdinHandle == INVALID_HANDLE_VALUE || stdinHandle == nullptr) {
+        return false;
+    }
+    DWORD fileType = GetFileType(stdinHandle);
+    if (fileType == FILE_TYPE_PIPE) {
+        DWORD bytesAvail = 0;
+        if (PeekNamedPipe(stdinHandle, nullptr, 0, nullptr, &bytesAvail, nullptr)) {
+            if (bytesAvail > 0)
+                return true;
+            // Simple timed wait: sleep for the timeout and check again once
+            if (timeoutMs > 0) {
+                Sleep(static_cast<DWORD>(timeoutMs));
+                bytesAvail = 0;
+                if (PeekNamedPipe(stdinHandle, nullptr, 0, nullptr, &bytesAvail, nullptr)) {
+                    return bytesAvail > 0;
+                }
+            }
+            return false;
+        }
+        // If PeekNamedPipe fails, fall back to a short sleep
+        if (timeoutMs > 0)
+            Sleep(static_cast<DWORD>(timeoutMs));
+        return false;
+    }
+    // Console input or unknown: WaitForSingleObject is acceptable
+    DWORD waitResult = WaitForSingleObject(stdinHandle, static_cast<DWORD>(timeoutMs));
     return waitResult == WAIT_OBJECT_0;
 #else
     // Unix/Linux/macOS implementation using poll
@@ -204,159 +304,124 @@ bool StdioTransport::isInputAvailable(int timeoutMs) const {
 }
 
 MessageResult StdioTransport::receive() {
-    auto currentState = state_.load();
-    if (currentState == TransportState::Closing || currentState == TransportState::Disconnected) {
-        return Error{ErrorCode::NetworkError, "Transport is closed or disconnected"};
+    if (state_.load() != TransportState::Connected) {
+        return Error{ErrorCode::NetworkError, "Transport not connected"};
     }
-
-    // MCP stdio transport: Support both LSP-style Content-Length framing and
-    // newline-delimited JSON. Always read from the current std::cin buffer so
-    // redirections done after construction (in tests) are honored.
     std::istream in(std::cin.rdbuf());
 
     while (state_.load() != TransportState::Closing) {
-        // Check for input availability
-        std::streamsize avail = in.rdbuf() ? in.rdbuf()->in_avail() : 0;
-
-        // Check for EOF first
-        if (in.eof()) {
-            state_.store(TransportState::Disconnected);
-            return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
+        if (!isInputAvailable(recvTimeoutMs_)) {
+            if (externalShutdown_ && *externalShutdown_) {
+                state_.store(TransportState::Closing);
+                return Error{ErrorCode::NetworkError, "External shutdown requested"};
+            }
+            continue;
         }
 
-        if (isInputAvailable(100) || avail > 0) {
-            std::string firstLine;
-            in.clear();
+        // Attempt to read framed headers; fallback to single-line JSON (non-seekable safe)
+        std::size_t contentLength = 0;
+        std::string line;
 
-            // Lock mutex for thread-safe reads
-            if (!std::getline(in, firstLine)) {
-                if (in.eof()) {
-                    spdlog::debug("EOF on stdin, closing transport");
-                    state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "End of file reached on stdin"};
-                }
-                // Clear error and retry if we should
-                in.clear();
-                if (!shouldRetryAfterError()) {
-                    state_.store(TransportState::Error);
-                    return Error{ErrorCode::NetworkError, "Too many consecutive I/O errors"};
-                }
-                continue;
+        // Read first non-empty line
+        do {
+            if (!std::getline(in, line)) {
+                state_.store(TransportState::Disconnected);
+                return Error{ErrorCode::NetworkError, "EOF on stdin"};
             }
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+        } while (line.empty());
 
-            // Handle CRLF: strip trailing '\r' if present
-            if (!firstLine.empty() && firstLine.back() == '\r') {
-                firstLine.pop_back();
-            }
+        spdlog::debug("StdioTransport: Read line: '{}'", line);
 
-            // Check for LSP-style framing
-            if (firstLine.rfind("Content-Length:", 0) == 0) {
-                // Parse length
-                std::size_t colon = firstLine.find(':');
-                std::size_t len = 0;
-                if (colon != std::string::npos) {
-                    // Skip optional space
-                    std::string lenStr = firstLine.substr(colon + 1);
-                    if (!lenStr.empty() && lenStr.front() == ' ')
-                        lenStr.erase(0, 1);
-                    try {
-                        len = static_cast<std::size_t>(std::stoul(lenStr));
-                    } catch (...) {
-                        recordError();
-                        return Error{ErrorCode::InvalidData, "Invalid Content-Length header"};
-                    }
-                } else {
-                    recordError();
-                    return Error{ErrorCode::InvalidData, "Malformed Content-Length header"};
-                }
-
-                // Consume header lines until an empty line (CRLF) to support multiple headers
-                std::string headerLine;
-                while (std::getline(in, headerLine)) {
-                    if (!headerLine.empty() && headerLine.back() == '\r')
-                        headerLine.pop_back();
-                    if (headerLine.empty())
-                        break; // end of headers
-                    // Ignore additional headers such as Content-Type
-                }
-
-                // Read exact number of bytes
-                std::string payload;
-                payload.resize(len);
-                in.read(payload.data(), static_cast<std::streamsize>(len));
-                if (in.gcount() != static_cast<std::streamsize>(len)) {
-                    recordError();
-                    return Error{ErrorCode::NetworkError, "Short read on Content-Length payload"};
-                }
-                // Compatibility: consume any trailing CR/LF after framed payload, if present
-                if (in.rdbuf() && in.rdbuf()->in_avail() > 0) {
-                    while (in.rdbuf()->in_avail() > 0) {
-                        int c = in.peek();
-                        if (c == '\r' || c == '\n') {
-                            (void)in.get();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                // Parse JSON message using safe parser
-                auto parseResult = json_utils::parse_json(payload);
-                if (!parseResult) {
-                    recordError();
-                    spdlog::debug("JSON parse error (framed): {}", parseResult.error().message);
-                    state_.store(TransportState::Error);
-                    return parseResult.error();
-                }
-
-                resetErrorCount();
-                return parseResult.value();
-            }
-
-            // Fallback: treat line as a full JSON message (newline-delimited mode)
-            if (firstLine.empty()) {
-                // If we got an empty line and there's no more input, check EOF/timeout
-                if (in.eof() || (!in.rdbuf() || in.rdbuf()->in_avail() == 0)) {
-                    if (!isInputAvailable(10)) {
-                        state_.store(TransportState::Disconnected);
-                        return Error{ErrorCode::NetworkError, "No more input after empty line"};
-                    }
-                }
-                continue;
-            }
-
-            // Parse JSON message using safe parser
-            auto parseResult = json_utils::parse_json(firstLine);
-            if (!parseResult) {
+        // Unframed single-line JSON support (best-effort compatibility)
+        if (!line.empty() && line.front() == '{') {
+            spdlog::debug("StdioTransport: Detected single-line JSON mode");
+            auto parsed = json_utils::parse_json(line);
+            if (!parsed) {
+                spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
                 recordError();
-                spdlog::debug("JSON parse error (line): {}", parseResult.error().message);
-
-                // In test environments or when we shouldn't retry, return error immediately
-                // This prevents hanging when there's no more input after an error
-                if (!shouldRetryAfterError() || in.eof()) {
+                if (!shouldRetryAfterError())
                     state_.store(TransportState::Error);
-                    return parseResult.error();
-                }
-
-                // Check if there's more input available before continuing
-                if (!isInputAvailable(10)) { // Short timeout
-                    // No more input available, return the error
-                    return parseResult.error();
-                }
-                continue; // Try next line for recoverable errors
+                return parsed.error();
             }
-
-            // Reset error count on successful parse
             resetErrorCount();
-            return parseResult.value();
+            return parsed.value();
         }
 
-        // Check if external shutdown was requested
-        if (externalShutdown_ && *externalShutdown_) {
-            spdlog::debug("External shutdown requested, closing transport");
-            state_.store(TransportState::Closing);
-            return Error{ErrorCode::NetworkError, "External shutdown requested"};
+        auto parseHeader = [&](const std::string& hdr) -> bool {
+            auto pos = hdr.find(':');
+            if (pos == std::string::npos)
+                return false;
+            std::string key = hdr.substr(0, pos);
+            std::string val = hdr.substr(pos + 1);
+            while (!val.empty() && (val.front() == ' ' || val.front() == '\t'))
+                val.erase(val.begin());
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            if (key == "content-length") {
+                try {
+                    contentLength = static_cast<std::size_t>(std::stoull(val));
+                } catch (...) {
+                    contentLength = 0;
+                }
+            }
+            return true;
+        };
+
+        if (!parseHeader(line)) {
+            recordError();
+            if (!shouldRetryAfterError())
+                state_.store(TransportState::Error);
+            return Error{ErrorCode::InvalidData, "Malformed header line"};
         }
+
+        // Remaining headers until blank line
+        while (true) {
+            if (!std::getline(in, line)) {
+                state_.store(TransportState::Disconnected);
+                return Error{ErrorCode::NetworkError, "EOF during headers"};
+            }
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (line.empty())
+                break; // end of headers
+            if (!parseHeader(line)) {
+                recordError();
+                if (!shouldRetryAfterError())
+                    state_.store(TransportState::Error);
+                return Error{ErrorCode::InvalidData, "Malformed header line"};
+            }
+        }
+
+        if (contentLength == 0) {
+            recordError();
+            if (!shouldRetryAfterError())
+                state_.store(TransportState::Error);
+            return Error{ErrorCode::InvalidData, "Missing Content-Length"};
+        }
+
+        std::string payload(contentLength, '\0');
+        spdlog::debug("StdioTransport: Reading {} bytes of content", contentLength);
+        in.read(payload.data(), static_cast<std::streamsize>(contentLength));
+        if (in.gcount() != static_cast<std::streamsize>(contentLength)) {
+            recordError();
+            if (!shouldRetryAfterError())
+                state_.store(TransportState::Error);
+            return Error{ErrorCode::NetworkError, "Short read of framed JSON payload"};
+        }
+
+        spdlog::debug("StdioTransport: Received framed message with Content-Length: {}",
+                      contentLength);
+        auto parsed = json_utils::parse_json(payload);
+        if (!parsed) {
+            spdlog::error("StdioTransport: Failed to parse framed JSON payload");
+            recordError();
+            if (!shouldRetryAfterError())
+                state_.store(TransportState::Error);
+            return parsed.error();
+        }
+        resetErrorCount();
+        return parsed.value();
     }
 
     return Error{ErrorCode::NetworkError, "Transport closed during receive"};
@@ -377,7 +442,9 @@ void StdioTransport::resetErrorCount() noexcept {
 
 // MCPServer implementation
 MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown)
-    : transport_(std::move(transport)), externalShutdown_(externalShutdown) {
+    : transport_(std::move(transport)), externalShutdown_(externalShutdown),
+      eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(true),
+      limitToolResultDup_(false) {
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -393,6 +460,61 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize a single multiplexed daemon client (replaces legacy pool/managers)
     {
         yams::daemon::ClientConfig cfg;
+
+        // Align daemon storage with CLI: resolve dataDir from env/config/XDG/HOME
+        std::filesystem::path dataDir;
+        if (const char* envStorage = std::getenv("YAMS_STORAGE"); envStorage && *envStorage) {
+            dataDir = envStorage;
+        } else if (const char* envData = std::getenv("YAMS_DATA_DIR"); envData && *envData) {
+            dataDir = envData;
+        } else {
+            try {
+                // Try config.toml via ConfigMigrator
+                std::map<std::string, std::map<std::string, std::string>> toml;
+                std::filesystem::path configPath;
+                if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
+                    configPath = std::filesystem::path(xdgConfigHome) / "yams" / "config.toml";
+                } else if (const char* homeEnv = std::getenv("HOME")) {
+                    configPath =
+                        std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
+                }
+                if (!configPath.empty() && std::filesystem::exists(configPath)) {
+                    yams::config::ConfigMigrator migrator;
+                    if (auto parsed = migrator.parseTomlConfig(configPath)) {
+                        toml = std::move(parsed.value());
+                    }
+                }
+                if (auto it = toml.find("core"); it != toml.end()) {
+                    const auto& core = it->second;
+                    if (auto f = core.find("data_dir"); f != core.end() && !f->second.empty()) {
+                        std::string p = f->second;
+                        if (!p.empty() && p.front() == '~') {
+                            if (const char* home = std::getenv("HOME")) {
+                                p = std::string(home) + p.substr(1);
+                            }
+                        }
+                        dataDir = std::filesystem::path(p);
+                    }
+                }
+            } catch (...) {
+                // ignore config errors
+            }
+            if (dataDir.empty()) {
+                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+                    dataDir = std::filesystem::path(xdgDataHome) / "yams";
+                } else if (const char* homeEnv = std::getenv("HOME")) {
+                    dataDir = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
+                }
+            }
+        }
+        if (!dataDir.empty()) {
+            cfg.dataDir = dataDir;
+#ifndef _WIN32
+            ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
+            ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
+#endif
+        }
+
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
         cfg.requestTimeout = std::chrono::seconds(30);
@@ -405,6 +527,76 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
+
+    // Set default handshake behavior from environment variables
+    enableYamsExtensions_ = true;
+    if (const char* env = std::getenv("YAMS_DISABLE_EXTENSIONS")) {
+        enableYamsExtensions_ = !(std::string(env) == "1" || std::string(env) == "true");
+    }
+    // Environment variable support for handshake behavior
+    if (const char* env = std::getenv("YAMS_MCP_EAGER_READY")) {
+        eagerReadyEnabled_ = (std::string(env) == "1" || std::string(env) == "true");
+    }
+    if (const char* env = std::getenv("YAMS_MCP_AUTO_READY")) {
+        autoReadyEnabled_ = !(std::string(env) == "0" || std::string(env) == "false");
+    }
+    if (const char* env = std::getenv("YAMS_MCP_STRICT_PROTOCOL")) {
+        strictProtocol_ = (std::string(env) == "1" || std::string(env) == "true");
+    }
+    if (const char* env = std::getenv("YAMS_MCP_HANDSHAKE_TRACE")) {
+        handshakeTrace_ = (std::string(env) == "1" || std::string(env) == "true");
+    }
+    if (const char* env = std::getenv("YAMS_MCP_READY_DELAY_MS")) {
+        try {
+            autoReadyDelayMs_ = std::stoi(env);
+            if (autoReadyDelayMs_ < 20)
+                autoReadyDelayMs_ = 20;
+        } catch (...) {
+            autoReadyDelayMs_ = 100;
+        }
+    }
+
+    if (const char* env = std::getenv("YAMS_MCP_LIMIT_DUP_CONTENT")) {
+        limitToolResultDup_ = !(std::string(env) == "0" || std::string(env) == "false");
+    }
+
+    // Initialize outbound strand for serialized writes on the global IO context
+    {
+        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+        outboundStrand_ =
+            std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(io.get_executor());
+    }
+    // Proactively connect to the daemon (auto-start if configured) so first tool call
+    // doesn’t fail with a transport error when the socket isn’t up yet.
+    {
+        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+        boost::asio::co_spawn(
+            io,
+            [cli = daemon_client_]() -> boost::asio::awaitable<void> {
+                auto r = co_await cli->connect();
+                if (!r) {
+                    spdlog::warn("Daemon connect attempt failed: {}", r.error().message);
+                }
+                co_return;
+            },
+            boost::asio::detached);
+    }
+    // Ensure the global io_context is running so co_spawn coroutines progress (singleton runner)
+    static std::atomic<bool> ioThreadStarted{false};
+    if (!ioThreadStarted.exchange(true)) {
+        std::thread([] {
+            auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+            try {
+                spdlog::debug("Starting GlobalIOContext run loop thread");
+                io.run();
+            } catch (const std::exception& e) {
+                spdlog::error("GlobalIOContext thread exception: {}", e.what());
+            } catch (...) {
+                spdlog::error("GlobalIOContext thread encountered unknown exception");
+            }
+        }).detach();
+    }
+    startThreadPool(4);
 }
 
 MCPServer::~MCPServer() {
@@ -416,15 +608,10 @@ void MCPServer::start() {
         return; // Already running
     }
 
+    // Ensure stdout is not buffered for real-time communication
+    std::cout.setf(std::ios::unitbuf);
+
     spdlog::info("MCP server started");
-    // Start a small fixed thread pool for request handling (avoid unbounded detached threads)
-    {
-        size_t hc = std::thread::hardware_concurrency();
-        if (hc == 0)
-            hc = 2;
-        size_t threads = std::min<size_t>(4, std::max<size_t>(2, hc));
-        startThreadPool(threads);
-    }
 
     // Main message loop with modern error handling
     while (running_ && (!externalShutdown_ || !*externalShutdown_)) {
@@ -436,12 +623,14 @@ void MCPServer::start() {
             // Handle different error types
             switch (error.code) {
                 case ErrorCode::NetworkError:
-                    spdlog::info("Transport closed: {}", error.message);
+                    spdlog::debug("Transport closed: {}", error.message);
                     running_ = false;
                     break;
 
                 case ErrorCode::InvalidData:
                     spdlog::debug("Invalid JSON received: {}", error.message);
+                    // Per JSON-RPC 2.0, respond with Parse error and id=null
+                    sendResponse(createError(json(nullptr), protocol::PARSE_ERROR, error.message));
                     // Continue processing - client may send valid messages
                     continue;
 
@@ -454,265 +643,52 @@ void MCPServer::start() {
 
         // Process valid message
         auto request = messageResult.value();
+        spdlog::debug("MCP server received message: {}", request.dump());
+        if (handshakeTrace_) {
+            // handshakeTrace is a YAMS extension
+            try {
+                std::string meth = request.value("method", "");
+                std::string id = request.contains("id") ? request["id"].dump() : "null";
+                // Log to local logger instead of sending non-standard notification
+                spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
+            } catch (...) {
+            }
+        }
         // Detect JSON‑RPC notification (no "id" field per spec)
         const bool isNotification = !request.contains("id");
 
-        // Async dispatch is now the default for all MCP handlers
-        {
-            std::string method = request.value("method", "");
-            // Accept initialized notifications from clients (both MCP and legacy forms)
-            if (method == "initialized" || method == "notifications/initialized") {
-                // Client signals readiness; record and send server readiness notification
-                initialized_.exchange(true);
-                spdlog::info("MCP client sent notifications/initialized");
-                transport_->send(createReadyNotification());
-                continue;
-            }
-            if (method == "search") {
-                auto id = request.value("id", json{});
-                auto params = request.value("params", json::object());
-
-                enqueueTask([this, id, params]() mutable {
-                    auto task = [this, id, params]() -> yams::Task<void> {
-                        auto mcpReq = MCPSearchRequest::fromJson(params);
-                        auto result = co_await handleSearchDocuments(mcpReq);
-                        if (result) {
-                            auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        } else {
-                            auto err =
-                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(err);
-                            } else {
-                                transport_->send(err);
-                            }
-                        }
-                        co_return;
-                    }();
-                    try {
-                        task.get();
-                    } catch (...) {
-                    }
-                });
-
-                continue;
-            } else if (method == "grep") {
-                auto id = request.value("id", json{});
-                auto params = request.value("params", json::object());
-
-                enqueueTask([this, id, params]() mutable {
-                    auto task = [this, id, params]() -> yams::Task<void> {
-                        auto mcpReq = MCPGrepRequest::fromJson(params);
-                        auto result = co_await handleGrepDocuments(mcpReq);
-                        if (result) {
-                            auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        } else {
-                            auto err =
-                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(err);
-                            } else {
-                                transport_->send(err);
-                            }
-                        }
-                        co_return;
-                    }();
-                    try {
-                        task.get();
-                    } catch (...) {
-                    }
-                });
-
-                continue;
-            } else if (method == "list") {
-                auto id = request.value("id", json{});
-                auto params = request.value("params", json::object());
-
-                enqueueTask([this, id, params]() mutable {
-                    auto task = [this, id, params]() -> yams::Task<void> {
-                        auto mcpReq = MCPListDocumentsRequest::fromJson(params);
-                        auto result = co_await handleListDocuments(mcpReq);
-                        if (result) {
-                            auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        } else {
-                            auto err =
-                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(err);
-                            } else {
-                                transport_->send(err);
-                            }
-                        }
-                        co_return;
-                    }();
-                    try {
-                        task.get();
-                    } catch (...) {
-                    }
-                });
-
-                continue;
-            } else if (method == "get") {
-                auto id = request.value("id", json{});
-                auto params = request.value("params", json::object());
-
-                enqueueTask([this, id, params]() mutable {
-                    auto task = [this, id, params]() -> yams::Task<void> {
-                        auto mcpReq = MCPRetrieveDocumentRequest::fromJson(params);
-                        auto result = co_await handleRetrieveDocument(mcpReq);
-                        if (result) {
-                            auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        } else {
-                            auto err =
-                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(err);
-                            } else {
-                                transport_->send(err);
-                            }
-                        }
-                        co_return;
-                    }();
-                    try {
-                        task.get();
-                    } catch (...) {
-                    }
-                });
-
-                continue;
-            } else if (method == "add") {
-                auto id = request.value("id", json{});
-                auto params = request.value("params", json::object());
-
-                enqueueTask([this, id, params]() mutable {
-                    auto task = [this, id, params]() -> yams::Task<void> {
-                        auto mcpReq = MCPStoreDocumentRequest::fromJson(params);
-                        auto result = co_await handleStoreDocument(mcpReq);
-                        if (result) {
-                            auto resp = createResponse(id, result.value().toJson());
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        } else {
-                            auto err =
-                                createError(id, protocol::INTERNAL_ERROR, result.error().message);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(err);
-                            } else {
-                                transport_->send(err);
-                            }
-                        }
-                        co_return;
-                    }();
-                    try {
-                        task.get();
-                    } catch (...) {
-                    }
-                });
-
-                continue;
-            } else if (method == "tools/call") {
-                auto id = request.value("id", json{});
-                auto params = request.value("params", json::object());
-                auto toolName = params.value("name", "");
-                auto toolArgs = params.value("arguments", json::object());
-
-                enqueueTask([this, id, toolName, toolArgs]() mutable {
-                    auto task = [this, id, toolName, toolArgs]() -> yams::Task<void> {
-                        if (!toolRegistry_) {
-                            auto err = createError(id, protocol::INTERNAL_ERROR,
-                                                   "Tool registry not initialized");
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(err);
-                            } else {
-                                transport_->send(err);
-                            }
-                            co_return;
-                        }
-
-                        auto toolResult = co_await toolRegistry_->callTool(toolName, toolArgs);
-
-                        // Wrap non-MCP-shaped results into MCP content format for compatibility
-                        // with MCP clients
-                        if (toolResult.contains("content") && toolResult["content"].is_array()) {
-                            auto resp = createResponse(id, toolResult);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        } else {
-                            json wrapped = {
-                                {"content", json::array({json{{"type", "text"},
-                                                              {"text", toolResult.dump(2)}}})}};
-                            auto resp = createResponse(id, wrapped);
-                            if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-                                stdio->sendAsync(resp);
-                            } else {
-                                transport_->send(resp);
-                            }
-                        }
-                        co_return;
-                    }();
-                    try {
-                        task.get();
-                    } catch (...) {
-                    }
-                });
-
-                continue;
-            }
+        auto id_val = request.value("id", json{});
+        if (!isNotification && isCanceled(id_val)) {
+            spdlog::debug("Dropping response for cancelled request id={}", id_val.dump());
+            continue; // do not send a response (required by spec)
         }
-        // Fall through to synchronous handling for any unhandled methods
 
+        // All handling is now synchronous within this loop
         auto response = handleRequest(request);
         if (response) {
-            // Skip responses for notifications (no id per JSON-RPC 2.0)
             if (!isNotification) {
-                transport_->send(response.value());
-            } else {
-                spdlog::debug("Notification processed without response");
+                sendResponse(response.value());
             }
         } else {
-            // Send error response for protocol violations only for requests (not notifications)
             if (!isNotification) {
                 const auto& error = response.error();
                 json errorResponse = {
                     {"jsonrpc", protocol::JSONRPC_VERSION},
                     {"error", {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
                     {"id", request.value("id", nullptr)}};
-                transport_->send(errorResponse);
-            } else {
-                spdlog::debug("Notification error ignored (no response sent)");
+                sendResponse(errorResponse);
             }
         }
     }
 
-    stopThreadPool();
     running_ = false;
     spdlog::info("MCP server stopped");
+}
+
+// Async stdio-driven loop removed; startAsync delegates to start()
+boost::asio::awaitable<void> MCPServer::startAsync() {
+    start();
+    co_return;
 }
 
 void MCPServer::stop() {
@@ -727,38 +703,290 @@ void MCPServer::stop() {
 }
 
 MessageResult MCPServer::handleRequest(const json& request) {
+    auto id = request.value("id", json{});
+    registerCancelable(id);
     try {
         // Extract method and params
         std::string method = request.value("method", "");
         json params = request.value("params", json::object());
         auto id = request.value("id", json{});
 
-        json response;
+        spdlog::debug("MCP server handling method: '{}' with id: {}", method, id.dump());
 
         // Route to appropriate handler
         if (method == "initialize") {
-            response = initialize(params);
+            auto initResult = initialize(params);
+            if (initResult.contains("_initialize_error")) {
+                spdlog::error("MCP initialize failed with error");
+                return json{{"jsonrpc", "2.0"},
+                            {"id", id},
+                            {"error",
+                             {{"code", initResult["code"]},
+                              {"message", initResult["message"]},
+                              {"data", initResult["data"]}}}};
+            }
+            spdlog::debug("MCP initialize successful, protocol version: {}",
+                          initResult.value("protocolVersion", "unknown"));
+            return createResponse(id, initResult);
+        } else if (method == "notifications/cancelled") {
+            // MCP cancellation notification; tolerate either 'id' or 'requestId'
+            nlohmann::json cancelId;
+            if (params.contains("id")) {
+                cancelId = params["id"];
+            } else if (params.contains("requestId")) {
+                cancelId = params["requestId"];
+            } else {
+                spdlog::warn("notifications/cancelled missing id/requestId");
+                return Error{ErrorCode::InvalidArgument, "Missing id/requestId"};
+            }
+            cancelRequest(cancelId);
+            // Do not send a response for notifications
+            return Error{ErrorCode::Success, "notification"}; // notification: no response sent
+        } else if (method == "notifications/initialized") {
+            // MCP client signals readiness; no response required
+            markClientInitialized();
+            return Error{ErrorCode::Success, "notification"};
+        } else if (method == "ping") {
+            return createResponse(id, json::object());
+        } else if (method == "shutdown") {
+            // Per LSP spec: prepare for exit but don't actually exit yet
+            // Just acknowledge the shutdown request
+            spdlog::debug("Shutdown request received, preparing for exit");
+            shutdownRequested_ = true;
+            return createResponse(id, json::object());
+        } else if (method == "exit") {
+            // Per LSP spec: exit only after shutdown was requested
+            spdlog::debug("Exit request received");
+            if (externalShutdown_)
+                *externalShutdown_ = true;
+            running_ = false;
+            // Exit is a notification (no response expected)
+            return Error{ErrorCode::Success, "notification"};
         } else if (method == "tools/list") {
-            response = listTools();
+            recordEarlyFeatureUse();
+            return createResponse(id, listTools());
         } else if (method == "tools/call") {
-            // Tool calls are handled asynchronously in the start() method
-            return Error{ErrorCode::InvalidOperation,
-                         "Tool calls must be made through async message handling"};
+            recordEarlyFeatureUse();
+            const auto toolName = params.value("name", "");
+            const auto toolArgs = params.value("arguments", json::object());
+            spdlog::debug("MCP tool call: '{}' with args: {}", toolName, toolArgs.dump());
+            json raw = callTool(toolName, toolArgs);
+
+            // The tool already returns a properly wrapped result from wrapToolResult
+            // Just return it wrapped in the response envelope
+            return createResponse(id, raw);
         } else if (method == "resources/list") {
-            response = listResources();
+            return createResponse(id, listResources());
         } else if (method == "resources/read") {
             std::string uri = params.value("uri", "");
-            response = readResource(uri);
+            return createResponse(id, readResource(uri));
         } else if (method == "prompts/list") {
-            response = listPrompts();
+            return createResponse(id, listPrompts());
+        } else if (method == "prompts/get") {
+            std::string name = params.value("name", "");
+            json args = params.value("arguments", json::object());
+
+            auto textPart = [](const std::string& t) {
+                return json{{"type", "text"}, {"text", t}};
+            };
+            auto sysMsg = [&](const std::string& t) {
+                return json{{"role", "system"}, {"content", json::array({textPart(t)})}};
+            };
+            auto userMsg = [&](const std::string& t) {
+                return json{{"role", "user"}, {"content", json::array({textPart(t)})}};
+            };
+
+            auto makeResponse = [&](std::vector<json> messages) {
+                return createResponse(id, json{{"messages", std::move(messages)}});
+            };
+
+            if (name == "search_codebase") {
+                const std::string pattern = args.value("pattern", "");
+                const std::string fileType = args.value("file_type", "");
+                std::string u =
+                    "Goal: find occurrences in the codebase and propose next steps.\n"
+                    "- Prefer tools/grep for regex/precise matches with contexts.\n"
+                    "- Prefer tools/search for fuzzy/hybrid discovery across names+content.\n"
+                    "- Respect session scoping by default (server may scope by session).\n"
+                    "- When using grep, include line numbers and filenames.\n"
+                    "- When using search, return names/paths and snippets.\n";
+                if (!pattern.empty()) {
+                    u += "\nRequested pattern: " + pattern + "\n";
+                }
+                if (!fileType.empty()) {
+                    u += "File type filter hint: " + fileType + "\n";
+                }
+                return makeResponse({
+                    sysMsg("You are a code navigator that selects between grep and hybrid search."),
+                    userMsg(u),
+                });
+            }
+
+            if (name == "summarize_document") {
+                const std::string docName = args.value("document_name", "");
+                const int maxLen = args.value("max_length", 200);
+                std::string u =
+                    "Task: summarize a single document retrieved from the knowledge store.\n"
+                    "Steps:\n"
+                    "1) Retrieve by name via tools/get_by_name (latest=true) or by hash via "
+                    "tools/get.\n"
+                    "2) Produce a concise, faithful summary within " +
+                    std::to_string(maxLen) +
+                    " words.\n"
+                    "3) Include citation using the document name and/or hash.\n";
+                if (!docName.empty()) {
+                    u += "\nDocument name: " + docName + "\n";
+                }
+                return makeResponse({
+                    sysMsg("You are a precise summarizer. Cite sources by name/hash."),
+                    userMsg(u),
+                });
+            }
+
+            if (name == "rag/rewrite_query") {
+                const std::string query = args.value("query", "");
+                const std::string intent = args.value("intent", "");
+                std::string u = "Rewrite the user query to optimize retrieval (hybrid search: text "
+                                "+ metadata).\n"
+                                "Guidelines:\n"
+                                "- Expand meaningful synonyms; preserve critical terms.\n"
+                                "- Add lightweight qualifiers (e.g., name:*.md, tag:pinned) only "
+                                "if clearly helpful.\n"
+                                "- Keep it concise and robust to typos.\n";
+                if (!query.empty()) {
+                    u += "\nOriginal query: " + query + "\n";
+                }
+                if (!intent.empty()) {
+                    u += "Intent hint: " + intent + "\n";
+                }
+                return makeResponse({
+                    sysMsg("You are a retrieval query rewriter for hybrid search."),
+                    userMsg(u),
+                });
+            }
+
+            if (name == "rag/retrieve") {
+                const std::string query = args.value("query", "");
+                const int k = std::max(1, args.value("k", 10));
+                const std::string session = args.value("session", "");
+                std::string u =
+                    "Retrieve top-" + std::to_string(k) +
+                    " relevant items using tools/search.\n"
+                    "Requirements:\n"
+                    "- Use fuzzy=true and type=hybrid (server defaults may already do this).\n"
+                    "- Prefer session scoping if available; include name/path/hash/score/snippet.\n"
+                    "- Return a compact list suitable for follow-up fetches via tools/cat or "
+                    "tools/get.\n";
+                if (!query.empty()) {
+                    u += "\nQuery: " + query + "\n";
+                }
+                if (!session.empty()) {
+                    u += "Scope session: " + session + "\n";
+                }
+                return makeResponse({
+                    sysMsg("You are a retrieval runner that returns compact, citeable candidates."),
+                    userMsg(u),
+                });
+            }
+
+            if (name == "rag/retrieve_summarize") {
+                const std::string query = args.value("query", "");
+                const int k = std::max(1, args.value("k", 5));
+                const int maxWords = std::max(50, args.value("max_words", 250));
+                std::string u = "RAG pipeline: retrieve then summarize.\n"
+                                "Steps:\n"
+                                "1) tools/search with query (hybrid/fuzzy), top-" +
+                                std::to_string(k) +
+                                ".\n"
+                                "2) For each candidate, fetch content via tools/cat or tools/get "
+                                "(by hash/name).\n"
+                                "3) Synthesize a grounded summary in <= " +
+                                std::to_string(maxWords) +
+                                " words.\n"
+                                "4) Include inline citations like (name | hash:abcd...).\n"
+                                "5) Prefer diverse sources and de-dup near-identical results.\n";
+                if (!query.empty()) {
+                    u += "\nQuery: " + query + "\n";
+                }
+                return makeResponse({
+                    sysMsg("You orchestrate retrieval and grounded summarization with citations."),
+                    userMsg(u),
+                });
+            }
+
+            if (name == "rag/extract_citations") {
+                const std::string style = args.value("style", "inline");
+                const int k = std::max(1, args.value("k", 10));
+                std::string u =
+                    "From prior retrieval results, produce " + std::to_string(k) +
+                    " citations in style '" + style +
+                    "'.\n"
+                    "Include: name, hash (short), path (if available), and date/labels if known.\n";
+                return makeResponse({
+                    sysMsg("You format high-quality citations for retrieved artifacts."),
+                    userMsg(u),
+                });
+            }
+
+            if (name == "rag/code_navigation") {
+                const std::string symbol = args.value("symbol", "");
+                const std::string lang = args.value("language", "");
+                std::string u =
+                    "Plan code navigation using grep+search:\n"
+                    "- Suggest regexes for tools/grep (e.g., function/class definitions; case "
+                    "sensitivity).\n"
+                    "- Suggest hybrid queries for tools/search (semantic context, filenames).\n"
+                    "- Respect session include patterns when unspecified.\n";
+                if (!symbol.empty()) {
+                    u += "\nTarget symbol: " + symbol + "\n";
+                }
+                if (!lang.empty()) {
+                    u += "Language hint: " + lang + "\n";
+                }
+                return makeResponse({
+                    sysMsg("You guide symbol discovery and code navigation."),
+                    userMsg(u),
+                });
+            }
+
+            // Default fallback
+            return makeResponse({
+                sysMsg("You provide retrieval-augmented workflows over YAMS via MCP tools."),
+                userMsg(
+                    "No specific prompt name matched; outline a sensible RAG plan for the task."),
+            });
+        } else if (method == "logging/setLevel") {
+            if (!areYamsExtensionsEnabled()) {
+                // logging/setLevel is a YAMS extension, and extensions are disabled
+                return json{
+                    {"jsonrpc", protocol::JSONRPC_VERSION},
+                    {"error",
+                     {{"code", -32601},
+                      {"message", "Method not available (extensions disabled): " + method}}},
+                    {"id", id}};
+            }
+            const auto level = params.value("level", "info");
+            spdlog::level::level_enum lvl = spdlog::level::info;
+            if (level == "trace")
+                lvl = spdlog::level::trace;
+            else if (level == "debug")
+                lvl = spdlog::level::debug;
+            else if (level == "info" || level == "notice")
+                lvl = spdlog::level::info;
+            else if (level == "warning" || level == "warn")
+                lvl = spdlog::level::warn;
+            else if (level == "error")
+                lvl = spdlog::level::err;
+            else if (level == "critical" || level == "alert" || level == "emergency")
+                lvl = spdlog::level::critical;
+            spdlog::set_level(lvl);
+            return createResponse(id, json::object());
         } else {
-            // Unknown method
-            return createError(id, -32601, "Method not found: " + method);
+            // Unknown method - return proper JSON-RPC error
+            return json{{"jsonrpc", protocol::JSONRPC_VERSION},
+                        {"error", {{"code", -32601}, {"message", "Method not found: " + method}}},
+                        {"id", id}};
         }
-
-        // Create JSON-RPC response
-        return createResponse(id, response);
-
     } catch (const json::exception& e) {
         return Error{ErrorCode::InvalidArgument, std::string("JSON error: ") + e.what()};
     } catch (const std::exception& e) {
@@ -767,48 +995,42 @@ MessageResult MCPServer::handleRequest(const json& request) {
 }
 
 json MCPServer::initialize(const json& params) {
-    // Store client info if provided
-    if (params.contains("clientInfo")) {
-        auto info = params["clientInfo"];
-        clientInfo_.name = info.value("name", "unknown");
-        clientInfo_.version = info.value("version", "unknown");
-        spdlog::info("MCP client connected: {} {}", clientInfo_.name, clientInfo_.version);
-    }
+    // Supported protocol versions (latest first)
+    static const std::vector<std::string> kSupported = {"2024-11-05", "2025-06-18", "2025-03-26"};
+    const std::string latest = "2024-11-05"; // Use current MCP spec version as default
 
-    // Protocol version negotiation (latest supported: 2024-11-05)
-    // If the requested version is unsupported, negotiate to the latest supported version
-    // Compose capabilities and negotiate protocol version using latest MCP spec versions
-    // Supported (preference order): 2025-06-18, 2025-03-26, 2024-11-05
-    std::string requestedVersion = "2025-06-18";
+    // Extract requested version (optional)
+    std::string requested = latest;
     if (params.contains("protocolVersion") && params["protocolVersion"].is_string()) {
-        requestedVersion = params["protocolVersion"].get<std::string>();
+        requested = params["protocolVersion"].get<std::string>();
     }
-    const char* supported[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
-    std::string negotiatedVersion = supported[0];
-    bool supportedRequested = false;
-    for (const auto& v : supported) {
-        if (requestedVersion == v) {
-            negotiatedVersion = v;
-            supportedRequested = true;
-            break;
-        }
-    }
-    if (requestedVersion != negotiatedVersion) {
-        spdlog::warn("Negotiated protocolVersion: requested='{}' -> using='{}'", requestedVersion,
-                     negotiatedVersion);
+    spdlog::debug("MCP client requested protocol version: {}", requested);
+
+    // Negotiate (fallback to latest if unsupported)
+    std::string negotiated = latest;
+    bool matched = std::find(kSupported.begin(), kSupported.end(), requested) != kSupported.end();
+    if (matched) {
+        negotiated = requested;
     }
 
-    // Compose capabilities (minimal, conservative defaults)
-    json capabilities = {{"tools", json({{"listChanged", false}})},
-                         {"prompts", json({{"listChanged", false}})},
-                         {"resources", json({{"subscribe", false}, {"listChanged", false}})},
-                         {"logging", json::object()}};
-    json result = {{"protocolVersion", negotiatedVersion},
-                   {"capabilities", capabilities},
-                   {"serverInfo", {{"name", "YAMS MCP Server"}, {"version", "0.0.2"}}},
-                   {"instructions", "YAMS MCP server is ready. Use tools/list to discover tools."}};
+    // Capture client info if present (tolerant)
+    if (params.contains("clientInfo") && params["clientInfo"].is_object()) {
+        clientInfo_.name = params["clientInfo"].value("name", "unknown");
+        clientInfo_.version = params["clientInfo"].value("version", "unknown");
+    } else {
+        clientInfo_.name = "unknown";
+        clientInfo_.version = "unknown";
+    }
 
-    negotiatedProtocolVersion_ = negotiatedVersion;
+    negotiatedProtocolVersion_ = negotiated;
+
+    // Always build server capabilities (do NOT rely on client-supplied capabilities)
+    json caps = buildServerCapabilities();
+
+    json result = {{"protocolVersion", negotiated},
+                   {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}},
+                   {"capabilities", caps}};
+
     return result;
 }
 
@@ -921,9 +1143,10 @@ json MCPServer::listTools() {
         props["similarity"]["default"] = 0.7;
         props["hash"] =
             makeProp("string", "Search by file hash (full or partial, minimum 8 characters)");
-        props["verbose"] = makeProp("boolean", "Enable verbose output");
+        props["verbose"] = makeProp("boolean", "Enable verbose output (YAMS extension)");
         props["verbose"]["default"] = false;
-        props["type"] = makeProp("string", "Search type: keyword, semantic, hybrid");
+        props["type"] =
+            makeProp("string", "Search type: keyword, semantic, hybrid (YAMS extension)");
         props["type"]["default"] = "hybrid";
         props["paths_only"] = makeProp("boolean", "Return only file paths (LLM-friendly)");
         props["paths_only"]["default"] = false;
@@ -935,24 +1158,29 @@ json MCPServer::listTools() {
         props["before_context"]["default"] = 0;
         props["context"] = makeProp("integer", "Lines of context around matches");
         props["context"]["default"] = 0;
-        props["color"] =
-            makeProp("string", "Color highlighting for matches (values: always, never, auto)");
+        props["color"] = makeProp(
+            "string",
+            "Color highlighting for matches (values: always, never, auto) (YAMS extension)");
         props["color"]["default"] = "auto";
-        props["path_pattern"] =
-            makeProp("string", "Glob-like filename/path filter (e.g., **/*.md or substring)");
-        props["path"] =
-            makeProp("string", "Alias for path_pattern (substring or glob-like filter)");
+        props["path_pattern"] = makeProp(
+            "string",
+            "Glob-like filename/path filter (e.g., **/*.md or substring) (YAMS extension)");
+        props["path"] = makeProp(
+            "string", "Alias for path_pattern (substring or glob-like filter) (YAMS extension)");
         props["tags"] =
             json{{"type", "array"},
                  {"items", json{{"type", "string"}}},
-                 {"description", "Filter by tags (presence-based, matches any by default)"}};
-        props["match_all_tags"] = makeProp("boolean", "Require all specified tags to be present");
+                 {"description",
+                  "Filter by tags (presence-based, matches any by default) (YAMS extension)"}};
+        props["match_all_tags"] =
+            makeProp("boolean", "Require all specified tags to be present (YAMS extension)");
         props["match_all_tags"]["default"] = false;
         // Session scoping for server-managed sessions
         props["use_session"] =
-            makeProp("boolean", "Scope search to current session when available");
+            makeProp("boolean", "Scope search to current session when available (YAMS extension)");
         props["use_session"]["default"] = true;
-        props["session"] = makeProp("string", "Explicit session name to scope the search");
+        props["session"] =
+            makeProp("string", "Explicit session name to scope the search (YAMS extension)");
         schema["properties"] = props;
         schema["required"] = json::array({"query"});
         tool["inputSchema"] = schema;
@@ -997,9 +1225,11 @@ json MCPServer::listTools() {
         props["color"] = makeProp("string", "Color highlighting (values: always, never, auto)");
         props["color"]["default"] = "auto";
         // Session scoping for name and path resolution
-        props["use_session"] = makeProp("boolean", "Scope grep to current session when available");
+        props["use_session"] =
+            makeProp("boolean", "Scope grep to current session when available (YAMS extension)");
         props["use_session"]["default"] = true;
-        props["session"] = makeProp("string", "Explicit session name to scope the grep");
+        props["session"] =
+            makeProp("string", "Explicit session name to scope the grep (YAMS extension)");
         schema["properties"] = props;
         schema["required"] = json::array({"pattern"});
         tool["inputSchema"] = schema;
@@ -1075,12 +1305,14 @@ json MCPServer::listTools() {
         props["hash"] = makeProp("string", "Document SHA-256 hash");
         props["name"] = makeProp("string", "Document name");
         props["outputPath"] = makeProp("string", "Output file path for retrieved content");
-        props["graph"] = makeProp("boolean", "Include knowledge graph relationships");
+        props["graph"] =
+            makeProp("boolean", "Include knowledge graph relationships (YAMS extension)");
         props["graph"]["default"] = false;
-        props["depth"] = makeProp("integer", "Graph traversal depth (1-5)");
+        props["depth"] = makeProp("integer", "Graph traversal depth (1-5) (YAMS extension)");
         props["depth"]["default"] = 1;
-        props["include_content"] = makeProp("boolean", "Include full content in graph results");
-        props["include_content"]["default"] = false;
+        props["include_content"] =
+            makeProp("boolean", "Include full content in graph results (YAMS extension)");
+        props["include_content"]["default"] = true;
         schema["properties"] = props;
         tool["inputSchema"] = schema;
         tools.push_back(tool);
@@ -1163,6 +1395,8 @@ json MCPServer::listTools() {
         props["sort_order"]["default"] = "desc";
         props["with_labels"] = makeProp("boolean", "Include snapshot labels in results");
         props["with_labels"]["default"] = false;
+        // Session scoping
+        props["session"] = makeProp("string", "Explicit session name to scope the list");
         schema["properties"] = props;
         tool["inputSchema"] = schema;
         tools.push_back(tool);
@@ -1198,6 +1432,10 @@ json MCPServer::listTools() {
         props["raw_content"]["default"] = false;
         props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
         props["extract_text"]["default"] = true;
+        props["latest"] = makeProp("boolean", "Select newest match when ambiguous");
+        props["latest"]["default"] = true;
+        props["oldest"] = makeProp("boolean", "Select oldest match when ambiguous");
+        props["oldest"]["default"] = false;
         schema["properties"] = props;
         schema["required"] = json::array({"name"});
         tool["inputSchema"] = schema;
@@ -1218,6 +1456,10 @@ json MCPServer::listTools() {
         props["raw_content"]["default"] = false;
         props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
         props["extract_text"]["default"] = true;
+        props["latest"] = makeProp("boolean", "Select newest match when ambiguous");
+        props["latest"]["default"] = true;
+        props["oldest"] = makeProp("boolean", "Select oldest match when ambiguous");
+        props["oldest"]["default"] = false;
         schema["properties"] = props;
         tool["inputSchema"] = schema;
         tools.push_back(tool);
@@ -1410,44 +1652,161 @@ json MCPServer::listTools() {
         tools.push_back(tool);
     }
 
+    // session/pin
+    {
+        json tool;
+        tool["name"] = "session_pin";
+        tool["description"] = "Pin documents by path pattern (adds 'pinned' tag and updates repo)";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["path"] = makeProp("string", "Path glob pattern to pin");
+        props["tags"] = json{{"type", "array"},
+                             {"items", json{{"type", "string"}}},
+                             {"description", "Additional tags"}};
+        props["metadata"] = makeProp("object", "Metadata key/value pairs to add");
+        schema["properties"] = props;
+        schema["required"] = json::array({"path"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
+    // session/unpin
+    {
+        json tool;
+        tool["name"] = "session_unpin";
+        tool["description"] = "Unpin documents by path pattern (removes 'pinned' tag from repo)";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["path"] = makeProp("string", "Path glob pattern to unpin");
+        schema["properties"] = props;
+        schema["required"] = json::array({"path"});
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
     return json{{"tools", tools}};
 }
 
 json yams::mcp::MCPServer::listPrompts() {
-    return {{"prompts",
-             json::array(
-                 {{{"name", "search_codebase"},
-                   {"description", "Search for code patterns in the codebase"},
-                   {"arguments",
-                    json::array({{{"name", "pattern"},
-                                  {"description", "Code pattern to search for"},
-                                  {"required", true}},
-                                 {{"name", "file_type"},
-                                  {"description", "Filter by file type (e.g., cpp, py, js)"},
-                                  {"required", false}}})}},
-                  {{"name", "summarize_document"},
-                   {"description", "Generate a summary of a document"},
-                   {"arguments", json::array({{{"name", "document_name"},
-                                               {"description", "Name of the document to summarize"},
-                                               {"required", true}},
-                                              {{"name", "max_length"},
-                                               {"description", "Maximum summary length in words"},
-                                               {"required", false}}})}}})}};
+    return {
+        {"prompts",
+         json::array(
+             {{{"name", "search_codebase"},
+               {"description", "Search for code patterns in the codebase"},
+               {"arguments",
+                json::array({{{"name", "pattern"},
+                              {"description", "Code pattern to search for"},
+                              {"required", true}},
+                             {{"name", "file_type"},
+                              {"description", "Filter by file type (e.g., cpp, py, js)"},
+                              {"required", false}}})}},
+              {{"name", "summarize_document"},
+               {"description", "Generate a summary of a document"},
+               {"arguments", json::array({{{"name", "document_name"},
+                                           {"description", "Name of the document to summarize"},
+                                           {"required", true}},
+                                          {{"name", "max_length"},
+                                           {"description", "Maximum summary length in words"},
+                                           {"required", false}}})}},
+              {{"name", "rag/rewrite_query"},
+               {"description", "Rewrite a query to optimize hybrid retrieval"},
+               {"arguments",
+                json::array({{{"name", "query"},
+                              {"description", "Original user query text"},
+                              {"required", true}},
+                             {{"name", "intent"},
+                              {"description", "Optional intent hint to guide rewriting"},
+                              {"required", false}}})}},
+              {{"name", "rag/retrieve"},
+               {"description", "Retrieve top-k candidates via hybrid search"},
+               {"arguments",
+                json::array({{{"name", "query"},
+                              {"description", "Search query for retrieval"},
+                              {"required", true}},
+                             {{"name", "k"},
+                              {"description", "Number of candidates to return"},
+                              {"required", false}},
+                             {{"name", "session"},
+                              {"description", "Session name to scope retrieval (optional)"},
+                              {"required", false}},
+                             {{"name", "tags"},
+                              {"description", "Optional tag filters (comma-separated or array)"},
+                              {"required", false}}})}},
+              {{"name", "rag/retrieve_summarize"},
+               {"description", "RAG pipeline: retrieve then summarize with citations"},
+               {"arguments",
+                json::array({{{"name", "query"},
+                              {"description", "Search query for retrieval"},
+                              {"required", true}},
+                             {{"name", "k"},
+                              {"description", "Number of items to retrieve before summarization"},
+                              {"required", false}},
+                             {{"name", "max_words"},
+                              {"description", "Maximum words for the synthesized summary"},
+                              {"required", false}}})}},
+              {{"name", "rag/extract_citations"},
+               {"description", "Format citations from retrieved artifacts"},
+               {"arguments",
+                json::array({{{"name", "style"},
+                              {"description", "Citation style (e.g., inline, list)"},
+                              {"required", false}},
+                             {{"name", "k"},
+                              {"description", "Number of citations to produce"},
+                              {"required", false}},
+                             {{"name", "include_hashes"},
+                              {"description", "Whether to include content hashes in citations"},
+                              {"required", false}}})}},
+              {{"name", "rag/code_navigation"},
+               {"description", "Suggest grep and hybrid search strategies for symbol discovery"},
+               {"arguments", json::array({{{"name", "symbol"},
+                                           {"description", "Target symbol or identifier to locate"},
+                                           {"required", true}},
+                                          {{"name", "language"},
+                                           {"description", "Language hint (e.g., cpp, py, js)"},
+                                           {"required", false}}})}}})}};
 }
 
-// Pure O(1) callTool implementation
 json MCPServer::callTool(const std::string& name, const json& arguments) {
-    spdlog::debug("MCP callTool: name='{}', arguments={}", name, arguments.dump());
+    spdlog::info("MCP callTool invoked: name='{}', arguments={}", name, arguments.dump());
 
     if (!toolRegistry_) {
-        return {{"error", "Tool registry not initialized"}};
+        return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
 
-    // For now, return a simple response indicating the tool call was received
-    // Full async implementation can be added later when async infrastructure is stable
-    return {{"content", json::array({json{{"type", "text"},
-                                          {"text", "Tool call received: " + name +
-                                                       " with arguments: " + arguments.dump()}}})}};
+    auto& ioc = yams::daemon::GlobalIOContext::instance().get_io_context();
+    auto task = toolRegistry_->callTool(name, arguments);
+    auto promise = std::make_shared<std::promise<json>>();
+    auto future = promise->get_future();
+
+    boost::asio::co_spawn(
+        ioc,
+        [task = std::move(task), promise]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto result = co_await std::move(task);
+                promise->set_value(result);
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        json result = future.get();
+
+        spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
+
+        // Tools already return properly wrapped content via wrapToolResult
+        // Just return the result as-is without double-wrapping
+        return result;
+
+    } catch (const std::exception& e) {
+        spdlog::error("MCP tool '{}' threw exception: {}", name, e.what());
+        return {{"error",
+                 {{"code", -32603}, {"message", std::string("Tool call failed: ") + e.what()}}}};
+    }
 }
 
 // Modern C++20 tool handler implementations
@@ -1460,12 +1819,23 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         if (!_query.empty())
             _query += " ";
         _query += "name:" + req.pathPattern;
+    } else if (req.useSession) {
+        // Scope search to session include patterns when no explicit path pattern is provided
+        auto sess = app::services::makeSessionService(nullptr);
+        auto pats = sess->activeIncludePatterns(req.sessionName.empty()
+                                                    ? std::optional<std::string>{}
+                                                    : std::optional<std::string>{req.sessionName});
+        if (!pats.empty()) {
+            if (!_query.empty())
+                _query += " ";
+            _query += "name:" + pats.front();
+        }
     }
     dreq.query = _query;
     dreq.limit = req.limit;
     // Default to fuzzy + hybrid to be resilient to clients that cannot set options
     dreq.fuzzy = true;
-    dreq.similarity = (req.similarity > 0.0) ? static_cast<double>(req.similarity) : 0.7;
+    dreq.similarity = (req.similarity > 0.0f) ? static_cast<double>(req.similarity) : 0.7;
     // Pass-through hash when present to enable hash-first search
     dreq.hashQuery = req.hash;
     dreq.searchType = "hybrid";
@@ -1477,19 +1847,54 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     dreq.context = req.context;
 
     MCPSearchResponse out;
+    // Propagate session to services/daemon via environment for this handler
+    std::string __session;
+    if (!req.sessionName.empty()) {
+        __session = req.sessionName;
+    } else {
+        auto __svc = app::services::makeSessionService(nullptr);
+        __session = __svc->current().value_or("");
+    }
+    if (!__session.empty()) {
+        ::setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
+        spdlog::debug("[MCP] search: using session '{}'", __session);
+    }
     auto res = co_await daemon_client_->streamingSearch(dreq);
+    // Clear after call
+    if (!__session.empty()) {
+        ::setenv("YAMS_SESSION_CURRENT", "", 1);
+    }
     if (!res)
         co_return res.error();
     const auto& r = res.value();
     out.total = r.totalCount;
     out.type = "daemon";
     out.executionTimeMs = r.elapsed.count();
+    // When pathsOnly was requested by the MCP client, populate the 'paths' field
+    // to mirror CLI behavior and make it easy for clients to consume.
+    if (req.pathsOnly) {
+        out.paths.reserve(r.results.size());
+        for (const auto& item : r.results) {
+            std::string path =
+                !item.path.empty()
+                    ? item.path
+                    : (item.metadata.count("path") ? item.metadata.at("path") : std::string());
+            if (path.empty())
+                path = item.id; // last-resort fallback
+            out.paths.push_back(std::move(path));
+        }
+        co_return out;
+    }
+    // Full result objects (with robust path fallback)
     for (const auto& item : r.results) {
         MCPSearchResponse::Result m;
         m.id = item.id;
         m.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
         m.title = item.title;
-        m.path = item.path;
+        // Fallback to metadata.path when daemon omitted direct path field
+        m.path = !item.path.empty()
+                     ? item.path
+                     : (item.metadata.count("path") ? item.metadata.at("path") : std::string());
         m.score = item.score;
         m.snippet = item.snippet;
         out.results.push_back(std::move(m));
@@ -1536,7 +1941,7 @@ yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrep
     if (req.fastFirst) {
         try {
             if (transport_) {
-                transport_->send(createLogNotification(
+                sendResponse(createLogNotification(
                     "info", "grep fast-first: returning semantic semantic suggestions"));
             }
         } catch (...) {
@@ -1568,7 +1973,23 @@ yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrep
     }
 
     MCPGrepResponse out;
+    // Propagate session to services/daemon via environment for this handler
+    std::string __session;
+    if (!req.sessionName.empty()) {
+        __session = req.sessionName;
+    } else {
+        auto __svc = app::services::makeSessionService(nullptr);
+        __session = __svc->current().value_or("");
+    }
+    if (!__session.empty()) {
+        ::setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
+        spdlog::debug("[MCP] grep: using session '{}'", __session);
+    }
     auto res = co_await daemon_client_->streamingGrep(dreq);
+    // Clear after call
+    if (!__session.empty()) {
+        ::setenv("YAMS_SESSION_CURRENT", "", 1);
+    }
     if (!res)
         co_return res.error();
     const auto& r = res.value();
@@ -2019,20 +2440,42 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // Normalize path: expand '~' and make absolute using PWD for relative paths
     {
         std::string _p = req.path;
+        // Strip file:// scheme if present (basic normalization)
+        if (_p.rfind("file://", 0) == 0) {
+            _p = _p.substr(7);
+        }
         if (!_p.empty() && _p.front() == '~') {
             if (const char* home = std::getenv("HOME")) {
                 _p = std::string(home) + _p.substr(1);
             }
         }
+        // Resolve relative paths against likely bases: PWD, then current_path()
         if (!_p.empty() && _p.front() != '/') {
-            if (const char* pwd = std::getenv("PWD")) {
-                if (pwd && *pwd) {
-                    if (_p.rfind("./", 0) == 0) {
-                        _p = std::string(pwd) + "/" + _p.substr(2);
-                    } else {
-                        _p = std::string(pwd) + "/" + _p;
-                    }
+            std::vector<std::filesystem::path> bases;
+            if (const char* pwd = std::getenv("PWD"); pwd && *pwd) {
+                bases.emplace_back(pwd);
+            }
+            bases.emplace_back(std::filesystem::current_path());
+
+            std::filesystem::path chosen = _p;
+            bool resolved = false;
+            for (const auto& base : bases) {
+                std::filesystem::path cand = base / (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
+                std::error_code ec;
+                if (std::filesystem::exists(cand, ec)) {
+                    chosen = cand;
+                    resolved = true;
+                    break;
                 }
+            }
+            _p = resolved ? chosen.string() : (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
+        }
+        // Best-effort canonicalization
+        {
+            std::error_code __canon_ec;
+            auto __canon = std::filesystem::weakly_canonical(_p, __canon_ec);
+            if (!__canon_ec && !__canon.empty()) {
+                _p = __canon.string();
             }
         }
         daemon_req.path = _p;
@@ -2148,7 +2591,7 @@ yams::Task<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
-    daemon_req.namePattern = req.pattern;
+    daemon_req.namePattern = req.name.empty() ? req.pattern : req.name;
     if (req.useSession && daemon_req.namePattern.empty()) {
         auto sess = app::services::makeSessionService(nullptr);
         auto pats = sess->activeIncludePatterns(req.sessionName.empty()
@@ -2172,7 +2615,23 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon_req.reverse =
         (req.sortOrder == "asc") ? true : false; // ascending means reverse order in server
 
+    // Propagate session to services/daemon via environment for this handler
+    std::string __session;
+    if (!req.sessionName.empty()) {
+        __session = req.sessionName;
+    } else {
+        auto __svc = app::services::makeSessionService(nullptr);
+        __session = __svc->current().value_or("");
+    }
+    if (!__session.empty()) {
+        ::setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
+        spdlog::debug("[MCP] list: using session '{}'", __session);
+    }
     auto dres = co_await daemon_client_->list(daemon_req);
+    // Clear after call
+    if (!__session.empty()) {
+        ::setenv("YAMS_SESSION_CURRENT", "", 1);
+    }
     if (!dres)
         co_return dres.error();
     MCPListDocumentsResponse out;
@@ -2222,131 +2681,71 @@ yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsReq
 
 yams::Task<Result<MCPAddDirectoryResponse>>
 MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
-    daemon::AddDocumentRequest daemon_req;
-    // Normalize directory path: expand '~' and make absolute using PWD for relative paths
-    {
-        std::string _p = req.directoryPath;
-        if (!_p.empty() && _p.front() == '~') {
-            if (const char* home = std::getenv("HOME")) {
-                _p = std::string(home) + _p.substr(1);
-            }
-        }
-        if (!_p.empty() && _p.front() != '/') {
-            if (const char* pwd = std::getenv("PWD")) {
-                if (pwd && *pwd) {
-                    if (_p.rfind("./", 0) == 0) {
-                        _p = std::string(pwd) + "/" + _p.substr(2);
-                    } else {
-                        _p = std::string(pwd) + "/" + _p;
-                    }
-                }
-            }
-        }
-        daemon_req.path = _p;
-    }
-    daemon_req.collection = req.collection;
-    daemon_req.includePatterns = req.includePatterns;
-    daemon_req.excludePatterns = req.excludePatterns;
-    daemon_req.recursive = req.recursive;
-    for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string())
-            daemon_req.metadata[key] = value.get<std::string>();
-        else
-            daemon_req.metadata[key] = value.dump();
-    }
-    // Increase daemon timeouts for long-running directory indexing
-    // Use moderate defaults; avoid appearing to hang on misconfigured daemons
-    daemon_client_->setHeaderTimeout(std::chrono::seconds(30));
-    daemon_client_->setBodyTimeout(std::chrono::seconds(300));
-    // Validate that the directory path exists and is a directory
-    if (!daemon_req.path.empty()) {
-        std::error_code __ec;
-        if (!std::filesystem::exists(daemon_req.path, __ec)) {
-            co_return Error{ErrorCode::InvalidArgument,
-                            std::string("Directory does not exist: ") + daemon_req.path};
-        }
-        if (!std::filesystem::is_directory(daemon_req.path, __ec)) {
-            co_return Error{ErrorCode::InvalidArgument,
-                            std::string("Path is not a directory: ") + daemon_req.path};
-        }
-        if (!daemon_req.recursive) {
-            // Match CLI/service semantics: explicit recursive required for directory adds
-            co_return Error{ErrorCode::InvalidArgument,
-                            "Directory specified but --recursive not set"};
-        }
-    }
-    // Check daemon readiness quickly; if not ready, fall back to local indexing service
-    {
-        auto statusRes = co_await daemon_client_->status();
-        bool ready = false;
-        if (statusRes) {
-            const auto& st = statusRes.value();
-            ready = st.ready || st.overallStatus == "ready" || st.overallStatus == "degraded";
-        }
-        if (!ready) {
-            if (indexingService_) {
-                app::services::AddDirectoryRequest sreq;
-                sreq.directoryPath = daemon_req.path;
-                sreq.collection = daemon_req.collection;
-                sreq.includePatterns = daemon_req.includePatterns;
-                sreq.excludePatterns = daemon_req.excludePatterns;
-                sreq.recursive = daemon_req.recursive;
-                for (const auto& [k, v] : daemon_req.metadata)
-                    sreq.metadata[k] = v;
-                auto sres = indexingService_->addDirectory(sreq);
-                if (!sres)
-                    co_return sres.error();
-                MCPAddDirectoryResponse out;
-                const auto& r = sres.value();
-                out.directoryPath = r.directoryPath;
-                out.collection = r.collection;
-                out.filesProcessed = r.filesProcessed;
-                out.filesIndexed = r.filesIndexed;
-                out.filesSkipped = r.filesSkipped;
-                out.filesFailed = r.filesFailed;
-                co_return out;
-            }
-            // If no service, propagate a clear not ready error
-            co_return Error{ErrorCode::InvalidState, "Daemon not ready for add_directory"};
-        }
+    // Use app::services IndexingService to add directory contents
+    auto indexingService = app::services::makeIndexingService(appContext_);
+    if (!indexingService) {
+        co_return Error{ErrorCode::NotInitialized, "Indexing service not available"};
     }
 
-    auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
-    if (!dres) {
-        // Fallback to local indexing service on daemon failure
-        if (indexingService_) {
-            app::services::AddDirectoryRequest sreq;
-            sreq.directoryPath = daemon_req.path;
-            sreq.collection = daemon_req.collection;
-            sreq.includePatterns = daemon_req.includePatterns;
-            sreq.excludePatterns = daemon_req.excludePatterns;
-            sreq.recursive = daemon_req.recursive;
-            for (const auto& [k, v] : daemon_req.metadata)
-                sreq.metadata[k] = v;
-            auto sres = indexingService_->addDirectory(sreq);
-            if (!sres)
-                co_return dres.error(); // keep original daemon error if service also fails
-            MCPAddDirectoryResponse out;
-            const auto& r = sres.value();
-            out.directoryPath = r.directoryPath;
-            out.collection = r.collection;
-            out.filesProcessed = r.filesProcessed;
-            out.filesIndexed = r.filesIndexed;
-            out.filesSkipped = r.filesSkipped;
-            out.filesFailed = r.filesFailed;
-            co_return out;
+    app::services::AddDirectoryRequest sreq;
+    sreq.directoryPath = req.directoryPath;
+    sreq.collection = req.collection;
+    sreq.includePatterns = req.includePatterns;
+    sreq.excludePatterns = req.excludePatterns;
+    sreq.recursive = req.recursive;
+    sreq.followSymlinks = req.followSymlinks;
+
+    // Convert metadata and enrich with snapshot/tags when provided
+    for (const auto& [key, value] : req.metadata.items()) {
+        if (value.is_string()) {
+            sreq.metadata[key] = value.get<std::string>();
+        } else {
+            sreq.metadata[key] = value.dump();
         }
-        co_return dres.error();
     }
+    if (!req.snapshotId.empty()) {
+        sreq.metadata["snapshot_id"] = req.snapshotId;
+    }
+    if (!req.snapshotLabel.empty()) {
+        sreq.metadata["snapshot_label"] = req.snapshotLabel;
+    }
+    if (!req.tags.empty()) {
+        std::string joined;
+        for (size_t i = 0; i < req.tags.size(); ++i) {
+            if (i)
+                joined += ",";
+            joined += req.tags[i];
+        }
+        sreq.metadata["tags"] = joined;
+    }
+
+    auto sres = indexingService->addDirectory(sreq);
+    if (!sres) {
+        co_return sres.error();
+    }
+
     MCPAddDirectoryResponse out;
-    const auto& add = dres.value();
-    out.directoryPath = add.path;
-    out.collection = daemon_req.collection;
-    // Populate counts so clients can infer success
-    out.filesIndexed = add.documentsAdded;
-    out.filesProcessed = add.documentsAdded;
-    out.filesSkipped = 0;
-    out.filesFailed = 0;
+    const auto& resp = sres.value();
+    out.directoryPath = resp.directoryPath;
+    out.collection = resp.collection;
+    out.filesProcessed = resp.filesProcessed;
+    out.filesIndexed = resp.filesIndexed;
+    out.filesSkipped = resp.filesSkipped;
+    out.filesFailed = resp.filesFailed;
+
+    out.results.clear();
+    for (const auto& r : resp.results) {
+        json j;
+        j["path"] = r.path;
+        j["hash"] = r.hash;
+        j["size_bytes"] = r.sizeBytes;
+        j["success"] = r.success;
+        if (r.error.has_value()) {
+            j["error"] = *r.error;
+        }
+        out.results.push_back(std::move(j));
+    }
+
     co_return out;
 }
 
@@ -2428,9 +2827,108 @@ MCPServer::handleSessionStop(const MCPSessionStopRequest& req) {
     co_return out;
 }
 
+yams::Task<Result<MCPSessionPinResponse>>
+MCPServer::handleSessionPin(const MCPSessionPinRequest& req) {
+    // Validate inputs
+    if (req.path.empty()) {
+        co_return Error{ErrorCode::InvalidArgument, "path is required"};
+    }
+    // Create a document service bound to the MCP app context
+    auto docService = app::services::makeDocumentService(appContext_);
+    if (!docService) {
+        co_return Error{ErrorCode::NotInitialized, "Document service not available"};
+    }
+
+    // List documents matching the provided pattern
+    app::services::ListDocumentsRequest lreq;
+    lreq.pattern = req.path;
+    lreq.limit = 10000; // reasonable safeguard
+    auto lres = docService->list(lreq);
+    if (!lres) {
+        co_return lres.error();
+    }
+
+    // Update each matched document: add 'pinned' tag and provided tags/metadata
+    std::size_t updated = 0;
+    for (const auto& d : lres.value().documents) {
+        app::services::UpdateMetadataRequest u;
+        u.name = d.name;
+
+        // Add 'pinned' tag plus any user-specified tags
+        u.addTags = req.tags;
+        if (std::find(u.addTags.begin(), u.addTags.end(), "pinned") == u.addTags.end()) {
+            u.addTags.push_back("pinned");
+        }
+
+        // Metadata: copy string values as-is; non-strings are serialized
+        if (req.metadata.is_object()) {
+            for (auto it = req.metadata.begin(); it != req.metadata.end(); ++it) {
+                if (it->is_string()) {
+                    u.keyValues[it.key()] = it->get<std::string>();
+                } else {
+                    u.keyValues[it.key()] = it->dump();
+                }
+            }
+        }
+        // Explicitly set pinned=true metadata for discoverability
+        u.keyValues["pinned"] = "true";
+
+        auto ur = docService->updateMetadata(u);
+        if (ur && ur.value().success) {
+            ++updated;
+        }
+    }
+
+    MCPSessionPinResponse out;
+    out.updated = updated;
+    co_return out;
+}
+
+yams::Task<Result<MCPSessionUnpinResponse>>
+MCPServer::handleSessionUnpin(const MCPSessionUnpinRequest& req) {
+    // Validate inputs
+    if (req.path.empty()) {
+        co_return Error{ErrorCode::InvalidArgument, "path is required"};
+    }
+    // Create a document service bound to the MCP app context
+    auto docService = app::services::makeDocumentService(appContext_);
+    if (!docService) {
+        co_return Error{ErrorCode::NotInitialized, "Document service not available"};
+    }
+
+    // List documents matching the provided pattern
+    app::services::ListDocumentsRequest lreq;
+    lreq.pattern = req.path;
+    lreq.limit = 10000; // reasonable safeguard
+    auto lres = docService->list(lreq);
+    if (!lres) {
+        co_return lres.error();
+    }
+
+    // Update each matched document: remove 'pinned' tag and set pinned=false metadata
+    std::size_t updated = 0;
+    for (const auto& d : lres.value().documents) {
+        app::services::UpdateMetadataRequest u;
+        u.name = d.name;
+
+        u.removeTags.push_back("pinned");
+        u.keyValues["pinned"] = "false";
+
+        auto ur = docService->updateMetadata(u);
+        if (ur && ur.value().success) {
+            ++updated;
+        }
+    }
+
+    MCPSessionUnpinResponse out;
+    out.updated = updated;
+    co_return out;
+}
+
 void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
+    // Always register standard MCP tools
     toolRegistry_->registerTool<MCPSearchRequest, MCPSearchResponse>(
         "search", [this](const MCPSearchRequest& req) { return handleSearchDocuments(req); },
         json{
@@ -2448,7 +2946,7 @@ void MCPServer::initializeToolRegistry() {
               {"tags",
                {{"type", "array"},
                 {"items", {{"type", "string"}}},
-                {"description", "Filter by tags"}}}}},
+                {"description", "Filter by tags (YAMS extension)"}}}}},
             {"required", json::array({"query"})}},
         "Search documents using hybrid search (vector + full-text + knowledge graph)");
 
@@ -2555,7 +3053,7 @@ void MCPServer::initializeToolRegistry() {
                {"include_content",
                 {{"type", "boolean"},
                  {"description", "Include content in response"},
-                 {"default", false}}},
+                 {"default", true}}},
                {"use_session",
                 {{"type", "boolean"},
                  {"description", "Use current session scope for name resolution"},
@@ -2568,6 +3066,7 @@ void MCPServer::initializeToolRegistry() {
         json{{"type", "object"},
              {"properties",
               {{"pattern", {{"type", "string"}, {"description", "Name pattern filter"}}},
+               {"name", {{"type", "string"}, {"description", "Exact name filter (optional)"}}},
                {"tags",
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
@@ -2627,7 +3126,15 @@ void MCPServer::initializeToolRegistry() {
                {"extract_text",
                 {{"type", "boolean"},
                  {"description", "Extract text from HTML/PDF files"},
-                 {"default", true}}}}},
+                 {"default", true}}},
+               {"latest",
+                {{"type", "boolean"},
+                 {"description", "Select newest match when ambiguous"},
+                 {"default", true}}},
+               {"oldest",
+                {{"type", "boolean"},
+                 {"description", "Select oldest match when ambiguous"},
+                 {"default", false}}}}},
              {"required", json::array({"name"})}},
         "Retrieve document content by name");
 
@@ -2662,7 +3169,15 @@ void MCPServer::initializeToolRegistry() {
                {"extract_text",
                 {{"type", "boolean"},
                  {"description", "Extract text from HTML/PDF files"},
-                 {"default", true}}}}}},
+                 {"default", true}}},
+               {"latest",
+                {{"type", "boolean"},
+                 {"description", "Select newest match when ambiguous"},
+                 {"default", true}}},
+               {"oldest",
+                {{"type", "boolean"},
+                 {"description", "Select oldest match when ambiguous"},
+                 {"default", false}}}}}},
         "Display document content by hash or name");
 
     toolRegistry_->registerTool<MCPUpdateMetadataRequest, MCPUpdateMetadataResponse>(
@@ -2680,30 +3195,63 @@ void MCPServer::initializeToolRegistry() {
         "Update document metadata and tags");
 
     // Session start/stop (simplified)
-    toolRegistry_->registerTool<MCPSessionStartRequest, MCPSessionStartResponse>(
-        "session_start",
-        [this](const MCPSessionStartRequest& req) { return handleSessionStart(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
-               {"description", {{"type", "string"}, {"description", "Session description"}}},
-               {"warm", {{"type", "boolean"}, {"default", true}}},
-               {"limit", {{"type", "integer"}, {"default", 200}}},
-               {"snippet_len", {{"type", "integer"}, {"default", 160}}},
-               {"cores", {{"type", "integer"}, {"default", -1}}},
-               {"memory_gb", {{"type", "integer"}, {"default", -1}}},
-               {"time_ms", {{"type", "integer"}, {"default", -1}}},
-               {"aggressive", {{"type", "boolean"}, {"default", false}}}}}},
-        "Start (and optionally warm) a session with default budgets");
+    // YAMS-specific session management tools
+    if (areYamsExtensionsEnabled()) {
+        // session_start
+        toolRegistry_->registerTool<MCPSessionStartRequest, MCPSessionStartResponse>(
+            "session_start",
+            [this](const MCPSessionStartRequest& req) { return handleSessionStart(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
+                   {"description", {{"type", "string"}, {"description", "Session description"}}},
+                   {"warm", {{"type", "boolean"}, {"default", true}}},
+                   {"limit", {{"type", "integer"}, {"default", 200}}},
+                   {"snippet_len", {{"type", "integer"}, {"default", 160}}},
+                   {"cores", {{"type", "integer"}, {"default", -1}}},
+                   {"memory_gb", {{"type", "integer"}, {"default", -1}}},
+                   {"time_ms", {{"type", "integer"}, {"default", -1}}},
+                   {"aggressive", {{"type", "boolean"}, {"default", false}}}}}},
+            "Start (and optionally warm) a session with default budgets");
 
-    toolRegistry_->registerTool<MCPSessionStopRequest, MCPSessionStopResponse>(
-        "session_stop", [this](const MCPSessionStopRequest& req) { return handleSessionStop(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
-               {"clear", {{"type", "boolean"}, {"default", true}}}}}},
-        "Stop session (clear materialized cache)");
+        // session_stop
+        toolRegistry_->registerTool<MCPSessionStopRequest, MCPSessionStopResponse>(
+            "session_stop",
+            [this](const MCPSessionStopRequest& req) { return handleSessionStop(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
+                   {"clear", {{"type", "boolean"}, {"default", true}}}}}},
+            "Stop session (clear materialized cache)");
 
+        // session_pin
+        toolRegistry_->registerTool<MCPSessionPinRequest, MCPSessionPinResponse>(
+            "session_pin",
+            [this](const MCPSessionPinRequest& req) { return handleSessionPin(req); },
+            json{
+                {"type", "object"},
+                {"properties",
+                 {{"path", {{"type", "string"}, {"description", "Path glob pattern to pin"}}},
+                  {"tags",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "Additional tags"}}},
+                  {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}},
+                {"required", json::array({"path"})}},
+            "Pin documents by path pattern (adds 'pinned' tag and updates repo)");
+
+        // session_unpin
+        toolRegistry_->registerTool<MCPSessionUnpinRequest, MCPSessionUnpinResponse>(
+            "session_unpin",
+            [this](const MCPSessionUnpinRequest& req) { return handleSessionUnpin(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"path", {{"type", "string"}, {"description", "Path glob pattern to unpin"}}}}},
+                 {"required", json::array({"path"})}},
+            "Unpin documents by path pattern by removing 'pinned' tag");
+    }
+
+    // Collection/Snapshot tools (consider these as standard or extension based on use case)
     toolRegistry_->registerTool<MCPRestoreCollectionRequest, MCPRestoreCollectionResponse>(
         "restore_collection",
         [this](const MCPRestoreCollectionRequest& req) { return handleRestoreCollection(req); },
@@ -2722,40 +3270,42 @@ void MCPServer::initializeToolRegistry() {
              {"required", json::array({"collection", "output_directory"})}},
         "Restore all documents from a collection");
 
-    toolRegistry_->registerTool<MCPRestoreSnapshotRequest, MCPRestoreSnapshotResponse>(
-        "restore_snapshot",
-        [this](const MCPRestoreSnapshotRequest& req) { return handleRestoreSnapshot(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
-               {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
-               {"overwrite",
-                {{"type", "boolean"},
-                 {"description", "Overwrite existing files"},
-                 {"default", false}}},
-               {"dry_run",
-                {{"type", "boolean"},
-                 {"description", "Preview without writing"},
-                 {"default", false}}}}},
-             {"required", json::array({"snapshot_id", "output_directory"})}},
-        "Restore all documents from a snapshot");
+    if (areYamsExtensionsEnabled()) {
+        toolRegistry_->registerTool<MCPRestoreSnapshotRequest, MCPRestoreSnapshotResponse>(
+            "restore_snapshot",
+            [this](const MCPRestoreSnapshotRequest& req) { return handleRestoreSnapshot(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
+                   {"overwrite",
+                    {{"type", "boolean"},
+                     {"description", "Overwrite existing files"},
+                     {"default", false}}},
+                   {"dry_run",
+                    {{"type", "boolean"},
+                     {"description", "Preview without writing"},
+                     {"default", false}}}}},
+                 {"required", json::array({"snapshot_id", "output_directory"})}},
+            "Restore all documents from a snapshot");
 
-    toolRegistry_->registerTool<MCPListCollectionsRequest, MCPListCollectionsResponse>(
-        "list_collections",
-        [this](const MCPListCollectionsRequest& req) { return handleListCollections(req); },
-        json{{"type", "object"}}, "List available collections");
+        toolRegistry_->registerTool<MCPListCollectionsRequest, MCPListCollectionsResponse>(
+            "list_collections",
+            [this](const MCPListCollectionsRequest& req) { return handleListCollections(req); },
+            json{{"type", "object"}}, "List available collections");
 
-    toolRegistry_->registerTool<MCPListSnapshotsRequest, MCPListSnapshotsResponse>(
-        "list_snapshots",
-        [this](const MCPListSnapshotsRequest& req) { return handleListSnapshots(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"collection", {{"type", "string"}, {"description", "Filter by collection"}}},
-               {"with_labels",
-                {{"type", "boolean"},
-                 {"description", "Include snapshot labels"},
-                 {"default", true}}}}}},
-        "List available snapshots");
+        toolRegistry_->registerTool<MCPListSnapshotsRequest, MCPListSnapshotsResponse>(
+            "list_snapshots",
+            [this](const MCPListSnapshotsRequest& req) { return handleListSnapshots(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"collection", {{"type", "string"}, {"description", "Filter by collection"}}},
+                   {"with_labels",
+                    {{"type", "boolean"},
+                     {"description", "Include snapshot labels"},
+                     {"default", true}}}}}},
+            "List available snapshots");
+    }
 }
 
 json MCPServer::createResponse(const json& id, const json& result) {
@@ -2763,26 +3313,20 @@ json MCPServer::createResponse(const json& id, const json& result) {
 }
 
 json MCPServer::createError(const json& id, int code, const std::string& message) {
+    spdlog::warn("MCP server creating error response: code={}, message='{}'", code, message);
     return json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}};
 }
 
-json MCPServer::createReadyNotification() {
-    // Compose a minimal ready notification per MCP 2.0
-    json capabilities = {{"tools", json({{"listChanged", false}})},
-                         {"prompts", json({{"listChanged", false}})},
-                         {"resources", json({{"subscribe", false}, {"listChanged", false}})},
-                         {"logging", json::object()}};
-    json params = {{"protocolVersion", negotiatedProtocolVersion_},
-                   {"capabilities", capabilities},
-                   {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}}};
-    return json{{"jsonrpc", "2.0"}, {"method", "notifications/ready"}, {"params", params}};
+void MCPServer::recordEarlyFeatureUse() {
+    if (!initializedNotificationSeen_.load()) {
+        earlyFeatureUse_ = true;
+    }
 }
 
 // Helper: create a structured MCP logging notification (optional, in-band logging)
-static json createLogNotification(const std::string& level, const std::string& message) {
-    json params = {{"level", level}, {"message", message}};
-    return json{{"jsonrpc", "2.0"}, {"method", "notifications/log"}, {"params", params}};
-}
+// Removed duplicate unused createLogNotification overload (previously: level + data + logger)
+
+/* Removed misplaced logging/setLevel block (should reside inside MCPServer::handleRequest) */
 
 yams::Task<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
@@ -2838,6 +3382,49 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
 
     auto initCall = co_await daemon_client_->getInit(init);
     if (!initCall) {
+        // Try disambiguation by listing exact name and selecting newest/oldest when ambiguous
+        if (!init.name.empty()) {
+            yams::daemon::ListRequest lreq;
+            lreq.namePattern = init.name;
+            lreq.limit = 200;
+            lreq.pathsOnly = false;
+            lreq.sortBy = "indexed";
+            auto lres = co_await daemon_client_->list(lreq);
+            if (lres && !lres.value().items.empty()) {
+                const auto& items = lres.value().items;
+                const auto* chosen = &items.front();
+                if (items.size() > 1) {
+                    if (req.oldest) {
+                        chosen = &*std::min_element(
+                            items.begin(), items.end(),
+                            [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                    } else {
+                        chosen = &*std::max_element(
+                            items.begin(), items.end(),
+                            [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                    }
+                }
+                yams::daemon::GetRequest greq;
+                greq.hash = chosen->hash;
+                greq.metadataOnly = false;
+                auto gres = co_await daemon_client_->get(greq);
+                if (gres) {
+                    const auto& r = gres.value();
+                    mcp_response.size = r.size;
+                    mcp_response.hash = r.hash;
+                    mcp_response.name = r.name;
+                    mcp_response.path = r.path;
+                    mcp_response.mimeType = r.mimeType;
+                    if (!r.content.empty()) {
+                        constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                        mcp_response.content = r.content.size() <= MAX_BYTES
+                                                   ? r.content
+                                                   : r.content.substr(0, MAX_BYTES);
+                    }
+                    co_return mcp_response;
+                }
+            }
+        }
         // Fallback: fuzzy search top match, then fetch by hash/name
         yams::daemon::SearchRequest sreq;
         sreq.query = init.name;
@@ -2980,6 +3567,46 @@ MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
 yams::Task<yams::Result<yams::mcp::MCPCatDocumentResponse>>
 yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
     MCPCatDocumentResponse out;
+    // Disambiguate by name before direct get when hash is not provided
+    if (req.hash.empty() && !req.name.empty()) {
+        yams::daemon::ListRequest lreq;
+        lreq.namePattern = req.name;
+        lreq.limit = 200;
+        lreq.pathsOnly = false;
+        lreq.sortBy = "indexed";
+        auto lres = co_await daemon_client_->list(lreq);
+        if (lres && !lres.value().items.empty()) {
+            const auto& items = lres.value().items;
+            const auto* chosen = &items.front();
+            if (items.size() > 1) {
+                if (req.oldest) {
+                    chosen = &*std::min_element(
+                        items.begin(), items.end(),
+                        [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                } else {
+                    chosen = &*std::max_element(
+                        items.begin(), items.end(),
+                        [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                }
+            }
+            yams::daemon::GetRequest greq;
+            greq.hash = chosen->hash;
+            greq.metadataOnly = false;
+            auto gres = co_await daemon_client_->get(greq);
+            if (gres) {
+                const auto& r = gres.value();
+                out.size = r.size;
+                out.hash = r.hash;
+                out.name = r.name;
+                if (!r.content.empty()) {
+                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                    out.content =
+                        r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+                }
+                co_return out;
+            }
+        }
+    }
     yams::daemon::GetRequest dreq;
     dreq.hash = req.hash;
     dreq.name = req.name;
@@ -3299,4 +3926,124 @@ void MCPServer::enqueueTask(std::function<void()> task) {
     taskCv_.notify_one();
 }
 
+// ---------------- Lifecycle helper implementations ----------------
+
+bool MCPServer::isMethodAllowedBeforeInitialization(const std::string& method) const {
+    static const std::unordered_set<std::string> allowed = {
+        "initialize", "exit",
+        // readonly discovery before full init
+        "tools/list", "resources/list", "resources/read", "prompts/list", "prompts/get",
+        // logging notifications (client -> server)
+        "notifications/log"};
+    return allowed.count(method) > 0;
+}
+
+void MCPServer::markClientInitialized() {
+    spdlog::info("MCP marking client as initialized");
+    initializedNotificationSeen_.store(true);
+    initialized_.store(true);
+}
+
+void MCPServer::handleExitRequest() {
+    spdlog::info("MCP server received 'exit' request");
+    exitRequested_.store(true);
+    running_.store(false);
+    if (transport_) {
+        transport_->close();
+    }
+}
+
+// --- Cancellation + capability helpers ---
+
+void MCPServer::registerCancelable(const nlohmann::json& id) {
+    if (id.is_null())
+        return;
+    std::lock_guard<std::mutex> lk(cancelMutex_);
+    std::string key = id.is_string() ? id.get<std::string>() : id.dump();
+    if (cancelTokens_.find(key) == cancelTokens_.end()) {
+        cancelTokens_[key] = std::make_shared<std::atomic<bool>>(false);
+    }
+}
+
+void MCPServer::cancelRequest(const nlohmann::json& id) {
+    if (id.is_null())
+        return;
+    std::lock_guard<std::mutex> lk(cancelMutex_);
+    std::string key = id.is_string() ? id.get<std::string>() : id.dump();
+    auto it = cancelTokens_.find(key);
+    if (it != cancelTokens_.end()) {
+        it->second->store(true);
+    }
+}
+
+bool MCPServer::isCanceled(const nlohmann::json& id) const {
+    if (id.is_null())
+        return false;
+    std::lock_guard<std::mutex> lk(cancelMutex_);
+    std::string key = id.is_string() ? id.get<std::string>() : id.dump();
+    auto it = cancelTokens_.find(key);
+    if (it == cancelTokens_.end())
+        return false;
+    return it->second->load();
+}
+
+json MCPServer::buildServerCapabilities() const {
+    json caps = {{"tools", json({{"listChanged", false}})},
+                 {"prompts", json({{"listChanged", false}})},
+                 {"resources", json({{"subscribe", false}, {"listChanged", false}})},
+                 {"logging", json::object()}};
+    // Augment with extended flags
+    caps["experimental"] = json::object();
+    caps["experimental"]["cancellation"] = cancellationSupported_;
+    caps["experimental"]["progress"] = progressSupported_;
+
+    return caps;
+}
+
+// --- Cancel & Progress Helper Implementations ---
+void MCPServer::handleCancelRequest(const nlohmann::json& params, const nlohmann::json& id) {
+    // Expect params: { "id": <original request id> } but also accept { "requestId": ... }
+    nlohmann::json target;
+    if (params.contains("id")) {
+        target = params["id"];
+    } else if (params.contains("requestId")) {
+        target = params["requestId"];
+    } else {
+        spdlog::warn("cancel: missing id/requestId field");
+        return;
+    }
+    cancelRequest(target);
+    spdlog::info("Cancel requested for original id '{}'",
+                 target.is_string() ? target.get<std::string>() : target.dump());
+    // Optionally emit a progress notification indicating cancellation acknowledged
+    sendProgress("cancel", 100.0, "Cancellation acknowledged");
+}
+
+void MCPServer::sendProgress(const std::string& phase, double percent, const std::string& message) {
+    json p = {{"phase", phase}, {"percent", percent}};
+    if (!message.empty())
+        p["message"] = message;
+    sendResponse({{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", p}});
+}
+
+void MCPServer::scheduleAutoReady() {
+    // Removed - not part of MCP spec
+}
+
+bool MCPServer::shouldAutoInitialize() const {
+    return false;
+}
+
 } // namespace yams::mcp
+
+void yams::mcp::MCPServer::beginSessionContext(
+    std::string sessionId,
+    std::function<void(const std::string&, const nlohmann::json&)> publisher) {
+    tlsSessionId_ = std::move(sessionId);
+    httpPublisher_ = std::move(publisher);
+}
+
+void yams::mcp::MCPServer::endSessionContext() {
+    tlsSessionId_.clear();
+    httpPublisher_ = nullptr;
+}

@@ -19,11 +19,16 @@
 // App services for service-based architecture
 #include <yams/app/services/services.hpp>
 // Daemon client API for daemon-first add
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
+// Async helpers for interim non-blocking daemon operations
+#include <future>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 
 namespace yams::cli {
 
@@ -49,7 +54,8 @@ public:
 
         cmd->add_option("-n,--name", documentName_,
                         "Name for the document (especially useful for stdin)");
-        cmd->add_option("-t,--tags", tags_, "Tags for the document (comma-separated)");
+        cmd->add_option("-t,--tags", tags_, "Tags for the document (comma-separated)")
+            ->delimiter(',');
         cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs");
         cmd->add_option("--mime-type", mimeType_, "MIME type of the document");
         cmd->add_flag("--no-auto-mime", disableAutoMime_, "Disable automatic MIME type detection");
@@ -79,17 +85,13 @@ public:
         // Directory options
         cmd->add_flag("-r,--recursive", recursive_, "Recursively add files from directories");
         cmd->add_option("--include", includePatterns_,
-                        "File patterns to include (e.g., '*.txt,*.md')");
+                        "File patterns to include (e.g., '*.txt,*.md')")
+            ->delimiter(',');
         cmd->add_option("--exclude", excludePatterns_,
-                        "File patterns to exclude (e.g., '*.tmp,*.log')");
+                        "File patterns to exclude (e.g., '*.tmp,*.log')")
+            ->delimiter(',');
 
-        cmd->callback([this]() {
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
-        });
+        cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
     Result<void> execute() override {
@@ -155,12 +157,24 @@ public:
                     while (true) {
                         yams::daemon::StatusRequest sreq;
                         sreq.detailed = true;
-                        auto st = run_sync(client.call(sreq), std::chrono::milliseconds(2500));
-                        if (st) {
-                            const auto& sr = st.value();
-                            if (sr.overallStatus == "ready" || sr.overallStatus == "degraded" ||
-                                sr.ready) {
-                                break;
+                        std::promise<Result<yams::daemon::StatusResponse>> prom;
+                        auto fut = prom.get_future();
+                        auto work = [&, sreq]() -> boost::asio::awaitable<void> {
+                            auto r = co_await client.call(sreq);
+                            prom.set_value(std::move(r));
+                            co_return;
+                        };
+                        boost::asio::co_spawn(boost::asio::system_executor{}, work(),
+                                              boost::asio::detached);
+                        if (fut.wait_for(std::chrono::milliseconds(2500)) ==
+                            std::future_status::ready) {
+                            auto st = fut.get();
+                            if (st) {
+                                const auto& sr = st.value();
+                                if (sr.overallStatus == "ready" || sr.overallStatus == "degraded" ||
+                                    sr.ready) {
+                                    break;
+                                }
                             }
                         }
                         if (std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -232,8 +246,23 @@ public:
                             cfg.singleUseConnections = true;
                             cfg.requestTimeout = std::chrono::milliseconds(daemonTimeoutMs_);
                             yams::daemon::DaemonClient client(cfg);
-                            auto result = run_sync(client.streamingAddDocument(dreq),
-                                                   std::chrono::milliseconds(daemonTimeoutMs_));
+                            std::promise<Result<yams::daemon::AddDocumentResponse>> prom;
+                            auto fut = prom.get_future();
+                            auto work = [&, dreq]() -> boost::asio::awaitable<void> {
+                                auto res = co_await client.streamingAddDocument(dreq);
+                                prom.set_value(std::move(res));
+                                co_return;
+                            };
+                            boost::asio::co_spawn(boost::asio::system_executor{}, work(),
+                                                  boost::asio::detached);
+                            Result<yams::daemon::AddDocumentResponse> result =
+                                Error{ErrorCode::Timeout, "AddDocument timed out"};
+                            if (fut.wait_for(std::chrono::milliseconds(daemonTimeoutMs_)) ==
+                                std::future_status::ready) {
+                                result = fut.get();
+                            } else {
+                                // keep default timeout error
+                            }
                             if (result) {
                                 render(result.value());
                                 success = true;
@@ -310,6 +339,11 @@ public:
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
+    }
+
+    boost::asio::awaitable<Result<void>> executeAsync() override {
+        // For now, call the existing execute() to reuse its logic; next pass will fully co_await
+        co_return execute();
     }
 
 private:

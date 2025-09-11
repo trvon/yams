@@ -1,11 +1,15 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <type_traits>
 #include <vector>
-#include <yams/cli/async_bridge.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
@@ -64,16 +68,24 @@ public:
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--recursive,-r", recursive_, "Delete directory contents recursively");
 
-        cmd->callback([this]() {
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Delete failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
-        });
+        cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
     Result<void> execute() override {
+        std::promise<Result<void>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [this, &prom]() -> boost::asio::awaitable<void> {
+                auto r = co_await this->executeAsync();
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        return fut.get();
+    }
+
+    boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             // Infer deletion mode from positional targets if no explicit selector is provided
             if (hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() &&
@@ -81,25 +93,20 @@ public:
                 auto has_wildcard = [](const std::string& s) {
                     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
                 };
-                // Heuristic: treat strings containing a '/' (and not wildcards) as paths (name or
-                // directory)
-                auto looks_like_directory = [](const std::string& s) {
-                    if (s.empty())
-                        return false;
-                    if (s.back() == '/')
-                        return true;
-                    return s.find('/') != std::string::npos;
+                // Treat explicit trailing '/' or --recursive as directory; otherwise treat as
+                // name/path.
+                auto has_trailing_slash = [](const std::string& s) {
+                    return !s.empty() && (s.back() == '/' || s.back() == '\\');
                 };
 
                 if (targets_.size() == 1) {
                     const std::string& t = targets_.front();
-                    // If -r is set, treat single target as a directory even without slashes or
-                    // wildcards
+                    // If -r is set, treat single target as a directory
                     if (recursive_) {
                         directory_ = t;
                     } else if (has_wildcard(t)) {
                         pattern_ = t;
-                    } else if (looks_like_directory(t)) {
+                    } else if (has_trailing_slash(t)) {
                         directory_ = t;
                     } else {
                         name_ = t;
@@ -202,26 +209,25 @@ public:
             try {
                 yams::daemon::ClientConfig cfg;
                 cfg.dataDir = cli_->getDataPath();
-                cfg.enableChunkedResponses = false; // delete responses are small
+                cfg.enableChunkedResponses = false;
                 cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
                 yams::daemon::DaemonClient client(cfg);
-                auto result = run_sync(client.call(dreq), std::chrono::seconds(30));
+                auto result = co_await client.call(dreq);
                 if (result) {
                     auto r = render(result.value());
                     if (!r)
-                        return r.error();
-                    return Result<void>();
+                        co_return r.error();
+                    co_return Result<void>();
                 }
             } catch (...) {
-                // fall through
             }
 
             // If daemon failed, try local execution
-            return executeLocal();
+            co_return executeLocal();
 
         } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
+            co_return Error{ErrorCode::Unknown, std::string(e.what())};
         }
     }
 

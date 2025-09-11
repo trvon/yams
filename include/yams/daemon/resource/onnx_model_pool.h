@@ -1,5 +1,6 @@
 #pragma once
 
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/resource_pool.h>
 #include <yams/vector/embedding_generator.h>
 
@@ -31,6 +32,10 @@ struct OnnxModelInfo {
     size_t maxSequenceLength;
     size_t memoryUsageBytes;
     std::chrono::system_clock::time_point loadTime;
+    // Whether this model is part of the hot pool (kept in memory eagerly)
+    bool isHot = false;
+    // Last access time as tracked by the pool (not per-session)
+    std::chrono::steady_clock::time_point lastAccess{};
     std::atomic<size_t> requestCount{0};
     std::atomic<size_t> errorCount{0};
 };
@@ -163,7 +168,8 @@ public:
         size_t cacheHits;
         size_t cacheMisses;
         double hitRate;
-        std::unordered_map<std::string, OnnxModelInfo> modelStats;
+        // Expose copyable summaries for external status reporting
+        std::unordered_map<std::string, ModelInfo> modelStats;
     };
 
     PoolStats getStats() const;
@@ -173,6 +179,13 @@ public:
 
     // Clean up expired/idle models
     void performMaintenance();
+
+    // Optional per-model resolution hints (e.g., HF revision, offline only)
+    struct ResolutionHints {
+        std::string hfRevision;   // e.g., "main" or snapshot hash
+        bool offlineOnly = false; // When true, never attempt network (cache/local only)
+    };
+    void setResolutionHints(const std::string& modelName, const ResolutionHints& hints);
 
 private:
     // Model registry entry
@@ -202,6 +215,7 @@ private:
     // Model registry and pools
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ModelEntry> models_;
+    std::unordered_map<std::string, ResolutionHints> modelHints_;
 
     // Statistics
     std::atomic<size_t> totalRequests_{0};

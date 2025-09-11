@@ -1049,7 +1049,10 @@ Result<int64_t> MetadataRepository::getDocumentCount() {
 Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         auto stmtResult = db.prepare(R"(
-            SELECT COUNT(*) FROM documents WHERE content_extracted = 1
+            SELECT COUNT(DISTINCT d.id) 
+            FROM documents d
+            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+            WHERE des.has_embedding = 1
         )");
         if (!stmtResult)
             return stmtResult.error();
@@ -1113,6 +1116,104 @@ MetadataRepository::getDocumentCountsByExtension() {
 
             return result;
         });
+}
+
+Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentId,
+                                                               bool hasEmbedding,
+                                                               const std::string& modelId) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // First, ensure the document exists
+        auto checkStmt = db.prepare("SELECT 1 FROM documents WHERE id = ?");
+        if (!checkStmt)
+            return checkStmt.error();
+
+        auto& stmt = checkStmt.value();
+        if (auto r = stmt.bind(1, documentId); !r)
+            return r.error();
+
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value()) {
+            return Error{ErrorCode::NotFound, "Document not found"};
+        }
+
+        // Insert or update the embedding status
+        auto updateStmt = db.prepare(R"(
+                INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
+                VALUES (?, ?, ?, unixepoch())
+                ON CONFLICT(document_id) DO UPDATE SET 
+                    has_embedding = excluded.has_embedding,
+                    model_id = excluded.model_id,
+                    updated_at = excluded.updated_at
+            )");
+        if (!updateStmt)
+            return updateStmt.error();
+
+        auto& ustmt = updateStmt.value();
+        if (auto r = ustmt.bind(1, documentId); !r)
+            return r.error();
+        if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r)
+            return r.error();
+        if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r)
+            return r.error();
+
+        auto execResult = ustmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        return Result<void>();
+    });
+}
+
+Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::string& hash,
+                                                                     bool hasEmbedding,
+                                                                     const std::string& modelId) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // First, get the document ID from the hash
+        auto getIdStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+        if (!getIdStmt)
+            return getIdStmt.error();
+
+        auto& stmt = getIdStmt.value();
+        if (auto r = stmt.bind(1, hash); !r)
+            return r.error();
+
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value()) {
+            return Error{ErrorCode::NotFound, "Document with hash not found"};
+        }
+
+        int64_t documentId = stmt.getInt64(0);
+
+        // Insert or update the embedding status
+        auto updateStmt = db.prepare(R"(
+                INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
+                VALUES (?, ?, ?, unixepoch())
+                ON CONFLICT(document_id) DO UPDATE SET 
+                    has_embedding = excluded.has_embedding,
+                    model_id = excluded.model_id,
+                    updated_at = excluded.updated_at
+            )");
+        if (!updateStmt)
+            return updateStmt.error();
+
+        auto& ustmt = updateStmt.value();
+        if (auto r = ustmt.bind(1, documentId); !r)
+            return r.error();
+        if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r)
+            return r.error();
+        if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r)
+            return r.error();
+
+        auto execResult = ustmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        return Result<void>();
+    });
 }
 
 // Helper methods for row mapping

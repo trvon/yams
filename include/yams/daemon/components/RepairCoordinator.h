@@ -8,6 +8,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <boost/asio/awaitable.hpp>
 #include <yams/compat/thread_stop_compat.h>
 
 namespace yams {
@@ -34,9 +35,11 @@ class RepairCoordinator {
 public:
     struct Config {
         bool enable{false};
-        std::filesystem::path dataDir{};    // used to locate vectors.db
-        std::uint32_t maxBatch{16};         // max docs per batch
-        std::uint32_t maintenanceTokens{1}; // number of concurrent heavy-stage tokens
+        std::filesystem::path dataDir{};          // used to locate vectors.db
+        std::uint32_t maxBatch{16};               // max docs per batch
+        std::uint32_t maintenanceTokens{1};       // number of concurrent heavy-stage tokens
+        bool allowDegraded{true};                 // allow limited work when not fully ready
+        std::uint32_t maxActiveDuringDegraded{1}; // run with up to N active connections
     };
 
     // Event types for document operations
@@ -61,9 +64,17 @@ public:
     void onDocumentAdded(const DocumentAddedEvent& event);
     void onDocumentRemoved(const DocumentRemovedEvent& event);
 
+    // Live tuning hooks (thread-safe best-effort); allow daemon to adapt scheduling
+    void setMaintenanceTokens(std::uint32_t tokens) {
+        tokens_.store(tokens, std::memory_order_relaxed);
+        cfg_.maintenanceTokens = tokens;
+    }
+    void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
+
 private:
-    void run(yams::compat::stop_token st);
-    bool maintenance_allowed() const; // idle window based on server stats
+    // Coroutine-based main loop; scheduled on the daemon IO executor
+    boost::asio::awaitable<void> runAsync();
+    bool maintenance_allowed() const; // idle window based on server stats and degraded policy
     // Token gating helpers (inline to avoid ODR/decl mismatches)
     bool try_acquire_token() {
         if (cfg_.maintenanceTokens == 0)
@@ -117,9 +128,15 @@ private:
     std::queue<std::string> pendingDocuments_;
     mutable std::mutex queueMutex_;
     std::condition_variable queueCv_;
-
-    yams::compat::jthread thread_{};
     std::atomic<bool> running_{false};
+
+    // Coarse progress tracking for indexing/embedding repair so status can reflect background
+    // progress. Tracks only the initial backlog; subsequent live additions are not included in
+    // the percentage but will still be processed.
+    std::atomic<std::uint64_t> totalBacklog_{0};
+    std::atomic<std::uint64_t> processed_{0};
+    void update_progress_pct();
 };
 
 } // namespace yams::daemon
+  // Live tuning hooks (thread-safe best-effort); allow daemon to adapt scheduling

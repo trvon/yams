@@ -13,6 +13,7 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/compat/thread_stop_compat.h>
 // New: shared request context
 #include <yams/daemon/ipc/request_context.h>
@@ -72,7 +73,7 @@ public:
         bool enable_streaming = true; // Use streaming response model
         bool enable_multiplexing =
             true; // Default: allow multiple concurrent requests per connection
-        size_t chunk_size = 256 * 1024;   // Default chunk size (256KB)
+        size_t chunk_size = 512 * 1024;   // Default chunk size (512KB, increased)
         size_t header_flush_delay_ms = 0; // Time to wait before flushing header (0 = immediate)
         size_t chunk_flush_delay_ms = 0;  // Time to wait before flushing chunks (0 = immediate)
         std::chrono::seconds write_timeout{30}; // Timeout for write operations
@@ -85,9 +86,10 @@ public:
         // Maximum allowed frame size (bytes) for inbound messages; must align with server limits
         size_t max_frame_size = 10 * 1024 * 1024; // 10MB default
         // Multiplexing limits (when enable_multiplexing=true)
-        size_t max_inflight_per_connection = 1024;        // Higher concurrency per connection
-        size_t per_request_queue_cap = 256;               // More frames queued per request
-        size_t total_queued_bytes_cap = 16 * 1024 * 1024; // Max bytes queued per connection (16MB)
+        size_t max_inflight_per_connection = 2048; // Higher concurrency per connection
+        size_t per_request_queue_cap = 1024;       // More frames queued per request
+        size_t total_queued_bytes_cap =
+            256 * 1024 * 1024; // Max bytes queued per connection (256MB)
         size_t writer_budget_bytes_per_turn =
             256 * 1024; // Fair-writer byte budget per request turn
 
@@ -96,6 +98,15 @@ public:
         // effect when close_after_response=false (persistent connections).
         bool graceful_half_close = false;
         std::chrono::milliseconds graceful_drain_timeout{200};
+
+        // When services are not ready (early startup), emit a minimal
+        // streaming stub (header + empty final chunk) for streaming-capable
+        // requests instead of invoking heavy services.
+        bool stream_stub_on_init = true;
+
+        // Executor for offloading CPU-bound work (worker pool)
+        boost::asio::any_io_executor worker_executor = boost::asio::system_executor();
+        std::function<void(bool)> worker_job_signal{};
 
         Config();
     };
@@ -140,15 +151,23 @@ public:
                              const Request& request, uint64_t request_id,
                              ConnectionFsm* fsm = nullptr, bool client_expects_streaming = false);
 
+private:
+    // Minimal streaming path used before services are ready: emits header then
+    // a single final empty chunk for Search/List/Grep without touching dispatcher.
+    boost::asio::awaitable<Result<void>>
+    stream_chunks_stub(boost::asio::local::stream_protocol::socket& socket, const Request& request,
+                       uint64_t request_id, ConnectionFsm* fsm);
+
     // Write a header frame and optionally flush
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_header(boost::asio::local::stream_protocol::socket& socket, const Response& response,
-                 uint64_t request_id, bool flush = true);
+                 uint64_t request_id, bool flush = true, ConnectionFsm* fsm = nullptr);
 
     // Write a chunk frame and optionally flush
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_chunk(boost::asio::local::stream_protocol::socket& socket, const Response& response,
-                uint64_t request_id, bool last_chunk = false, bool flush = true);
+                uint64_t request_id, bool last_chunk = false, bool flush = true,
+                ConnectionFsm* fsm = nullptr);
 
     // Stream chunks from a processor
     [[nodiscard]] boost::asio::awaitable<Result<void>>
@@ -211,10 +230,10 @@ private:
     // Streaming write operations
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_header_frame(boost::asio::local::stream_protocol::socket& socket, const Message& message,
-                       bool flush = true);
+                       bool flush = true, ConnectionFsm* fsm = nullptr);
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_chunk_frame(boost::asio::local::stream_protocol::socket& socket, const Message& message,
-                      bool last_chunk = false, bool flush = true);
+                      bool last_chunk = false, bool flush = true, ConnectionFsm* fsm = nullptr);
 
     [[nodiscard]] boost::asio::awaitable<Response> process_request(const Request& request);
 
@@ -242,8 +261,9 @@ private:
     Config config_;
     mutable InternalStats stats_;
 
-    // Per-connection write serialization when multiplexing is enabled
-    std::shared_ptr<std::mutex> conn_write_mtx_;
+    // Per-connection write serialization when multiplexing is enabled is handled by
+    // the write strand executor below. Do not add an extra write mutex here; the strand
+    // is the sole serialization mechanism for socket writes and writer queue mutations.
     std::optional<boost::asio::any_io_executor> write_strand_exec_;
     std::atomic<size_t> inflight_{0};
 
@@ -270,8 +290,10 @@ private:
 
     // Queue a frame for fair writing; must be called on write strand when present
     boost::asio::awaitable<Result<void>> enqueue_frame(uint64_t request_id,
-                                                       std::vector<uint8_t> frame, bool last);
-    boost::asio::awaitable<void> writer_drain(boost::asio::local::stream_protocol::socket& socket);
+                                                       std::vector<uint8_t> frame, bool last,
+                                                       ConnectionFsm* fsm = nullptr);
+    boost::asio::awaitable<void> writer_drain(boost::asio::local::stream_protocol::socket& socket,
+                                              ConnectionFsm* fsm = nullptr);
 };
 
 inline RequestHandler::Config::Config() = default;

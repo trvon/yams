@@ -1428,6 +1428,24 @@ add_subdirectory(src)
 
 # Plugins
 add_subdirectory(plugins/object_storage_s3)
+add_subdirectory(plugins/onnx)
+add_subdirectory(plugins/pdf_extractor)
+
+# Always create the plugins directory on install, even if no plugin was built
+install(DIRECTORY DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins)
+
+# Optional CPack configuration to produce binary packages with plugins
+if(YAMS_PACKAGE_PLUGINS)
+    set(CPACK_PACKAGE_NAME "yams")
+    set(CPACK_PACKAGE_VENDOR "YAMS")
+    set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+    set(CPACK_PACKAGE_CONTACT "support@yams.local")
+    # Default generators can be overridden by user/presets
+    if(NOT CPACK_GENERATOR)
+        set(CPACK_GENERATOR "TGZ")
+    endif()
+    include(CPack)
+endif()
 
 if(YAMS_BUILD_TESTS)
     enable_testing()
@@ -1866,6 +1884,8 @@ add_custom_target(pre-commit
 )
 
 message(STATUS "Development workflow targets:")
+# Package knobs
+option(YAMS_PACKAGE_PLUGINS "Include plugins in CPack packages" ON)
 message(STATUS "  dev-check   - Full development check (build + test + quality)")
 message(STATUS "  pre-commit  - Pre-commit checks (git files only, with formatting)")
 
@@ -1879,3 +1899,14 @@ set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 # CPack already included above at line 1306
 # YamsConfig.cmake generation and installation already handled above
+# Optional install of external (Python) Ghidra plugin artifacts
+option(YAMS_INSTALL_GHIDRA_PLUGIN "Install external Ghidra plugin (Python) into plugins dir" OFF)
+
+# Install external plugins (Python) when enabled
+if(YAMS_INSTALL_GHIDRA_PLUGIN)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/plugins/yams-ghidra-plugin/CMakeLists.txt)
+        add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/yams-ghidra-plugin ${CMAKE_BINARY_DIR}/plugins/yams-ghidra-plugin)
+    elseif(EXISTS ${CMAKE_SOURCE_DIR}/examples/plugins/yams-ghidra-plugin/CMakeLists.txt)
+        add_subdirectory(${CMAKE_SOURCE_DIR}/examples/plugins/yams-ghidra-plugin ${CMAKE_BINARY_DIR}/examples/plugins/yams-ghidra-plugin)
+    endif()
+endif()

@@ -17,8 +17,10 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 
 ## Environment
 
+Precedence: configuration file > environment (YAMS_STORAGE, XDG_*) > CLI flag (--storage/--data-dir). This prevents CLI defaults from masking configured storage roots defined in your config file.
+
 - YAMS_STORAGE
-  - Storage root directory. Overrides defaults and the --storage/--data-dir flag when set.
+  - Storage root directory. When set, overrides the CLI flag unless a configuration file explicitly sets a storage root (configuration takes precedence).
 - XDG_DATA_HOME
   - Used to derive the default storage directory when YAMS_STORAGE is not set (defaults to ~/.local/share if unset).
 - XDG_CONFIG_HOME
@@ -42,6 +44,7 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 - init
 - add
 - get
+- graph
 - cat
 - delete
 - list
@@ -51,6 +54,7 @@ Note: If verbose help isn’t available in your build, use yams --help and yams 
 - config (subcommands: get, set, list, validate, export)
 - auth
 - stats
+- doctor
 - uninstall
 - migrate
 - update
@@ -176,6 +180,34 @@ yams get abcd1234... -o output.txt
 yams get --name "document.pdf" -o restored.pdf
 yams get --name "config.json" > config.json
 yams get abcd1234... --verbose
+```
+
+---
+
+## graph {#cmd-graph}
+
+Show related documents via the knowledge graph for a given document (read-only).
+
+Synopsis:
+- yams graph <hash> [--depth N]
+- yams graph --name <path|name> [--depth N]
+
+Options:
+- --name <path|name>
+  - Resolve the target by path/name instead of hash
+- --depth <N>
+  - Depth of graph traversal, 1-5 (default: 1)
+- -v, --verbose
+  - Verbose header details
+
+Description:
+- Mirrors the graph view available in `get --graph` without fetching content.
+- Uses the same daemon request path; shows related documents and their relationship/distance.
+
+Examples:
+```
+yams graph 0123abcd... --depth 2
+yams graph --name "docs/readme.md" --depth 3
 ```
 
 ---
@@ -323,6 +355,7 @@ yams list --no-snippets --show-metadata  # No previews, full metadata
 ---
 
 ## search {#cmd-search}
+Note: Default search type is hybrid. When strict/hybrid returns zero results, the CLI auto-retries with fuzzy (similarity 0.7).
 
 YAMS-first code search
 Always use YAMS to search the indexed codebase (no external grep/find/rg).
@@ -352,6 +385,7 @@ yams search --query-file - --paths-only < /tmp/query.txt
 Hints:
 - Prefer hybrid or fuzzy search for exploratory queries; narrow with exact keywords as you iterate.
 - Combine with --paths-only to feed subsequent yams get calls.
+- Session helpers (experimental): Use `yams session pin|list|unpin|warm` to manage hot data. See PROMPT docs for examples: ../PROMPT-eng.md and ../PROMPT.md
 
 Search for documents with advanced query capabilities.
 
@@ -371,7 +405,7 @@ Options:
 - -l, --limit <number>
   - Maximum number of results to return (default: 20)
 - -t, --type <type>
-  - Search type: keyword | semantic | hybrid (default: keyword)
+  - Search type: keyword | semantic | hybrid (default: hybrid)
 - -f, --fuzzy
   - Enable fuzzy search for approximate matching
 - --similarity <value>
@@ -439,6 +473,7 @@ yams grep "##\\s+(watch|git|sync)\\b" --include="**/*.md"
 Notes:
 - Default mode is hybrid: regex plus semantic suggestions; use --regex-only to disable. Tune with --semantic-limit (default: 10).
 - Semantic suggestions are also shown in -l/--files-with-matches, -L/--files-without-match, --paths-only, and -c/--count modes. Regex counts only reflect text matches.
+- Hot/Cold modes: control behavior via environment variables. For grep, set YAMS_GREP_MODE=hot_only|cold_only|auto (hot uses extracted text cache; cold scans CAS bytes). For list, use YAMS_LIST_MODE, and for retrieval (cat/get), use YAMS_RETRIEVAL_MODE.
 - --include accepts comma-separated globs or repeated usage; prefer quoting patterns.
 - Pair with yams search --paths-only to scope subsequent grep runs.
 
@@ -553,11 +588,14 @@ Synopsis:
 - yams stats [options]
 
 Description:
-- Prints health or usage information about your store. Use --json where supported for machine-readable output.
+- Adaptive default view: when relevant, includes Recommendations and Service Status along with the compact footer; use -v for full System Health and detailed sections.
+- Telemetry includes auto-repair counters (repair_queue_depth, repair_batches_attempted, repair_embeddings_generated, repair_failed_operations), latency percentiles (p50/p95), top_slowest components, and not_ready flags.
+- Use --json for machine-readable output.
 
 Examples:
 ```
 yams stats
+yams stats -v
 yams stats --json
 ```
 
@@ -758,6 +796,195 @@ Common keybindings:
 Examples:
 ```
 yams browse
+```
+
+---
+
+## model {#cmd-model}
+
+Manage embedding models: list installed, download new, inspect, and verify runtime.
+
+Synopsis:
+- yams model list
+- yams model download <name> [--url <onnx_url>]
+- yams model info <name>
+- yams model check
+
+Description:
+- list: Shows locally available models (autodiscovers ~/.yams/models/<name>/model.onnx and other configured roots)
+- download: Fetches a model by name; use --url to override with a custom ONNX URL
+- info: Prints details for a model (dimensionality, path, notes when available)
+- check: Verifies ONNX runtime support, plugin directory status, and autodiscovery paths
+
+Configuring the preferred model:
+- yams config embeddings model <name>  # sets embeddings.preferred_model
+- embeddings.model_path can point to the models root; name-based resolution order:
+  configured root → ~/.yams/models → models/ → /usr/local/share/yams/models
+
+Examples:
+```
+yams model list
+yams model download all-MiniLM-L6-v2
+yams model download my-custom --url https://example.com/models/custom.onnx
+yams model info all-MiniLM-L6-v2
+yams model check
+yams config embeddings model all-MiniLM-L6-v2
+```
+
+---
+
+## plugin {#cmd-plugin}
+
+Manage plugins: scanning, trust policy, load/unload, and info.
+
+Synopsis:
+- yams plugin list
+- yams plugin scan [--dir DIR] [TARGET]
+- yams plugin info <name>
+- yams plugin load <path|name> [--config FILE] [--dry-run]
+- yams plugin unload <name>
+- yams plugin trust add <path> | list | remove <path>
+
+Description:
+- list: Show loaded plugins and basic details (name/path).
+- scan: Inspect default directories (or a given dir/target file) for plugins without initializing them; prints name/version/ABI and interfaces.
+- info: Show manifest/health JSON for a loaded plugin.
+- load: Load a plugin by absolute path or name (resolved in discovery paths); respects trust policy; `--dry-run` scans only.
+- unload: Unload a plugin by name.
+- trust: Manage the trust policy file `~/.config/yams/plugins_trust.txt`.
+
+Notes:
+- Default discovery order: `YAMS_PLUGIN_DIR` (exclusive if set), `$HOME/.local/lib/yams/plugins`, `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`, and `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`.
+- The daemon prefers host‑backed `model_provider_v1` when an ONNX plugin is trusted/loaded; otherwise it falls back to the legacy registry or mock/null provider (see README for env toggles).
+- Disable plugin subsystem: start the daemon with `--no-plugins`.
+
+Examples:
+```
+# discover and trust a system plugins directory
+yams plugin scan
+yams plugin trust add /usr/local/lib/yams/plugins
+yams plugin trust list
+
+# load ONNX plugin by path (respects trust policy)
+yams plugin load /usr/local/lib/yams/plugins/libyams_onnx_plugin.so
+
+# inspect and unload
+yams plugin info onnx
+yams plugin unload onnx
+```
+
+---
+
+## doctor {#cmd-doctor}
+
+Diagnose daemon connectivity, model/provider readiness, vector DB dimensions, and plugins. Includes repair helpers.
+
+Synopsis:
+- yams doctor [--fix] [--fix-config-dims] [--recreate-vectors [--dim N]] [--stop-daemon]
+- yams doctor daemon
+- yams doctor plugin [<path|name>] [--iface <id>] [--iface-version <N>] [--no-daemon]
+- yams doctor plugins
+- yams doctor repair [--embeddings] [--fts5] [--graph] [--all]
+
+Highlights:
+- Summary shows daemon status, vector DB dimension vs model target, and loaded plugins.
+- Knowledge Graph section appears when available; if empty, recommends:
+  `yams doctor repair --graph` to build from tags/metadata.
+
+Repair options:
+- --embeddings: Generate missing document embeddings (daemon streaming when available; local fallback).
+- --fts5: Rebuild the text index best-effort.
+- --graph: Construct/repair the knowledge graph from tags/metadata.
+- --all: Run all repair operations.
+
+Examples:
+```
+yams doctor
+yams doctor plugin onnx
+yams doctor repair --graph
+yams doctor --recreate-vectors --dim 768 --stop-daemon
+```
+
+---
+
+## repair {#cmd-repair}
+
+Run storage/database maintenance and (optionally) embedding generation.
+
+Synopsis:
+- yams repair [--orphans] [--chunks] [--mime] [--optimize] [--all] [--dry-run] [--force]
+- yams repair --embeddings [--include-mime <mime>] [--limit <N>]
+
+Description:
+- --orphans: Clean orphaned metadata entries
+- --chunks: Remove orphaned chunk files and reclaim space
+- --mime: Fix missing MIME types in documents
+- --optimize: Vacuum/optimize the database
+- --all: Run all non-embedding repair operations
+- --dry-run: Preview operations without making changes
+- --force: Skip confirmations
+- --embeddings: Generate missing embeddings for eligible documents
+- --include-mime <mime>: Opt-in additional MIME types (e.g., application/pdf) for embeddings
+
+Notes:
+- By default, embedding repair targets text-like MIME types only; binaries (PDFs/images) are skipped unless explicitly included with --include-mime.
+- PDF text extraction and embedding depend on build configuration (PDF support must be available).
+
+Examples:
+```
+yams repair --all --dry-run
+yams repair --orphans --chunks --optimize --force
+yams repair --embeddings
+yams repair --embeddings --include-mime application/pdf
+```
+
+---
+
+## status {#cmd-status}
+
+Show service readiness, subsystem health, and runtime stats (daemon-aware).
+
+Synopsis:
+- yams status
+
+Description:
+- Prints a concise services summary (e.g., ✓ Content | ✓ Repo | ✓ Search | ⚠ (N) Models)
+- During initialization, shows a WAIT line with not-ready components and progress
+- Exposes fields such as running/ready state, uptime, request counts, active connections, memory, CPU, and version when available
+- Highlights top slowest components and actionable recommendations when relevant
+
+Tips:
+- Use yams stats -v for detailed system health, recommendations, and service status sections.
+- Bootstrap status file: ~/.local/state/yams/yams-daemon.status.json
+
+Examples:
+```
+yams status
+```
+
+---
+
+## daemon {#cmd-daemon}
+
+Control the background daemon (if included in your build).
+
+Synopsis:
+- yams daemon start
+- yams daemon stop
+- yams daemon status
+- yams daemon restart
+
+Description:
+- start/stop/restart the daemon process
+- status shows readiness and subsystem overview similar to yams status
+
+Notes:
+- When client/daemon protocol versions differ, a one-time warning may be shown; upgrade the daemon if features appear limited.
+
+Examples:
+```
+yams daemon status
+yams daemon restart
 ```
 
 ---

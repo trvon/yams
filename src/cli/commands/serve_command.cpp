@@ -1,14 +1,22 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <iostream>
+#include <thread>
 #include <unistd.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/global_io_context.h>
+#include <yams/mcp/http_server.h>
 #include <yams/mcp/mcp_server.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
@@ -17,20 +25,32 @@ namespace yams::cli {
 
 static std::atomic<bool> g_shutdown{false};
 
-// HTTP transport removed - now stdio only
-
 class ServeCommand : public ICommand {
 public:
     std::string getName() const override { return "serve"; }
 
-    std::string getDescription() const override { return "Start MCP server (stdio transport)"; }
+    std::string getDescription() const override { return "Start MCP server"; }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("serve", getDescription());
-        cmd->add_flag("--quiet", quiet_,
-                      "Suppress banner and set warn log level (can also set YAMS_MCP_QUIET=1)");
+
+        // Backward compatible (now redundant) flag: default is already quiet.
+        cmd->add_flag(
+            "--quiet", quietFlag_,
+            "Deprecated / no-op: server runs quiet by default (use --verbose to show banner)");
+
+        // New flag enabling banner + info-level logging
+        cmd->add_flag(
+            "--verbose", verbose_,
+            "Show startup banner and enable info-level logging (overrides default quiet mode)");
+
+        cmd->add_flag("--http", http_, "Use HTTP+SSE transport instead of stdio");
+        cmd->add_option("--host", http_host_, "HTTP host to bind to (default: 127.0.0.1)")
+            ->envname("YAMS_MCP_HTTP_HOST");
+        cmd->add_option("--port", http_port_, "HTTP port to bind to (default: 8757)")
+            ->envname("YAMS_MCP_HTTP_PORT");
 
         cmd->callback([this]() {
             auto result = execute();
@@ -43,115 +63,87 @@ public:
 
     Result<void> execute() override {
         try {
-            // Redirect logging to stderr to avoid protocol conflicts with stdio transport
-            // Create a stderr sink for spdlog
+            // Dedicated stderr logger to avoid contaminating stdout protocol stream
             auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
             auto logger = std::make_shared<spdlog::logger>("stderr", stderr_sink);
             spdlog::set_default_logger(logger);
 
-            // Determine interactive mode and configure logging
             const bool interactive = isatty(STDIN_FILENO);
 
-            // Quiet mode: via --quiet flag or YAMS_MCP_QUIET=1 (env)
-            bool envQuiet = false;
+            // Environment override: YAMS_MCP_QUIET=0 => force verbose, =1 => force quiet
+            bool envOverride = false;
+            bool envQuietValue = true; // default if override sets quiet
             if (const char* q = std::getenv("YAMS_MCP_QUIET")) {
-                envQuiet = (q[0] == '1');
+                if (q[0] == '0') {
+                    envOverride = true;
+                    envQuietValue = false;
+                } else if (q[0] == '1') {
+                    envOverride = true;
+                    envQuietValue = true;
+                }
             }
-            const bool quiet = quiet_ || envQuiet;
 
-            // Reduce log noise in non-interactive/stdio mode or when quiet requested
+            // Effective quiet logic:
+            // Priority: explicit env override > --verbose flag > default quiet
+            bool quiet = envOverride ? envQuietValue : (!verbose_);
+
+            // Logging level: quiet -> warn, verbose -> info (unless SPLOG_LEVEL overrides)
             if (!interactive || quiet) {
-                // Suppress info-level logs so stdout carries only framed JSON-RPC
                 logger->set_level(spdlog::level::warn);
                 spdlog::set_level(spdlog::level::warn);
                 spdlog::flush_on(spdlog::level::warn);
             } else {
-                // Interactive banner for humans
-                std::cerr << "\n=== YAMS MCP Server ===" << std::endl;
-                std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)" << std::endl;
-                std::cerr << "Status: Waiting for client connection..." << std::endl;
-                std::cerr << "Press Ctrl+C to stop the server" << std::endl;
-                std::cerr << std::endl;
+                logger->set_level(spdlog::level::info);
+                spdlog::set_level(spdlog::level::info);
             }
 
-            // Set up signal handler for graceful shutdown using sigaction
-            // This allows interrupting blocking I/O operations
+            // Env manual override of spdlog level still honored
+            if (const char* env_l = std::getenv("SPLOG_LEVEL")) {
+                std::string level_str = env_l;
+                std::transform(level_str.begin(), level_str.end(), level_str.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (level_str == "trace")
+                    spdlog::set_level(spdlog::level::trace);
+                else if (level_str == "debug")
+                    spdlog::set_level(spdlog::level::debug);
+                else if (level_str == "info")
+                    spdlog::set_level(spdlog::level::info);
+                else if (level_str == "warn" || level_str == "warning")
+                    spdlog::set_level(spdlog::level::warn);
+                else if (level_str == "error")
+                    spdlog::set_level(spdlog::level::err);
+                else if (level_str == "critical")
+                    spdlog::set_level(spdlog::level::critical);
+            }
+
+            // Signal handlers
             struct sigaction sa;
             std::memset(&sa, 0, sizeof(sa));
-
-            // Use a lambda wrapper to set the shutdown flag
             sa.sa_handler = [](int sig) {
                 g_shutdown = true;
-                // Print shutdown message to stderr
-                std::cerr << "\n[Signal " << sig << " received, shutting down...]" << std::endl;
-                // Clear any error state on stdin to allow getline to return
-                if (std::cin.fail()) {
+                std::cerr << "\n[Signal " << sig << " received, shutting down...]\n";
+                if (std::cin.fail())
                     std::cin.clear();
-                }
             };
-
-            // Don't set SA_RESTART to allow interrupting blocking I/O
             sa.sa_flags = 0;
-
-            // Install the handler for SIGINT and SIGTERM
-            if (sigaction(SIGINT, &sa, nullptr) == -1) {
+            if (sigaction(SIGINT, &sa, nullptr) == -1)
                 spdlog::warn("Failed to install SIGINT handler");
-            }
-            if (sigaction(SIGTERM, &sa, nullptr) == -1) {
+            if (sigaction(SIGTERM, &sa, nullptr) == -1)
                 spdlog::warn("Failed to install SIGTERM handler");
-            }
 
+            // Ensure storage ready
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 return ensured;
             }
 
-            auto store = cli_->getContentStore();
-            auto searchExecutor = cli_->getSearchExecutor();
-            auto metadataRepo = cli_->getMetadataRepository();
+            effectiveQuiet_ = quiet; // store for server methods
 
-            // Prepare embedded HybridSearchEngine (not yet used; kept for future MCP integration)
-            std::shared_ptr<yams::search::HybridSearchEngine> hybridEngine;
-            try {
-                auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
-                yams::search::SearchEngineBuilder builder;
-                builder.withVectorIndex(vecMgr)
-                    .withMetadataRepo(metadataRepo)
-                    .withKGStore(cli_->getKnowledgeGraphStore());
-
-                auto buildRes = builder.buildEmbedded(
-                    yams::search::SearchEngineBuilder::BuildOptions::makeDefault());
-                if (buildRes) {
-                    hybridEngine = buildRes.value();
-                    spdlog::info("HybridSearchEngine initialized (embedded, KG {}abled)",
-                                 hybridEngine->getConfig().enable_kg ? "en" : "dis");
-                } else {
-                    spdlog::warn("HybridSearchEngine initialization failed: {}",
-                                 buildRes.error().message);
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("HybridSearchEngine bring-up error (ignored): {}", e.what());
+            if (http_) {
+                return runHttpServer();
+            } else {
+                return runStdioServer();
             }
-
-            if (!store || !searchExecutor) {
-                return Error{ErrorCode::NotInitialized, "Storage not initialized"};
-            }
-
-            // Create MCP server with stdio transport
-            std::unique_ptr<mcp::ITransport> transport = std::make_unique<mcp::StdioTransport>();
-            spdlog::info("MCP server initialized with stdio transport");
-
-            auto server = std::make_unique<mcp::MCPServer>(std::move(transport), &g_shutdown);
-
-            // Run server until shutdown signal
-            server->start();
-            while (!g_shutdown && server->isRunning()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            server->stop();
-            spdlog::info("MCP server stopped");
-
-            return Result<void>();
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Server error: ") + e.what()};
@@ -159,8 +151,55 @@ public:
     }
 
 private:
+    Result<void> runStdioServer() {
+        if (!effectiveQuiet_) {
+            std::cerr << "\n=== YAMS MCP Server (stdio) ===\n";
+            std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)\n";
+            std::cerr << "Status: Waiting for client connection...\n";
+            std::cerr << "Press Ctrl+C to stop the server\n\n";
+        }
+
+        auto transport = std::make_unique<mcp::StdioTransport>();
+        auto server = std::make_unique<mcp::MCPServer>(std::move(transport), &g_shutdown);
+        server->start();
+        spdlog::info("MCP stdio server stopped");
+        return {};
+    }
+
+    Result<void> runHttpServer() {
+        if (!effectiveQuiet_) {
+            std::cerr << "\n=== YAMS MCP Server (HTTP) ===\n";
+            std::cerr << "Transport: HTTP+SSE\n";
+            std::cerr << "Listening on: " << http_host_ << ":" << http_port_ << "\n";
+            std::cerr << "Press Ctrl+C to stop the server\n\n";
+        }
+
+        auto server = std::make_shared<mcp::MCPServer>(nullptr, &g_shutdown);
+
+        mcp::HttpMcpServer::Config cfg;
+        cfg.bindAddress = http_host_;
+        cfg.bindPort = http_port_;
+
+        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+        mcp::HttpMcpServer http(io, server, cfg);
+
+        http.run();
+
+        spdlog::info("MCP HTTP server stopped");
+        return {};
+    }
+
     YamsCLI* cli_ = nullptr;
-    bool quiet_ = false;
+
+    // Flags / options
+    bool quietFlag_ = true; // kept for backward compatibility (default quiet)
+    bool verbose_ = false;  // new flag: enables banner & info logging
+    bool http_ = false;
+    std::string http_host_ = "127.0.0.1";
+    uint16_t http_port_ = 8757;
+
+    // Derived effective quiet state after env + flags
+    bool effectiveQuiet_ = true;
 };
 
 // Factory function

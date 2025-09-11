@@ -2,6 +2,42 @@
 
 Concise guidance to size, configure, and run YAMS efficiently. Tune based on your workload profile: ingest-heavy, query-heavy, or mixed.
 
+## Daemon Metrics & Auto‑Tuning (new)
+
+YAMS includes a centralized TuneAdvisor and a lightweight ResourceTuner that adapt behavior based on accurate daemon metrics:
+
+- Metrics (daemon):
+  - CPU utilization derived from /proc deltas (percent of total machine capacity).
+  - Memory footprint prefers PSS (from smaps_rollup) and falls back to RSS.
+  - Mux backlogs and active connection counts inform server pressure.
+- Auto‑tuning loop (daemon):
+  - Shrinks worker pools when idle (low CPU, no queued work, zero active connections).
+  - Grows conservatively under pressure (CPU high, worker queue depth above threshold, or mux backlog).
+- Auto‑embed policy (ingest):
+  - Default policy is Idle: newly added documents embed only when the daemon is idle; otherwise embedding is deferred to the background repair coordinator.
+  - Policies: Never | Idle (default) | Always. These are defined centrally in TuneAdvisor and used by the RequestDispatcher’s auto‑embedding path.
+
+Notes:
+- The doctor output (“Resources: RAM=…, CPU=…”) now reflects improved metrics granularity, so tuning decisions align with what you see in `yams doctor`/`yams status`.
+- Background repair respects system load (deferred when busy) and processes in conservative, adaptive batches.
+
+### Embedding Batch Controls (conservative by default)
+
+Embedding generation uses an adaptive DynamicBatcher with these centralized knobs (via TuneAdvisor):
+
+- Safety factor: reserves headroom in token budget; default 0.90.
+- Advisory doc cap: optional upper bound on documents per dynamic batch; default unset.
+- Inter‑batch pause: optional millisecond pause after each persisted batch; default 0ms.
+
+These reduce sustained CPU pressure during large repairs and improve fairness with concurrent queries.
+
+### Worker Pools & Idle CPU
+
+- CPU worker pool threads run with a longer idle wait to reduce wakeups (default ~250ms tick internally), lowering idle CPU without harming responsiveness.
+- Socket server IO workers scale based on connection and mux pressure.
+
+Best practice: rely on the built‑in auto‑tuning first. If you need stricter behavior (e.g., keep the system cold while indexing), disable auto‑embed or increase inter‑batch pauses (see Recipes).
+
 ## TL;DR (Quick wins)
 
 - Hardware: prefer NVMe SSDs; allocate fast storage to the data directory.
@@ -95,6 +131,21 @@ Concise guidance to size, configure, and run YAMS efficiently. Tune based on you
 - Hybrid:
   - If using hybrid (keyword + vector), filter with keyword first to reduce vector candidates.
 
+### Vector & Embedding Tuning (daemon)
+
+- Auto‑embedding policy (TuneAdvisor):
+  - Idle (default): embed on add only when CPU is low and there are no active connections; otherwise defer to the repair coordinator.
+  - Never: always defer; run `yams repair --embeddings` or let the background repair catch up when idle.
+  - Always: embed immediately (use sparingly; may increase ingest CPU).
+- Embedding batches (TuneAdvisor):
+  - Safety factor ≈ 0.90 default; lower to be more conservative on memory/CPU (e.g., 0.75).
+  - Advisory doc cap: cap per‑batch documents to smooth CPU usage on heterogeneous inputs.
+  - Inter‑batch pause: add a small delay (e.g., 50–100ms) after each persisted batch to avoid prolonged CPU plateaus.
+  
+Operational guidance:
+- For shared hosts or during peak hours: Idle policy + small inter‑batch pause.
+- For bulk backfills off‑hours: Always policy + higher safety to maximize throughput while keeping stability.
+
 ---
 
 ## Concurrency, Batching, and Commit Strategy
@@ -104,6 +155,7 @@ Concise guidance to size, configure, and run YAMS efficiently. Tune based on you
 - Batching:
   - Ingest in batches (e.g., 100–1000 docs) to amortize transaction overhead.
   - Group small files and stdin streams when possible.
+  - Let the embedding DynamicBatcher pick doc batches based on token budget; use safety/doc‑cap/pause to shape CPU profile.
 - Transactions:
   - Larger transactions speed ingest but increase rollback scope; choose a safe middle ground for your failure model.
 
@@ -181,6 +233,7 @@ Concise guidance to size, configure, and run YAMS efficiently. Tune based on you
   - Schedule checkpoints; ensure consumers aren’t holding readers open.
 - Memory pressure:
   - Reduce caches; lower concurrency; ensure OS has headroom.
+  - Lower embedding batch safety and increase inter‑batch pauses; prefer Idle auto‑embed policy.
 
 ---
 

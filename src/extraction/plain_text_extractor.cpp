@@ -10,8 +10,8 @@ namespace yams::extraction {
 REGISTER_EXTRACTOR(PlainTextExtractor, ".txt", ".md", ".log", ".csv", ".json", ".xml", ".yml",
                    ".yaml", ".cpp", ".cxx", ".cc", ".c", ".h", ".hpp", ".hxx", ".py", ".js", ".ts",
                    ".java", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh", ".ps1", ".bat",
-                   ".cmd", ".html", ".htm", ".css", ".scss", ".less", ".sql", ".conf", ".cfg",
-                   ".ini", ".toml", ".tex", ".bib", ".rst", ".adoc", ".org");
+                   ".cmd", ".css", ".scss", ".less", ".sql", ".conf", ".cfg", ".ini", ".toml",
+                   ".tex", ".bib", ".rst", ".adoc", ".org");
 
 Result<ExtractionResult> PlainTextExtractor::extract(const std::filesystem::path& path,
                                                      const ExtractionConfig& config) {
@@ -120,11 +120,11 @@ Result<ExtractionResult> PlainTextExtractor::extractFromBuffer(std::span<const s
 }
 
 std::vector<std::string> PlainTextExtractor::supportedExtensions() const {
-    return {".txt",  ".md",  ".log",  ".csv", ".json", ".xml",  ".yml",  ".yaml", ".cpp",
-            ".cxx",  ".cc",  ".c",    ".h",   ".hpp",  ".hxx",  ".py",   ".js",   ".ts",
-            ".java", ".go",  ".rs",   ".rb",  ".php",  ".sh",   ".bash", ".zsh",  ".ps1",
-            ".bat",  ".cmd", ".html", ".htm", ".css",  ".scss", ".less", ".sql",  ".conf",
-            ".cfg",  ".ini", ".toml", ".tex", ".bib",  ".rst",  ".adoc", ".org"};
+    return {".txt",  ".md",  ".log", ".csv",  ".json", ".xml", ".yml",  ".yaml", ".cpp",
+            ".cxx",  ".cc",  ".c",   ".h",    ".hpp",  ".hxx", ".py",   ".js",   ".ts",
+            ".java", ".go",  ".rs",  ".rb",   ".php",  ".sh",  ".bash", ".zsh",  ".ps1",
+            ".bat",  ".cmd", ".css", ".scss", ".less", ".sql", ".conf", ".cfg",  ".ini",
+            ".toml", ".tex", ".bib", ".rst",  ".adoc", ".org"};
 }
 
 Result<std::string>
@@ -260,11 +260,12 @@ void PlainTextExtractor::extractFileMetadata(ExtractionResult& result,
         auto fileSize = std::filesystem::file_size(path);
         result.metadata["file_size"] = std::to_string(fileSize);
 
-        // Simplified time handling - just use current time for now
-        // TODO: Fix file time conversion
-        auto now = std::chrono::system_clock::now();
+        // Use actual last write time
+        auto ft = std::filesystem::last_write_time(path);
+        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ft - decltype(ft)::clock::now() + std::chrono::system_clock::now());
         result.metadata["last_modified"] =
-            std::to_string(std::chrono::system_clock::to_time_t(now));
+            std::to_string(std::chrono::system_clock::to_time_t(sctp));
     } catch (const std::exception& e) {
         result.warnings.push_back("Failed to extract file stats: " + std::string(e.what()));
     }

@@ -51,6 +51,8 @@ MessageType getMessageType(const Request& req) {
                 return MessageType::GetStatsRequest;
             } else if constexpr (std::is_same_v<T, CancelRequest>) {
                 return MessageType::CancelRequest;
+            } else if constexpr (std::is_same_v<T, EmbedDocumentsRequest>) {
+                return MessageType::EmbedDocumentsRequest;
             }
             return MessageType::StatusRequest; // Default
         },
@@ -102,6 +104,12 @@ MessageType getMessageType(const Response& res) {
                 return MessageType::GetStatsResponse;
             } else if constexpr (std::is_same_v<T, DeleteResponse>) {
                 return MessageType::DeleteResponse;
+            } else if constexpr (std::is_same_v<T, EmbedDocumentsResponse>) {
+                return MessageType::EmbedDocumentsResponse;
+            } else if constexpr (std::is_same_v<T, EmbeddingEvent>) {
+                return MessageType::EmbeddingEvent;
+            } else if constexpr (std::is_same_v<T, ModelLoadEvent>) {
+                return MessageType::ModelLoadEvent;
             }
             return MessageType::ErrorResponse; // Default
         },
@@ -143,6 +151,8 @@ std::string getRequestName(const Request& req) {
                 return "LoadModel";
             } else if constexpr (std::is_same_v<T, UnloadModelRequest>) {
                 return "UnloadModel";
+            } else if constexpr (std::is_same_v<T, EmbedDocumentsRequest>) {
+                return "EmbedDocuments";
             } else if constexpr (std::is_same_v<T, ModelStatusRequest>) {
                 return "ModelStatus";
             }

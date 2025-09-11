@@ -4,12 +4,16 @@
 // These interfaces define stable contracts for search, grep, document, and restore operations,
 // enabling strict feature parity between CLI tools and the MCP server.
 
+#include <boost/asio/awaitable.hpp>
 #include <yams/api/content_store.h>
+#include <yams/core/task.h>
 #include <yams/core/types.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_executor.h>
+// Required for yams::extraction::IContentExtractor
+#include <yams/extraction/content_extractor.h>
 
 #include <chrono>
 #include <cstddef>
@@ -19,8 +23,14 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <boost/asio/any_io_executor.hpp>
 
 // Forward declarations for LLM-optimized utilities
+// Forward declare daemon ServiceManager used in AppContext
+namespace yams::daemon {
+class ServiceManager;
+}
+
 namespace yams::app::services::utils {
 
 /// Parse natural language time expressions into Unix epoch seconds
@@ -55,10 +65,19 @@ namespace yams::app::services {
 // Shared application context for services. Construct once and pass to service implementations.
 
 struct AppContext {
+    yams::daemon::ServiceManager* service_manager = nullptr;
+    boost::asio::any_io_executor workerExecutor;
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<search::SearchExecutor> searchExecutor;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<search::HybridSearchEngine> hybridEngine;
+    // Optional: externally-provided content extractors (plugins)
+    std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
+
+    // Degraded search / repair status (allows services to fallback during repairs)
+    bool searchRepairInProgress{false};
+    std::string searchRepairDetails{};
+    int searchRepairProgress{0}; // 0-100%
 };
 
 // ===========================
@@ -228,7 +247,7 @@ struct SearchResponse {
 class ISearchService {
 public:
     virtual ~ISearchService() = default;
-    virtual Result<SearchResponse> search(const SearchRequest& req) = 0;
+    virtual boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) = 0;
 };
 
 // ===========================
@@ -754,6 +773,9 @@ struct DownloadServiceRequest {
     bool storeOnly{true};
     std::optional<std::string> exportPath;
     downloader::OverwritePolicy overwrite{downloader::OverwritePolicy::Never};
+    // User-supplied annotations
+    std::vector<std::string> tags;                         // repeated --tag
+    std::unordered_map<std::string, std::string> metadata; // repeated --meta key=value
 };
 
 struct DownloadServiceResponse {
@@ -813,6 +835,31 @@ public:
 };
 
 // ===========================
+// Embedding Service
+// ===========================
+
+struct EmbedDocumentsServiceRequest {
+    std::vector<std::string> documentHashes;
+    std::string modelName;
+    uint32_t batchSize{32};
+    bool skipExisting{true};
+};
+
+struct EmbedDocumentsServiceResponse {
+    uint64_t requested{0};
+    uint64_t embedded{0};
+    uint64_t skipped{0};
+    uint64_t failed{0};
+};
+
+class IEmbeddingService {
+public:
+    virtual ~IEmbeddingService() = default;
+    virtual boost::asio::awaitable<Result<EmbedDocumentsServiceResponse>>
+    embedDocuments(const EmbedDocumentsServiceRequest& req) = 0;
+};
+
+// ===========================
 // Stats Service
 // ===========================
 
@@ -846,6 +893,7 @@ public:
  * Factory functions to construct service implementations from shared context.
  */
 std::shared_ptr<ISearchService> makeSearchService(const AppContext& ctx);
+std::shared_ptr<IEmbeddingService> makeEmbeddingService(const AppContext& ctx);
 std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);
 std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx);
 std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx);

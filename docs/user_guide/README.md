@@ -14,6 +14,8 @@ echo "note" | yams add - --name "quick-note.txt" --mime-type text/plain
 # Explore
 yams list --format table --limit 20
 yams search "config file" --limit 5
+yams status
+yams stats -v
 
 # Retrieve and delete
 yams get <hash> -o ./file.bin
@@ -35,8 +37,10 @@ Tips:
 - Searching your documents
   - Keyword & FTS: [search_guide.md](./search_guide.md)
   - Semantic & hybrid search: [vector_search_guide.md](./vector_search_guide.md)
+  - Embedding models: see notes below
 - Configuration (advanced)
   - Admin/Config Overview: [../admin/configuration.md](../admin/configuration.md)
+  - Performance Tuning: [../admin/performance_tuning.md](../admin/performance_tuning.md)
 - Troubleshooting
   - Search issues: [../troubleshooting/search_issues.md](../troubleshooting/search_issues.md)
 
@@ -54,6 +58,10 @@ Tips:
 | `YAMS_ENABLE_ONNX` | ON | Enables ONNX Runtime features (pulls onnxruntime; may pull Boost transitively) |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 
+See also:
+- CLI Status: ./cli.md#cmd-status
+- CLI Stats: ./cli.md#cmd-stats
+
 ## Common patterns
 
 - Use JSON for scripting:
@@ -63,6 +71,16 @@ Tips:
   - `YAMS_STORAGE="$PWD/.yams" yams init --non-interactive`
   - `YAMS_STORAGE="$PWD/.yams" yams add ./doc.md`
 
+## Performance & Tuning (quick)
+
+- Status and doctor show live resource use and readiness:
+  - `yams status` — daemon readiness and resource snapshot
+  - `yams doctor` — includes RAM (PSS/RSS) and CPU%, plus vector scoring state
+- Auto‑embeddings on add are load‑aware:
+  - By default, embeddings generate on add only when the daemon is idle.
+  - When busy, embeddings are deferred to the background repair coordinator.
+- For deeper guidance (embedding batch safety/doc‑cap/pause, worker scaling), see the Admin guide: [Performance Tuning](../admin/performance_tuning.md).
+
 ## See also
 
 - Documentation Hub: [../README.md](../README.md)
@@ -70,3 +88,14 @@ Tips:
 
 ---
 Last updated: This guide is kept minimal and links to authoritative pages above. For exhaustive flags/options, see the CLI Reference or use the verbose help.
+
+## Embedding Models — Important Notes
+
+- Recommended models for most users:
+  - `all-MiniLM-L6-v2` (384‑dim): fast, lightweight
+  - `all-mpnet-base-v2` (768‑dim): higher quality, slower
+- Known issue: `nomic-embed-text-v1.5` (ONNX)
+  - Current ONNX provider lacks batch embedding and preload support; throughput and UX may be degraded.
+  - Use at your own risk. If you choose to use it, set dimensions to 768 and consider running repairs overnight.
+  - We’ve removed it from the recommended dialogs for now. You can still download it explicitly via `yams model download --hf nomic-ai/nomic-embed-text-v1.5`.
+  - After downloading, use `--apply-config` (or follow the printed `yams config set …` commands) to align `embeddings.embedding_dim`, `vector_database.embedding_dim`, and `vector_index.dimension`.

@@ -458,6 +458,7 @@ json MCPRetrieveDocumentResponse::toJson() const {
 MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     MCPListDocumentsRequest req;
     req.pattern = j.value("pattern", std::string{});
+    req.name = j.value("name", std::string{});
 
     if (j.contains("tags") && j["tags"].is_array()) {
         for (const auto& tag : j["tags"]) {
@@ -483,11 +484,72 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     return req;
 }
 
+MCPSessionPinRequest MCPSessionPinRequest::fromJson(const json& j) {
+    MCPSessionPinRequest req;
+    req.path = j.value("path", std::string{});
+    if (j.contains("tags") && j["tags"].is_array()) {
+        for (const auto& tag : j["tags"]) {
+            if (tag.is_string()) {
+                req.tags.push_back(tag.get<std::string>());
+            }
+        }
+    }
+    if (j.contains("metadata") && j["metadata"].is_object()) {
+        req.metadata = j["metadata"];
+    } else {
+        req.metadata = json::object();
+    }
+    return req;
+}
+
+json MCPSessionPinRequest::toJson() const {
+    return json{{"path", path}, {"tags", tags}, {"metadata", metadata}};
+}
+
+MCPSessionPinResponse MCPSessionPinResponse::fromJson(const json& j) {
+    MCPSessionPinResponse r;
+    r.updated = j.value("updated", size_t{0});
+    return r;
+}
+
+json MCPSessionPinResponse::toJson() const {
+    return json{{"updated", updated}};
+}
+
+MCPSessionUnpinRequest MCPSessionUnpinRequest::fromJson(const json& j) {
+    MCPSessionUnpinRequest req;
+    req.path = j.value("path", std::string{});
+    return req;
+}
+
+json MCPSessionUnpinRequest::toJson() const {
+    return json{{"path", path}};
+}
+
+MCPSessionUnpinResponse MCPSessionUnpinResponse::fromJson(const json& j) {
+    MCPSessionUnpinResponse r;
+    r.updated = j.value("updated", size_t{0});
+    return r;
+}
+
+json MCPSessionUnpinResponse::toJson() const {
+    return json{{"updated", updated}};
+}
+
 json MCPListDocumentsRequest::toJson() const {
-    return json{{"pattern", pattern},     {"tags", tags},           {"type", type},
-                {"mime", mime},           {"extension", extension}, {"binary", binary},
-                {"text", text},           {"recent", recent},       {"limit", limit},
-                {"offset", offset},       {"sort_by", sortBy},      {"sort_order", sortOrder},
+    return json{{"pattern", pattern},
+                {"name", name},
+                {"tags", tags},
+                {"type", type},
+                {"mime", mime},
+                {"extension", extension},
+                {"binary", binary},
+                {"text", text},
+                {"recent", recent},
+                {"limit", limit},
+                {"offset", offset},
+                {"sort_by", sortBy},
+                {"sort_order", sortOrder},
                 {"paths_only", pathsOnly}};
 }
 
@@ -573,6 +635,15 @@ MCPAddDirectoryRequest MCPAddDirectoryRequest::fromJson(const json& j) {
 
     req.recursive = j.value("recursive", true);
     req.followSymlinks = j.value("follow_symlinks", false);
+    req.snapshotId = j.value("snapshot_id", std::string{});
+    req.snapshotLabel = j.value("snapshot_label", std::string{});
+    if (j.contains("tags") && j["tags"].is_array()) {
+        for (const auto& tag : j["tags"]) {
+            if (tag.is_string()) {
+                req.tags.push_back(tag.get<std::string>());
+            }
+        }
+    }
     return req;
 }
 
@@ -583,7 +654,10 @@ json MCPAddDirectoryRequest::toJson() const {
                 {"exclude_patterns", excludePatterns},
                 {"metadata", metadata},
                 {"recursive", recursive},
-                {"follow_symlinks", followSymlinks}};
+                {"follow_symlinks", followSymlinks},
+                {"snapshot_id", snapshotId},
+                {"snapshot_label", snapshotLabel},
+                {"tags", tags}};
 }
 
 // MCPAddDirectoryResponse implementation
@@ -617,11 +691,17 @@ MCPGetByNameRequest MCPGetByNameRequest::fromJson(const json& j) {
     req.name = j.value("name", std::string{});
     req.rawContent = j.value("raw_content", false);
     req.extractText = j.value("extract_text", true);
+    req.latest = j.value("latest", false);
+    req.oldest = j.value("oldest", false);
     return req;
 }
 
 json MCPGetByNameRequest::toJson() const {
-    return json{{"name", name}, {"raw_content", rawContent}, {"extract_text", extractText}};
+    return json{{"name", name},
+                {"raw_content", rawContent},
+                {"extract_text", extractText},
+                {"latest", latest},
+                {"oldest", oldest}};
 }
 
 // MCPGetByNameResponse implementation
@@ -691,12 +771,18 @@ MCPCatDocumentRequest MCPCatDocumentRequest::fromJson(const json& j) {
     req.name = j.value("name", std::string{});
     req.rawContent = j.value("raw_content", false);
     req.extractText = j.value("extract_text", true);
+    req.latest = j.value("latest", false);
+    req.oldest = j.value("oldest", false);
     return req;
 }
 
 json MCPCatDocumentRequest::toJson() const {
-    return json{
-        {"hash", hash}, {"name", name}, {"raw_content", rawContent}, {"extract_text", extractText}};
+    return json{{"hash", hash},
+                {"name", name},
+                {"raw_content", rawContent},
+                {"extract_text", extractText},
+                {"latest", latest},
+                {"oldest", oldest}};
 }
 
 // MCPCatDocumentResponse implementation

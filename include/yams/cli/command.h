@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <boost/asio/awaitable.hpp>
 #include <CLI/CLI.hpp>
 #include <yams/core/types.h>
 
@@ -36,6 +37,11 @@ public:
      * Execute the command
      */
     virtual Result<void> execute() = 0;
+
+    /**
+     * Asynchronous execution (optional during migration). Default bridges to execute().
+     */
+    virtual boost::asio::awaitable<Result<void>> executeAsync() { co_return execute(); }
 };
 
 } // namespace yams::cli

@@ -1,5 +1,5 @@
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
-#include <yams/cli/async_bridge.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 
@@ -24,6 +24,12 @@ TEST(DaemonStatusStatsIntegration, StatusHasRuntimeAndStatsNonZero) {
             break;
         std::this_thread::sleep_for(100ms);
     }
+
+    // Lifecycle fields should be present and consistent
+    ASSERT_FALSE(s.overallStatus.empty());
+    ASSERT_FALSE(s.lifecycleState.empty());
+    EXPECT_EQ(s.lifecycleState, s.overallStatus);
+    EXPECT_TRUE(s.lastError.empty());
 
     // Allow tiny uptime; at least non-negative
     EXPECT_GE(s.uptimeSeconds, 0u);

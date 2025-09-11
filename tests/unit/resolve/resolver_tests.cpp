@@ -228,6 +228,15 @@ public:
     Result<int64_t> getDocumentCountByExtractionStatus(yams::metadata::ExtractionStatus) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+
+    // Embedding status operations
+    Result<void> updateDocumentEmbeddingStatus(int64_t, bool, const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> updateDocumentEmbeddingStatusByHash(const std::string&, bool,
+                                                     const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
 };
 
 TEST(ResolverFilesystemBackend, ResolveNameToAbsoluteFilePath) {

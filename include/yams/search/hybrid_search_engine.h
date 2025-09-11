@@ -3,7 +3,9 @@
 #include <yams/core/types.h>
 #include <yams/vector/vector_index_manager.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <optional>
@@ -173,9 +175,29 @@ struct HybridSearchResult {
     };
     std::optional<Explanation> explanation;
 
-    // Comparison for sorting (higher score = better)
+    // Comparison for sorting (higher score = better) with deterministic tie-breakers
     bool operator<(const HybridSearchResult& other) const {
-        return hybrid_score > other.hybrid_score;
+        constexpr float eps = 1e-6f;
+        if (std::fabs(hybrid_score - other.hybrid_score) > eps) {
+            return hybrid_score > other.hybrid_score;
+        }
+        // Prefer better keyword rank when scores tie (smaller rank is better)
+        if (keyword_rank != other.keyword_rank) {
+            return keyword_rank < other.keyword_rank;
+        }
+        // Then prefer better vector rank
+        if (vector_rank != other.vector_rank) {
+            return vector_rank < other.vector_rank;
+        }
+        // Next, prefer lexicographically smaller path if available, else id
+        auto pathItThis = metadata.find("path");
+        auto pathItOther = other.metadata.find("path");
+        if (pathItThis != metadata.end() && pathItOther != other.metadata.end() &&
+            pathItThis->second != pathItOther->second) {
+            return pathItThis->second < pathItOther->second;
+        }
+        // Fallback to id to ensure total order
+        return id < other.id;
     }
 
     bool operator>(const HybridSearchResult& other) const {

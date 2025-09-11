@@ -272,11 +272,11 @@ namespace yams {
 inline constexpr size_t HASH_SIZE = 32;        // SHA-256
 inline constexpr size_t HASH_STRING_SIZE = 64; // Hex encoded
 inline constexpr size_t DEFAULT_CHUNK_SIZE =
-    static_cast<size_t>(64) * static_cast<size_t>(1024); // 64KB
+    static_cast<size_t>(256) * static_cast<size_t>(1024); // 256KB (increased)
 inline constexpr size_t MIN_CHUNK_SIZE =
     static_cast<size_t>(16) * static_cast<size_t>(1024); // 16KB
 inline constexpr size_t MAX_CHUNK_SIZE =
-    static_cast<size_t>(256) * static_cast<size_t>(1024); // 256KB
+    static_cast<size_t>(1024) * static_cast<size_t>(1024); // 1MB (increased)
 inline constexpr size_t DEFAULT_BUFFER_SIZE =
     static_cast<size_t>(64) * static_cast<size_t>(1024); // 64KB
 

@@ -81,6 +81,8 @@ add_library(yams_daemon_ipc STATIC
     ipc/retrieval_session.cpp
     ipc/thread_pool.cpp
     ipc/socket_utils.cpp
+    ipc/resource_tuner.cpp
+    components/PoolManager.cpp
 )
 set_target_properties(yams_daemon_ipc PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
@@ -276,6 +278,7 @@ if(Protobuf_FOUND)
         PUBLIC
             yams::core
             protobuf::libprotobuf
+            nlohmann_json::nlohmann_json
         PRIVATE
             spdlog::spdlog
     )
@@ -305,13 +308,22 @@ endif()
 # ============================================================================
 add_library(yams_daemon STATIC
     daemon.cpp
+    components/DaemonMetrics.cpp
     components/RequestDispatcher.cpp
     components/LifecycleComponent.cpp
     components/ServiceManager.cpp
+    components/PoolManager.cpp
+    components/WorkerPool.cpp
     components/RepairCoordinator.cpp
     components/SocketServer.cpp
+    components/WalMetricsProvider.cpp
     resource/mock_model_provider.cpp
+    resource/abi_model_provider_adapter.cpp
+    resource/abi_plugin_loader.cpp
+    resource/plugin_host.cpp
     resource/plugin_loader.cpp
+    resource/wasm_runtime.cpp
+    resource/plugin_host_services_shim.cpp
 )
 
 # Avoid LTO bitcode in the static daemon lib to prevent link failures when executables disable IPO
@@ -331,17 +343,40 @@ target_link_libraries(yams_daemon
         yams::search
         yams::vector
         yams::api
+        yams::wal
         yams_downloader
         yams_repair
         yams_app_services
         yams::daemon_ipc
         yams_daemon_client
     PRIVATE
+        $<$<VERSION_GREATER_EQUAL:${CMAKE_VERSION},3.24>:$<LINK_GROUP:RESCAN,yams_wal>>
         spdlog::spdlog
         pthread
         ${CMAKE_DL_LIBS}  # For dlopen/dlsym
         # Removed: onnxruntime::onnxruntime (moved to plugin)
 )
+
+# Ensure WAL symbols are retained when linking with lld and section GC
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(yams_daemon PRIVATE -Wl,--no-gc-sections)
+    # Additionally, force-resolve yams_wal to avoid missing symbols under some link orders
+    target_link_libraries(yams_daemon PRIVATE $<$<LINK_LANGUAGE:CXX>:-Wl,--whole-archive> yams_wal $<$<LINK_LANGUAGE:CXX>:-Wl,--no-whole-archive>)
+endif()
+
+# Optional: enable WASM runtime (wasmtime-cpp) integration when available
+# Set -DYAMS_HAVE_WASMTIME=ON and provide include/link flags externally or via a toolchain.
+option(YAMS_HAVE_WASMTIME "Enable wasmtime-cpp integration for WASM plugins" OFF)
+if(YAMS_HAVE_WASMTIME)
+    target_compile_definitions(yams_daemon PRIVATE YAMS_HAVE_WASMTIME=1)
+    find_package(wasmtime QUIET)
+    if(wasmtime_FOUND)
+        target_link_libraries(yams_daemon PRIVATE wasmtime::wasmtime)
+        message(STATUS "WASM: wasmtime found; linking wasmtime::wasmtime")
+    else()
+        message(WARNING "WASM: YAMS_HAVE_WASMTIME=ON but wasmtime not found; building stubs")
+    endif()
+endif()
 
 # Propagate install prefix to code so PluginLoader can discover installed plugins at runtime
 if(CMAKE_INSTALL_PREFIX)
@@ -521,7 +556,7 @@ add_library(yams::daemon ALIAS yams_daemon)
 # Check if ONNX Runtime is available
 find_package(onnxruntime QUIET)
 
-if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
+if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX AND OFF)
     message(STATUS "Building ONNX model provider plugin")
 
     # Create ONNX plugin as a separate library
@@ -570,8 +605,7 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
     # Make plugin available for tests
     add_library(yams::onnx_plugin ALIAS yams_onnx_plugin)
 else()
-    message(STATUS "ONNX Runtime not found or disabled - ONNX plugin will not be built")
-    message(STATUS "  Embedding features will use mock provider")
+    message(STATUS "Skipping legacy in-tree ONNX plugin build (using plugins/onnx)")
 endif()
 
 # Link profiling where appropriate when profiling is enabled

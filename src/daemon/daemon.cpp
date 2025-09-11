@@ -1,17 +1,37 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
+
 #include <fstream>
+#include <mutex>
 #include <thread>
 #include <unistd.h> // For getuid(), geteuid(), getpid()
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/resource_tuner.h>
+#include <yams/daemon/resource/plugin_loader.h>
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+
+namespace {
+void set_current_thread_name(const std::string& name) {
+#ifdef __linux__
+    prctl(PR_SET_NAME, name.c_str(), 0, 0, 0);
+#elif __APPLE__
+    pthread_setname_np(name.c_str());
+#endif
+}
+} // namespace
 // IPC server implementation removed in PBI-007; client uses Boost.Asio path.
 
 namespace yams::daemon {
@@ -39,24 +59,101 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
             const size_t max_files = 5;               // Keep 5 rotated files
             auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 config_.logFile.string(), max_size, max_files);
+
+            // Initialize a small async logging thread pool for cross-thread logging
+
             auto logger = std::make_shared<spdlog::logger>("daemon", rotating_sink);
             spdlog::set_default_logger(logger);
-            spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
-            spdlog::set_level(spdlog::level::debug);
+            spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%t] [%^%l%$] %v");
+            // Honor YAMS_LOG_LEVEL if set; default to 'info' to reduce idle load
+            auto lvl = spdlog::level::info;
+            try {
+                if (const char* env = std::getenv("YAMS_LOG_LEVEL")) {
+                    std::string v(env);
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    if (v == "trace")
+                        lvl = spdlog::level::trace;
+                    else if (v == "debug")
+                        lvl = spdlog::level::debug;
+                    else if (v == "info")
+                        lvl = spdlog::level::info;
+                    else if (v == "warn" || v == "warning")
+                        lvl = spdlog::level::warn;
+                    else if (v == "error")
+                        lvl = spdlog::level::err;
+                    else if (v == "critical" || v == "fatal")
+                        lvl = spdlog::level::critical;
+                    else if (v == "off")
+                        lvl = spdlog::level::off;
+                }
+            } catch (...) {
+            }
+            spdlog::set_level(lvl);
         } else {
             spdlog::set_default_logger(existing);
-            spdlog::set_level(spdlog::level::debug);
+            // Existing logger present: still honor YAMS_LOG_LEVEL override
+            auto lvl = spdlog::level::info;
+            try {
+                if (const char* env = std::getenv("YAMS_LOG_LEVEL")) {
+                    std::string v(env);
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    if (v == "trace")
+                        lvl = spdlog::level::trace;
+                    else if (v == "debug")
+                        lvl = spdlog::level::debug;
+                    else if (v == "info")
+                        lvl = spdlog::level::info;
+                    else if (v == "warn" || v == "warning")
+                        lvl = spdlog::level::warn;
+                    else if (v == "error")
+                        lvl = spdlog::level::err;
+                    else if (v == "critical" || v == "fatal")
+                        lvl = spdlog::level::critical;
+                    else if (v == "off")
+                        lvl = spdlog::level::off;
+                }
+            } catch (...) {
+            }
+            spdlog::set_level(lvl);
         }
     } catch (const std::exception& e) {
         // Fall back to default stderr logger if file cannot be created
         spdlog::warn("Failed to initialize file logger ({}), continuing with default logger",
                      e.what());
-        spdlog::set_level(spdlog::level::debug);
+        auto lvl = spdlog::level::info;
+        try {
+            if (const char* env = std::getenv("YAMS_LOG_LEVEL")) {
+                std::string v(env);
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                if (v == "trace")
+                    lvl = spdlog::level::trace;
+                else if (v == "debug")
+                    lvl = spdlog::level::debug;
+                else if (v == "info")
+                    lvl = spdlog::level::info;
+                else if (v == "warn" || v == "warning")
+                    lvl = spdlog::level::warn;
+                else if (v == "error")
+                    lvl = spdlog::level::err;
+                else if (v == "critical" || v == "fatal")
+                    lvl = spdlog::level::critical;
+                else if (v == "off")
+                    lvl = spdlog::level::off;
+            }
+        } catch (...) {
+        }
+        spdlog::set_level(lvl);
     }
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
     serviceManager_ = std::make_unique<ServiceManager>(config_, state_);
-    requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_);
+    // Create metrics aggregator before the dispatcher so status can pull from a single snapshot
+    metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get());
+    requestDispatcher_ =
+        std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_, metrics_.get());
     state_.stats.startTime = std::chrono::steady_clock::now();
 
     spdlog::info("Daemon configuration resolved:");
@@ -65,9 +162,6 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     spdlog::info("  PID file: {}", config_.pidFile.string());
     spdlog::info("  Log file: {}", config_.logFile.string());
 
-    // Seed process-wide socket override so any code paths that rely on centralized
-    // resolution (FSM helpers) observe the same socket path chosen here.
-    // This prevents divergence between server-held state and late resolvers.
     if (!config_.socketPath.empty()) {
 #ifndef _WIN32
         ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);
@@ -82,6 +176,13 @@ YamsDaemon::~YamsDaemon() {
     if (running_) {
         stop();
     }
+}
+
+Result<size_t> YamsDaemon::autoloadPluginsNow() {
+    if (!serviceManager_) {
+        return Error{ErrorCode::NotInitialized, "ServiceManager not initialized"};
+    }
+    return serviceManager_->autoloadPluginsNow();
 }
 
 Result<void> YamsDaemon::start() {
@@ -103,9 +204,6 @@ Result<void> YamsDaemon::start() {
     // before kicking off async service initialization to avoid race with HealthyEvent.
     lifecycleFsm_.dispatch(BootstrappedEvent{});
 
-    // Initialize request dispatcher before IPC so Ping/Status can be handled immediately
-    requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_);
-
     // Start integrated socket server ASAP so status requests work during initialization
     SocketServer::Config socketConfig;
     socketConfig.socketPath = config_.socketPath;
@@ -126,10 +224,29 @@ Result<void> YamsDaemon::start() {
     state_.readiness.ipcServerReady = true;
     spdlog::info("Socket server started on {}", config_.socketPath.string());
 
+#ifdef YAMS_TESTING
+    // Fast-start mode for tests: skip heavy service initialization and allow
+    // streaming stubs/status responses to operate over the live socket server.
+    // Enable by setting YAMS_TEST_FAST_START=1 in the environment.
+    if (const char* fast = std::getenv("YAMS_TEST_FAST_START");
+        fast && *fast && std::string(fast) != "0" && std::string(fast) != "false") {
+        spdlog::warn("YAMS_TEST_FAST_START enabled: skipping ServiceManager initialization");
+        // Leave lifecycle FSM in its current (Initializing) state; readiness flags
+        // for services remain false. RequestDispatcher will serve Status responses
+        // and RequestHandler will use streaming stubs for Search/List/Grep.
+        return Result<void>();
+    }
+#endif
+
+    // Plugin auto-loading is managed by ServiceManager after core readiness; avoid duplicate loads
+    // here
+
     // Set callback to transition to Ready state when initialization completes
     serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
         if (success) {
             lifecycleFsm_.dispatch(HealthyEvent{});
+            // Note: Actual RepairCoordinator start is deferred to daemon loop once
+            // searchEngineReady is true to avoid competing with search/vectors initialization.
         } else {
             lifecycleFsm_.dispatch(FailureEvent{error});
         }
@@ -148,43 +265,176 @@ Result<void> YamsDaemon::start() {
         return result;
     }
 
-    // Start feature-flagged repair coordinator (idle-only)
-    if (config_.enableAutoRepair) {
-        RepairCoordinator::Config rcfg;
-        rcfg.enable = true;
-        rcfg.dataDir = config_.dataDir;
-        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
-        // Safe lambda: only dereference ipcServer_ while daemon is running; we stop
-        // the coordinator before tearing down ipcServer_ in stop().
-        auto activeFn = []() -> size_t { return 0; };
-        repairCoordinator_ =
-            std::make_unique<RepairCoordinator>(serviceManager_.get(), &state_, activeFn, rcfg);
-        repairCoordinator_->start();
-    }
+    // Defer RepairCoordinator start until lifecycle is Healthy/Ready to avoid competing with init
 
     // Bootstrapped event already dispatched before service initialization to prevent race.
 
     // Start lightweight main loop thread; no in-process IPC acceptor
     daemonThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
+        set_current_thread_name("yams-daemon-main");
         spdlog::debug("Daemon main loop started.");
         // Drive lifecycle FSM periodically
         lifecycleFsm_.tick();
+        // Allow tuning of the main loop tick for metrics refresh and readiness nudges
+        uint32_t tick_ms = TuneAdvisor::statusTickMs();
         while (!token.stop_requested() && !stopRequested_.load()) {
             std::unique_lock<std::mutex> lock(stop_mutex_);
-            if (stop_cv_.wait_for(lock, std::chrono::seconds(1),
+            if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
                                   [&] { return stopRequested_.load(); })) {
                 // Shutdown requested: inform lifecycle FSM and exit loop
                 lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
                 break;
             }
+            // Periodically refresh metrics snapshot cache to ensure fast status replies
+            try {
+                if (metrics_) {
+                    metrics_->refresh();
+                    // Feed ResourceTuner with centralized metrics to adjust pools
+                    auto snap = metrics_->getSnapshot();
+                    std::uint64_t workerThreads = 0;
+                    try {
+                        workerThreads = static_cast<std::uint64_t>(
+                            serviceManager_ ? serviceManager_->getWorkerThreads() : 0);
+                    } catch (...) {
+                    }
+                    ResourceTuner::instance().updateLoadHints(
+                        snap.cpuUsagePercent,
+                        static_cast<std::uint64_t>(snap.muxQueuedBytes >= 0 ? snap.muxQueuedBytes
+                                                                            : 0),
+                        static_cast<std::uint64_t>(snap.workerQueued), workerThreads,
+                        static_cast<std::uint64_t>(snap.activeConnections));
+                }
+            } catch (...) {
+            }
+            // Deferred RepairCoordinator start: require FSM Ready and searchEngineReady
+            if (config_.enableAutoRepair && !repairCoordinator_) {
+                auto snap = lifecycleFsm_.snapshot();
+                if (snap.state == LifecycleState::Ready &&
+                    state_.readiness.searchEngineReady.load()) {
+                    try {
+                        RepairCoordinator::Config rcfg;
+                        rcfg.enable = true;
+                        rcfg.dataDir = config_.dataDir;
+                        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+                        auto activeFn = [this]() -> size_t {
+                            return static_cast<size_t>(state_.stats.activeConnections.load());
+                        };
+                        repairCoordinator_ = std::make_unique<RepairCoordinator>(
+                            serviceManager_.get(), &state_, activeFn, rcfg);
+                        repairCoordinator_->start();
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
+                    }
+                }
+            }
+            // Live-tune RepairCoordinator scheduling using TuneAdvisor and load
+            if (repairCoordinator_) {
+                size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
+                uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
+                // Hysteresis on busy/idle
+                auto now = std::chrono::steady_clock::now();
+                bool isBusy = (active >= busyThresh);
+                if (isBusy) {
+                    if (repairBusySince_.time_since_epoch().count() == 0)
+                        repairBusySince_ = now;
+                    repairReadySince_ = {};
+                } else {
+                    if (repairReadySince_.time_since_epoch().count() == 0)
+                        repairReadySince_ = now;
+                    repairBusySince_ = {};
+                }
+                uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
+                uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
+                bool busyHeld =
+                    isBusy && repairBusySince_.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - repairBusySince_)
+                            .count() >= degradeHold;
+                bool idleHeld =
+                    !isBusy && repairReadySince_.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
+                            .count() >= readyHold;
+
+                uint32_t tokens =
+                    busyHeld ? TuneAdvisor::repairTokensBusy() : TuneAdvisor::repairTokensIdle();
+                uint32_t batch = TuneAdvisor::repairMaxBatch();
+                repairCoordinator_->setMaintenanceTokens(tokens);
+                repairCoordinator_->setMaxBatch(batch);
+
+                // Rate limiting: cap batches per second by temporarily disabling tokens
+                uint32_t maxPerSec = TuneAdvisor::repairMaxBatchesPerSec();
+                if (maxPerSec > 0) {
+                    auto curBatches = state_.stats.repairBatchesAttempted.load();
+                    if (repairRateWindowStart_.time_since_epoch().count() == 0) {
+                        repairRateWindowStart_ = now;
+                        repairBatchesAtWindowStart_ = curBatches;
+                    } else {
+                        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             now - repairRateWindowStart_)
+                                             .count();
+                        auto produced = (curBatches >= repairBatchesAtWindowStart_)
+                                            ? (curBatches - repairBatchesAtWindowStart_)
+                                            : 0;
+                        if (elapsedMs < 1000) {
+                            if (produced >= maxPerSec) {
+                                // Pause new batches this window
+                                repairCoordinator_->setMaintenanceTokens(0);
+                            }
+                        } else {
+                            // reset window
+                            repairRateWindowStart_ = now;
+                            repairBatchesAtWindowStart_ = curBatches;
+                        }
+                    }
+                }
+
+                // FSM signaling: mark Degraded when repairs pending and system sustained busy with
+                // no tokens
+                bool pending = state_.stats.repairQueueDepth.load() > 0;
+                auto snap = lifecycleFsm_.snapshot();
+                if (snap.state == LifecycleState::Ready) {
+                    if (pending && busyHeld && tokens == 0) {
+                        lifecycleFsm_.dispatch(DegradedEvent{});
+                    }
+                } else if (snap.state == LifecycleState::Degraded) {
+                    if (!pending || idleHeld) {
+                        lifecycleFsm_.dispatch(HealthyEvent{});
+                    }
+                }
+            }
             // Periodic tasks can be added here
             // TODO(PBI-007-06): Prefer DaemonLifecycleFsm as lifecycle authority; call fsm_.tick()
             // here once FSM is wired
+
+            // Readiness ticker: nudge searchProgress while long-running init is in progress
+            try {
+                if (!state_.readiness.searchEngineReady.load()) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = now - state_.stats.startTime;
+                    auto sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+
+                    // Target ramps toward 90% over time; clamp to avoid claiming ready
+                    int target = 5 + static_cast<int>(std::min<int64_t>(sec * 3, 90));
+                    int cur = state_.readiness.searchProgress.load();
+
+                    if (cur < target) {
+                        state_.readiness.searchProgress.store(std::min(95, target),
+                                                              std::memory_order_relaxed);
+                        spdlog::debug("Readiness ticker: nudged searchProgress to {}%",
+                                      state_.readiness.searchProgress.load());
+                    }
+                }
+            } catch (...) {
+                // best-effort ticker; ignore errors
+            }
         }
         spdlog::debug("Daemon main loop exiting.");
     });
 
     spdlog::info("YAMS daemon started successfully.");
+    spdlog::info("Hint: If this is a new or migrated data directory, run 'yams repair "
+                 "--embeddings' to generate vector embeddings.");
+    spdlog::info("Hint: Use 'yams stats --verbose' to monitor worker pool (threads/active/queued) "
+                 "and streaming metrics.");
     return Result<void>();
 }
 

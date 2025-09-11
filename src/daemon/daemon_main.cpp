@@ -11,6 +11,8 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 
+#include <yams/daemon/resource/plugin_loader.h>
+
 // POSIX headers for daemonization
 #include <fcntl.h>     // for open(), O_RDONLY, O_RDWR
 #include <unistd.h>    // for fork(), setsid(), chdir(), close()
@@ -62,9 +64,16 @@ void signal_handler(int signo) {
     std::_Exit(128 + signo);
 }
 
+static std::atomic<bool> g_autoload_plugins_now{false};
+
 void setup_fatal_handlers() {
     std::signal(SIGSEGV, signal_handler);
     std::signal(SIGABRT, signal_handler);
+    // Use SIGUSR1 as on-demand plugin autoload trigger
+#ifdef SIGUSR1
+    std::signal(SIGUSR1,
+                [](int) { g_autoload_plugins_now.store(true, std::memory_order_relaxed); });
+#endif
     std::set_terminate([]() noexcept {
         log_fatal("std::terminate called");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -94,7 +103,10 @@ int main(int argc, char* argv[]) {
 
     app.add_option("--log-file", config.logFile, "Log file path");
 
-    app.add_option("--workers", config.workerThreads, "Number of worker threads")->default_val(0);
+    // Worker threads: avoid overriding DaemonConfig default (4) with an accidental 0.
+    // If the user does not provide this flag, keep the compiled default; if they do and set 0,
+    // we will coerce to at least 1 later to ensure the socket server can accept connections.
+    app.add_option("--workers", config.workerThreads, "Number of worker threads");
 
     app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")->default_val(8);
 
@@ -493,6 +505,14 @@ int main(int argc, char* argv[]) {
         // Non-fatal: ignore config check errors in daemon startup
     }
 
+    // Coerce workers to a safe minimum if zero was configured
+    if (config.workerThreads == 0) {
+        // Choose a reasonable default based on hardware, but never less than 1
+        auto hc = std::thread::hardware_concurrency();
+        config.workerThreads = (hc > 0 ? static_cast<size_t>(hc) : static_cast<size_t>(4));
+        spdlog::warn("--workers was 0; using {} worker thread(s) instead", config.workerThreads);
+    }
+
     // Daemonize if not running in foreground
     if (!foreground) {
         pid_t pid = fork();
@@ -541,6 +561,20 @@ int main(int argc, char* argv[]) {
 
         // Keep running until shutdown signal
         while (daemon.isRunning() && !daemon.isStopRequested()) {
+            // On-demand autoload via SIGUSR1
+            if (g_autoload_plugins_now.exchange(false, std::memory_order_relaxed)) {
+                try {
+                    auto r = daemon.autoloadPluginsNow();
+                    if (r) {
+                        spdlog::info("On-demand plugin autoload completed: {} plugin(s) loaded",
+                                     r.value());
+                    } else {
+                        spdlog::warn("On-demand plugin autoload failed: {}", r.error().message);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("On-demand plugin autoload exception: {}", e.what());
+                }
+            }
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 

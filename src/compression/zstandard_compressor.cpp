@@ -266,7 +266,7 @@ public:
         return {};
     }
 
-    [[nodiscard]] size_t recommendedOutputSize(size_t inputSize) const {
+    [[nodiscard]] size_t recommendedOutputSize(size_t /*inputSize*/) const {
         return ZSTD_CStreamOutSize();
     }
 
@@ -284,7 +284,7 @@ ZstandardStreamCompressor::ZstandardStreamCompressor(uint8_t level)
 
 ZstandardStreamCompressor::~ZstandardStreamCompressor() = default;
 
-Result<void> ZstandardStreamCompressor::init(uint8_t level) {
+Result<void> ZstandardStreamCompressor::init(uint8_t /*level*/) {
     // Already initialized in constructor
     return {};
 }
@@ -365,7 +365,7 @@ public:
 
     [[nodiscard]] bool isComplete() const { return isComplete_; }
 
-    [[nodiscard]] size_t recommendedOutputSize(size_t inputSize) const {
+    [[nodiscard]] size_t recommendedOutputSize(size_t /*inputSize*/) const {
         return ZSTD_DStreamOutSize();
     }
 

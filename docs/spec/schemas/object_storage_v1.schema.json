@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/plugins/object_storage_v1",
+  "title": "YAMS Object Storage v1 Plugin Config",
+  "type": "object",
+  "properties": {
+    "endpoint": { "type": "string", "description": "S3-compatible endpoint URL" },
+    "region": { "type": "string" },
+    "bucket": { "type": "string" },
+    "access_key": { "type": "string" },
+    "secret_key": { "type": "string" },
+    "use_tls": { "type": "boolean", "default": true },
+    "force_path_style": { "type": "boolean", "default": false },
+    "kms_key_id": { "type": "string" },
+    "object_lock": { "type": "boolean", "default": false }
+  },
+  "required": ["bucket"],
+  "additionalProperties": true
+}
+

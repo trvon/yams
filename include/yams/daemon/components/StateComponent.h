@@ -58,6 +58,7 @@ struct DaemonStats {
     std::atomic<uint64_t> repairEmbeddingsGenerated{0};
     std::atomic<uint64_t> repairEmbeddingsSkipped{0};
     std::atomic<uint64_t> repairFailedOperations{0};
+    std::atomic<uint64_t> repairQueueDepth{0};
 };
 
 /**

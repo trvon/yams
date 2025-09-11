@@ -109,6 +109,10 @@ Result<void> Transaction::commit() {
         }
 
         pImpl->state = State::Committed;
+        // Update WAL manager active transaction count
+        if (pImpl->manager) {
+            pImpl->manager->notifyTransactionClosed();
+        }
         return Result<void>();
 
     } catch (const std::exception& e) {
@@ -137,6 +141,9 @@ Result<void> Transaction::rollback() {
         }
 
         pImpl->state = State::RolledBack;
+        if (pImpl->manager) {
+            pImpl->manager->notifyTransactionClosed();
+        }
         return Result<void>();
 
     } catch (const std::exception& e) {
@@ -610,6 +617,10 @@ WALManager::Stats WALManager::getStats() const {
     stats.totalEntries = pImpl->totalEntries.load();
     stats.totalBytes = pImpl->totalBytes.load();
     stats.activeTransactions = pImpl->activeTransactions.load();
+    {
+        std::lock_guard lock(pImpl->mutex);
+        stats.pendingEntriesCount = pImpl->pendingEntries.size();
+    }
 
     // Count log files
     size_t logCount = 0;
@@ -626,6 +637,14 @@ WALManager::Stats WALManager::getStats() const {
     stats.lastRotation = pImpl->lastRotation;
 
     return stats;
+}
+
+void WALManager::notifyTransactionClosed() {
+    // Decrement active transactions, avoid underflow
+    auto current = pImpl->activeTransactions.load();
+    if (current > 0) {
+        pImpl->activeTransactions.fetch_sub(1);
+    }
 }
 
 } // namespace yams::wal

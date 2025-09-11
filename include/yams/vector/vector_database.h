@@ -19,6 +19,9 @@ struct VectorDatabaseConfig {
     std::string database_path = "vectors.db"; // SQLite database path
     std::string table_name = "document_embeddings";
     size_t embedding_dim = 384; // all-MiniLM-L6-v2 dimensions
+    // When false, do not create vectors.db or its tables if missing.
+    // Only the daemon ServiceManager should set this to true.
+    bool create_if_missing = false;
     std::string index_type = "IVF_PQ";
     size_t num_partitions = 256;    // For IVF index
     size_t num_sub_quantizers = 96; // For PQ

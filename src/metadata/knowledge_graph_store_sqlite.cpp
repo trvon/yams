@@ -89,30 +89,217 @@ public:
 
     const KnowledgeGraphStoreConfig& getConfig() const override { return cfg_; }
 
-    // Nodes (not needed for SimpleKGScorer MVP)
-    Result<std::int64_t> upsertNode(const KGNode&) override {
-        return Error{ErrorCode::NotImplemented, "upsertNode not implemented"};
+    // Nodes
+    Result<std::int64_t> upsertNode(const KGNode& node) override {
+        // Perform an INSERT ... ON CONFLICT(node_key) DO UPDATE to ensure presence
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            // Use a transaction to make the upsert + select atomic
+            auto trx = db.transaction([&]() -> Result<void> {
+                auto stmtR = db.prepare(
+                    "INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, "
+                    "properties) "
+                    "VALUES (?, ?, ?, COALESCE(?, unixepoch()), COALESCE(?, unixepoch()), ?) "
+                    "ON CONFLICT(node_key) DO UPDATE SET "
+                    "  label = COALESCE(excluded.label, kg_nodes.label), "
+                    "  type = COALESCE(excluded.type, kg_nodes.type), "
+                    "  updated_time = COALESCE(excluded.updated_time, unixepoch()), "
+                    "  properties = COALESCE(excluded.properties, kg_nodes.properties)");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+
+                auto br = stmt.bind(1, node.nodeKey);
+                if (!br)
+                    return br.error();
+                if (node.label.has_value())
+                    br = stmt.bind(2, node.label.value());
+                else
+                    br = stmt.bind(2, nullptr);
+                if (!br)
+                    return br.error();
+                if (node.type.has_value())
+                    br = stmt.bind(3, node.type.value());
+                else
+                    br = stmt.bind(3, nullptr);
+                if (!br)
+                    return br.error();
+                if (node.createdTime.has_value())
+                    br = stmt.bind(4, node.createdTime.value());
+                else
+                    br = stmt.bind(4, nullptr);
+                if (!br)
+                    return br.error();
+                if (node.updatedTime.has_value())
+                    br = stmt.bind(5, node.updatedTime.value());
+                else
+                    br = stmt.bind(5, nullptr);
+                if (!br)
+                    return br.error();
+                if (node.properties.has_value())
+                    br = stmt.bind(6, node.properties.value());
+                else
+                    br = stmt.bind(6, nullptr);
+                if (!br)
+                    return br.error();
+
+                auto er = stmt.execute();
+                if (!er)
+                    return er.error();
+                return Result<void>();
+            });
+            if (!trx)
+                return trx.error();
+
+            // Retrieve id
+            auto idStmtR = db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
+            if (!idStmtR)
+                return idStmtR.error();
+            auto idStmt = std::move(idStmtR).value();
+            auto br = idStmt.bind(1, node.nodeKey);
+            if (!br)
+                return br.error();
+            auto step = idStmt.step();
+            if (!step)
+                return step.error();
+            if (!step.value())
+                return Error{ErrorCode::NotFound, "node not found after upsert"};
+            return idStmt.getInt64(0);
+        });
     }
 
-    Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>&) override {
-        return Error{ErrorCode::NotImplemented, "upsertNodes not implemented"};
+    Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>& nodes) override {
+        std::vector<std::int64_t> ids;
+        ids.reserve(nodes.size());
+        for (const auto& n : nodes) {
+            auto r = upsertNode(n);
+            if (!r)
+                return r.error();
+            ids.push_back(r.value());
+        }
+        return ids;
     }
 
-    Result<std::optional<KGNode>> getNodeById(std::int64_t) override {
-        return Error{ErrorCode::NotImplemented, "getNodeById not implemented"};
+    Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
+            auto stmtR = db.prepare(
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE id = ? LIMIT 1");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, nodeId);
+            if (!br)
+                return br.error();
+            auto step = stmt.step();
+            if (!step)
+                return step.error();
+            if (!step.value())
+                return std::optional<KGNode>{};
+            KGNode n;
+            n.id = stmt.getInt64(0);
+            n.nodeKey = stmt.getString(1);
+            if (!stmt.isNull(2))
+                n.label = stmt.getString(2);
+            if (!stmt.isNull(3))
+                n.type = stmt.getString(3);
+            if (!stmt.isNull(4))
+                n.createdTime = stmt.getInt64(4);
+            if (!stmt.isNull(5))
+                n.updatedTime = stmt.getInt64(5);
+            if (!stmt.isNull(6))
+                n.properties = stmt.getString(6);
+            return std::optional<KGNode>{std::move(n)};
+        });
     }
 
-    Result<std::optional<KGNode>> getNodeByKey(std::string_view) override {
-        return Error{ErrorCode::NotImplemented, "getNodeByKey not implemented"};
+    Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
+            auto stmtR = db.prepare(
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE node_key = ? LIMIT 1");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, nodeKey);
+            if (!br)
+                return br.error();
+            auto step = stmt.step();
+            if (!step)
+                return step.error();
+            if (!step.value())
+                return std::optional<KGNode>{};
+            KGNode n;
+            n.id = stmt.getInt64(0);
+            n.nodeKey = stmt.getString(1);
+            if (!stmt.isNull(2))
+                n.label = stmt.getString(2);
+            if (!stmt.isNull(3))
+                n.type = stmt.getString(3);
+            if (!stmt.isNull(4))
+                n.createdTime = stmt.getInt64(4);
+            if (!stmt.isNull(5))
+                n.updatedTime = stmt.getInt64(5);
+            if (!stmt.isNull(6))
+                n.properties = stmt.getString(6);
+            return std::optional<KGNode>{std::move(n)};
+        });
     }
 
-    Result<std::vector<KGNode>> findNodesByType(std::string_view, std::size_t,
-                                                std::size_t) override {
-        return Error{ErrorCode::NotImplemented, "findNodesByType not implemented"};
+    Result<std::vector<KGNode>> findNodesByType(std::string_view type, std::size_t limit,
+                                                std::size_t offset) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            auto stmtR = db.prepare(
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE type = ? LIMIT ? OFFSET ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, type);
+            if (!br)
+                return br.error();
+            br = stmt.bind(2, static_cast<int64_t>(limit));
+            if (!br)
+                return br.error();
+            br = stmt.bind(3, static_cast<int64_t>(offset));
+            if (!br)
+                return br.error();
+            std::vector<KGNode> out;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGNode n;
+                n.id = stmt.getInt64(0);
+                n.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    n.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    n.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    n.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    n.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    n.properties = stmt.getString(6);
+                out.push_back(std::move(n));
+            }
+            return out;
+        });
     }
 
-    Result<void> deleteNodeById(std::int64_t) override {
-        return Error{ErrorCode::NotImplemented, "deleteNodeById not implemented"};
+    Result<void> deleteNodeById(std::int64_t nodeId) override {
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto stmtR = db.prepare("DELETE FROM kg_nodes WHERE id = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, nodeId);
+            if (!br)
+                return br.error();
+            return stmt.execute();
+        });
     }
 
     // Aliases

@@ -64,6 +64,9 @@ public:
     // Milliseconds-based timeouts to avoid std::chrono in the public header.
     void set_header_timeout_ms(uint32_t ms) noexcept;
     void set_payload_timeout_ms(uint32_t ms) noexcept;
+    void set_idle_timeout_ms(uint32_t ms) noexcept;
+    void set_write_cap_bytes(std::size_t bytes) noexcept;
+    void set_backpressure_watermarks(uint32_t low_percent, uint32_t high_percent) noexcept;
     void set_max_retries(std::size_t n) noexcept;
     void enable_metrics(bool on) noexcept;
     void enable_snapshots(bool on) noexcept;
@@ -80,11 +83,18 @@ public:
     void on_stream_next(bool done);
     void on_timeout(Operation op);
     void on_error(int err);
+    void on_error(int err, const char* where);
     void on_close_request();
     // Called by server after a full response (non-streaming or end of streaming) has been sent.
     // If close_after is true, transitions toward Closing; otherwise returns to Connected so
     // another request can be read on the same persistent connection.
     void on_response_complete(bool close_after);
+
+    // Phase 2b: backpressure accounting (bytes-based)
+    void on_write_queued(std::size_t bytes) noexcept;
+    void on_write_flushed(std::size_t bytes) noexcept;
+    bool backpressured() const noexcept;
+    std::size_t write_capacity_remaining() const noexcept;
 
     // State validation helpers
     bool can_read() const noexcept {
@@ -119,15 +129,13 @@ public:
 
 private:
     // Internal access for the tinyfsm-backed implementation (kept private API stable)
-    struct TinyDeleter {
-        void operator()(void*) const noexcept;
-    };
-    void transition(State next) noexcept;
+    struct Impl; // forward-declared PIMPL
+    // Non-throwing transition; returns true if applied, false if illegal/no-op.
+    bool transition(State next, const char* reason) noexcept;
     State state_{State::Disconnected};
     int fd_{-1};
-    // Pimpl to hide tinyfsm, metrics, and snapshot details from the header
-    // Use void* to avoid incomplete-type deletion at compile sites that only see this header
-    std::unique_ptr<void, TinyDeleter> impl_;
+    // PIMPL hides tinyfsm, metrics, and snapshot details from the header
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace daemon

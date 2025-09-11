@@ -138,16 +138,41 @@ export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
 ### Quick start (Conan dependencies)
 ```bash
 # Configure + build Debug (tests, tracing, Unity build)
+conan install . -of build/yams-debug -s build_type=Debug -b missing -o yams/*:enable_onnx=True
 cmake --preset yams-debug
 cmake --build --preset yams-debug
 
 # Configure + build Release (IPO/LTO)
+conan install . -of build/yams-release -s build_type=Release -b missing -o yams/*:enable_onnx=True
 cmake --preset yams-release
 cmake --build --preset yams-release
 
 # Run tests (Debug)
 ctest --preset yams-debug --output-on-failure
 ```
+
+### Testing managed plugins (in-tree plugins)
+
+- Build the specific test targets first (ctest does not build targets):
+  - `cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests`
+- Run the tests using the debug test preset:
+  - `ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure`
+  - `ctest --preset yams-debug -R ObjectStorageAdapterUnitTests --output-on-failure`
+
+S3 plugin smoke test (optional, networked)
+- Enable the smoke test at configure time: `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON`
+- Build the target: `cmake --build --preset yams-debug --target s3_plugin_smoke_test`
+- Required environment:
+  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
+  - `S3_TEST_BUCKET`
+  - Optional for Cloudflare R2: `S3_TEST_ENDPOINT=<ACCOUNT>.r2.cloudflarestorage.com`, `S3_TEST_USE_PATH_STYLE=1`
+- Run: `ctest --preset yams-debug -R s3_plugin_smoke_test --output-on-failure`
+
+Notes
+- Ensure system dependencies for the S3 plugin are present: libcurl and OpenSSL development headers.
+- Plugin discovery can be overridden with `YAMS_PLUGIN_DIR` (the loader checks this environment variable). For local runs, the build system wires this for the smoke test; you can also set it manually to the built plugin folder.
+
+> **Note on Optional Tests:** Integration tests for plugins like S3 and ONNX are disabled by default. This is a common practice to prevent build and test failures for developers who may not have the required external dependencies (like S3 credentials or the ONNX Runtime library) configured in their local environment. It separates fast, local unit tests from slower integration tests. You can enable them via CMake options when you are specifically working on these components.
 
 ### System dependencies (no Conan)
 ```bash
@@ -328,6 +353,17 @@ Or build without CURL support:
 ```bash
 cmake .. -DYAMS_REQUIRE_CURL=OFF
 ```
+
+### Issue: "ONNX runtime disabled in this build" or embeddings silently fall back
+
+Causes and fixes:
+- ONNX disabled at configure time. Enable explicitly:
+  - Conan: add `-o yams/*:enable_onnx=True` to your `conan install` (default in bundled profiles).
+  - Plain CMake: pass `-DYAMS_ENABLE_ONNX=ON`.
+- `onnxruntime` not found. Provide it to CMake:
+  - Install dev packages/libraries, or
+  - Set `-DCMAKE_PREFIX_PATH=/path/to/onnxruntime` so `find_package(onnxruntime REQUIRED)` succeeds.
+- Validate your configure log shows: `ONNX Runtime found - enabling local embedding generation`.
 
 ## Performance Optimization
 

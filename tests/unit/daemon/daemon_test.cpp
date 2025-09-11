@@ -50,6 +50,13 @@ protected:
         // Do not force preloads in unit tests; allow on-demand
         config_.modelPoolConfig.preloadModels.clear();
 
+        // Tighten init timeouts to keep tests snappy and robust
+        ::setenv("YAMS_DB_OPEN_TIMEOUT_MS", "1500", 1);
+        ::setenv("YAMS_DB_MIGRATE_TIMEOUT_MS", "2000", 1);
+        ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1500", 1);
+        // Avoid vector DB dependency in unit tests
+        ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
+
         std::error_code se;
         fs::create_directories(config_.dataDir, se);
     }

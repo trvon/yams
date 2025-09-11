@@ -55,6 +55,15 @@ Tips:
 - Append --build=missing to build packages not available precompiled.
 - Use a custom profile via -pr:h=<host> -pr:b=<build> as needed.
 
+ONNX embeddings (enablement and mapping)
+
+- Conan option: `yams/*:enable_onnx` (default True in this repo’s profiles) pulls `onnxruntime` and sets the CMake cache var `YAMS_ENABLE_ONNX` via the generated toolchain.
+- CMake option: `YAMS_ENABLE_ONNX` toggles ONNX support in `src/vector`. When ON and `onnxruntime` is found, the build defines `YAMS_USE_ONNX_RUNTIME`, enabling the ONNX-backed embedding path.
+- Typical flows:
+  - Conan: `conan install . -of build/yams-debug -s build_type=Debug -b missing -o yams/*:enable_onnx=True`
+  - Plain CMake: `cmake -S . -B build -G Ninja -DYAMS_ENABLE_ONNX=ON -DCMAKE_PREFIX_PATH=/path/to/onnxruntime`
+- Validation: configure logs should contain `ONNX Runtime found - enabling local embedding generation`. If you see `ONNX Runtime disabled`, check options and dependency visibility.
+
 ## Configure and build
 
 CMake configure (from repo root):
@@ -95,6 +104,28 @@ ctest --preset yams-release --output-on-failure
 ```
 
 For single-config Ninja (default here), CMake puts intermediate build files under build/yams-*/build; use the test presets, not raw paths.
+
+### Managed plugin tests
+
+- Build the plugin unit tests explicitly, then run with the test preset:
+  - Build: `cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests`
+  - Run: `ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure`
+  - Run: `ctest --preset yams-debug -R ObjectStorageAdapterUnitTests --output-on-failure`
+
+S3 plugin smoke test (optional, networked)
+- Enable at configure time: `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON`
+- Build: `cmake --build --preset yams-debug --target s3_plugin_smoke_test`
+- Environment required:
+  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
+  - `S3_TEST_BUCKET`
+  - Optional for R2: `S3_TEST_ENDPOINT=<ACCOUNT>.r2.cloudflarestorage.com`, `S3_TEST_USE_PATH_STYLE=1`
+- Run: `ctest --preset yams-debug -R s3_plugin_smoke_test --output-on-failure`
+
+Discovery and paths
+- The plugin loader checks `YAMS_PLUGIN_DIR` for discovery in addition to default paths. The smoke test sets this automatically to the built plugin path; you can also set it manually for custom runs.
+- System prerequisites for S3 plugin tests: libcurl and OpenSSL development headers.
+
+> **Note on Optional Tests:** Integration tests for plugins like S3 and ONNX are disabled by default. This is a common practice to prevent build and test failures for developers who may not have the required external dependencies (like S3 credentials or the ONNX Runtime library) configured in their local environment. It separates fast, local unit tests from slower integration tests. You can enable them via CMake options when you are specifically working on these components.
 
 ## Build options and toolchain notes
 

@@ -1,6 +1,11 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <yams/api/content_store_builder.h>
@@ -19,6 +24,27 @@ using namespace yams::api;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 using ::testing::Not;
+template <typename T> yams::Result<T> runAwait(boost::asio::awaitable<yams::Result<T>> aw) {
+    boost::asio::io_context ioc;
+
+    auto wrapper =
+        [aw = std::move(aw)]() mutable -> boost::asio::awaitable<std::optional<yams::Result<T>>> {
+        try {
+            auto v = co_await std::move(aw);
+            co_return std::optional<yams::Result<T>>(std::move(v));
+        } catch (...) {
+            co_return std::optional<yams::Result<T>>{};
+        }
+    };
+
+    auto fut = boost::asio::co_spawn(ioc, wrapper(), boost::asio::use_future);
+    ioc.run();
+    auto opt = fut.get();
+    if (opt) {
+        return std::move(*opt);
+    }
+    return yams::Result<T>(yams::Error{yams::ErrorCode::InternalError, "Awaitable failed"});
+}
 
 class SearchServiceTest : public ::testing::Test {
 protected:
@@ -186,7 +212,7 @@ protected:
 TEST_F(SearchServiceTest, BasicTextSearch) {
     auto request = createBasicSearchRequest("programming");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result) << "Search failed: " << result.error().message;
 
@@ -204,7 +230,7 @@ TEST_F(SearchServiceTest, BasicTextSearch) {
 TEST_F(SearchServiceTest, SearchWithMultipleTerms) {
     auto request = createBasicSearchRequest("python programming tutorial");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
 
@@ -224,9 +250,9 @@ TEST_F(SearchServiceTest, CaseInsensitiveSearch) {
     auto request2 = createBasicSearchRequest("artificial");
     auto request3 = createBasicSearchRequest("Artificial");
 
-    auto result1 = searchService_->search(request1);
-    auto result2 = searchService_->search(request2);
-    auto result3 = searchService_->search(request3);
+    auto result1 = runAwait(searchService_->search(request1));
+    auto result2 = runAwait(searchService_->search(request2));
+    auto result3 = runAwait(searchService_->search(request3));
 
     ASSERT_TRUE(result1);
     ASSERT_TRUE(result2);
@@ -243,7 +269,7 @@ TEST_F(SearchServiceTest, SearchWithLimit) {
     auto request = createBasicSearchRequest("test");
     request.limit = 3;
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     EXPECT_LE(result.value().results.size(), 3);
@@ -253,7 +279,7 @@ TEST_F(SearchServiceTest, SearchWithOffset) {
     auto request1 = createBasicSearchRequest("test");
     request1.limit = 10;
 
-    auto result1 = searchService_->search(request1);
+    auto result1 = runAwait(searchService_->search(request1));
     ASSERT_TRUE(result1);
 
     if (result1.value().total > 1) {
@@ -261,7 +287,7 @@ TEST_F(SearchServiceTest, SearchWithOffset) {
         request2.limit = 10;
         // Note: offset might not be in the interface
 
-        auto result2 = searchService_->search(request2);
+        auto result2 = runAwait(searchService_->search(request2));
         ASSERT_TRUE(result2);
 
         // Should get different results potentially
@@ -277,7 +303,7 @@ TEST_F(SearchServiceTest, FuzzySearch) {
     request.fuzzy = true;
     request.similarity = 0.8f;
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
 
@@ -293,7 +319,7 @@ TEST_F(SearchServiceTest, SearchWithTagFilter) {
     request.tags = {"tutorial", "example"};
     request.matchAllTags = false; // OR logic
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     // Should only return documents with at least one of the specified tags
@@ -304,7 +330,7 @@ TEST_F(SearchServiceTest, SearchWithFileTypeFilter) {
     auto request = createBasicSearchRequest("development");
     request.fileType = "text";
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
 
@@ -322,7 +348,7 @@ TEST_F(SearchServiceTest, SearchWithExtensionFilter) {
     auto request = createBasicSearchRequest("tutorial");
     request.extension = ".txt";
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
 
@@ -340,7 +366,7 @@ TEST_F(SearchServiceTest, KeywordSearch) {
     auto request = createBasicSearchRequest("artificial intelligence");
     request.type = "keyword";
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     EXPECT_GE(result.value().total, 0);
@@ -355,7 +381,7 @@ TEST_F(SearchServiceTest, SemanticSearch) {
     auto request = createBasicSearchRequest("machine learning algorithms");
     request.type = "semantic";
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     // Semantic search might not be available in all configurations
     if (result) {
@@ -376,7 +402,7 @@ TEST_F(SearchServiceTest, HybridSearch) {
     auto request = createBasicSearchRequest("python programming");
     request.type = "hybrid";
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     EXPECT_GE(result.value().total, 0);
@@ -392,7 +418,7 @@ TEST_F(SearchServiceTest, HybridSearch) {
 TEST_F(SearchServiceTest, HandleEmptyQuery) {
     auto request = createBasicSearchRequest("");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::InvalidArgument);
@@ -402,7 +428,7 @@ TEST_F(SearchServiceTest, HandleInvalidLimit) {
     auto request = createBasicSearchRequest("test");
     request.limit = -1;
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, ErrorCode::InvalidArgument);
@@ -412,7 +438,7 @@ TEST_F(SearchServiceTest, HandleInvalidSearchType) {
     auto request = createBasicSearchRequest("test");
     request.type = "invalid_type"; // Invalid search type
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     // Should either fail or default to hybrid
     if (!result) {
@@ -428,7 +454,7 @@ TEST_F(SearchServiceTest, SearchPerformance) {
     auto request = createBasicSearchRequest("programming tutorial example");
 
     auto start = std::chrono::high_resolution_clock::now();
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
     auto end = std::chrono::high_resolution_clock::now();
 
     ASSERT_TRUE(result);
@@ -444,7 +470,7 @@ TEST_F(SearchServiceTest, LargeResultSetPerformance) {
     request.limit = 100;
 
     auto start = std::chrono::high_resolution_clock::now();
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
     auto end = std::chrono::high_resolution_clock::now();
 
     ASSERT_TRUE(result);
@@ -460,7 +486,7 @@ TEST_F(SearchServiceTest, LargeResultSetPerformance) {
 TEST_F(SearchServiceTest, SearchWithSpecialCharacters) {
     auto request = createBasicSearchRequest("C++ programming");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     // Should handle special characters in queries without crashing
@@ -470,7 +496,7 @@ TEST_F(SearchServiceTest, SearchWithSpecialCharacters) {
 TEST_F(SearchServiceTest, SearchWithQuotedPhrase) {
     auto request = createBasicSearchRequest("\"machine learning\"");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     // Should search for exact phrase
@@ -480,7 +506,7 @@ TEST_F(SearchServiceTest, SearchWithQuotedPhrase) {
 TEST_F(SearchServiceTest, SearchWithWildcards) {
     auto request = createBasicSearchRequest("program*");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     // Should match programming, programs, etc.
@@ -492,7 +518,7 @@ TEST_F(SearchServiceTest, SearchWithWildcards) {
 TEST_F(SearchServiceTest, RelevanceScoring) {
     auto request = createBasicSearchRequest("python programming tutorial");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
 
@@ -515,7 +541,7 @@ TEST_F(SearchServiceTest, RelevanceScoring) {
 TEST_F(SearchServiceTest, NoResults) {
     auto request = createBasicSearchRequest("xyzzyveryunlikelytomatchanything");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
     EXPECT_EQ(result.value().total, 0);
@@ -534,7 +560,7 @@ TEST_F(SearchServiceTest, ServiceContextIntegration) {
     // Test basic functionality to ensure context is working
     auto request = createBasicSearchRequest("test");
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
     ASSERT_TRUE(result); // Should work if context is properly set up
 }
 
@@ -544,7 +570,7 @@ TEST_F(SearchServiceTest, VeryLongQuery) {
     std::string longQuery(1000, 'a'); // 1000 character query
     auto request = createBasicSearchRequest(longQuery);
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     // Should either handle gracefully or return appropriate error
     if (result) {
@@ -558,13 +584,13 @@ TEST_F(SearchServiceTest, SearchWithPathsOnly) {
     auto request = createBasicSearchRequest("programming");
     request.pathsOnly = true;
 
-    auto result = searchService_->search(request);
+    auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
 
     // When pathsOnly is true, paths should be populated
     if (request.pathsOnly) {
-        EXPECT_FALSE(result.value().paths.empty() || result.value().paths.empty());
+        EXPECT_FALSE(result.value().paths.empty());
     }
     for (const auto& doc : result.value().results) {
         EXPECT_FALSE(doc.hash.empty());

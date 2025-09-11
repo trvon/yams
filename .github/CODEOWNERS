@@ -1,0 +1,9 @@
+# Global ownership
+* @trvon
+
+# Scoped examples (override if you later add more owners)
+/src/** @trvon
+/plugins/** @trvon
+/docs/** @trvon
+/.github/** @trvon
+/scripts/** @trvon

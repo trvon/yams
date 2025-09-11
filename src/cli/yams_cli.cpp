@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -15,6 +16,7 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
@@ -77,9 +79,18 @@ namespace fs = std::filesystem;
 #include <string>
 #include <string_view>
 #include <vector>
+// Async runner for deferred command execution
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 
 namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
+
+void YamsCLI::setPendingCommand(ICommand* cmd) {
+    pendingCommand_ = cmd;
+}
 
 YamsCLI::YamsCLI() {
     // Set a conservative default; finalized after parsing flags in run()
@@ -366,6 +377,30 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()
 
+        // If a command scheduled deferred execution, run it now once via a single async spawn
+        if (pendingCommand_) {
+            std::promise<Result<void>> prom;
+            auto fut = prom.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [this, &prom]() -> boost::asio::awaitable<void> {
+                    auto r = co_await pendingCommand_->executeAsync();
+                    prom.set_value(std::move(r));
+                    co_return;
+                },
+                boost::asio::detached);
+            auto status = fut.wait_for(std::chrono::minutes(10));
+            if (status != std::future_status::ready) {
+                spdlog::error("Command timed out");
+                return 1;
+            }
+            auto result = fut.get();
+            if (!result) {
+                spdlog::error("{}", result.error().message);
+                return 1;
+            }
+        }
+
         return 0;
     } catch (const CLI::ParseError& e) {
         return app_->exit(e);
@@ -576,30 +611,59 @@ Result<void> YamsCLI::initializeStorage() {
             // Try to detect proper dimension from existing vectors or available models
             size_t vectorDimension = 384; // Safe default
 
-            // First, check if vectors.db exists and has vectors to detect dimension
+            // First, check if vectors.db exists and read stored dimension directly
             fs::path vectorDbPath = dataPath_ / "vectors.db";
             if (fs::exists(vectorDbPath)) {
                 try {
-                    vector::VectorDatabaseConfig vdbConfig;
-                    vdbConfig.database_path = vectorDbPath.string();
-                    vdbConfig.embedding_dim = 384; // Temporary for initialization
+                    vector::SqliteVecBackend be;
+                    if (be.initialize(vectorDbPath.string())) {
+                        (void)be.ensureVecLoaded();
+                        if (auto sdim = be.getStoredEmbeddingDimension()) {
+                            if (*sdim > 0)
+                                vectorDimension = *sdim;
+                        }
+                        be.close();
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("Could not read stored vector dimension: {}", e.what());
+                }
+            }
 
-                    auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-                    if (vectorDb->initialize() && vectorDb->tableExists()) {
-                        // Try to get dimension from existing vectors
-                        auto vectorCount = vectorDb->getVectorCount();
-                        if (vectorCount > 0) {
-                            // In production, we'd query the actual dimension from the DB
-                            // For now, detect based on model availability
-                            if (verbose_) {
-                                spdlog::info("Found existing vector database with {} vectors",
-                                             vectorCount);
+            // If no stored dim was found, prefer config > env > generator > heuristic
+            if (vectorDimension == 384) {
+                try {
+                    auto cfgPath = getConfigPath();
+                    if (fs::exists(cfgPath)) {
+                        auto cfg = parseSimpleToml(cfgPath);
+                        auto it = cfg.find("embeddings.embedding_dim");
+                        if (it != cfg.end()) {
+                            try {
+                                vectorDimension = static_cast<size_t>(std::stoul(it->second));
+                            } catch (...) {
                             }
                         }
                     }
-                } catch (const std::exception& e) {
-                    spdlog::debug("Could not probe vector database: {}", e.what());
+                } catch (...) {
                 }
+                if (vectorDimension == 384) {
+                    if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
+                        try {
+                            vectorDimension = static_cast<size_t>(std::stoul(envd));
+                        } catch (...) {
+                        }
+                    }
+                }
+                if (vectorDimension == 384) {
+                    try {
+                        if (auto emb = getEmbeddingGenerator()) {
+                            auto d = emb->getEmbeddingDimension();
+                            if (d > 0)
+                                vectorDimension = d;
+                        }
+                    } catch (...) {
+                    }
+                }
+                // Heuristic remains 384
             }
 
             // Second, detect dimension from available models
@@ -657,13 +721,52 @@ Result<void> YamsCLI::initializeStorage() {
 
                             // Check for specific models in priority order
                             std::string selectedModel;
-                            if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
-                                selectedModel = "all-MiniLM-L6-v2";
-                                embConfig.embedding_dim = 384;
-                            } else if (fs::exists(modelsPath / "all-mpnet-base-v2" /
-                                                  "model.onnx")) {
-                                selectedModel = "all-mpnet-base-v2";
-                                embConfig.embedding_dim = 768;
+                            // 1) Preferred from config ([embeddings].preferred_model) or env
+                            try {
+                                std::string pref;
+                                // Simple TOML parse via helper
+                                auto cfgPath = getConfigPath();
+                                if (fs::exists(cfgPath)) {
+                                    auto cfg = parseSimpleToml(cfgPath);
+                                    auto it = cfg.find("embeddings.preferred_model");
+                                    if (it != cfg.end() && !it->second.empty())
+                                        pref = it->second;
+                                }
+                                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL")) {
+                                    if (pref.empty())
+                                        pref = p;
+                                }
+                                if (!pref.empty() && fs::exists(modelsPath / pref / "model.onnx")) {
+                                    selectedModel = pref;
+                                }
+                            } catch (...) {
+                            }
+
+                            // 2) Known models (MiniLM/mpnet/nomic)
+                            if (selectedModel.empty()) {
+                                if (fs::exists(modelsPath / "nomic-embed-text-v1.5" /
+                                               "model.onnx")) {
+                                    selectedModel = "nomic-embed-text-v1.5";
+                                } else if (fs::exists(modelsPath / "nomic-embed-text-v1" /
+                                                      "model.onnx")) {
+                                    selectedModel = "nomic-embed-text-v1";
+                                } else if (fs::exists(modelsPath / "all-MiniLM-L6-v2" /
+                                                      "model.onnx")) {
+                                    selectedModel = "all-MiniLM-L6-v2";
+                                } else if (fs::exists(modelsPath / "all-mpnet-base-v2" /
+                                                      "model.onnx")) {
+                                    selectedModel = "all-mpnet-base-v2";
+                                }
+                            }
+
+                            // 3) Any model directory containing model.onnx
+                            if (selectedModel.empty()) {
+                                for (const auto& e : fs::directory_iterator(modelsPath)) {
+                                    if (e.is_directory() && fs::exists(e.path() / "model.onnx")) {
+                                        selectedModel = e.path().filename().string();
+                                        break;
+                                    }
+                                }
                             }
 
                             if (!selectedModel.empty()) {
@@ -671,6 +774,15 @@ Result<void> YamsCLI::initializeStorage() {
                                     (modelsPath / selectedModel / "model.onnx").string();
                                 embConfig.model_name = selectedModel;
                                 embConfig.batch_size = 32;
+                                // Provisional defaults (overridden at init by backend-reported)
+                                if (selectedModel.find("MiniLM") != std::string::npos)
+                                    embConfig.embedding_dim = 384;
+                                else if (selectedModel.find("mpnet") != std::string::npos)
+                                    embConfig.embedding_dim = 768;
+                                else if (selectedModel.find("nomic") != std::string::npos)
+                                    embConfig.embedding_dim = 768;
+                                else
+                                    embConfig.embedding_dim = 384;
                                 embConfig.max_sequence_length = 512;
                                 embConfig.normalize_embeddings = true;
 
@@ -719,7 +831,7 @@ Result<void> YamsCLI::initializeStorage() {
                     "VectorIndexManager not available, skipping EmbeddingGenerator initialization");
             }
 
-            // Initialize vector database proactively to avoid "Not found" messages
+            // Initialize vector database proactively using resolved dimension to avoid warnings
             try {
                 vector::VectorDatabaseConfig vdbConfig;
                 vdbConfig.database_path = (dataPath_ / "vectors.db").string();

@@ -232,6 +232,7 @@ SearchEngineBuilder::makeKGScorerIfEnabled(const HybridSearchConfig& cfg) {
 
 Result<std::shared_ptr<HybridSearchEngine>>
 SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
+    spdlog::info("Building embedded HybridSearchEngine");
     if (!vectorIndex_) {
         return Error{ErrorCode::InvalidArgument,
                      "SearchEngineBuilder: VectorIndexManager not provided"};

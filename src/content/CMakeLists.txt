@@ -13,7 +13,6 @@ find_program(MEDIAINFO_EXECUTABLE mediainfo)
 set(CONTENT_SOURCES
     content_handler_registry.cpp
     text_content_handler.cpp
-    pdf_content_handler.cpp
     binary_content_handler.cpp
     image_content_handler.cpp
     audio_content_handler.cpp

@@ -14,6 +14,7 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#include <yams/compat/thread_stop_compat.h>
 
 namespace yams::daemon {
 
@@ -60,6 +61,8 @@ private:
     boost::asio::awaitable<void> accept_loop();
     boost::asio::awaitable<void>
     handle_connection(boost::asio::local::stream_protocol::socket socket);
+    void start_io_reconciler();
+    void stop_io_reconciler();
 
     // Configuration
     Config config_;
@@ -70,10 +73,16 @@ private:
     // Boost.ASIO components
     boost::asio::io_context io_context_;
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
-    std::vector<std::thread> workers_;
+    struct IoWorker {
+        std::thread th;
+        std::shared_ptr<std::atomic<bool>> exit;
+    };
+    std::vector<IoWorker> workers_;
+    std::mutex workersMutex_;
     // Keep io_context_ alive while running to avoid race where threads exit
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
         work_guard_;
+    yams::compat::jthread ioReconThread_;
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;

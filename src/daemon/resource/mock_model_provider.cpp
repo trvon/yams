@@ -67,6 +67,18 @@ public:
         return embedding;
     }
 
+    Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                    const std::string& text) override {
+        // Require the requested model to be loaded to simulate explicit selection
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loadedModels_.find(modelName) == loadedModels_.end()) {
+                return Error{ErrorCode::NotFound, "Requested model not loaded: " + modelName};
+            }
+        }
+        return generateEmbedding(text);
+    }
+
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) override {
         // Empty input should succeed with empty result
@@ -97,6 +109,18 @@ public:
         }
 
         return embeddings;
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loadedModels_.find(modelName) == loadedModels_.end()) {
+                return Error{ErrorCode::NotFound, "Requested model not loaded: " + modelName};
+            }
+        }
+        return generateBatchEmbeddings(texts);
     }
 
     // ========================================================================
@@ -258,9 +282,17 @@ public:
     Result<std::vector<float>> generateEmbedding(const std::string&) override {
         return Error{ErrorCode::NotImplemented, "No model provider available"};
     }
+    Result<std::vector<float>> generateEmbeddingFor(const std::string&,
+                                                    const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "No model provider available"};
+    }
 
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>&) override {
+        return Error{ErrorCode::NotImplemented, "No model provider available"};
+    }
+    Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string&, const std::vector<std::string>&) override {
         return Error{ErrorCode::NotImplemented, "No model provider available"};
     }
 

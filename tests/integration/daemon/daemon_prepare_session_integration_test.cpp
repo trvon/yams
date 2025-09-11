@@ -1,5 +1,5 @@
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 
@@ -9,7 +9,7 @@
 TEST(DaemonPrepareSession, RequestResponseRoundTrip) {
     using namespace yams::daemon;
     DaemonClient client;
-    auto c = client.connect();
+    auto c = yams::cli::run_sync(client.connect(), std::chrono::seconds(1));
     if (!c) {
         GTEST_SKIP() << "Daemon not running; skipping prepare-session roundtrip";
     }

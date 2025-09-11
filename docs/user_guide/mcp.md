@@ -24,7 +24,7 @@ docker run -i ghcr.io/trvon/yams:latest serve
 
 ## Transport Options
 
-### Stdio Transport (Default)
+### Stdio Transport
 
 The stdio transport uses standard input/output for JSON-RPC communication. This is the standard for local MCP integrations.
 
@@ -37,6 +37,31 @@ The stdio transport uses standard input/output for JSON-RPC communication. This 
 - No network exposure
 - Secure by default
 - Simple configuration
+
+### HTTP + SSE Transport (Default)
+
+The HTTP + SSE transport provides a network-accessible interface for the MCP server, enabling web-based or remote clients.
+
+**When to use:**
+- Web-based AI applications
+- Remote AI assistants
+- Cross-language integrations
+
+**Characteristics:**
+- Network accessible
+- Supports Server-Sent Events for notifications
+- Configurable bind address and port
+
+**Configuration:**
+- Default bind address: `127.0.0.1:8757`
+- JSON-RPC endpoint: `POST /mcp/jsonrpc`
+- SSE endpoint: `GET /mcp/events?session=<sessionId>`
+- To change the bind address, set the environment variable: `YAMS_MCP_HTTP_BIND=your_address:your_port`
+
+**Session Management:**
+- Initialize via `POST /mcp/jsonrpc`; the result of the `initialize` method will include a `sessionId`.
+- Open an SSE connection at `GET /mcp/events?session=<sessionId>` using the obtained `sessionId` to receive `notifications/ready`, logs, and progress updates.
+- Send the `initialized` notification via `POST /mcp/jsonrpc` using the same session to trigger the server's readiness.
 
 
 
@@ -86,6 +111,10 @@ Add YAMS to your Claude Desktop configuration file:
 
 After updating the configuration, restart Claude Desktop to load the MCP server.
 
+## Readiness and Initialization
+
+During startup, the daemon may report an initializing state. The CLI (yams status) and the MCP server will indicate not-ready services and progress. If models are configured to preload and you see prolonged initialization, consider lazy loading and verify model/provider readiness. Refer to yams stats -v for recommendations and detailed service status.
+
 ## Docker Usage
 
 ### Basic Docker Commands
@@ -97,13 +126,7 @@ docker run -i --rm \
   -e YAMS_STORAGE=/data \
   ghcr.io/trvon/yams:latest serve
 
-# HTTP server accessible from network
-docker run -d --name yams-mcp \
-  -p 8777:8777 \
-  -v ~/.local/share/yams:/data \
-  -e YAMS_STORAGE=/data \
-  ghcr.io/trvon/yams:latest \
-  serve
+
 
 # With custom configuration
 docker run -i --rm \
@@ -125,10 +148,12 @@ Search for documents using various strategies.
 **Parameters:**
 - `query` (required): Search query string
 - `limit`: Maximum results (default: 10)
-- `fuzzy`: Enable fuzzy matching (default: false)
+- `fuzzy`: Enable fuzzy matching (default: true)
 - `similarity`: Fuzzy match threshold 0.0-1.0 (default: 0.7)
 - `type`: Search type - keyword|semantic|hybrid (default: hybrid)
 - `paths_only`: Return only file paths (default: false)
+
+Defaults: When the client omits search options, the server runs hybrid search with fuzzy enabled (similarity 0.7).
 
 **Example:**
 ```json
@@ -204,6 +229,27 @@ List stored documents with filtering.
 - `sort_order`: asc|desc
 - `recent`: Show N most recent documents
 
+## Hot/Cold Modes
+
+You can control hot/cold behavior via startup flags (passed to the MCP server):
+- --list-mode hot_only|cold_only|auto
+- --grep-mode hot_only|cold_only|auto
+- --retrieval-mode hot_only|cold_only|auto
+
+Environment alternatives:
+- YAMS_LIST_MODE, YAMS_GREP_MODE, YAMS_RETRIEVAL_MODE
+
+Note: paths_only typically engages hot paths where supported, and reduces response size for large result sets.
+
+## Additional Tools
+
+The MCP server also exposes additional tools for batch and collection workflows. See the API reference for schemas and examples: ../api/mcp_tools.md
+
+- add_directory: Index directory contents recursively (recursive defaults to true).
+- downloader.download: Fetch artifacts by URL into CAS with checksum support.
+- restore_collection, restore_snapshot: Restore documents to the filesystem.
+- list_collections, list_snapshots: Enumerate collections and snapshots.
+
 ## Testing the MCP Server
 
 ### Manual Testing with JSON-RPC
@@ -225,43 +271,95 @@ echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_documents"
 
 ### Python Client
 
+This example shows how to communicate with the `yams serve` process over stdio using the required `Content-Length` message framing.
+
 ```python
 import json
 import subprocess
+import os
+import re
 
 class YamsMCP:
     def __init__(self):
+        # Use text=False (binary mode) for correct byte handling
         self.proc = subprocess.Popen(
             ['yams', 'serve'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+            stderr=subprocess.PIPE
         )
         self.request_id = 0
 
-    def call_tool(self, tool_name, arguments):
+    def send_request(self, request_data):
+        """Sends a JSON-RPC request with Content-Length framing."""
+        message = json.dumps(request_data)
+        body = message.encode('utf-8')
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode('utf-8')
+        
+        self.proc.stdin.write(header + body)
+        self.proc.stdin.flush()
+
+    def read_response(self):
+        """Reads a JSON-RPC response with Content-Length framing."""
+        line = self.proc.stdout.readline().decode('utf-8')
+        if not line:
+            stderr = self.proc.stderr.read().decode('utf-8')
+            raise ConnectionError(f"Failed to read header. Server stderr:\n{stderr}")
+
+        match = re.match(r"Content-Length: (\d+)", line)
+        if not match:
+            raise ConnectionError(f"Invalid header received: {line}")
+
+        content_length = int(match.group(1))
+        # Read the blank line separator
+        self.proc.stdout.read(2) # Reads \r\n
+        
+        body_bytes = self.proc.stdout.read(content_length)
+        return json.loads(body_bytes.decode('utf-8'))
+
+    def call(self, method, params):
+        """Makes a generic JSON-RPC call."""
         self.request_id += 1
         request = {
             "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments
-            },
+            "method": method,
+            "params": params,
             "id": self.request_id
         }
-        self.proc.stdin.write(json.dumps(request) + '\n')
-        self.proc.stdin.flush()
-        response = self.proc.stdout.readline()
-        return json.loads(response)
+        self.send_request(request)
+        return self.read_response()
 
-# Usage
-mcp = YamsMCP()
-result = mcp.call_tool("search_documents", {"query": "test", "limit": 5})
+# --- Usage Example ---
+if __name__ == "__main__":
+    mcp = YamsMCP()
+    
+    print("--> Initializing connection...")
+    init_response = mcp.call("initialize", {
+        "clientInfo": {
+            "name": "python-example-client",
+            "version": "1.0"
+        }
+    })
+    print("<-- Server initialized:", json.dumps(init_response, indent=2))
+
+    print("\n--> Listing tools...")
+    tools = mcp.call("tools/list", {})
+    print("<-- Tools available:", json.dumps(tools, indent=2))
+
+    print("\n--> Calling 'search' tool...")
+    search_result = mcp.call("tools/call", {
+        "name": "search",
+        "arguments": {"query": "test", "limit": 5}
+    })
+    print("<-- Search result:", json.dumps(search_result, indent=2))
+    
+    # Cleanly shutdown the process
+    mcp.proc.terminate()
 ```
 
 ### Node.js Client
+
+This example shows how to communicate with the `yams serve` process over stdio using the required `Content-Length` message framing. It includes a simple parser to handle the response stream.
 
 ```javascript
 const { spawn } = require('child_process');
@@ -270,26 +368,102 @@ class YamsMCP {
   constructor() {
     this.proc = spawn('yams', ['serve']);
     this.requestId = 0;
-  }
+    this.responseCallbacks = new Map();
 
-  async callTool(toolName, args) {
-    this.requestId++;
-    const request = {
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: { name: toolName, arguments: args },
-      id: this.requestId
-    };
+    let buffer = Buffer.alloc(0);
+    this.proc.stdout.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (true) {
+        const bufferStr = buffer.toString('utf-8');
+        const match = bufferStr.match(/Content-Length: (\d+)\r\n\r\n/);
+        if (!match) {
+          break;
+        }
 
-    this.proc.stdin.write(JSON.stringify(request) + '\n');
+        const contentLength = parseInt(match[1], 10);
+        const messageStart = match.index + match[0].length;
 
-    return new Promise((resolve) => {
-      this.proc.stdout.once('data', (data) => {
-        resolve(JSON.parse(data.toString()));
-      });
+        if (buffer.length < messageStart + contentLength) {
+          break;
+        }
+
+        const messageBytes = buffer.slice(messageStart, messageStart + contentLength);
+        buffer = buffer.slice(messageStart + contentLength);
+
+        const response = JSON.parse(messageBytes.toString('utf-8'));
+        if (this.responseCallbacks.has(response.id)) {
+          this.responseCallbacks.get(response.id)(response);
+          this.responseCallbacks.delete(response.id);
+        }
+      }
+    });
+    
+    this.proc.stderr.on('data', (data) => {
+        console.error(`Server STDERR: ${data}`);
     });
   }
+
+  _send(request) {
+    const message = JSON.stringify(request);
+    const body = Buffer.from(message, 'utf-8');
+    const header = `Content-Length: ${body.length}\r\n\r\n`;
+    this.proc.stdin.write(header);
+    this.proc.stdin.write(body);
+  }
+
+  call(method, params) {
+    this.requestId++;
+    const id = this.requestId;
+    const request = {
+      jsonrpc: "2.0",
+      method: method,
+      params: params,
+      id: id
+    };
+
+    return new Promise((resolve, reject) => {
+      this.responseCallbacks.set(id, resolve);
+      this._send(request);
+      // Optional: Add a timeout
+      setTimeout(() => {
+        if (this.responseCallbacks.has(id)) {
+          this.responseCallbacks.delete(id);
+          reject(new Error(`Request ${id} timed out`));
+        }
+      }, 5000); // 5 second timeout
+    });
+  }
+  
+  shutdown() {
+      this.proc.kill();
+  }
 }
+
+// --- Usage Example ---
+async function main() {
+    const mcp = new YamsMCP();
+
+    console.log("--> Initializing connection...");
+    const initResponse = await mcp.call("initialize", {
+        "clientInfo": {"name": "js-example-client", "version": "1.0"}
+    });
+    console.log("<-- Server initialized:", JSON.stringify(initResponse, null, 2));
+
+    console.log("\n--> Listing tools...");
+    const tools = await mcp.call("tools/list", {});
+    console.log("<-- Tools available:", JSON.stringify(tools, null, 2));
+
+    console.log("\n--> Calling 'search' tool...");
+    const searchResult = await mcp.call("tools/call", {
+        "name": "search",
+        "arguments": {"query": "test", "limit": 5}
+    });
+    console.log("<-- Search result:", JSON.stringify(searchResult, null, 2));
+
+    mcp.shutdown();
+}
+
+main().catch(console.error);
 ```
 
 ## Troubleshooting
@@ -373,3 +547,6 @@ For more information:
 - [CLI Reference](cli.md) - Complete command-line documentation
 - [API Documentation](../api/mcp_tools.md) - Detailed tool schemas
 - [GitHub Issues](https://github.com/trvon/yams/issues) - Report problems or request features
+
+
+

@@ -1,17 +1,24 @@
 #include <spdlog/spdlog.h>
-#include <yams/cli/async_bridge.h>
+#include <future>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <iomanip>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <regex>
 #include <shared_mutex>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 
 #ifdef YAMS_USE_ONNX_RUNTIME
@@ -424,6 +431,10 @@ public:
             auto start = std::chrono::high_resolution_clock::now();
 
             if (model_info.session) {
+                spdlog::debug(
+                    "[Embedding][ONNX] runInference: model='{}' batch={} max_seq_len={} dim={}",
+                    model_name, input_tokens.size(), model_info.max_sequence_length,
+                    model_info.embedding_dim);
                 YAMS_ONNX_ZONE("CoreInference");
 
                 std::vector<std::vector<float>> embeddings;
@@ -435,83 +446,63 @@ public:
                           static_cast<int64_t>(model_info.max_sequence_length));
                 embeddings.reserve(input_tokens.size());
 
-                // Process each item in the batch
+                // Process each item in the batch with one Run per item (safe fallback)
+                const int64_t MAX_TOKEN_ID = 30521; // BERT vocab size
+                const int64_t UNK_TOKEN_ID = 100;   // [UNK]
+                size_t expected_seq_len = model_info.max_sequence_length;
                 for (size_t batch_idx = 0; batch_idx < input_tokens.size(); ++batch_idx) {
+                    if (batch_idx == 0 || (batch_idx + 1) % 5 == 0 ||
+                        batch_idx + 1 == input_tokens.size()) {
+                        spdlog::debug("[Embedding][ONNX] Inference progress: {}/{}", batch_idx + 1,
+                                      input_tokens.size());
+                    }
                     const auto& tokens = input_tokens[batch_idx];
                     const auto& mask = attention_masks[batch_idx];
-
-                    // Ensure input is exactly the expected sequence length
-                    size_t expected_seq_len = model_info.max_sequence_length;
                     if (tokens.size() != expected_seq_len || mask.size() != expected_seq_len) {
                         throw std::runtime_error("Input sequence length mismatch: expected " +
                                                  std::to_string(expected_seq_len) + ", got " +
                                                  std::to_string(tokens.size()));
                     }
+                    std::vector<int64_t> tokens_int64;
+                    tokens_int64.reserve(expected_seq_len);
+                    for (const auto& t : tokens) {
+                        tokens_int64.push_back(
+                            (t < 0 || t > MAX_TOKEN_ID) ? UNK_TOKEN_ID : static_cast<int64_t>(t));
+                    }
+                    std::vector<int64_t> mask_int64(mask.begin(), mask.end());
 
-                    // Create input tensors with fixed shape
                     std::vector<int64_t> input_shape = {1, static_cast<int64_t>(expected_seq_len)};
                     size_t input_tensor_size = expected_seq_len;
 
-                    // Convert tokens to int64, with conservative vocabulary bounds
-                    const int64_t MAX_TOKEN_ID = 30521; // BERT vocab size for sentence-transformers
-                    const int64_t UNK_TOKEN_ID = 100;   // [UNK] token ID in BERT vocab
-
-                    std::vector<int64_t> tokens_int64;
-                    tokens_int64.reserve(expected_seq_len);
-                    for (const auto& token : tokens) {
-                        if (token < 0 || token > MAX_TOKEN_ID) {
-                            tokens_int64.push_back(UNK_TOKEN_ID);
-                        } else {
-                            tokens_int64.push_back(static_cast<int64_t>(token));
-                        }
-                    }
-
-                    std::vector<int64_t> mask_int64(mask.begin(), mask.end());
-
-                    // Create ONNX tensors
                     std::vector<Ort::Value> input_tensors;
                     std::vector<int64_t> token_type_ids;
-
                     {
                         YAMS_ONNX_ZONE("TensorCreation");
                         auto memory_info =
                             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-                        // Add input_ids (always first)
                         input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
                             memory_info, tokens_int64.data(), input_tensor_size, input_shape.data(),
                             2));
-
-                        // Add attention_mask (always second)
                         input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
                             memory_info, mask_int64.data(), input_tensor_size, input_shape.data(),
                             2));
-
-                        // Add token_type_ids if the model expects it (some models like MiniLM need
-                        // it, MPNet doesn't)
                         if (model_info.input_names.size() >= 3) {
-                            token_type_ids.resize(expected_seq_len,
-                                                  0); // All zeros for single sentences
+                            token_type_ids.assign(expected_seq_len, 0);
                             input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
                                 memory_info, token_type_ids.data(), input_tensor_size,
                                 input_shape.data(), 2));
                         }
-
                         YAMS_PLOT("TensorInputCount", static_cast<int64_t>(input_tensors.size()));
                         YAMS_PLOT("TensorSize", static_cast<int64_t>(input_tensor_size));
                     }
 
-                    // Run inference with the actual number of inputs and outputs
                     std::vector<Ort::Value> output_tensors;
                     {
                         YAMS_ONNX_ZONE("SessionRun");
                         output_tensors = model_info.session->Run(
                             Ort::RunOptions{nullptr}, model_info.input_names_char.data(),
-                            input_tensors.data(),
-                            model_info.input_names.size(), // Use actual input count
-                            model_info.output_names_char.data(),
-                            model_info.output_names.size() // Use actual output count
-                        );
+                            input_tensors.data(), model_info.input_names.size(),
+                            model_info.output_names_char.data(), model_info.output_names.size());
                         YAMS_PLOT("TensorOutputCount", static_cast<int64_t>(output_tensors.size()));
                     }
 
@@ -538,7 +529,7 @@ public:
                                     " doesn't match expected " + std::to_string(embedding_size));
                             }
 
-                            // Process each batch item (should only be 1 in our case)
+                            // Process each batch item
                             {
                                 YAMS_ONNX_ZONE("MeanPooling");
                                 YAMS_PLOT("PoolingBatchSize", static_cast<int64_t>(batch_size));
@@ -651,6 +642,8 @@ public:
                 // Update statistics
                 model_info.stats.inference_count++;
                 model_info.stats.total_inference_time += duration;
+                spdlog::debug("[Embedding][ONNX] runInference completed: batch={} took {}ms",
+                              input_tokens.size(), duration.count());
 
                 return embeddings;
             }
@@ -991,7 +984,16 @@ public:
         }
     }
 
-    size_t getEmbeddingDimension() const override { return config_.embedding_dim; }
+    size_t getEmbeddingDimension() const override {
+        size_t dim = 0;
+#ifdef YAMS_USE_ONNX_RUNTIME
+        try {
+            dim = model_manager_.getModelEmbeddingDim(config_.model_name);
+        } catch (...) {
+        }
+#endif
+        return dim > 0 ? dim : config_.embedding_dim;
+    }
     size_t getMaxSequenceLength() const override { return config_.max_sequence_length; }
     std::string getBackendName() const override { return "LocalONNX"; }
     bool isAvailable() const override { return initialized_; }
@@ -1159,6 +1161,29 @@ private:
  * DaemonBackend - Daemon IPC backend
  * Communicates with the daemon service for embedding generation
  */
+// Local awaitable bridge (build-only) to await daemon calls without legacy async_bridge
+template <typename T, typename MakeAwaitable>
+static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
+    std::promise<yams::Result<T>> prom;
+    auto fut = prom.get_future();
+    boost::asio::co_spawn(
+        boost::asio::system_executor{},
+        [m = std::forward<MakeAwaitable>(make), &prom]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await m();
+            prom.set_value(std::move(r));
+            co_return;
+        },
+        boost::asio::detached);
+    if (timeout.count() > 0) {
+        if (fut.wait_for(timeout) != std::future_status::ready) {
+            return yams::Error{yams::ErrorCode::Timeout, "await timeout"};
+        }
+    } else {
+        fut.wait();
+    }
+    return fut.get();
+}
+
 class DaemonBackend : public IEmbeddingBackend {
 public:
     explicit DaemonBackend(const EmbeddingConfig& config) : config_(config), initialized_(false) {}
@@ -1183,32 +1208,55 @@ public:
             dcfg.autoStart = config_.daemon_auto_start;
             daemon_client_ = std::make_shared<daemon::DaemonClient>(dcfg);
 
-            if (auto result = daemon_client_->connect(); !result) {
-                spdlog::warn("Failed to connect to daemon: {}", result.error().message);
-
-                // Try to auto-start daemon if configured
-                if (config_.daemon_auto_start) {
-                    spdlog::info("Attempting to auto-start daemon...");
-                    // TODO: Implement daemon auto-start
-                }
-                return false;
-            }
+            // No explicit connect here; transport connects lazily per request.
 
             // Verify daemon is responsive via DaemonClient, then request model preload (non-fatal
             // on error)
-            auto st = yams::cli::run_sync(daemon_client_->status(), std::chrono::seconds(5));
+            auto st = await_with_timeout<yams::daemon::StatusResponse>(
+                [&]() { return daemon_client_->status(); }, std::chrono::seconds(5));
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
                 // Search will gracefully fall back when daemon is unavailable/slow.
                 spdlog::debug("Daemon status probe failed: {}", st.error().message);
             } else if (!config_.model_name.empty()) {
-                daemon::LoadModelRequest req;
-                req.modelName = config_.model_name;
-                req.preload = true;
-                auto lm =
-                    yams::cli::run_sync(daemon_client_->loadModel(req), std::chrono::seconds(10));
-                if (!lm) {
-                    spdlog::warn("Failed to preload model in daemon: {}", lm.error().message);
+                const auto& s = st.value();
+                bool provider_ready = false;
+                // Prefer readiness flag when available
+                auto it = s.readinessStates.find("model_provider");
+                if (it != s.readinessStates.end()) {
+                    provider_ready = it->second;
+                }
+                // Or presence of a provider entry in models
+                if (!provider_ready) {
+                    for (const auto& m : s.models) {
+                        if (m.name == "(provider)") {
+                            provider_ready = true;
+                            break;
+                        }
+                    }
+                }
+                if (provider_ready) {
+                    // Allow extended preload timeout via env (default 30s)
+                    std::chrono::milliseconds preload_timeout = std::chrono::seconds(30);
+                    if (const char* t = std::getenv("YAMS_MODEL_PRELOAD_TIMEOUT_MS")) {
+                        try {
+                            long v = std::stol(std::string(t));
+                            if (v > 0)
+                                preload_timeout = std::chrono::milliseconds(v);
+                        } catch (...) {
+                        }
+                    }
+                    daemon::LoadModelRequest req;
+                    req.modelName = config_.model_name;
+                    req.preload = true;
+                    auto lm = await_with_timeout<yams::daemon::ModelLoadResponse>(
+                        [&]() { return daemon_client_->loadModel(req); }, preload_timeout);
+                    if (!lm) {
+                        spdlog::debug("Preload model in daemon did not complete: {}",
+                                      lm.error().message);
+                    }
+                } else {
+                    spdlog::debug("Daemon model provider not ready; skipping preload");
                 }
             }
 
@@ -1249,7 +1297,8 @@ public:
             req.modelName = config_.model_name;
             req.normalize = config_.normalize_embeddings;
 
-            auto result = daemon_client_->generateEmbedding(req).get();
+            auto result = await_with_timeout<yams::daemon::EmbeddingResponse>(
+                [&]() { return daemon_client_->generateEmbedding(req); }, config_.daemon_timeout);
             if (!result) {
                 return Error{ErrorCode::NetworkError, result.error().message};
             }
@@ -1284,18 +1333,123 @@ public:
         try {
             auto start = std::chrono::high_resolution_clock::now();
 
+            // Sanitize to UTF-8 to satisfy protobuf 'string' constraints
+            auto sanitize_utf8 = [](const std::string& s) -> std::string {
+                std::string out;
+                out.reserve(s.size());
+                const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
+                size_t i = 0, n = s.size();
+                while (i < n) {
+                    unsigned char c = p[i];
+                    if (c < 0x80) {
+                        out.push_back(static_cast<char>(c));
+                        ++i;
+                    } else if ((c >> 5) == 0x6 && i + 1 < n) {
+                        unsigned char c1 = p[i + 1];
+                        if ((c1 & 0xC0) == 0x80) {
+                            out.push_back(static_cast<char>(c));
+                            out.push_back(static_cast<char>(c1));
+                            i += 2;
+                        } else {
+                            out.push_back('?');
+                            ++i;
+                        }
+                    } else if ((c >> 4) == 0xE && i + 2 < n) {
+                        unsigned char c1 = p[i + 1], c2 = p[i + 2];
+                        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
+                            out.push_back(static_cast<char>(c));
+                            out.push_back(static_cast<char>(c1));
+                            out.push_back(static_cast<char>(c2));
+                            i += 3;
+                        } else {
+                            out.push_back('?');
+                            ++i;
+                        }
+                    } else if ((c >> 3) == 0x1E && i + 3 < n) {
+                        unsigned char c1 = p[i + 1], c2 = p[i + 2], c3 = p[i + 3];
+                        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
+                            out.push_back(static_cast<char>(c));
+                            out.push_back(static_cast<char>(c1));
+                            out.push_back(static_cast<char>(c2));
+                            out.push_back(static_cast<char>(c3));
+                            i += 4;
+                        } else {
+                            out.push_back('?');
+                            ++i;
+                        }
+                    } else {
+                        out.push_back('?');
+                        ++i;
+                    }
+                }
+                return out;
+            };
+
             daemon::BatchEmbeddingRequest req;
-            req.texts = std::vector<std::string>(texts.begin(), texts.end());
+            req.texts.reserve(texts.size());
+            for (const auto& t : texts) {
+                req.texts.emplace_back(sanitize_utf8(t));
+            }
             req.modelName = config_.model_name;
             req.normalize = config_.normalize_embeddings;
             req.batchSize = config_.batch_size;
 
-            auto result = daemon_client_->generateBatchEmbeddings(req).get();
-            if (!result) {
-                return Error{ErrorCode::NetworkError, result.error().message};
+            // Heuristic: use streaming for larger batches to avoid idle socket timeouts
+            bool useStreaming = texts.size() > 1; // stream whenever batch > 1
+            // When streaming, reduce sub-batch size to emit progress more frequently
+            if (useStreaming) {
+                req.batchSize = std::max<size_t>(4, std::min<size_t>(req.batchSize, 8));
             }
 
-            const auto& response = result.value();
+            std::optional<yams::daemon::BatchEmbeddingResponse> maybeResponse;
+            Error lastError{ErrorCode::InternalError, "uninitialized"};
+            const int maxAttempts = 4;
+            size_t attempt = 0;
+            size_t currentBatchSize = req.batchSize;
+            while (attempt < maxAttempts) {
+                ++attempt;
+                spdlog::debug("[Embedding][Daemon] Batch request attempt {}: size={} streaming={} "
+                              "sub_batch={}",
+                              attempt, texts.size(), useStreaming ? "true" : "false",
+                              currentBatchSize);
+                req.batchSize = currentBatchSize;
+                yams::Result<yams::daemon::BatchEmbeddingResponse> result =
+                    useStreaming
+                        ? await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
+                              [&]() { return daemon_client_->streamingBatchEmbeddings(req); },
+                              config_.daemon_timeout)
+                        : await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
+                              [&]() { return daemon_client_->generateBatchEmbeddings(req); },
+                              config_.daemon_timeout);
+                if (result) {
+                    maybeResponse = result.value();
+                    break;
+                }
+                lastError = result.error();
+                spdlog::warn(
+                    "[Embedding][Daemon] Batch embeddings failed (code={}, msg='{}') on attempt {}",
+                    static_cast<int>(lastError.code), lastError.message, attempt);
+                // Retry only on transient/network/timeout-like failures
+                const bool canRetry = lastError.code == ErrorCode::Timeout ||
+                                      lastError.code == ErrorCode::NetworkError ||
+                                      lastError.code == ErrorCode::InvalidState;
+                if (!canRetry)
+                    break;
+                // Exponential backoff: 100ms, 200ms, 400ms, 800ms
+                using namespace std::chrono_literals;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100u << (attempt - 1)));
+                // Reduce sub-batch size to mitigate long single-run stalls
+                if (currentBatchSize > 4)
+                    currentBatchSize = std::max<size_t>(4, currentBatchSize / 2);
+                // Force streaming on retry to ensure progress events
+                useStreaming = true;
+            }
+
+            if (!maybeResponse) {
+                return Error{ErrorCode::NetworkError, lastError.message};
+            }
+
+            const auto& response = *maybeResponse;
 
             // Update cached dimensions
             if (response.dimensions > 0) {
@@ -1557,6 +1711,8 @@ public:
         }
 
         try {
+            // Initialize concurrency cap from environment once per process
+            ConcurrencyGuard::init_from_env_once();
             if (!backend_) {
                 setError("No backend configured");
                 return false;
@@ -1599,6 +1755,7 @@ public:
 
     std::vector<float> generateEmbedding(const std::string& text) {
         YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbedding");
+        ConcurrencyGuard _gate; // limit concurrent embedding jobs
 
         // Lock-free check for initialization
         if (!initialized_.load() || !backend_) {
@@ -1624,6 +1781,7 @@ public:
 
     std::vector<std::vector<float>> generateEmbeddings(const std::vector<std::string>& texts) {
         YAMS_EMBEDDING_ZONE_BATCH(texts.size());
+        ConcurrencyGuard _gate; // limit concurrent embedding jobs
 
         if (texts.empty()) {
             return {};
@@ -1701,6 +1859,49 @@ public:
     bool hasError() const { return has_error_.load(); }
 
 private:
+    // Global simple concurrency gate to prevent unbounded CPU oversubscription when plugins
+    // implement embedding backends. Limits concurrent generate* calls across the process.
+    struct ConcurrencyGuard final {
+        ConcurrencyGuard() { lock(); }
+        ~ConcurrencyGuard() { unlock(); }
+        static void init_from_env_once() {
+            static std::once_flag once;
+            std::call_once(once, []() {
+                int def = std::max(2u, std::thread::hardware_concurrency());
+                int cap = def;
+                try {
+                    if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
+                        int v = std::stoi(s);
+                        if (v > 0 && v < 1024)
+                            cap = v;
+                    }
+                } catch (...) {
+                }
+                g_max_concurrency_.store(cap, std::memory_order_relaxed);
+                spdlog::info("EmbeddingGenerator: max concurrency set to {}", cap);
+            });
+        }
+        static void lock() {
+            std::unique_lock<std::mutex> lk(g_mtx_);
+            const int cap = g_max_concurrency_.load(std::memory_order_relaxed);
+            while (g_active_ >= cap) {
+                g_cv_.wait(lk);
+            }
+            ++g_active_;
+        }
+        static void unlock() {
+            std::lock_guard<std::mutex> lk(g_mtx_);
+            if (g_active_ > 0) {
+                --g_active_;
+            }
+            g_cv_.notify_one();
+        }
+        static std::mutex g_mtx_;
+        static std::condition_variable g_cv_;
+        static std::atomic<int> g_max_concurrency_;
+        static int g_active_;
+    };
+
     void setError(const std::string& error) const {
         {
             std::unique_lock<std::shared_mutex> lock(error_mutex_);
@@ -1716,6 +1917,12 @@ private:
     mutable std::string last_error_;
     mutable std::atomic<bool> has_error_{false};
 };
+
+// Static members for ConcurrencyGuard
+std::mutex EmbeddingGenerator::Impl::ConcurrencyGuard::g_mtx_;
+std::condition_variable EmbeddingGenerator::Impl::ConcurrencyGuard::g_cv_;
+std::atomic<int> EmbeddingGenerator::Impl::ConcurrencyGuard::g_max_concurrency_{2};
+int EmbeddingGenerator::Impl::ConcurrencyGuard::g_active_{0};
 
 EmbeddingGenerator::EmbeddingGenerator(const EmbeddingConfig& config)
     : pImpl(std::make_unique<Impl>(config)) {}

@@ -1,0 +1,33 @@
+# YAMS Ecosystem Registry (community + maintained)
+# Add entries via PRs. This file is machine-readable for tooling.
+
+maintained_plugins:
+  - name: onnx-model-provider
+    repo: https://github.com/trvon/yams (plugins/onnx)
+    transport: abi
+    interfaces: [model_provider_v1]
+    status: alpha
+    license: Apache-2.0
+
+  - name: yams-ghidra-plugin
+    repo: https://github.com/trvon/yams (plugins/yams-ghidra-plugin)
+    transport: external
+    interfaces: [ghidra_analysis_v1]
+    status: prototype
+    license: Apache-2.0
+
+community_plugins:
+  # Example entry; replace with real repo when available
+  - name: dr-python-example
+    repo: https://example.com/user/yams-dr-python
+    transport: external
+    interfaces: [dr_provider_v1]
+    status: experimental
+    license: MIT
+
+projects_built_on_yams:
+  # Example entry; replace with real repo when available
+  - name: acme-knowledge-app
+    repo: https://example.com/acme/knowledge-app
+    description: “Knowledge app powered by YAMS content-addressed storage and search.”
+    status: in_production

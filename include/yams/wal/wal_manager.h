@@ -96,11 +96,15 @@ public:
         uint64_t totalEntries = 0;
         uint64_t totalBytes = 0;
         size_t activeTransactions = 0;
+        size_t pendingEntriesCount = 0;
         size_t logFileCount = 0;
         std::chrono::steady_clock::time_point lastSync;
         std::chrono::steady_clock::time_point lastRotation;
     };
     [[nodiscard]] Stats getStats() const;
+
+    // Internal notifications (used by Transaction lifecycle)
+    void notifyTransactionClosed();
 
 private:
     struct Impl;

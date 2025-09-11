@@ -1,7 +1,11 @@
 #include <nlohmann/json.hpp>
-#include <yams/cli/async_bridge.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/progress_indicator.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
@@ -20,6 +24,7 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+#include <future>
 #include <signal.h>
 #include <sstream>
 #include <string>
@@ -56,6 +61,7 @@ public:
         start->add_option("--daemon-binary", startDaemonBinary_,
                           "Path to yams-daemon executable (override)");
         start->add_flag("--foreground", startForeground_, "Run daemon in foreground (don't fork)");
+        start->add_flag("-r,--restart", startRestart_, "If already running, restart the daemon");
 
         start->callback([this]() { startDaemon(); });
 
@@ -175,7 +181,20 @@ private:
 
         // Probe status via DaemonClient
         yams::daemon::DaemonClient client{};
-        auto statusResult = run_sync(client.status(), std::chrono::seconds(5));
+        std::promise<Result<yams::daemon::StatusResponse>> promStatus;
+        auto futStatus = promStatus.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [&]() -> boost::asio::awaitable<void> {
+                auto r = co_await client.status();
+                promStatus.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        auto statusResult =
+            (futStatus.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
+                ? futStatus.get()
+                : Result<yams::daemon::StatusResponse>(Error{ErrorCode::Timeout, "status timeout"});
         if (!statusResult) {
             spdlog::warn("Could not get status from running daemon: {}",
                          statusResult.error().message);
@@ -191,7 +210,20 @@ private:
             daemon::ShutdownRequest sreq;
             sreq.graceful = true;
             yams::daemon::DaemonClient shutClient{};
-            auto shutdownResult = run_sync(shutClient.shutdown(true), std::chrono::seconds(10));
+            std::promise<Result<void>> promShutdown;
+            auto futShutdown = promShutdown.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    auto r = co_await shutClient.shutdown(true);
+                    promShutdown.set_value(std::move(r));
+                    co_return;
+                },
+                boost::asio::detached);
+            auto shutdownResult =
+                (futShutdown.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
+                    ? futShutdown.get()
+                    : Result<void>(Error{ErrorCode::Timeout, "shutdown timeout"});
             bool stopped = false;
 
             if (shutdownResult) {
@@ -266,7 +298,14 @@ private:
 
         // Check if daemon is already running and handle version compatibility
         if (checkAndHandleVersionMismatch(effectiveSocket)) {
-            std::cout << "[INFO] A YAMS daemon is already running\n";
+            if (startRestart_) {
+                std::cout << "[INFO] YAMS daemon is already running - restarting...\n";
+                restartDaemon();
+            } else {
+                std::cout << "YAMS daemon is already running.\n";
+                std::cout << "Use '--restart' to restart it, or run 'yams daemon status -d' to "
+                             "view daemon status.\n";
+            }
             return;
         }
 
@@ -411,69 +450,9 @@ private:
                 std::exit(1);
             }
 
-            // Live spinner: poll status until Ready (or timeout)
-            using namespace std::chrono_literals;
-            const auto timeout = 10s;
-            auto t0 = std::chrono::steady_clock::now();
-
-            // Use shared progress indicator for consistent TTY rendering
-            ProgressIndicator pi(ProgressIndicator::Style::Spinner, true);
-            pi.setUpdateInterval(100);
-            pi.setShowCount(false);
-            pi.start("Starting daemon…");
-
-            // Brief grace period for socket binding before polling status
-            std::this_thread::sleep_for(300ms);
-
-            bool became_ready = false;
-            // Poll status (even failures should keep the spinner visible)
-            while (std::chrono::steady_clock::now() - t0 < timeout) {
-                yams::daemon::DaemonClient probe{};
-                auto statusRes = run_sync(probe.status(), std::chrono::seconds(2));
-                if (statusRes) {
-                    const auto& s = statusRes.value();
-                    // TODO(PBI-007-06): Prefer StatusResponse.lifecycle_state/last_error when
-                    // available.
-                    const auto lifecycle = s.overallStatus.empty()
-                                               ? (s.ready ? std::string("Ready")
-                                                          : (s.running ? std::string("Starting")
-                                                                       : std::string("Stopped")))
-                                               : s.overallStatus;
-                    bool ready = s.ready || lifecycle == "Ready" || lifecycle == "ready";
-                    std::ostringstream msg;
-                    msg << lifecycle;
-                    size_t shown = 0;
-                    for (const auto& kv : s.readinessStates) {
-                        if (shown++ >= 4)
-                            break;
-                        msg << "  " << kv.first << ": " << (kv.second ? "ok" : "…");
-                        auto it = s.initProgress.find(kv.first);
-                        if (it != s.initProgress.end())
-                            msg << " (" << (int)it->second << "%)";
-                    }
-                    // Render current status and keep spinner animating
-                    pi.setMessage(msg.str());
-                    pi.tick();
-                    if (ready) {
-                        pi.stop();
-                        std::cout << "[OK] YAMS daemon started successfully\n";
-                        became_ready = true;
-                        break;
-                    }
-                } else {
-                    // transient errors right after spawn are expected (ECONNRESET, etc.)
-                    pi.tick();
-                }
-                std::this_thread::sleep_for(200ms);
-            }
-
-            if (!became_ready) {
-                pi.stop();
-                std::cout << "[INFO] Daemon start initiated. It will finish initializing in the "
-                             "background.\n";
-                std::cout
-                    << "[INFO] Tip: run 'yams daemon status -d' or check the log for progress.\n";
-            }
+            // No-wait fast exit with a concise tip
+            std::cout << "Run 'yams daemon status -d' to monitor readiness.\n";
+            return;
         }
     }
 
@@ -510,8 +489,20 @@ private:
             daemon::ShutdownRequest sreq;
             sreq.graceful = !force_;
             {
+                std::promise<Result<void>> prom;
+                auto fut = prom.get_future();
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [&]() -> boost::asio::awaitable<void> {
+                        auto r = co_await shut.shutdown(sreq.graceful);
+                        prom.set_value(std::move(r));
+                        co_return;
+                    },
+                    boost::asio::detached);
                 auto shutdownResult =
-                    run_sync(shut.shutdown(sreq.graceful), std::chrono::seconds(10));
+                    (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
+                        ? fut.get()
+                        : Result<void>(Error{ErrorCode::Timeout, "shutdown timeout"});
                 if (shutdownResult) {
                     spdlog::info("Sent shutdown request to daemon");
 
@@ -621,16 +612,18 @@ private:
         std::string effectiveSocket =
             socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
                                 : socketPath_;
-        if (effectiveSocket.empty()) {
-            std::cout << "Socket: <empty> (resolve failed)\n";
-        } else {
-            std::cout << "Socket: " << effectiveSocket << "\n";
-        }
+        // Title - more compact
+        std::cout << "\n=== YAMS Daemon Doctor ===\n\n";
+
+        // Section: IPC & Files - compact header
+        std::cout << "IPC & Files:\n";
+        std::cout << "  Socket:    "
+                  << (effectiveSocket.empty() ? "<resolve failed>" : effectiveSocket) << "\n";
         if (pidFile_.empty()) {
             pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
                            .string();
         }
-        std::cout << "PID file: " << pidFile_ << "\n";
+        std::cout << "  PID File:  " << pidFile_ << "\n";
         // Helper: interactive confirm when on a TTY
         auto confirm = [](const std::string& q) -> bool {
 #ifndef _WIN32
@@ -652,17 +645,18 @@ private:
 
         // Check socket path length
         bool ok = true;
+        std::vector<std::string> hints; // Collect hints to show at end
 #ifndef _WIN32
         if (!effectiveSocket.empty()) {
             size_t maxlen = sizeof(sockaddr_un::sun_path);
             if (effectiveSocket.size() >= maxlen) {
-                std::cout << "[FAIL] Socket path too long for AF_UNIX (" << effectiveSocket.size()
-                          << "/" << maxlen << ")\n";
+                std::cout << "  [FAIL] Socket path too long (" << effectiveSocket.size() << "/"
+                          << maxlen << ")\n";
                 ok = false;
-                std::cout << "      Suggestion: export YAMS_DAEMON_SOCKET=/tmp/yams-daemon-$(id "
-                             "-u).sock\n";
+                hints.push_back("Socket path too long - use: export "
+                                "YAMS_DAEMON_SOCKET=/tmp/yams-daemon-$(id -u).sock");
             } else {
-                std::cout << "[OK] Socket path length within limit\n";
+                std::cout << "  [OK] Socket path length OK\n";
             }
         }
 #endif
@@ -679,53 +673,149 @@ private:
                 f << "ok";
                 f.close();
                 fs::remove(probe, ec);
-                std::cout << "[OK] Socket directory writable: " << parent.string() << "\n";
+                std::cout << "  Socket Dir: " << parent.string() << " "
+                          << yams::cli::ui::colorize("[writable]", yams::cli::ui::Ansi::GREEN)
+                          << "\n";
             } else {
-                std::cout << "[FAIL] Cannot write to socket directory: " << parent.string() << "\n";
+                std::cout << "  Socket Dir: " << parent.string() << " "
+                          << yams::cli::ui::colorize("[not writable]", yams::cli::ui::Ansi::RED)
+                          << "\n";
                 ok = false;
+                hints.push_back("Socket directory not writable - check permissions");
             }
         }
         // Check for stale socket (and show readiness summary if daemon responds)
         bool socket_exists = !effectiveSocket.empty() && fs::exists(effectiveSocket);
         if (socket_exists) {
-            std::cout << "[INFO] Socket file exists. Probing server...\n";
+            std::cout << "\nDaemon Probe:\n";
             setenv("YAMS_CLIENT_DEBUG", "1", 1);
             bool alive = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
             if (alive) {
-                std::cout << "[OK] Daemon responds on socket\n";
+                std::cout << "  Socket: "
+                          << yams::cli::ui::colorize("RESPONDING", yams::cli::ui::Ansi::GREEN)
+                          << "\n";
                 // Fetch detailed readiness and show a short Waiting on: summary
                 try {
                     yams::daemon::DaemonClient probe{};
-                    auto sres = run_sync(probe.status(), std::chrono::seconds(2));
+                    std::promise<Result<yams::daemon::StatusResponse>> promProbe;
+                    auto futProbe = promProbe.get_future();
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor{},
+                        [&]() -> boost::asio::awaitable<void> {
+                            auto r = co_await probe.status();
+                            promProbe.set_value(std::move(r));
+                            co_return;
+                        },
+                        boost::asio::detached);
+                    auto sres =
+                        (futProbe.wait_for(std::chrono::seconds(2)) == std::future_status::ready)
+                            ? futProbe.get()
+                            : Result<yams::daemon::StatusResponse>(
+                                  Error{ErrorCode::Timeout, "status timeout"});
                     if (sres) {
                         const auto& s = sres.value();
-                        // Show any components not ready yet (up to a few for brevity)
-                        std::vector<std::string> waiting;
+                        // Daemon Status - compact format
+                        std::cout << "\nDaemon Status:\n";
+                        std::string lifecycle =
+                            !s.lifecycleState.empty()
+                                ? s.lifecycleState
+                                : (s.overallStatus.empty() ? (s.ready ? std::string("ready")
+                                                                      : std::string("initializing"))
+                                                           : s.overallStatus);
+                        std::cout << "  State:       " << lifecycle << "\n";
+                        if (!s.lastError.empty()) {
+                            std::cout << "  Last Error:  " << s.lastError << "\n";
+                        }
+                        if (!s.version.empty())
+                            std::cout << "  Version:     " << s.version << "\n";
+                        std::cout << "  Uptime:      " << s.uptimeSeconds << "s\n";
+                        std::cout << "  Connections: " << s.activeConnections << "\n";
+                        // Show degraded search indicator if present
+                        try {
+                            auto itDeg = s.readinessStates.find("search_engine_degraded");
+                            if (itDeg != s.readinessStates.end() && itDeg->second) {
+                                std::cout << "  Search:      degraded (repairing)\n";
+                            }
+                        } catch (...) {
+                        }
+                        // Show vector scoring availability
+                        try {
+                            bool vecAvail = false, vecEnabled = false;
+                            if (auto it = s.readinessStates.find("vector_embeddings_available");
+                                it != s.readinessStates.end())
+                                vecAvail = it->second;
+                            if (auto it = s.readinessStates.find("vector_scoring_enabled");
+                                it != s.readinessStates.end())
+                                vecEnabled = it->second;
+                            if (!vecEnabled) {
+                                std::cout
+                                    << "  Vector:      disabled — "
+                                    << (vecAvail ? "config weight=0" : "embeddings unavailable")
+                                    << "\n";
+                            } else {
+                                std::cout << "  Vector:      enabled\n";
+                            }
+                        } catch (...) {
+                        }
+                        // Worker pool (from requestCounts)
+                        try {
+                            auto itT = s.requestCounts.find("worker_threads");
+                            auto itA = s.requestCounts.find("worker_active");
+                            auto itQ = s.requestCounts.find("worker_queued");
+                            if (itT != s.requestCounts.end() || itA != s.requestCounts.end() ||
+                                itQ != s.requestCounts.end()) {
+                                std::size_t threads =
+                                    itT != s.requestCounts.end() ? itT->second : 0;
+                                std::size_t active = itA != s.requestCounts.end() ? itA->second : 0;
+                                std::size_t queued = itQ != s.requestCounts.end() ? itQ->second : 0;
+                                std::size_t util =
+                                    (threads > 0)
+                                        ? static_cast<std::size_t>((100.0 * active) / threads)
+                                        : 0;
+                                std::cout << "  Worker Pool:  threads=" << threads
+                                          << ", active=" << active << ", queued=" << queued
+                                          << ", util=" << util << "%\n";
+                            }
+                        } catch (...) {
+                        }
+
+                        // Version mismatch check
+                        try {
+                            std::string current = YAMS_VERSION_STRING;
+                            if (!s.version.empty() && s.version != current) {
+                                hints.push_back("Version mismatch - run: yams daemon restart");
+                            }
+                        } catch (...) {
+                        }
+                        // Show any components not ready yet
+                        bool has_waiting = false;
                         for (const auto& [k, v] : s.readinessStates) {
                             if (!v) {
-                                std::ostringstream w;
-                                w << k;
+                                if (!has_waiting) {
+                                    std::cout << "\nWaiting:\n";
+                                    has_waiting = true;
+                                }
+                                std::cout << "  - " << k;
                                 auto it = s.initProgress.find(k);
                                 if (it != s.initProgress.end()) {
-                                    w << " (" << (int)it->second << "%)";
+                                    std::cout << " (" << (int)it->second << "%)";
                                 }
-                                // Approximate elapsed with daemon uptime (per-component timing TBD)
-                                w << ", elapsed ~" << s.uptimeSeconds << "s";
-                                waiting.push_back(w.str());
+                                std::cout << "\n";
+
+                                // Add specific hints for components
+                                if (k == "search_engine") {
+                                    hints.push_back(
+                                        "Search engine initializing - run: yams session warm");
+                                } else if (k == "vector_index") {
+                                    hints.push_back(
+                                        "Vector index building - check model availability");
+                                } else if (k == "content_store") {
+                                    hints.push_back("Content store not ready - verify YAMS_STORAGE "
+                                                    "is writable");
+                                }
                             }
                         }
-                        if (!waiting.empty()) {
-                            std::cout << "[INFO] Waiting on: ";
-                            for (size_t i = 0; i < waiting.size() && i < 3; ++i) {
-                                if (i)
-                                    std::cout << ", ";
-                                std::cout << waiting[i];
-                            }
-                            if (waiting.size() > 3)
-                                std::cout << ", …";
-                            std::cout << "\n";
-                        }
-                        // Additionally, show top 3 slowest components if bootstrap has timings
+                        // Show slow components if available
                         try {
                             auto rt =
                                 daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
@@ -735,59 +825,88 @@ private:
                                 bf >> j;
                                 if (j.contains("top_slowest") && j["top_slowest"].is_array() &&
                                     !j["top_slowest"].empty()) {
-                                    std::cout << "[INFO] Top slow components: ";
+                                    std::cout << "\nSlow Components:\n";
                                     auto arr = j["top_slowest"];
-                                    for (size_t i = 0; i < arr.size() && i < 3; ++i) {
+                                    size_t show = std::min<size_t>(arr.size(), 3);
+                                    for (size_t i = 0; i < show; ++i) {
                                         const auto& e = arr[i];
                                         std::string name = e.value("name", std::string{"unknown"});
                                         uint64_t ms = e.value("elapsed_ms", 0ULL);
-                                        if (i)
-                                            std::cout << ", ";
-                                        std::cout << name << " (" << ms << "ms)";
+                                        std::cout << "  - " << name << ": " << ms << "ms\n";
                                     }
-                                    if (arr.size() > 3)
-                                        std::cout << ", …";
-                                    std::cout << "\n";
                                 }
                             }
                         } catch (...) {
+                        }
+
+                        // Check resource usage
+                        if (s.cpuUsagePercent >= 90.0) {
+                            hints.push_back("High CPU usage (" +
+                                            std::to_string((int)s.cpuUsagePercent) +
+                                            "%) - reduce concurrent tasks");
+                        }
+                        if (s.memoryUsageMb > 4096.0) {
+                            hints.push_back("High memory usage (" +
+                                            std::to_string((int)s.memoryUsageMb) +
+                                            " MB) - reduce cache/model size");
                         }
                     }
                 } catch (...) {
                 }
             } else {
-                std::cout << "[WARN] No response on socket. File may be stale.\n";
-                if (confirm("Remove stale socket file now?")) {
+                std::cout << "  Socket: "
+                          << yams::cli::ui::colorize("STALE", yams::cli::ui::Ansi::YELLOW) << "\n";
+                if (confirm("Remove stale socket file?")) {
                     std::error_code ec;
                     fs::remove(effectiveSocket, ec);
                     if (ec) {
-                        std::cout << "[FAIL] Failed to remove socket: " << ec.message() << "\n";
+                        std::cout << "    [FAIL] " << ec.message() << "\n";
                     } else {
-                        std::cout << "[OK] Removed stale socket file\n";
+                        std::cout << "    [OK] Removed\n";
                     }
                 }
             }
         } else {
-            std::cout << "[INFO] Socket file not present yet\n";
+            std::cout << "\nSocket: NOT PRESENT\n";
         }
         // PID check
+        std::cout << "\nPID Check:\n";
         pid_t pid = readPidFromFile(pidFile_);
+        std::string fallbackPidPath;
+        pid_t fallbackPid = -1;
+        {
+            // Compute a deterministic /tmp fallback path: /tmp/yams-daemon-<uid>.pid
+            uid_t uid = getuid();
+            fallbackPidPath = std::string{"/tmp/yams-daemon-"} + std::to_string(uid) + ".pid";
+            if (fallbackPidPath != pidFile_) {
+                fallbackPid = readPidFromFile(fallbackPidPath);
+            }
+        }
 #ifndef _WIN32
         if (pid > 0 && kill(pid, 0) == 0) {
-            std::cout << "[OK] PID file references running process: " << pid << "\n";
+            std::cout << "  PID " << pid << ": RUNNING\n";
         } else if (pid > 0) {
-            std::cout << "[WARN] PID file references non-running process: " << pid << "\n";
-            if (confirm("Remove stale PID file now?")) {
+            std::cout << "  PID " << pid << ": STALE\n";
+            if (confirm("  Remove stale PID file?")) {
                 std::error_code ec;
                 fs::remove(pidFile_, ec);
                 if (ec) {
-                    std::cout << "[FAIL] Failed to remove PID file: " << ec.message() << "\n";
+                    std::cout << "    [FAIL] " << ec.message() << "\n";
                 } else {
-                    std::cout << "[OK] Removed PID file\n";
+                    std::cout << "    [OK] Removed\n";
                 }
             }
         } else {
-            std::cout << "[INFO] No PID file or unreadable\n";
+            // Try fallback path in /tmp
+            if (!fallbackPidPath.empty() && fallbackPid > 0) {
+                if (kill(fallbackPid, 0) == 0) {
+                    std::cout << "  Fallback PID " << fallbackPid << ": RUNNING\n";
+                } else {
+                    std::cout << "  Fallback PID " << fallbackPid << ": STALE\n";
+                }
+            } else {
+                std::cout << "  No PID file found\n";
+            }
         }
 
         // If IPC is not yet available and PID is not confirmed running,
@@ -813,8 +932,7 @@ private:
                     }
                 }
                 if (found) {
-                    std::cout
-                        << "[INFO] Daemon process detected: initializing (IPC not yet available)\n";
+                    std::cout << "  Process found: INITIALIZING\n";
                 }
             } catch (...) {
                 // ignore errors from /proc scanning
@@ -822,12 +940,22 @@ private:
         }
 #else
         if (pid > 0) {
-            std::cout << "[INFO] PID recorded: " << pid << "\n";
+            std::cout << "  PID recorded: " << pid << "\n";
         }
 #endif
-        if (!ok) {
-            std::cout << "One or more checks failed. Consider setting YAMS_DAEMON_SOCKET to a "
-                         "short path (e.g., /tmp/yams-daemon-$(id -u).sock) and retry.\n";
+
+        // Show collected hints/recommendations
+        if (!hints.empty() || !ok) {
+            std::cout << "\nRecommendations:\n";
+            for (const auto& hint : hints) {
+                std::cout << "  • " << hint << "\n";
+            }
+            if (!ok && hints.empty()) {
+                std::cout
+                    << "  • Check failed - set YAMS_DAEMON_SOCKET=/tmp/yams-daemon-$(id -u).sock\n";
+            }
+        } else {
+            std::cout << "\n✓ All checks passed\n";
         }
     }
 
@@ -938,42 +1066,8 @@ private:
                 }
                 return;
             }
-            // Linux: as a best-effort fallback, detect a launching daemon by scanning /proc
-            // for a yams-daemon process when socket and PID file are not yet ready.
-            try {
-                namespace fs = std::filesystem;
-                for (const auto& entry : fs::directory_iterator("/proc")) {
-                    if (!entry.is_directory())
-                        continue;
-                    const auto& p = entry.path();
-                    auto name = p.filename().string();
-                    if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos)
-                        continue; // not a PID directory
-                    std::ifstream cmd(p / "cmdline");
-                    if (!cmd)
-                        continue;
-                    std::string cmdline;
-                    std::getline(cmd, cmdline, '\0');
-                    if (cmdline.find("yams-daemon") != std::string::npos) {
-                        std::cout
-                            << "YAMS daemon is starting/initializing (IPC not yet available)\n";
-                        if (detailed_) {
-                            try {
-                                auto logPath = daemon::YamsDaemon::resolveSystemPath(
-                                                   daemon::YamsDaemon::PathType::LogFile)
-                                                   .string();
-                                std::cout
-                                    << "[INFO] Likely waiting on search stack (index, models).\n";
-                                std::cout << "[INFO] Tail log for details: " << logPath << "\n";
-                            } catch (...) {
-                            }
-                        }
-                        return;
-                    }
-                }
-            } catch (...) {
-                // Ignore any /proc scanning errors; fall through to not running message
-            }
+            // Do not guess by scanning /proc — if socket is down and no PID file, report not
+            // running.
 #endif
             std::cout << "YAMS daemon is not running\n";
             return;
@@ -990,7 +1084,21 @@ private:
         for (int attempt = 0; attempt < 5; ++attempt) {
             // Keep client debug enabled while polling
             setenv("YAMS_CLIENT_DEBUG", detailed_ ? "1" : "0", 1);
-            auto statusResult = run_sync(client.status(), std::chrono::seconds(5));
+            std::promise<Result<yams::daemon::StatusResponse>> promS;
+            auto futS = promS.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    auto r = co_await client.status();
+                    promS.set_value(std::move(r));
+                    co_return;
+                },
+                boost::asio::detached);
+            auto statusResult =
+                (futS.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
+                    ? futS.get()
+                    : Result<yams::daemon::StatusResponse>(
+                          Error{ErrorCode::Timeout, "status timeout"});
             if (statusResult) {
                 const auto& status = statusResult.value();
                 std::cout << "YAMS Daemon Status:\n";
@@ -1015,6 +1123,24 @@ private:
                     for (const auto& [k, v] : status.readinessStates) {
                         std::cout << "    - " << k << ": " << (v ? "ok" : "…") << "\n";
                     }
+                }
+                // Vector scoring availability (human-readable summary)
+                try {
+                    bool vecAvail = false, vecEnabled = false;
+                    if (auto it = status.readinessStates.find("vector_embeddings_available");
+                        it != status.readinessStates.end())
+                        vecAvail = it->second;
+                    if (auto it = status.readinessStates.find("vector_scoring_enabled");
+                        it != status.readinessStates.end())
+                        vecEnabled = it->second;
+                    if (!vecEnabled) {
+                        std::cout << "  Vector:      disabled — "
+                                  << (vecAvail ? "config weight=0" : "embeddings unavailable")
+                                  << "\n";
+                    } else {
+                        std::cout << "  Vector:      enabled\n";
+                    }
+                } catch (...) {
                 }
                 // Plugin / Model summary
                 if (!status.models.empty()) {
@@ -1065,7 +1191,21 @@ private:
             yams::daemon::DaemonClient client{};
             daemon::ShutdownRequest sreq;
             sreq.graceful = true;
-            (void)run_sync(client.shutdown(true), std::chrono::seconds(10));
+            {
+                std::promise<Result<void>> prom;
+                auto fut = prom.get_future();
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [&]() -> boost::asio::awaitable<void> {
+                        auto r = co_await client.shutdown(true);
+                        prom.set_value(std::move(r));
+                        co_return;
+                    },
+                    boost::asio::detached);
+                if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+                    (void)fut.get();
+                }
+            }
 
             // Wait for daemon to stop
             for (int i = 0; i < 10; i++) {
@@ -1107,6 +1247,8 @@ private:
     std::string dataDir_;
     // Start-subcommand-only options
     bool startForeground_ = false;
+    bool startRestart_ = false;
+    // --wait removed: start command no longer waits for readiness
     std::string startLogLevel_;
     std::string startConfigPath_;
     std::string startDaemonBinary_;
@@ -1119,13 +1261,3 @@ std::unique_ptr<ICommand> createDaemonCommand() {
 }
 
 } // namespace yams::cli
-static pid_t readPidFromFile(const std::string& path) {
-    pid_t pid = 0;
-    if (path.empty())
-        return pid;
-    std::ifstream in(path);
-    if (!in)
-        return pid;
-    in >> pid;
-    return pid;
-}

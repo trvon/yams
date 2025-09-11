@@ -9,6 +9,7 @@ build_type=Debug
 
 [options]
 yams/*:build_tests=True
+yams/*:enable_onnx=True
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Unix Makefiles

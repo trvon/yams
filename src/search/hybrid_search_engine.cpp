@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <future>
 #include <mutex>
@@ -379,11 +380,18 @@ public:
             return Result<void>(Error{ErrorCode::InvalidArgument, "Invalid search engines"});
         }
 
-        // Initialize vector index if needed
-        if (!vector_index_->isInitialized()) {
+        // Initialize vector index if needed; do not block engine if it fails.
+        // We can still operate in keyword/KG-only mode.
+        vector_index_ready_ = vector_index_->isInitialized();
+        if (!vector_index_ready_) {
             auto result = vector_index_->initialize();
             if (!result.has_value()) {
-                return result;
+                spdlog::warn(
+                    "VectorIndex initialization failed; continuing with keyword-only mode: {}",
+                    result.error().message);
+                vector_index_ready_ = false;
+            } else {
+                vector_index_ready_ = true;
             }
         }
 
@@ -413,10 +421,8 @@ public:
             }
         }
 
-        // Fallback to placeholder vector
-        // Use 384 dimensions (all-MiniLM-L6-v2) or detect from config
-        size_t dim = config_.vector_top_k > 0 ? 384 : 768; // Default dims for common models
-        return std::vector<float>(dim, 0.0f);
+        // No embeddings available; return empty to signal vector path should be skipped
+        return {};
     }
 
     bool isInitialized() const { return initialized_; }
@@ -442,6 +448,17 @@ public:
         auto parsed = yams::search::parseQueryQualifiers(query);
         const std::string& normalizedQuery = parsed.normalizedQuery;
 
+        // Lightweight query analysis for heuristics
+        auto tokens = keyword_engine_->analyzeQuery(normalizedQuery);
+        const bool is_single_term = (tokens.size() == 1);
+        auto lower = normalizedQuery;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        const bool looks_structured =
+            (lower.find('"') != std::string::npos) || (lower.find(" and ") != std::string::npos) ||
+            (lower.find(" or ") != std::string::npos) ||
+            (lower.find(" not ") != std::string::npos) || (lower.find('(') != std::string::npos) ||
+            (lower.find(')') != std::string::npos);
+
         // Check cache
         if (config_.enable_cache) {
             auto cache_key = generateCacheKey(normalizedQuery, k, filter);
@@ -453,9 +470,13 @@ public:
             metrics_.cache_misses++;
         }
 
-        // Expand query if enabled (use normalized query)
+        // Expand query if enabled (use normalized query). Skip expansion when vector is disabled
+        // or query appears structured to preserve semantics and reduce latency.
         std::string expanded_query = normalizedQuery;
-        if (config_.enable_query_expansion) {
+        // Whether vector search is possible (embedding generator ready)
+        const bool embeddings_ready =
+            (embedding_generator_ && embedding_generator_->isInitialized());
+        if (config_.enable_query_expansion && embeddings_ready && !looks_structured) {
             auto expanded_terms = expandQuery(normalizedQuery);
             if (!expanded_terms.empty()) {
                 expanded_query += " " + joinStrings(expanded_terms, " ");
@@ -465,6 +486,7 @@ public:
         // Perform parallel or sequential search (with runtime gates via env)
         const bool env_disable_keyword = (std::getenv("YAMS_DISABLE_KEYWORD") != nullptr);
         const bool env_disable_vector = (std::getenv("YAMS_DISABLE_VECTOR") != nullptr);
+        const bool env_disable_onnx = (std::getenv("YAMS_DISABLE_ONNX") != nullptr);
         const bool env_disable_kg = (std::getenv("YAMS_DISABLE_KG") != nullptr);
 
         // Effective config reflects runtime gates
@@ -480,17 +502,33 @@ public:
             effective.structural_weight = 0.0f;
             effective.enable_kg = false;
         }
+        // Heuristics: prefer speed and exactness for single-term and structured expressions
+        if (is_single_term || looks_structured) {
+            effective.enable_reranking = false;
+            // Keep KG disabled for these simple/structured cases to reduce overhead
+            effective.enable_kg = false;
+            effective.kg_entity_weight = 0.0f;
+            effective.structural_weight = 0.0f;
+        }
         effective.normalizeWeights();
 
         std::future<Result<std::vector<vector::SearchResult>>> vector_future;
         std::future<Result<std::vector<KeywordSearchResult>>> keyword_future;
 
+        // Determine if vector path should be attempted at all
+        const bool vector_enabled =
+            !env_disable_vector && !env_disable_onnx && embeddings_ready && vector_index_ready_;
+
         if (config_.parallel_search) {
             // Launch searches in parallel honoring gates
-            if (!env_disable_vector) {
+            if (vector_enabled) {
                 vector_future = std::async(std::launch::async, [this, &normalizedQuery, &filter]() {
                     // Generate embedding for normalized query
                     auto query_vector = generateQueryEmbedding(normalizedQuery);
+                    if (query_vector.empty()) {
+                        return Result<std::vector<vector::SearchResult>>(
+                            std::vector<vector::SearchResult>{});
+                    }
                     return vector_index_->search(query_vector, config_.vector_top_k, filter);
                 });
             }
@@ -520,13 +558,15 @@ public:
             }
         } else {
             // Sequential search honoring gates
-            if (!env_disable_vector) {
+            if (vector_enabled) {
                 // Generate embedding for normalized query
                 auto query_vector = generateQueryEmbedding(normalizedQuery);
-                auto vector_result =
-                    vector_index_->search(query_vector, config_.vector_top_k, filter);
-                if (vector_result.has_value()) {
-                    vector_results = vector_result.value();
+                if (!query_vector.empty()) {
+                    auto vector_result =
+                        vector_index_->search(query_vector, config_.vector_top_k, filter);
+                    if (vector_result.has_value()) {
+                        vector_results = vector_result.value();
+                    }
                 }
             }
             if (!env_disable_keyword) {
@@ -570,6 +610,12 @@ public:
         auto search_duration =
             std::chrono::duration_cast<std::chrono::microseconds>(search_end - start_time);
 
+        // If vector is disabled/unavailable, zero-out its weight to avoid rank dilution
+        if (!vector_enabled) {
+            effective.vector_weight = 0.0f;
+            effective.normalizeWeights();
+        }
+
         // Fuse results
         auto fusion_start = std::chrono::high_resolution_clock::now();
         auto fused_results = fuseResults(vector_results, keyword_results, effective);
@@ -577,8 +623,8 @@ public:
         auto fusion_duration =
             std::chrono::duration_cast<std::chrono::microseconds>(fusion_end - fusion_start);
 
-        // Re-rank if enabled
-        if (config_.enable_reranking && !fused_results.empty()) {
+        // Re-rank if enabled (skip when vector is disabled to reduce latency)
+        if (config_.enable_reranking && !fused_results.empty() && vector_enabled) {
             auto rerank_start = std::chrono::high_resolution_clock::now();
             fused_results = rerankResults(fused_results, normalizedQuery);
             auto rerank_end = std::chrono::high_resolution_clock::now();
@@ -710,7 +756,52 @@ public:
     fuseResults(const std::vector<vector::SearchResult>& vector_results,
                 const std::vector<KeywordSearchResult>& keyword_results,
                 const HybridSearchConfig& config) {
+        // Fast path: if vector is effectively disabled and no vector results, compute
+        // keyword/KG-only fusion without extra allocation work.
+        if ((config.vector_weight <= 1e-6f || vector_results.empty()) && !keyword_results.empty()) {
+            std::vector<HybridSearchResult> out;
+            out.reserve(keyword_results.size());
+            for (size_t i = 0; i < keyword_results.size(); ++i) {
+                const auto& kr = keyword_results[i];
+                HybridSearchResult r;
+                r.id = kr.id;
+                r.content = kr.content;
+                r.keyword_score = normalizeKeywordScore(kr.score, keyword_results);
+                r.keyword_rank = i;
+                r.found_by_keyword = true;
+                r.matched_keywords = kr.matched_terms;
+                // Attach KG signals if available
+                if (config.enable_kg) {
+                    auto it = last_kg_scores_.find(r.id);
+                    if (it != last_kg_scores_.end()) {
+                        r.kg_entity_score = it->second.entity;
+                        r.structural_score = it->second.structural;
+                    }
+                }
+                // Merge metadata
+                r.metadata = kr.metadata;
+                // Compute hybrid score without vector contribution
+                float base =
+                    fusion::linearCombination(0.0f, r.keyword_score, 0.0f, config.keyword_weight);
+                if (config.enable_kg) {
+                    base += r.kg_entity_score * config.kg_entity_weight;
+                    base += r.structural_score * config.structural_weight;
+                }
+                r.hybrid_score = base;
+                if (config.normalize_scores) {
+                    if (r.hybrid_score < 0.0f)
+                        r.hybrid_score = 0.0f;
+                    else if (r.hybrid_score > 1.0f)
+                        r.hybrid_score = 1.0f;
+                }
+                out.push_back(std::move(r));
+            }
+            std::sort(out.begin(), out.end());
+            return out;
+        }
+
         std::unordered_map<std::string, HybridSearchResult> result_map;
+        result_map.reserve(vector_results.size() + keyword_results.size());
 
         // Process vector results
         for (size_t i = 0; i < vector_results.size(); ++i) {
@@ -764,12 +855,24 @@ public:
                         base += result.structural_score * config.structural_weight;
                     }
                     result.hybrid_score = base;
+                    if (config.normalize_scores) {
+                        if (result.hybrid_score < 0.0f)
+                            result.hybrid_score = 0.0f;
+                        else if (result.hybrid_score > 1.0f)
+                            result.hybrid_score = 1.0f;
+                    }
                     break;
                 }
 
                 case HybridSearchConfig::FusionStrategy::RECIPROCAL_RANK:
                     result.hybrid_score = fusion::reciprocalRankFusion(
                         result.vector_rank, result.keyword_rank, config.rrf_k);
+                    if (config.normalize_scores) {
+                        if (result.hybrid_score < 0.0f)
+                            result.hybrid_score = 0.0f;
+                        else if (result.hybrid_score > 1.0f)
+                            result.hybrid_score = 1.0f;
+                    }
                     break;
 
                 default: {
@@ -782,6 +885,12 @@ public:
                         base += result.structural_score * config.structural_weight;
                     }
                     result.hybrid_score = base;
+                    if (config.normalize_scores) {
+                        if (result.hybrid_score < 0.0f)
+                            result.hybrid_score = 0.0f;
+                        else if (result.hybrid_score > 1.0f)
+                            result.hybrid_score = 1.0f;
+                    }
                     break;
                 }
             }
@@ -864,6 +973,7 @@ private:
     std::shared_ptr<vector::VectorIndexManager> vector_index_;
     std::shared_ptr<KeywordSearchEngine> keyword_engine_;
     std::shared_ptr<vector::EmbeddingGenerator> embedding_generator_;
+    bool vector_index_ready_ = false;
     HybridSearchConfig config_;
     std::shared_ptr<KGScorer> kg_scorer_;
     std::unordered_map<std::string, KGScore> last_kg_scores_;

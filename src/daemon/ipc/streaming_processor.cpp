@@ -4,550 +4,355 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <cstdlib>
 #include <optional>
 #include <string>
 #include <variant>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/system_executor.hpp>
-#include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_future.hpp>
-#include <yams/app/services/grep_mode_tls.h>
+#include <yams/daemon/ipc/mux_metrics_registry.h>
 
 namespace yams::daemon {
 
+std::size_t
+StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per_item) const {
+    std::size_t target = cfg_.chunk_size > 0
+                             ? (cfg_.chunk_size / std::max<std::size_t>(approx_bytes_per_item, 1))
+                             : 256;
+    auto snap = MuxMetricsRegistry::instance().snapshot();
+    const int64_t q = snap.queuedBytes;
+    if (q > static_cast<int64_t>(256ull * 1024ull * 1024ull)) {
+        target /= 4; // heavy backlog: smaller pages
+    } else if (q > static_cast<int64_t>(128ull * 1024ull * 1024ull)) {
+        target /= 2;
+    } else if (q < static_cast<int64_t>(8ull * 1024ull * 1024ull)) {
+        target *= 3; // very light: triple page size
+    } else if (q < static_cast<int64_t>(32ull * 1024ull * 1024ull)) {
+        target *= 2; // light: double page size
+    } else if (q < static_cast<int64_t>(64ull * 1024ull * 1024ull)) {
+        target += (target / 2); // moderately light: +50%
+    }
+    // Widen clamps to allow much larger pages under light load and smaller under heavy load
+    target = std::clamp<std::size_t>(target, 5, 50000);
+    return target;
+}
+
+// NOTE:
+// This is a simplified, deterministic implementation of StreamingRequestProcessor.
+// Legacy staging / fast vs. full futures, adaptive keepalives, and environment
+// overrides have been removed for clarity. The goals:
+//  1. Always emit exactly one initial "heartbeat"/typed starter chunk after the handler
+//     writes the header frame.
+//  2. For Search/List/Grep: on the SECOND next_chunk() call, compute the full
+//     response via delegate_->process(), store it, and begin paging deterministically.
+//  3. For BatchEmbeddingRequest / EmbedDocumentsRequest: on the SECOND next_chunk(),
+//     compute once and emit the final full response (is_last_chunk = true).
+//  4. For AddDocumentRequest (and similar single-shot types we decide to stream):
+//     same pattern: heartbeat first, final response second.
+//  5. For all other request types: fall back to delegate (non‑streamed) unless
+//     they were explicitly deferred in process_streaming().
+//
+// Paging logic uses compute_item_chunk_count() to size the next page, influenced
+// by mux metrics (still dynamic but deterministic per call order).
+
+// -------------------- process (non-streaming immediate) --------------------
 boost::asio::awaitable<Response> StreamingRequestProcessor::process(const Request& request) {
     co_return co_await delegate_->process(request);
 }
 
+// -------------------- process_streaming (decide whether to defer) ----------
 boost::asio::awaitable<std::optional<Response>>
 StreamingRequestProcessor::process_streaming(const Request& request) {
-    // Only intercept known stream-friendly types; otherwise delegate.
-    if (std::holds_alternative<SearchRequest>(request)) {
-        spdlog::debug(
-            "StreamingRequestProcessor: deferring Search compute until first next_chunk()");
-        mode_ = Mode::Search;
-        pending_request_ = request;
-        co_return std::optional<Response>{};
-    }
-    if (std::holds_alternative<ListRequest>(request)) {
-        spdlog::debug("StreamingRequestProcessor: deferring List compute until first next_chunk()");
-        mode_ = Mode::List;
-        pending_request_ = request;
-        co_return std::optional<Response>{};
-    }
-    if (std::holds_alternative<GrepRequest>(request)) {
-        spdlog::debug("StreamingRequestProcessor: deferring Grep compute until first next_chunk()");
-        mode_ = Mode::Grep;
-        pending_request_ = request;
-        co_return std::optional<Response>{};
-    }
-    if (std::holds_alternative<AddDocumentRequest>(request)) {
-        // For AddDocument, send header immediately (handled by RequestHandler),
-        // then compute full response on first next_chunk() and return as last chunk.
-        spdlog::debug("StreamingRequestProcessor: deferring AddDocument compute until first "
-                      "next_chunk() to send header-first");
-        pending_request_ = request; // leave mode_ as None
-        co_return std::optional<Response>{};
-    }
+    try {
+        // Use MessageType classification first to avoid variant-dependent ambiguity.
+        switch (getMessageType(request)) {
+            case MessageType::BatchEmbeddingRequest:
+                spdlog::debug("StreamingRequestProcessor: defer BatchEmbedding (deterministic)");
+                mode_ = Mode::BatchEmbed;
+                pending_request_ = request;
+                co_return std::nullopt;
+            case MessageType::EmbedDocumentsRequest:
+                spdlog::debug("StreamingRequestProcessor: defer EmbedDocuments (deterministic)");
+                mode_ = Mode::EmbedDocs;
+                pending_request_ = request;
+                co_return std::nullopt;
+            default:
+                break;
+        }
 
-    // Unknown type – pass through to delegate's streaming behavior
-    co_return co_await delegate_->process_streaming(request);
+        if (std::holds_alternative<SearchRequest>(request)) {
+            spdlog::debug("StreamingRequestProcessor: defer Search for deterministic paging");
+            mode_ = Mode::Search;
+            pending_request_ = request;
+            co_return std::nullopt;
+        }
+        if (std::holds_alternative<ListRequest>(request)) {
+            spdlog::debug("StreamingRequestProcessor: defer List for deterministic paging");
+            mode_ = Mode::List;
+            pending_request_ = request;
+            co_return std::nullopt;
+        }
+        if (std::holds_alternative<GrepRequest>(request)) {
+            spdlog::debug("StreamingRequestProcessor: defer Grep for deterministic paging");
+            mode_ = Mode::Grep;
+            pending_request_ = request;
+            co_return std::nullopt;
+        }
+        if (std::holds_alternative<AddDocumentRequest>(request)) {
+            spdlog::debug("StreamingRequestProcessor: defer AddDocument for header-first");
+            // Mode None: single final chunk after heartbeat
+            pending_request_ = request;
+            co_return std::nullopt;
+        }
+        // Fallback: defer GenerateEmbedding / LoadModel to provide typed start events.
+        if (std::holds_alternative<GenerateEmbeddingRequest>(request) ||
+            std::holds_alternative<LoadModelRequest>(request)) {
+            spdlog::debug("StreamingRequestProcessor: defer single-step embedding/model load");
+            pending_request_ = request;
+            co_return std::nullopt;
+        }
+
+        // Not a streaming-recognized request: delegate immediately.
+        co_return co_await delegate_->process(request);
+    } catch (...) {
+        // On unexpected failure; choose streaming path so caller can still progress.
+        pending_request_ = request;
+        co_return std::nullopt;
+    }
 }
 
+// -------------------- supports_streaming -----------------------------------
 bool StreamingRequestProcessor::supports_streaming(const Request& request) const {
     if (std::holds_alternative<SearchRequest>(request) ||
         std::holds_alternative<ListRequest>(request) ||
         std::holds_alternative<GrepRequest>(request) ||
-        std::holds_alternative<AddDocumentRequest>(request)) {
+        std::holds_alternative<AddDocumentRequest>(request) ||
+        std::holds_alternative<BatchEmbeddingRequest>(request) ||
+        std::holds_alternative<EmbedDocumentsRequest>(request) ||
+        std::holds_alternative<GenerateEmbeddingRequest>(request) ||
+        std::holds_alternative<LoadModelRequest>(request)) {
         return true;
     }
     return delegate_->supports_streaming(request);
 }
 
-std::size_t
-StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per_item) const {
-    std::size_t approx = cfg_.chunk_size > 0 ? cfg_.chunk_size / approx_bytes_per_item : 256;
-    approx = std::clamp<std::size_t>(approx, 10, 5000);
-    return approx;
-}
-
+// -------------------- next_chunk (deterministic) ---------------------------
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
     try {
-        // Allow environment override for keepalive cadence (basic support)
-        if (keepalive_interval_.count() == 500) {
-            if (const char* s = std::getenv("YAMS_KEEPALIVE_MS")) {
-                try {
-                    auto v = static_cast<long>(std::stol(s));
-                    if (v >= 50 && v <= 60000) {
-                        keepalive_interval_ = std::chrono::milliseconds(v);
-                    }
-                } catch (...) {
-                    // ignore invalid value
-                }
-            }
-        }
-        // Emit a tiny heartbeat chunk immediately after header to keep client alive
+        // 1) If we have a pending request and have not yet sent the initial heartbeat,
+        //    synthesize a typed starter frame (never last).
         if (pending_request_.has_value() && !heartbeat_sent_) {
             heartbeat_sent_ = true;
-            last_keepalive_ = std::chrono::steady_clock::now();
-            if (mode_ == Mode::Grep) {
-                first_batch_start_ = last_keepalive_;
-                if (!grep_env_applied_) {
-                    if (const char* s = std::getenv("YAMS_GREP_FIRST_BATCH_MAX_WAIT_MS")) {
-                        try {
-                            auto v = static_cast<long>(std::stol(s));
-                            if (v >= 50 && v <= 60000)
-                                grep_first_batch_max_wait_ = std::chrono::milliseconds(v);
-                        } catch (...) {
-                        }
-                    }
-                    if (const char* s = std::getenv("YAMS_GREP_BATCH_SIZE")) {
-                        try {
-                            auto v = static_cast<long>(std::stol(s));
-                            if (v > 0)
-                                grep_batch_size_override_ = static_cast<std::size_t>(v);
-                        } catch (...) {
-                        }
-                    }
-                    grep_env_applied_ = true;
-                }
-            }
-            // Synthesize an empty chunk matching the selected mode
-            switch (mode_) {
-                case Mode::Search: {
+            auto mt = getMessageType(*pending_request_);
+
+            switch (mt) {
+                case MessageType::SearchRequest: {
                     SearchResponse r;
                     r.totalCount = 0;
                     r.elapsed = std::chrono::milliseconds(0);
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                              .is_last_chunk = false};
+                    co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
                 }
-                case Mode::List: {
+                case MessageType::ListRequest: {
                     ListResponse r;
                     r.totalCount = 0;
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                              .is_last_chunk = false};
+                    co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
                 }
-                case Mode::Grep: {
+                case MessageType::GrepRequest: {
                     GrepResponse r;
                     r.totalMatches = 0;
                     r.filesSearched = 0;
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                              .is_last_chunk = false};
+                    co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
                 }
-                case Mode::None:
+                case MessageType::BatchEmbeddingRequest:
+                case MessageType::EmbedDocumentsRequest:
+                case MessageType::GenerateEmbeddingRequest: {
+                    EmbeddingEvent ev{};
+                    if (auto* r = std::get_if<BatchEmbeddingRequest>(&*pending_request_))
+                        ev.modelName = r->modelName;
+                    if (auto* r = std::get_if<EmbedDocumentsRequest>(&*pending_request_))
+                        ev.modelName = r->modelName;
+                    if (auto* r = std::get_if<GenerateEmbeddingRequest>(&*pending_request_))
+                        ev.modelName = r->modelName;
+                    if (mt == MessageType::EmbedDocumentsRequest) {
+                        ev.total = std::get<EmbedDocumentsRequest>(*pending_request_)
+                                       .documentHashes.size();
+                    } else if (mt == MessageType::BatchEmbeddingRequest) {
+                        ev.total = std::get<BatchEmbeddingRequest>(*pending_request_).texts.size();
+                    } else {
+                        ev.total = 1;
+                    }
+                    ev.phase = "started";
+                    ev.message = "embedding started";
+                    co_return ResponseChunk{.data = Response{std::move(ev)},
+                                            .is_last_chunk = false};
+                }
+                case MessageType::LoadModelRequest: {
+                    ModelLoadEvent mev{};
+                    mev.phase = "started";
+                    mev.message = "load started";
+                    mev.modelName = std::get<LoadModelRequest>(*pending_request_).modelName;
+                    co_return ResponseChunk{.data = Response{std::move(mev)},
+                                            .is_last_chunk = false};
+                }
                 default: {
-                    // For non-chunkable types (e.g., AddDocument before compute), send a
-                    // lightweight heartbeat so clients reset inactivity timers.
                     SuccessResponse ok{"Streaming started"};
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)},
-                                                              .is_last_chunk = false};
+                    co_return ResponseChunk{.data = Response{std::move(ok)},
+                                            .is_last_chunk = false};
                 }
             }
         }
 
-        // Start staged background compute after first heartbeat
+        // 2) After the heartbeat has been sent, act based on mode_ or message type.
         if (pending_request_.has_value()) {
-            // Initialize first-burst limit from env once
-            if (first_burst_limit_ == 0)
-                first_burst_limit_ = 20;
-            if (const char* env = std::getenv("YAMS_FIRST_BURST"); env && *env) {
-                try {
-                    auto v = static_cast<std::size_t>(std::stoul(env));
-                    if (v > 0)
-                        first_burst_limit_ = v;
-                } catch (...) {
-                }
-            }
+            auto mt = getMessageType(*pending_request_);
 
-            if (!fast_future_.has_value() && !full_future_.has_value()) {
-                auto req = *pending_request_;
-                // Prepare a reduced-limit request for fast-first results when applicable
-                Request fastReq = req;
-                if (mode_ == Mode::Search) {
-                    if (auto* s = std::get_if<SearchRequest>(&fastReq)) {
-                        if (s->limit == 0 || s->limit > first_burst_limit_)
-                            s->limit = first_burst_limit_;
-                    }
-                } else if (mode_ == Mode::List) {
-                    if (auto* l = std::get_if<ListRequest>(&fastReq)) {
-                        if (l->limit == 0 || l->limit > first_burst_limit_)
-                            l->limit = first_burst_limit_;
-                    }
-                }
-
-                // Spawn fast and full computes
-                // For Grep, set thread-local execution mode to HotOnly (fast) and ColdOnly (full)
-                auto fastCoro = [this, fastReq]() -> boost::asio::awaitable<Response> {
-                    // TLS override for grep
-                    yams::app::services::set_grep_mode_tls(
-                        yams::app::services::GrepExecMode::HotOnly);
-                    auto r = co_await delegate_->process(fastReq);
-                    yams::app::services::set_grep_mode_tls(
-                        yams::app::services::GrepExecMode::Unset);
-                    co_return r;
-                };
-                auto fullCoro = [this, req]() -> boost::asio::awaitable<Response> {
-                    yams::app::services::set_grep_mode_tls(
-                        yams::app::services::GrepExecMode::ColdOnly);
-                    auto r = co_await delegate_->process(req);
-                    yams::app::services::set_grep_mode_tls(
-                        yams::app::services::GrepExecMode::Unset);
-                    co_return r;
-                };
-                if (mode_ == Mode::Grep) {
-                    fast_future_.emplace(boost::asio::co_spawn(
-                        boost::asio::system_executor(), fastCoro(), boost::asio::use_future));
-                    full_future_.emplace(boost::asio::co_spawn(
-                        boost::asio::system_executor(), fullCoro(), boost::asio::use_future));
-                } else {
-                    fast_future_.emplace(boost::asio::co_spawn(boost::asio::system_executor(),
-                                                               delegate_->process(fastReq),
-                                                               boost::asio::use_future));
-                    full_future_.emplace(boost::asio::co_spawn(boost::asio::system_executor(),
-                                                               delegate_->process(req),
-                                                               boost::asio::use_future));
-                }
-                // Do not clear pending yet; we may need the request type
-            }
-            // If neither fast nor full compute is ready, emit periodic keepalive;
-            // otherwise fall through to emit real data/completion.
-            // Evaluate flag before touching the future to avoid no_state after get()
-            bool fast_ready =
-                !first_burst_emitted_ && fast_future_.has_value() &&
-                fast_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
-            bool full_ready =
-                full_future_.has_value() &&
-                full_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
-
-            if (!fast_ready && !full_ready) {
-                // Throttle keepalives
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_keepalive_ < keepalive_interval_) {
-                    // Sleep until next keepalive interval
-                    auto exec = co_await boost::asio::this_coro::executor;
-                    boost::asio::steady_timer timer(exec);
-                    auto delta = keepalive_interval_ - (now - last_keepalive_);
-                    timer.expires_after(delta);
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-                last_keepalive_ = std::chrono::steady_clock::now();
-                // Emit periodic keepalive matching mode
-                switch (mode_) {
-                    case Mode::Search: {
-                        SearchResponse r;
-                        r.totalCount = 0;
-                        r.elapsed = std::chrono::milliseconds(0);
-                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                                  .is_last_chunk = false};
-                    }
-                    case Mode::List: {
-                        ListResponse r;
-                        r.totalCount = 0;
-                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                                  .is_last_chunk = false};
-                    }
-                    case Mode::Grep: {
-                        GrepResponse r;
-                        r.totalMatches = 0;
-                        r.filesSearched = 0;
-                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                                  .is_last_chunk = false};
-                    }
-                    case Mode::None:
-                    default: {
-                        SuccessResponse ok{"Streaming in progress"};
-                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(ok)},
-                                                                  .is_last_chunk = false};
-                    }
-                }
-            }
-        }
-
-        // Fast compute completion: emit first-burst results
-        if (!first_burst_emitted_ && fast_future_.has_value() &&
-            fast_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-            Response fast;
-            try {
-                fast = fast_future_->get();
-            } catch (const std::exception& e) {
-                spdlog::debug("StreamingRequestProcessor: fast compute failed: {}", e.what());
-                fast_future_.reset();
-            }
-            if (auto* s = std::get_if<SearchResponse>(&fast)) {
-                search_ = SearchState{};
-                search_->totalCount = s->totalCount;
-                search_->elapsed = s->elapsed;
-                search_->results = std::move(s->results);
-                search_->pos = 0;
-                already_sent_ = search_->results.size();
-                first_burst_emitted_ = true;
-                // Emit the entire fast-burst as one chunk
-                SearchResponse chunk;
-                chunk.totalCount = search_->totalCount;
-                chunk.elapsed = search_->elapsed;
-                chunk.results = search_->results;
-                // We consumed the future with get(); drop it to avoid no_state on later waits
-                fast_future_.reset();
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)},
-                                                          .is_last_chunk = false};
-            } else if (auto* l = std::get_if<ListResponse>(&fast)) {
-                list_ = ListState{};
-                list_->totalCount = l->totalCount;
-                list_->items = std::move(l->items);
-                list_->pos = 0;
-                already_sent_ = list_->items.size();
-                first_burst_emitted_ = true;
-                ListResponse chunk;
-                chunk.totalCount = list_->totalCount;
-                chunk.items = list_->items;
-                fast_future_.reset();
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)},
-                                                          .is_last_chunk = false};
-            } else if (auto* g = std::get_if<GrepResponse>(&fast)) {
-                grep_ = GrepState{};
-                grep_->totalMatches = g->totalMatches;
-                grep_->filesSearched = g->filesSearched;
-                grep_->matches = std::move(g->matches);
-                grep_->pos = 0;
-                already_sent_ = grep_->matches.size();
-                first_burst_emitted_ = true;
-                if (cancel_cold_on_hot_) {
-                    full_future_.reset();
-                }
-                GrepResponse chunk;
-                chunk.totalMatches = grep_->totalMatches;
-                chunk.filesSearched = grep_->filesSearched;
-                chunk.matches = grep_->matches;
-                fast_future_.reset();
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)},
-                                                          .is_last_chunk = false};
-            } else {
-                // For non-chunkable types, ignore fast path
-                fast_future_.reset();
-            }
-        }
-
-        // Full compute completion: build full state when ready
-        if (full_future_.has_value() &&
-            full_future_->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-            Response full;
-            try {
-                full = full_future_->get();
-            } catch (const std::exception& e) {
-                spdlog::error("StreamingRequestProcessor: background compute failed: {}", e.what());
-                ErrorResponse err{ErrorCode::InternalError,
-                                  std::string("Failed to process request: ") + e.what()};
-                full_future_.reset();
+            // Embedding & model load types: compute once now and finish.
+            if (mt == MessageType::BatchEmbeddingRequest ||
+                mt == MessageType::EmbedDocumentsRequest ||
+                mt == MessageType::GenerateEmbeddingRequest ||
+                mt == MessageType::LoadModelRequest) {
+                auto final = co_await delegate_->process(*pending_request_);
                 pending_request_.reset();
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
-                                                          .is_last_chunk = true};
+                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
             }
-            full_future_.reset();
-            pending_request_.reset();
 
-            // Populate chunking state
-            if (auto* s = std::get_if<SearchResponse>(&full)) {
-                search_ = SearchState{};
-                search_->totalCount = s->totalCount;
-                search_->elapsed = s->elapsed;
-                search_->results = std::move(s->results);
-                search_->pos = std::min<std::size_t>(already_sent_, search_->results.size());
+            // AddDocumentRequest: single final response after heartbeat.
+            if (mt == MessageType::AddDocumentRequest) {
+                auto final = co_await delegate_->process(*pending_request_);
+                pending_request_.reset();
+                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+            }
 
-                // Add memory limit check
-                constexpr size_t MAX_RESULTS = 100000; // Reasonable limit
-                if (search_->results.size() > MAX_RESULTS) {
-                    spdlog::warn("StreamingRequestProcessor(Search): result count {} exceeds limit "
-                                 "{}, truncating",
-                                 search_->results.size(), MAX_RESULTS);
-                    search_->results.resize(MAX_RESULTS);
+            // Search/List/Grep initial compute (first post-heartbeat chunk)
+            if (mode_ == Mode::Search && !search_.has_value()) {
+                auto r = co_await delegate_->process(*pending_request_);
+                if (auto* s = std::get_if<SearchResponse>(&r)) {
+                    search_ = SearchState{};
+                    search_->results = std::move(s->results);
+                    search_->totalCount = s->totalCount;
+                    search_->elapsed = s->elapsed;
+                    search_->pos = 0;
+                } else {
+                    pending_request_.reset();
+                    co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
-
-                spdlog::debug(
-                    "StreamingRequestProcessor(Search): background compute completed ({} results)",
-                    search_->results.size());
-            } else if (auto* l = std::get_if<ListResponse>(&full)) {
-                list_ = ListState{};
-                list_->totalCount = l->totalCount;
-                list_->items = std::move(l->items);
-                list_->pos = std::min<std::size_t>(already_sent_, list_->items.size());
-
-                // Add memory limit check
-                constexpr size_t MAX_ITEMS = 100000; // Reasonable limit
-                if (list_->items.size() > MAX_ITEMS) {
-                    spdlog::warn("StreamingRequestProcessor(List): item count {} exceeds limit {}, "
-                                 "truncating",
-                                 list_->items.size(), MAX_ITEMS);
-                    list_->items.resize(MAX_ITEMS);
+            } else if (mode_ == Mode::List && !list_.has_value()) {
+                auto r = co_await delegate_->process(*pending_request_);
+                if (auto* l = std::get_if<ListResponse>(&r)) {
+                    list_ = ListState{};
+                    list_->items = std::move(l->items);
+                    list_->totalCount = l->totalCount;
+                    list_->pos = 0;
+                } else {
+                    pending_request_.reset();
+                    co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
-
-                spdlog::debug(
-                    "StreamingRequestProcessor(List): background compute completed ({} items)",
-                    list_->items.size());
-            } else if (auto* g = std::get_if<GrepResponse>(&full)) {
-                // If grep full finishes before first-burst and timeout not elapsed, delay emitting
-                if (!first_burst_emitted_ && first_batch_start_.time_since_epoch().count() != 0) {
-                    auto now = std::chrono::steady_clock::now();
-                    if (now - first_batch_start_ < grep_first_batch_max_wait_) {
-                        // Re-arm full result by storing back into future-like state: stash as grep_
-                        grep_ = GrepState{};
-                        grep_->totalMatches = g->totalMatches;
-                        grep_->filesSearched = g->filesSearched;
-                        grep_->matches = std::move(g->matches);
-                        grep_->pos = 0;
-                        // Sleep until deadline and emit keepalive
-                        auto exec = co_await boost::asio::this_coro::executor;
-                        boost::asio::steady_timer timer(exec);
-                        timer.expires_after(grep_first_batch_max_wait_ -
-                                            (now - first_batch_start_));
-                        co_await timer.async_wait(boost::asio::use_awaitable);
-                        // Emit keepalive to maintain connection while waiting
-                        GrepResponse r;
-                        r.totalMatches = 0;
-                        r.filesSearched = 0;
-                        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                                  .is_last_chunk = false};
-                    }
+            } else if (mode_ == Mode::Grep && !grep_.has_value()) {
+                auto r = co_await delegate_->process(*pending_request_);
+                if (auto* g = std::get_if<GrepResponse>(&r)) {
+                    grep_ = GrepState{};
+                    grep_->matches = std::move(g->matches);
+                    grep_->totalMatches = g->totalMatches;
+                    grep_->filesSearched = g->filesSearched;
+                    grep_->pos = 0;
+                } else {
+                    pending_request_.reset();
+                    co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
-                grep_ = GrepState{};
-                grep_->totalMatches = g->totalMatches;
-                grep_->filesSearched = g->filesSearched;
-                grep_->matches = std::move(g->matches);
-                grep_->pos = 0;
-
-                // Add memory limit check
-                constexpr size_t MAX_MATCHES = 100000; // Reasonable limit
-                if (grep_->matches.size() > MAX_MATCHES) {
-                    spdlog::warn("StreamingRequestProcessor(Grep): match count {} exceeds limit "
-                                 "{}, truncating",
-                                 grep_->matches.size(), MAX_MATCHES);
-                    grep_->matches.resize(MAX_MATCHES);
-                }
-
-                spdlog::debug("StreamingRequestProcessor(Grep): background compute completed ({} "
-                              "matches across {} files)",
-                              grep_->matches.size(), grep_->filesSearched);
-            } else {
-                // Not a chunkable type; return as a single last chunk
-                co_return RequestProcessor::ResponseChunk{.data = std::move(full),
-                                                          .is_last_chunk = true};
             }
         }
 
-        switch (mode_) {
-            case Mode::Search: {
-                if (!search_.has_value()) {
-                    // Compute still in progress; keepalive throttle handled above
-                    SearchResponse r;
-                    r.totalCount = 0;
-                    r.elapsed = std::chrono::milliseconds(0);
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                              .is_last_chunk = false};
-                }
-                auto& st = *search_;
-                const std::size_t total = st.results.size();
-                const std::size_t n = compute_item_chunk_count(512); // ~512B per result
-                const std::size_t start = st.pos;
-                const std::size_t end = std::min(start + n, total);
-
-                SearchResponse chunk;
-                chunk.totalCount = st.totalCount;
-                chunk.elapsed = st.elapsed;
-                chunk.results.reserve(end - start);
-                for (std::size_t i = start; i < end; ++i) {
-                    chunk.results.push_back(std::move(st.results[i]));
-                }
-                st.pos = end;
-                bool last = end >= total;
-                spdlog::debug(
-                    "StreamingRequestProcessor(Search): emit [{}..{})/{}, count={}, last={}", start,
-                    end, total, chunk.results.size(), last);
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)},
-                                                          .is_last_chunk = last};
+        // 3) Emit next page (Search)
+        if (mode_ == Mode::Search) {
+            if (!search_.has_value()) {
+                // Still computing? Should not happen in deterministic path, fallback
+                // keepalive-like.
+                SearchResponse r;
+                r.totalCount = 0;
+                r.elapsed = std::chrono::milliseconds(0);
+                co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
             }
-            case Mode::List: {
-                if (!list_.has_value()) {
-                    ListResponse r;
-                    r.totalCount = 0;
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                              .is_last_chunk = false};
-                }
-                auto& st = *list_;
-                const std::size_t total = st.items.size();
-                const std::size_t n =
-                    compute_item_chunk_count(2048); // ~2KB per item to reduce chunk churn
-                const std::size_t start = st.pos;
-                const std::size_t end = std::min(start + n, total);
+            auto& st = *search_;
+            const std::size_t total = st.results.size();
+            const std::size_t n = compute_item_chunk_count(512);
+            const std::size_t start = st.pos;
+            const std::size_t end = std::min(start + n, total);
 
-                ListResponse chunk;
-                chunk.totalCount = st.totalCount;
-                chunk.items.reserve(end - start);
-                for (std::size_t i = start; i < end; ++i) {
-                    chunk.items.push_back(std::move(st.items[i]));
-                }
-                st.pos = end;
-                bool last = end >= total;
-                spdlog::debug(
-                    "StreamingRequestProcessor(List): emit [{}..{})/{}, count={}, last={}", start,
-                    end, total, chunk.items.size(), last);
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)},
-                                                          .is_last_chunk = last};
+            SearchResponse chunk;
+            chunk.totalCount = st.totalCount;
+            chunk.elapsed = st.elapsed;
+            chunk.results.reserve(end - start);
+            for (std::size_t i = start; i < end; ++i) {
+                chunk.results.push_back(std::move(st.results[i]));
             }
-            case Mode::Grep: {
-                if (!grep_.has_value()) {
-                    GrepResponse r;
-                    r.totalMatches = 0;
-                    r.filesSearched = 0;
-                    co_return RequestProcessor::ResponseChunk{.data = Response{std::move(r)},
-                                                              .is_last_chunk = false};
-                }
-                auto& st = *grep_;
-                const std::size_t total = st.matches.size();
-                std::size_t n = compute_item_chunk_count(1024); // ~1KB per match
-                if (grep_batch_size_override_ > 0)
-                    n = std::min(n, grep_batch_size_override_);
-                const std::size_t start = st.pos;
-                const std::size_t end = std::min(start + n, total);
-
-                auto start_time = std::chrono::steady_clock::now();
-
-                GrepResponse chunk;
-                chunk.totalMatches = st.totalMatches;
-                chunk.filesSearched = st.filesSearched;
-                chunk.matches.reserve(end - start);
-                for (std::size_t i = start; i < end; ++i) {
-                    chunk.matches.push_back(std::move(st.matches[i]));
-                }
-                st.pos = end;
-                bool last = end >= total;
-
-                auto end_time = std::chrono::steady_clock::now();
-                auto duration =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time)
-                        .count();
-
-                spdlog::debug(
-                    "StreamingRequestProcessor(Grep): emit [{}..{})/{}, count={}, last={}, "
-                    "duration={}ms",
-                    start, end, total, chunk.matches.size(), last, duration);
-                if (first_burst_emitted_ && cancel_cold_on_hot_) {
-                    // If hot already emitted and we consider cold cancelled, ensure no extra cold
-                    // chunks linger
-                }
-                co_return RequestProcessor::ResponseChunk{.data = Response{std::move(chunk)},
-                                                          .is_last_chunk = last};
+            st.pos = end;
+            bool last = (end >= total);
+            if (last) {
+                // clear pending only once we have emitted all pages
+                pending_request_.reset();
             }
-            case Mode::None:
-            default:
-                // Delegate as last resort
-                co_return co_await delegate_->next_chunk();
+            co_return ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = last};
         }
+
+        // 4) Emit next page (List)
+        if (mode_ == Mode::List) {
+            if (!list_.has_value()) {
+                ListResponse r;
+                r.totalCount = 0;
+                co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
+            auto& st = *list_;
+            const std::size_t total = st.items.size();
+            const std::size_t n = compute_item_chunk_count(2048);
+            const std::size_t start = st.pos;
+            const std::size_t end = std::min(start + n, total);
+
+            ListResponse chunk;
+            chunk.totalCount = st.totalCount;
+            chunk.items.reserve(end - start);
+            for (std::size_t i = start; i < end; ++i) {
+                chunk.items.push_back(std::move(st.items[i]));
+            }
+            st.pos = end;
+            bool last = (end >= total);
+            if (last)
+                pending_request_.reset();
+            co_return ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = last};
+        }
+
+        // 5) Emit next page (Grep)
+        if (mode_ == Mode::Grep) {
+            if (!grep_.has_value()) {
+                GrepResponse r;
+                r.totalMatches = 0;
+                r.filesSearched = 0;
+                co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
+            auto& st = *grep_;
+            const std::size_t total = st.matches.size();
+            std::size_t n = compute_item_chunk_count(1024);
+            const std::size_t start = st.pos;
+            const std::size_t end = std::min(start + n, total);
+
+            GrepResponse chunk;
+            chunk.totalMatches = st.totalMatches;
+            chunk.filesSearched = st.filesSearched;
+            chunk.matches.reserve(end - start);
+            for (std::size_t i = start; i < end; ++i) {
+                chunk.matches.push_back(std::move(st.matches[i]));
+            }
+            st.pos = end;
+            bool last = (end >= total);
+            if (last)
+                pending_request_.reset();
+            co_return ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = last};
+        }
+
+        // 6) Fallback: provide a graceful end-of-stream to avoid calling into
+        // delegate_->next_chunk() (which is not used by the dispatcher adapter).
+        SuccessResponse ok{"End of stream"};
+        co_return ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = true};
     } catch (const std::exception& e) {
         spdlog::error("StreamingRequestProcessor::next_chunk() exception: {}", e.what());
         ErrorResponse err{ErrorCode::InternalError, std::string("Streaming error: ") + e.what()};
-        co_return RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
-                                                  .is_last_chunk = true};
+        co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
     }
 }
 

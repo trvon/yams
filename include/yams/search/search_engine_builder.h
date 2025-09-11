@@ -119,13 +119,13 @@ public:
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {
             BuildOptions o{};
-            // Vector/keyword weights dominate; KG contributes small but non-zero
-            o.hybrid.vector_weight = 0.60f;
-            o.hybrid.keyword_weight = 0.35f;
-            o.hybrid.kg_entity_weight = 0.03f;
-            o.hybrid.structural_weight = 0.02f;
+            // Prefer FTS5 keyword results over vector by default; disable KG unless opted-in
+            o.hybrid.vector_weight = 0.40f;
+            o.hybrid.keyword_weight = 0.60f;
+            o.hybrid.kg_entity_weight = 0.0f;
+            o.hybrid.structural_weight = 0.0f;
 
-            o.hybrid.enable_kg = true;
+            o.hybrid.enable_kg = false;
             o.hybrid.kg_max_neighbors = 32;
             o.hybrid.kg_max_hops = 1;
             o.hybrid.kg_budget_ms = std::chrono::milliseconds{20};

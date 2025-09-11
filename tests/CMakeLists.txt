@@ -33,6 +33,13 @@ set(ENV{CTEST_OUTPUT_ON_FAILURE} 1)
 # Unit tests
 add_subdirectory(unit)
 
+# Build test plugins/fixtures
+add_subdirectory(plugins)
+
+
+# SDK tests (Python-based)
+add_subdirectory(sdk)
+
 
 # Integration tests
 add_subdirectory(integration)

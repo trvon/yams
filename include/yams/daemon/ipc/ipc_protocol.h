@@ -55,13 +55,33 @@ struct SearchRequest {
     int context = 0;                    // Lines before and after
     std::string hashQuery;              // Search by file hash
 
+    // Engine-level filtering (parity with app::services::SearchRequest)
+    std::string pathPattern;       // Glob-like filename/path filter
+    std::vector<std::string> tags; // Filter by tags (presence-based)
+    bool matchAllTags = false;     // Require all specified tags
+    std::string extension;         // File extension filter
+    std::string mimeType;          // MIME type filter
+    std::string fileType;          // High-level file type
+    bool textOnly{false};          // Text-only filter
+    bool binaryOnly{false};        // Binary-only filter
+    // Time filters
+    std::string createdAfter;
+    std::string createdBefore;
+    std::string modifiedAfter;
+    std::string modifiedBefore;
+    std::string indexedAfter;
+    std::string indexedBefore;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << query << static_cast<uint32_t>(limit) << fuzzy << literalText << similarity
             << timeout << searchType << pathsOnly << showHash << verbose << jsonOutput
             << showLineNumbers << static_cast<int32_t>(afterContext)
-            << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(context) << hashQuery;
+            << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(context) << hashQuery
+            << pathPattern << tags << matchAllTags << extension << mimeType << fileType << textOnly
+            << binaryOnly << createdAfter << createdBefore << modifiedAfter << modifiedBefore
+            << indexedAfter << indexedBefore;
     }
 
     template <typename Deserializer>
@@ -150,6 +170,78 @@ struct SearchRequest {
             return hq.error();
         req.hashQuery = std::move(hq.value());
 
+        // New fields (optional in older peers; keep order consistent with serialize)
+        if (auto pp = deser.readString(); pp) {
+            req.pathPattern = std::move(pp.value());
+        } else {
+            return pp.error();
+        }
+        if (auto tg = deser.readStringVector(); tg) {
+            req.tags = std::move(tg.value());
+        } else {
+            return tg.error();
+        }
+        if (auto mat = deser.template read<bool>(); mat) {
+            req.matchAllTags = mat.value();
+        } else {
+            return mat.error();
+        }
+        if (auto ext = deser.readString(); ext) {
+            req.extension = std::move(ext.value());
+        } else {
+            return ext.error();
+        }
+        if (auto mt = deser.readString(); mt) {
+            req.mimeType = std::move(mt.value());
+        } else {
+            return mt.error();
+        }
+        if (auto ft = deser.readString(); ft) {
+            req.fileType = std::move(ft.value());
+        } else {
+            return ft.error();
+        }
+        if (auto to = deser.template read<bool>(); to) {
+            req.textOnly = to.value();
+        } else {
+            return to.error();
+        }
+        if (auto bo = deser.template read<bool>(); bo) {
+            req.binaryOnly = bo.value();
+        } else {
+            return bo.error();
+        }
+        if (auto ca = deser.readString(); ca) {
+            req.createdAfter = std::move(ca.value());
+        } else {
+            return ca.error();
+        }
+        if (auto cb = deser.readString(); cb) {
+            req.createdBefore = std::move(cb.value());
+        } else {
+            return cb.error();
+        }
+        if (auto ma = deser.readString(); ma) {
+            req.modifiedAfter = std::move(ma.value());
+        } else {
+            return ma.error();
+        }
+        if (auto mb = deser.readString(); mb) {
+            req.modifiedBefore = std::move(mb.value());
+        } else {
+            return mb.error();
+        }
+        if (auto ia = deser.readString(); ia) {
+            req.indexedAfter = std::move(ia.value());
+        } else {
+            return ia.error();
+        }
+        if (auto ib = deser.readString(); ib) {
+            req.indexedBefore = std::move(ib.value());
+        } else {
+            return ib.error();
+        }
+
         return req;
     }
 };
@@ -230,7 +322,7 @@ struct GetRequest {
     std::string outputPath;      // output file path (empty = stdout)
     bool metadataOnly = false;   // return only metadata, no content
     uint64_t maxBytes = 0;       // max bytes to transfer (0 = unlimited)
-    uint32_t chunkSize = 262144; // streaming chunk size in bytes
+    uint32_t chunkSize = 524288; // streaming chunk size in bytes (increased default)
 
     // Content options
     bool raw = false;     // output raw content without text extraction
@@ -422,7 +514,7 @@ struct GetInitRequest {
     bool byName = false;             // resolve by path/name when true
     bool metadataOnly = false;       // return only metadata (no content transfer)
     uint64_t maxBytes = 0;           // 0 = unlimited; otherwise cap bytes served
-    uint32_t chunkSize = 256 * 1024; // hint for preferred chunk size
+    uint32_t chunkSize = 512 * 1024; // hint for preferred chunk size (increased)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -1318,14 +1410,62 @@ struct BatchEmbeddingRequest {
     }
 };
 
-struct LoadModelRequest {
-    std::string modelName;
-    bool preload = true; // Keep in hot pool
+struct EmbedDocumentsRequest {
+    std::vector<std::string> documentHashes;
+    std::string modelName = "all-MiniLM-L6-v2";
+    bool normalize = true;
+    size_t batchSize = 32;
+    bool skipExisting = true;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << modelName << preload;
+        ser << documentHashes << modelName << normalize << static_cast<uint32_t>(batchSize)
+            << skipExisting;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<EmbedDocumentsRequest> deserialize(Deserializer& deser) {
+        EmbedDocumentsRequest req;
+        auto hashes = deser.readStringVector();
+        if (!hashes)
+            return hashes.error();
+        req.documentHashes = std::move(hashes.value());
+
+        auto model = deser.readString();
+        if (!model)
+            return model.error();
+        req.modelName = std::move(model.value());
+
+        auto norm = deser.template read<bool>();
+        if (!norm)
+            return norm.error();
+        req.normalize = norm.value();
+
+        auto bs = deser.template read<uint32_t>();
+        if (!bs)
+            return bs.error();
+        req.batchSize = bs.value();
+
+        auto se = deser.template read<bool>();
+        if (!se)
+            return se.error();
+        req.skipExisting = se.value();
+
+        return req;
+    }
+};
+
+struct LoadModelRequest {
+    std::string modelName;
+    bool preload = true;     // Keep in hot pool
+    std::string optionsJson; // Optional plugin options (e.g., hf.revision/offline)
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << modelName << preload << optionsJson;
     }
 
     template <typename Deserializer>
@@ -1342,6 +1482,11 @@ struct LoadModelRequest {
         if (!preloadResult)
             return preloadResult.error();
         req.preload = preloadResult.value();
+
+        auto opt = deser.readString();
+        if (!opt)
+            return opt.error();
+        req.optionsJson = std::move(opt.value());
 
         return req;
     }
@@ -1682,11 +1827,15 @@ struct UpdateDocumentRequest {
     std::vector<std::string> addTags;
     std::vector<std::string> removeTags;
     std::map<std::string, std::string> metadata;
+    bool atomic{true};
+    bool createBackup{false};
+    bool verbose{false};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << name << newContent << addTags << removeTags << metadata;
+        ser << hash << name << newContent << addTags << removeTags << metadata << atomic
+            << createBackup << verbose;
     }
 
     template <typename Deserializer>
@@ -1717,6 +1866,18 @@ struct UpdateDocumentRequest {
         if (!m)
             return m.error();
         req.metadata = std::move(m.value());
+        if (auto a = deser.template read<bool>(); a)
+            req.atomic = a.value();
+        else
+            return a.error();
+        if (auto cb = deser.template read<bool>(); cb)
+            req.createBackup = cb.value();
+        else
+            return cb.error();
+        if (auto vb = deser.template read<bool>(); vb)
+            req.verbose = vb.value();
+        else
+            return vb.error();
         return req;
     }
 };
@@ -1879,6 +2040,132 @@ struct PrepareSessionRequest {
     }
 };
 
+// Plugin management requests
+struct PluginScanRequest {
+    std::string dir;    // optional
+    std::string target; // optional file path
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << dir << target;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginScanRequest> deserialize(Deserializer& d) {
+        PluginScanRequest r;
+        if (auto s = d.readString(); s)
+            r.dir = std::move(s.value());
+        else
+            return s.error();
+        if (auto t = d.readString(); t)
+            r.target = std::move(t.value());
+        else
+            return t.error();
+        return r;
+    }
+};
+
+struct PluginLoadRequest {
+    std::string pathOrName;
+    std::string configJson;
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << pathOrName << configJson << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginLoadRequest> deserialize(Deserializer& d) {
+        PluginLoadRequest r;
+        if (auto a = d.readString(); a)
+            r.pathOrName = std::move(a.value());
+        else
+            return a.error();
+        if (auto c = d.readString(); c)
+            r.configJson = std::move(c.value());
+        else
+            return c.error();
+        if (auto dr = d.template read<bool>(); dr)
+            r.dryRun = dr.value();
+        else
+            return dr.error();
+        return r;
+    }
+};
+
+struct PluginUnloadRequest {
+    std::string name;
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << name;
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginUnloadRequest> deserialize(Deserializer& d) {
+        PluginUnloadRequest r;
+        if (auto n = d.readString(); n)
+            r.name = std::move(n.value());
+        else
+            return n.error();
+        return r;
+    }
+};
+
+struct PluginTrustListRequest {
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer&) const {}
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginTrustListRequest> deserialize(Deserializer&) {
+        return PluginTrustListRequest{};
+    }
+};
+
+struct PluginTrustAddRequest {
+    std::string path;
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << path;
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginTrustAddRequest> deserialize(Deserializer& d) {
+        PluginTrustAddRequest r;
+        if (auto p = d.readString(); p)
+            r.path = std::move(p.value());
+        else
+            return p.error();
+        return r;
+    }
+};
+
+struct PluginTrustRemoveRequest {
+    std::string path;
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << path;
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginTrustRemoveRequest> deserialize(Deserializer& d) {
+        PluginTrustRemoveRequest r;
+        if (auto p = d.readString(); p)
+            r.path = std::move(p.value());
+        else
+            return p.error();
+        return r;
+    }
+};
+
 // Variant type for all requests
 using Request =
     std::variant<SearchRequest, AddRequest, GetRequest, GetInitRequest, GetChunkRequest,
@@ -1886,7 +2173,9 @@ using Request =
                  PingRequest, GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
                  UnloadModelRequest, ModelStatusRequest, AddDocumentRequest, GrepRequest,
                  UpdateDocumentRequest, DownloadRequest, GetStatsRequest, PrepareSessionRequest,
-                 CancelRequest>;
+                 CancelRequest, EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest,
+                 PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest,
+                 PluginTrustRemoveRequest>;
 
 // ============================================================================
 // Response Types
@@ -2271,12 +2560,16 @@ struct StatusResponse {
     uint64_t muxActiveHandlers = 0;
     int64_t muxQueuedBytes = 0;
     uint64_t muxWriterBudgetBytes = 0;
+    uint32_t retryAfterMs = 0; // optional backpressure hint
     std::map<std::string, size_t> requestCounts;
 
     // Readiness state tracking (new fields)
     std::map<std::string, bool> readinessStates; // Subsystem -> ready
     std::map<std::string, uint8_t> initProgress; // Subsystem -> progress (0-100)
     std::string overallStatus;                   // "ready", "degraded", "initializing", "starting"
+    // Explicit lifecycle fields (preferred by CLI/clients)
+    std::string lifecycleState; // mirrors FSM state string when available
+    std::string lastError;      // last lifecycle error if any (empty when none)
 
     // Model information
     struct ModelInfo {
@@ -2330,7 +2623,8 @@ struct StatusResponse {
             << static_cast<uint64_t>(fsmHeaderReads) << static_cast<uint64_t>(fsmPayloadReads)
             << static_cast<uint64_t>(fsmPayloadWrites) << static_cast<uint64_t>(fsmBytesSent)
             << static_cast<uint64_t>(fsmBytesReceived) << static_cast<uint64_t>(muxActiveHandlers)
-            << static_cast<int64_t>(muxQueuedBytes) << static_cast<uint64_t>(muxWriterBudgetBytes);
+            << static_cast<int64_t>(muxQueuedBytes) << static_cast<uint64_t>(muxWriterBudgetBytes)
+            << static_cast<uint32_t>(retryAfterMs);
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -2350,8 +2644,8 @@ struct StatusResponse {
             ser << key << static_cast<uint8_t>(value);
         }
 
-        // Serialize overall status
-        ser << overallStatus;
+        // Serialize overall status and lifecycle fields
+        ser << overallStatus << lifecycleState << lastError;
 
         // Serialize models
         ser << static_cast<uint32_t>(models.size());
@@ -2451,6 +2745,12 @@ struct StatusResponse {
             return muxWriterBudgetBytesResult.error();
         res.muxWriterBudgetBytes = muxWriterBudgetBytesResult.value();
 
+        // retryAfterMs (optional; default 0 if older streams)
+        auto retryAfterMsResult = deser.template read<uint32_t>();
+        if (!retryAfterMsResult)
+            return retryAfterMsResult.error();
+        res.retryAfterMs = retryAfterMsResult.value();
+
         // Deserialize request counts
         auto countsCountResult = deser.template read<uint32_t>();
         if (!countsCountResult)
@@ -2496,11 +2796,21 @@ struct StatusResponse {
             res.initProgress[std::move(keyResult.value())] = valueResult.value();
         }
 
-        // Deserialize overall status
+        // Deserialize overall status and lifecycle fields
         auto statusResult = deser.readString();
         if (!statusResult)
             return statusResult.error();
         res.overallStatus = std::move(statusResult.value());
+
+        auto lifecycleRes = deser.readString();
+        if (!lifecycleRes)
+            return lifecycleRes.error();
+        res.lifecycleState = std::move(lifecycleRes.value());
+
+        auto lastErrRes = deser.readString();
+        if (!lastErrRes)
+            return lastErrRes.error();
+        res.lastError = std::move(lastErrRes.value());
 
         // Deserialize models
         auto modelsCountResult = deser.template read<uint32_t>();
@@ -2826,6 +3136,151 @@ struct BatchEmbeddingResponse {
         res.failureCount = failureResult.value();
 
         return res;
+    }
+};
+
+// ============================================================================
+// Streaming Event Types
+// ============================================================================
+
+struct EmbedDocumentsResponse {
+    size_t requested{0};
+    size_t embedded{0};
+    size_t skipped{0};
+    size_t failed{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << static_cast<uint64_t>(requested) << static_cast<uint64_t>(embedded)
+            << static_cast<uint64_t>(skipped) << static_cast<uint64_t>(failed);
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<EmbedDocumentsResponse> deserialize(Deserializer& deser) {
+        EmbedDocumentsResponse res;
+
+        auto r = deser.template read<uint64_t>();
+        if (!r)
+            return r.error();
+        res.requested = r.value();
+
+        auto e = deser.template read<uint64_t>();
+        if (!e)
+            return e.error();
+        res.embedded = e.value();
+
+        auto s = deser.template read<uint64_t>();
+        if (!s)
+            return s.error();
+        res.skipped = s.value();
+
+        auto f = deser.template read<uint64_t>();
+        if (!f)
+            return f.error();
+        res.failed = f.value();
+
+        return res;
+    }
+};
+
+struct EmbeddingEvent {
+    std::string modelName;
+    size_t processed{0};
+    size_t total{0};
+    size_t success{0};
+    size_t failure{0};
+    size_t inserted{0};
+    std::string phase;   // started|working|completed|error
+    std::string message; // optional status
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << modelName << static_cast<uint64_t>(processed) << static_cast<uint64_t>(total)
+            << static_cast<uint64_t>(success) << static_cast<uint64_t>(failure)
+            << static_cast<uint64_t>(inserted) << phase << message;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<EmbeddingEvent> deserialize(Deserializer& deser) {
+        EmbeddingEvent ev;
+        auto m = deser.readString();
+        if (!m)
+            return m.error();
+        ev.modelName = std::move(m.value());
+        auto p = deser.template read<uint64_t>();
+        if (!p)
+            return p.error();
+        ev.processed = p.value();
+        auto t = deser.template read<uint64_t>();
+        if (!t)
+            return t.error();
+        ev.total = t.value();
+        auto s = deser.template read<uint64_t>();
+        if (!s)
+            return s.error();
+        ev.success = s.value();
+        auto f = deser.template read<uint64_t>();
+        if (!f)
+            return f.error();
+        ev.failure = f.value();
+        auto ins = deser.template read<uint64_t>();
+        if (!ins)
+            return ins.error();
+        ev.inserted = ins.value();
+        auto ph = deser.readString();
+        if (!ph)
+            return ph.error();
+        ev.phase = std::move(ph.value());
+        auto msg = deser.readString();
+        if (!msg)
+            return msg.error();
+        ev.message = std::move(msg.value());
+        return ev;
+    }
+};
+
+struct ModelLoadEvent {
+    std::string modelName;
+    std::string phase; // started|downloading|initializing|warming|completed|error
+    uint64_t bytesTotal{0};
+    uint64_t bytesLoaded{0};
+    std::string message;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << modelName << phase << bytesTotal << bytesLoaded << message;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ModelLoadEvent> deserialize(Deserializer& deser) {
+        ModelLoadEvent ev;
+        auto m = deser.readString();
+        if (!m)
+            return m.error();
+        ev.modelName = std::move(m.value());
+        auto ph = deser.readString();
+        if (!ph)
+            return ph.error();
+        ev.phase = std::move(ph.value());
+        auto bt = deser.template read<uint64_t>();
+        if (!bt)
+            return bt.error();
+        ev.bytesTotal = bt.value();
+        auto bl = deser.template read<uint64_t>();
+        if (!bl)
+            return bl.error();
+        ev.bytesLoaded = bl.value();
+        auto msg = deser.readString();
+        if (!msg)
+            return msg.error();
+        ev.message = std::move(msg.value());
+        return ev;
     }
 };
 
@@ -3248,6 +3703,129 @@ struct GetStatsResponse {
     }
 };
 
+// Plugin responses
+struct PluginRecord {
+    std::string name;
+    std::string version;
+    uint32_t abiVersion{0};
+    std::string path;
+    std::string manifestJson;
+    std::vector<std::string> interfaces;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << name << version << abiVersion << path << manifestJson << interfaces;
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginRecord> deserialize(Deserializer& d) {
+        PluginRecord r;
+        if (auto a = d.readString(); a)
+            r.name = std::move(a.value());
+        else
+            return a.error();
+        if (auto b = d.readString(); b)
+            r.version = std::move(b.value());
+        else
+            return b.error();
+        if (auto c = d.template read<uint32_t>(); c)
+            r.abiVersion = c.value();
+        else
+            return c.error();
+        if (auto p = d.readString(); p)
+            r.path = std::move(p.value());
+        else
+            return p.error();
+        if (auto m = d.readString(); m)
+            r.manifestJson = std::move(m.value());
+        else
+            return m.error();
+        if (auto iv = d.readStringVector(); iv)
+            r.interfaces = std::move(iv.value());
+        else
+            return iv.error();
+        return r;
+    }
+};
+
+struct PluginScanResponse {
+    std::vector<PluginRecord> plugins;
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << static_cast<uint32_t>(plugins.size());
+        for (const auto& pr : plugins) {
+            pr.serialize(ser);
+        }
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginScanResponse> deserialize(Deserializer& d) {
+        PluginScanResponse r;
+        auto cnt = d.template read<uint32_t>();
+        if (!cnt)
+            return cnt.error();
+        r.plugins.reserve(cnt.value());
+        for (uint32_t i = 0; i < cnt.value(); ++i) {
+            auto rec = PluginRecord::deserialize(d);
+            if (!rec)
+                return rec.error();
+            r.plugins.push_back(std::move(rec.value()));
+        }
+        return r;
+    }
+};
+
+struct PluginLoadResponse {
+    bool loaded{false};
+    std::string message;
+    PluginRecord record;
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << loaded << message;
+        record.serialize(ser);
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginLoadResponse> deserialize(Deserializer& d) {
+        PluginLoadResponse r;
+        if (auto ok = d.template read<bool>(); ok)
+            r.loaded = ok.value();
+        else
+            return ok.error();
+        if (auto msg = d.readString(); msg)
+            r.message = std::move(msg.value());
+        else
+            return msg.error();
+        auto rec = PluginRecord::deserialize(d);
+        if (!rec)
+            return rec.error();
+        r.record = std::move(rec.value());
+        return r;
+    }
+};
+
+struct PluginTrustListResponse {
+    std::vector<std::string> paths;
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << paths;
+    }
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PluginTrustListResponse> deserialize(Deserializer& d) {
+        PluginTrustListResponse r;
+        if (auto v = d.readStringVector(); v)
+            r.paths = std::move(v.value());
+        else
+            return v.error();
+        return r;
+    }
+};
+
 struct DownloadResponse {
     std::string hash;      // Content hash of downloaded file
     std::string localPath; // Local path where file was stored
@@ -3326,7 +3904,10 @@ using Response =
                  StatusResponse, SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse,
                  BatchEmbeddingResponse, ModelLoadResponse, ModelStatusResponse, ListResponse,
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, DownloadResponse,
-                 GetStatsResponse, DeleteResponse, PrepareSessionResponse>;
+                 GetStatsResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
+                 PluginScanResponse, PluginLoadResponse, PluginTrustListResponse,
+                 // Streaming events (progress/heartbeats)
+                 EmbeddingEvent, ModelLoadEvent>;
 
 // ============================================================================
 // Message Envelope
@@ -3383,6 +3964,7 @@ enum class MessageType : uint8_t {
     GetStatsRequest = 21,
     CancelRequest = 22,
     PrepareSessionRequest = 23,
+    EmbedDocumentsRequest = 24,
 
     // Responses
     SearchResponse = 128,
@@ -3405,7 +3987,11 @@ enum class MessageType : uint8_t {
     UpdateDocumentResponse = 145,
     GetStatsResponse = 146,
     DeleteResponse = 147,
-    PrepareSessionResponse = 148
+    PrepareSessionResponse = 148,
+    // Events
+    EmbeddingEvent = 149,
+    ModelLoadEvent = 150,
+    EmbedDocumentsResponse = 151
 };
 
 // ============================================================================

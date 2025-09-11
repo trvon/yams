@@ -6,7 +6,7 @@
 #include <thread>
 #include <vector>
 
-#include <yams/cli/async_bridge.h>
+#include "test_async_helpers.h"
 #include <yams/daemon/client/daemon_client.h>
 
 using namespace std::chrono_literals;

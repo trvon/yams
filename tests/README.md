@@ -36,18 +36,18 @@ make coverage
 
 ### Running Benchmarks
 
+The benchmark suite is now consolidated into a few executables (`api_benchmarks`, `core_benchmarks`, `search_benchmarks`).
+
 ```bash
 # Run all benchmarks
-./tests/benchmarks/performance_benchmarks
+cd build/tests/benchmarks
+./run_all_benchmarks
 
-# Run specific benchmark pattern
-./tests/benchmarks/performance_benchmarks --benchmark_filter="SHA256.*"
+# Run a specific benchmark suite
+./core_benchmarks
 
-# Generate benchmark report
-./tests/benchmarks/performance_benchmarks --benchmark_out=results.json --benchmark_out_format=json
-
-# Compare with baseline
-python3 tests/scripts/check_regression.py results.json baseline.json
+# Pass arguments to the benchmark runner
+./api_benchmarks --iterations 100 --output my_results.json
 ```
 
 ## Test Organization
@@ -59,19 +59,17 @@ tests/
 │   ├── test_data_generator.h  # Test data generation
 │   ├── fixture_manager.h  # Test fixture management
 │   └── benchmark_tracker.h # Benchmark tracking
-├── unit/                   # Unit tests
-│   ├── extraction/        # Text/PDF extraction tests
-│   ├── cli/              # CLI command tests
-│   ├── metadata/         # Metadata operations
+├── unit/                   # Unit tests for each component
+│   ├── crypto/
+│   ├── storage/
 │   └── ...
-├── integration/           # Integration tests
-│   ├── document_lifecycle_test.cpp
-│   ├── multi_command_test.cpp
+├── integration/           # End-to-end and multi-component tests
+│   ├── daemon/
 │   └── ...
 ├── benchmarks/           # Performance benchmarks
-│   ├── ingestion_benchmark.cpp
-│   ├── search_benchmark.cpp
-│   └── ...
+│   ├── api_benchmarks.cpp
+│   ├── core_benchmarks.cpp
+│   └── search_benchmarks.cpp
 ├── stress/              # Stress tests
 ├── data/                # Test data files
 ├── fixtures/            # Test fixtures
@@ -168,38 +166,46 @@ TEST_F(DocumentLifecycleTest, CompleteDocumentWorkflow) {
 
 ### Performance Benchmarks
 
-Benchmarks measure performance characteristics. Place in `tests/benchmarks/`.
+Benchmarks use a custom `BenchmarkBase` class for consistency. Place new benchmarks in the appropriate consolidated file (`core_benchmarks.cpp`, `search_benchmarks.cpp`, etc.).
 
 ```cpp
-#include <benchmark/benchmark.h>
-#include "tests/common/benchmark_tracker.h"
+#include "benchmark_base.h"
+#include <yams/crypto/hasher.h>
 
-static void BM_PDFExtraction(benchmark::State& state) {
-    auto fixture = FixtureManager::getComplexPDF();
-    PDFExtractor extractor;
-    
-    for (auto _ : state) {
-        auto result = extractor.extract(fixture.path);
-        benchmark::DoNotOptimize(result);
+using namespace yams::benchmark;
+
+// Define a benchmark class that inherits from a suitable base or BenchmarkBase itself
+class HashingBenchmark : public BenchmarkBase {
+public:
+    HashingBenchmark(const std::string& name, size_t dataSize) 
+        : BenchmarkBase("Hashing_" + name), dataSize_(dataSize) { 
+        // Setup code here
+        hasher_ = yams::crypto::createSHA256Hasher();
+        data_.resize(dataSize_);
     }
-    
-    state.SetBytesProcessed(state.iterations() * fixture.size);
-}
-BENCHMARK(BM_PDFExtraction);
 
-// After benchmarks run, track results
-static void RecordBenchmarks() {
-    BenchmarkTracker tracker("benchmark_history.json");
-    
-    BenchmarkTracker::BenchmarkResult result;
-    result.name = "pdf_extraction";
-    result.value = GetBenchmarkTime("BM_PDFExtraction");
-    result.unit = "ms";
-    result.timestamp = std::chrono::system_clock::now();
-    
-    tracker.recordResult(result);
-    tracker.generateReport("benchmark_report.json");
+protected:
+    // The core work of the benchmark goes here
+    size_t runIteration() override {
+        hasher_->hash(data_);
+        return 1; // Number of operations in this iteration
+    }
+
+private:
+    std::unique_ptr<yams::crypto::IContentHasher> hasher_;
+    std::vector<std::byte> data_;
+    size_t dataSize_;
+};
+
+// In main(), instantiate and run the benchmark
+int main() {
+    BenchmarkBase::Config config;
+    // ... configure ...
+    auto bench = std::make_unique<HashingBenchmark>("SHA256_1MB", 1024 * 1024);
+    bench->run();
+    return 0;
 }
+
 ```
 
 ## Test Data Management

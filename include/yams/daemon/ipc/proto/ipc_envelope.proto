@@ -29,6 +29,21 @@ message SearchRequest {
   int32 before_context = 14;
   int32 context = 15;
   string hash_query = 16;
+  // Engine-level filtering parity with CLI/local service
+  string path_pattern = 17;
+  repeated string tags = 18;
+  bool match_all_tags = 19;
+  string extension = 20;
+  string mime_type = 21;
+  string file_type = 22;
+  bool text_only = 23;
+  bool binary_only = 24;
+  string created_after = 25;
+  string created_before = 26;
+  string modified_after = 27;
+  string modified_before = 28;
+  string indexed_after = 29;
+  string indexed_before = 30;
 }
 
 message AddRequest {
@@ -146,9 +161,35 @@ message BatchEmbeddingRequest {
   bool normalize = 3;
   uint32 batch_size = 4;
 }
-message LoadModelRequest { string model_name = 1; bool preload = 2; }
+message LoadModelRequest { string model_name = 1; bool preload = 2; string options_json = 3; }
 message UnloadModelRequest { string model_name = 1; bool force = 2; }
 message ModelStatusRequest { string model_name = 1; bool detailed = 2; }
+
+// Embed specific documents by hash and persist into vectors.db
+message EmbedDocumentsRequest {
+  repeated string document_hashes = 1;
+  string model_name = 2;
+  bool normalize = 3;
+  uint32 batch_size = 4;
+  bool skip_existing = 5;
+}
+
+// Plugin management
+message PluginRecord {
+  string name = 1;
+  string version = 2;
+  uint32 abi_version = 3;
+  string path = 4;
+  string manifest_json = 5;
+  repeated string interfaces = 6;
+}
+
+message PluginScanRequest { string dir = 1; string target = 2; }
+message PluginLoadRequest { string path_or_name = 1; string config_json = 2; bool dry_run = 3; }
+message PluginUnloadRequest { string name = 1; }
+message PluginTrustListRequest {}
+message PluginTrustAddRequest { string path = 1; }
+message PluginTrustRemoveRequest { string path = 1; }
 
 message AddDocumentRequest {
   string path = 1;
@@ -203,6 +244,9 @@ message UpdateDocumentRequest {
   repeated string add_tags = 4;
   repeated string remove_tags = 5;
   repeated KvPair metadata = 6;
+  bool atomic = 7;
+  bool create_backup = 8;
+  bool verbose = 9;
 }
 
 message DownloadRequest {
@@ -315,6 +359,16 @@ message StatusResponse {
   double memory_mb = 7;
   double cpu_pct = 8;
   string version = 9;
+  // Additional health optics (v3)
+  // Key/value pairs to transport maps without introducing proto map types here
+  // readiness: key=subsystem, value="true"|"false"
+  repeated KvPair readiness = 10;
+  // progress: key=subsystem, value="0..100"
+  repeated KvPair progress = 11;
+  // overall lifecycle: "ready"|"degraded"|"initializing"|"starting"|"stopped"
+  string overall_status = 12;
+  // request_counts: key=request name, value=count
+  repeated KvPair request_counts = 13;
 }
 
 message EmbeddingResponse {
@@ -333,11 +387,41 @@ message BatchEmbeddingResponse {
   uint64 failure_count = 6;
 }
 
+// Streaming progress events (embeddings/model load)
+message EmbedEvent {
+  string model_name = 1;
+  uint64 processed = 2;
+  uint64 total = 3;
+  uint64 success = 4;
+  uint64 failure = 5;
+  uint64 inserted = 6; // vectors inserted into index/db (if applicable)
+  string phase = 7;    // started|working|completed|error
+  string message = 8;  // free-form status
+}
+
+message ModelLoadEvent {
+  string model_name = 1;
+  string phase = 2;       // started|downloading|initializing|warming|completed|error
+  uint64 bytes_total = 3; // if downloading
+  uint64 bytes_loaded = 4;
+  string message = 5;
+}
+
 message ModelLoadResponse { bool loaded = 1; string message = 2; }
 message ModelStatusResponse { string model_name = 1; string status = 2; }
 message AddDocumentResponse { string hash = 1; string message = 2; }
 message GrepResponse { repeated string lines = 1; }
 message UpdateDocumentResponse { bool updated = 1; }
+message EmbedDocumentsResponse {
+  uint64 requested = 1;
+  uint64 embedded = 2;
+  uint64 skipped = 3;
+  uint64 failed = 4;
+}
+
+message PluginScanResponse { repeated PluginRecord plugins = 1; }
+message PluginLoadResponse { bool loaded = 1; string message = 2; PluginRecord record = 3; }
+message PluginTrustListResponse { repeated string paths = 1; }
 // Extended to match legacy ipc_protocol parity
 message DownloadResponse {
   string url = 1;
@@ -390,6 +474,14 @@ message Envelope {
     DownloadRequest download_request = 29;
     GetStatsRequest get_stats_request = 30;
     PrepareSessionRequest prepare_session_request = 31;
+    EmbedDocumentsRequest embed_documents_request = 32;
+    // Plugin requests
+    PluginScanRequest plugin_scan_request = 33;
+    PluginLoadRequest plugin_load_request = 34;
+    PluginUnloadRequest plugin_unload_request = 35;
+    PluginTrustListRequest plugin_trust_list_request = 36;
+    PluginTrustAddRequest plugin_trust_add_request = 37;
+    PluginTrustRemoveRequest plugin_trust_remove_request = 38;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -413,5 +505,13 @@ message Envelope {
     DownloadResponse download_response = 118;
     DeleteResponse delete_response = 119;
     PrepareSessionResponse prepare_session_response = 120;
+    EmbedDocumentsResponse embed_documents_response = 121;
+    // Streaming events
+    EmbedEvent embed_event = 122;
+    ModelLoadEvent model_load_event = 123;
+    // Plugin responses
+    PluginScanResponse plugin_scan_response = 124;
+    PluginLoadResponse plugin_load_response = 125;
+    PluginTrustListResponse plugin_trust_list_response = 126;
   }
 }

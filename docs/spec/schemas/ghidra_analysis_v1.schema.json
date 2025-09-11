@@ -1,0 +1,461 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ghidra_analysis_v1",
+  "description": "Schemas for YAMS Ghidra analysis interface v1",
+  "type": "object",
+  "properties": {
+    "analyze.request": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "path",
+                "bytes",
+                "yams_hash"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "base64-encoded bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "opts": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
+    "analyze.response": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "count": {
+          "type": "number"
+        },
+        "functions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "addr": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "addr"
+            ]
+          }
+        }
+      },
+      "required": [
+        "arch",
+        "count",
+        "functions"
+      ]
+    },
+    "list_functions.request": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "path",
+                "bytes",
+                "yams_hash"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "base64-encoded bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "opts": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "offset": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
+    "list_functions.response": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "addr": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "addr"
+            ]
+          }
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total"
+      ]
+    },
+    "get_function.request": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "path",
+                "bytes",
+                "yams_hash"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "base64-encoded bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "func": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "addr": {
+              "type": "string"
+            }
+          },
+          "minProperties": 1
+        },
+        "include_body": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source",
+        "func"
+      ]
+    },
+    "get_function.response": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "addr": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "addr"
+      ]
+    },
+    "decompile_function.request": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "path",
+                "bytes",
+                "yams_hash"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "base64-encoded bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "func": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "addr": {
+              "type": "string"
+            }
+          },
+          "minProperties": 1
+        },
+        "opts": {
+          "type": "object",
+          "properties": {
+            "timeout_sec": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "required": [
+        "source",
+        "func"
+      ]
+    },
+    "decompile_function.response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "decomp": {
+          "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "addr": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "search.request": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "path",
+                "bytes",
+                "yams_hash"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "base64-encoded bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        },
+        "opts": {
+          "type": "object",
+          "properties": {
+            "max_hits": {
+              "type": "integer"
+            },
+            "timeout_sec": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "required": [
+        "source",
+        "query"
+      ]
+    },
+    "search.response": {
+      "type": "object",
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "addr": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "addr"
+            ]
+          }
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hits",
+        "total"
+      ]
+    },
+    "grep.request": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "path",
+                "bytes",
+                "yams_hash"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "base64-encoded bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "pattern": {
+          "type": "object",
+          "properties": {
+            "regex": {
+              "type": "string"
+            },
+            "flags": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "regex"
+          ]
+        },
+        "opts": {
+          "type": "object",
+          "properties": {
+            "max_hits": {
+              "type": "integer"
+            },
+            "timeout_sec": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "required": [
+        "source",
+        "pattern"
+      ]
+    },
+    "grep.response": {
+      "type": "object",
+      "properties": {
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "addr": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "addr"
+            ]
+          }
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "matches",
+        "total"
+      ]
+    }
+  }
+}

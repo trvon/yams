@@ -1,11 +1,22 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <fcntl.h>
 #include <filesystem>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
+#ifndef _WIN32
+#include <pthread.h> // For setting thread priority
+#endif
+#include <nlohmann/json.hpp>
+#include <fstream>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/integrity/repair_utils.h>
+#include <yams/vector/dim_resolver.h>
+#include <yams/vector/dynamic_batcher.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
@@ -14,7 +25,53 @@ namespace yams::vector {
 
 namespace fs = std::filesystem;
 
+namespace {
+// Simple RAII file lock helper stamped with PID/time (advisory fcntl lock)
+struct FileLock {
+    int fd{-1};
+    fs::path path;
+    explicit FileLock(const fs::path& p) : path(p) {
+        fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
+        if (fd >= 0) {
+            struct flock fl{};
+            fl.l_type = F_WRLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_start = 0;
+            fl.l_len = 0; // whole file
+            if (fcntl(fd, F_SETLK, &fl) == -1) {
+                ::close(fd);
+                fd = -1;
+            } else {
+                // Best-effort: stamp PID and time for diagnostics
+                try {
+                    (void)ftruncate(fd, 0);
+                    std::string stamp = std::to_string(static_cast<long long>(::getpid())) + " " +
+                                        std::to_string(static_cast<long long>(::time(nullptr))) +
+                                        "\n";
+                    (void)::write(fd, stamp.data(), stamp.size());
+                    (void)lseek(fd, 0, SEEK_SET);
+                } catch (...) {
+                }
+            }
+        }
+    }
+    bool locked() const { return fd >= 0; }
+    ~FileLock() {
+        if (fd >= 0) {
+            struct flock fl{};
+            fl.l_type = F_UNLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_start = 0;
+            fl.l_len = 0;
+            (void)fcntl(fd, F_SETLK, &fl);
+            ::close(fd);
+        }
+    }
+};
+} // anonymous namespace
+
 std::unique_ptr<EmbeddingService> EmbeddingService::create(cli::YamsCLI* cli) {
+    (void)cli; // unused (interface parity; implementation handled elsewhere)
     // Forward declaration limitation - implementation moved to YamsCLI
     // This method is now implemented in yams_cli.cpp to avoid circular dependencies
     return nullptr;
@@ -68,6 +125,14 @@ bool EmbeddingService::startRepairAsync() {
 
     // Launch stop-aware background worker with std::jthread
     repairThread_ = yams::compat::jthread([this](yams::compat::stop_token stoken) {
+#ifndef _WIN32
+        // Lower thread priority to avoid starving main threads
+        struct sched_param sp{};
+        sp.sched_priority = 0;
+        if (pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp) != 0) {
+            spdlog::warn("Failed to set repair thread to idle priority");
+        }
+#endif
         // Ensure running flag is reset when the thread exits
         struct Reset {
             bool& flag;
@@ -115,9 +180,55 @@ void EmbeddingService::triggerRepairIfNeeded() {
 
     // Quick check if there are missing embeddings (don't do full scan here)
     try {
+        // Do not create vectors.db from health probe; let the daemon manage creation
+        if (!std::filesystem::exists(dataPath_ / "vectors.db")) {
+            spdlog::debug("triggerRepairIfNeeded: vectors.db not found; skipping probe");
+            return;
+        }
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath_ / "vectors.db").string();
-        vdbConfig.embedding_dim = 384; // Will be adjusted based on model
+        // Choose a model-aware default for dimension to avoid creating a DB
+        // with an incorrect vec0 schema during health checks.
+        size_t modelAwareDim = 384;
+        auto models = getAvailableModels();
+        if (!models.empty()) {
+            std::string pick = models[0];
+            if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
+                std::string preferred(pref);
+                for (const auto& m : models) {
+                    if (m == preferred) {
+                        pick = m;
+                        break;
+                    }
+                }
+            } else {
+                for (const auto& m : models) {
+                    if (m.find("nomic") != std::string::npos) {
+                        pick = m;
+                        break;
+                    }
+                }
+                for (const auto& m : models) {
+                    if (m == "all-mpnet-base-v2") {
+                        pick = m;
+                        break;
+                    }
+                }
+                for (const auto& m : models) {
+                    if (m == "all-MiniLM-L6-v2") {
+                        pick = m;
+                        break;
+                    }
+                }
+            }
+            if (pick == "all-MiniLM-L6-v2")
+                modelAwareDim = 384;
+            else if (pick == "all-mpnet-base-v2")
+                modelAwareDim = 768;
+            else if (pick.find("nomic") != std::string::npos)
+                modelAwareDim = 768;
+        }
+        vdbConfig.embedding_dim = modelAwareDim;
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
         if (!vectorDb->initialize()) {
@@ -175,51 +286,65 @@ void EmbeddingService::triggerRepairIfNeeded() {
 }
 
 void EmbeddingService::runRepair(yams::compat::stop_token stopToken) {
-    // Cross-process single-writer lock using a lockfile on vectors.db
+    // Cross-process single-writer lock using a lockfile on vectors.db (declared file-scope)
     fs::path lockPath = dataPath_ / "vectors.db.lock";
-    struct FileLock {
-        int fd{-1};
-        fs::path path;
-        explicit FileLock(const fs::path& p) : path(p) {
-            fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
-            if (fd >= 0) {
-                struct flock fl{};
-                fl.l_type = F_WRLCK;
-                fl.l_whence = SEEK_SET;
-                fl.l_start = 0;
-                fl.l_len = 0; // whole file
-                if (fcntl(fd, F_SETLK, &fl) == -1) {
-                    ::close(fd);
-                    fd = -1;
-                }
-            }
-        }
-        bool locked() const { return fd >= 0; }
-        ~FileLock() {
-            if (fd >= 0) {
-                struct flock fl{};
-                fl.l_type = F_UNLCK;
-                fl.l_whence = SEEK_SET;
-                fl.l_start = 0;
-                fl.l_len = 0;
-                (void)fcntl(fd, F_SETLK, &fl);
-                ::close(fd);
-            }
-        }
-    } vlock(lockPath);
-
-    if (!vlock.locked()) {
-        spdlog::info("Repair thread: another process holds vector DB lock; skipping repair");
-        return;
-    }
+    FileLock vlock(lockPath);
 
     spdlog::debug("Repair thread started");
 
     try {
-        // Initialize vector DB
+        // Initialize vector DB (create on first use if missing)
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath_ / "vectors.db").string();
-        vdbConfig.embedding_dim = 384;
+        // Determine embedding dimension: config -> sentinel -> generator/model heuristic
+        size_t heuristicDim = 384;
+        {
+            auto models = getAvailableModels();
+            std::string pick = models.empty() ? std::string() : models[0];
+            if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
+                std::string preferred(pref);
+                for (const auto& m : models) {
+                    if (m == preferred) {
+                        pick = m;
+                        break;
+                    }
+                }
+            } else {
+                for (const auto& m : models) {
+                    if (m.find("nomic") != std::string::npos) {
+                        pick = m;
+                        break;
+                    }
+                }
+                for (const auto& m : models) {
+                    if (m == "all-mpnet-base-v2") {
+                        pick = m;
+                        break;
+                    }
+                }
+                for (const auto& m : models) {
+                    if (m == "all-MiniLM-L6-v2") {
+                        pick = m;
+                        break;
+                    }
+                }
+            }
+            if (pick == "all-MiniLM-L6-v2")
+                heuristicDim = 384;
+            else if (pick == "all-mpnet-base-v2")
+                heuristicDim = 768;
+            else if (!pick.empty() and pick.find("nomic") != std::string::npos)
+                heuristicDim = 768;
+        }
+        size_t repairDim = yams::vector::dimres::resolve_dim(dataPath_, heuristicDim, 384);
+        vdbConfig.embedding_dim = repairDim;
+        // Align schema only when missing; avoid dropping existing tables during repair
+        try {
+            (void)yams::integrity::ensureVectorSchemaAligned(dataPath_, repairDim, false);
+        } catch (...) {
+            // best-effort; continue with DB init
+        }
+        vdbConfig.create_if_missing = true;
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
         if (!vectorDb->initialize()) {
@@ -318,12 +443,33 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
     }
 
     try {
-        // 1. Configure embedding generation (prefer all-MiniLM-L6-v2 for efficiency)
+        // 1. Configure embedding generation
+        // Priority order:
+        // - YAMS_PREFERRED_MODEL if present and available
+        // - nomic-embed-text-v1 if available
+        // - all-MiniLM-L6-v2 (default efficient)
+        // - first available as last resort
         std::string selectedModel = availableModels[0];
-        for (const auto& model : availableModels) {
-            if (model == "all-MiniLM-L6-v2") {
-                selectedModel = model;
-                break;
+        if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
+            std::string preferred(pref);
+            for (const auto& m : availableModels) {
+                if (m == preferred) {
+                    selectedModel = m;
+                    break;
+                }
+            }
+        } else {
+            for (const auto& m : availableModels) {
+                if (m == "nomic-embed-text-v1") {
+                    selectedModel = m;
+                    break;
+                }
+            }
+            for (const auto& m : availableModels) {
+                if (m == "all-MiniLM-L6-v2") {
+                    selectedModel = m;
+                    break;
+                }
             }
         }
 
@@ -334,13 +480,33 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         embConfig.model_path = (modelsPath / selectedModel / "model.onnx").string();
         embConfig.model_name = selectedModel;
 
-        // Set dimensions based on model
-        if (selectedModel == "all-MiniLM-L6-v2") {
+        // Set provisional dimensions based on common defaults; will be overridden after init
+        if (selectedModel == "all-MiniLM-L6-v2")
             embConfig.embedding_dim = 384;
-        } else if (selectedModel == "all-mpnet-base-v2") {
+        else if (selectedModel == "all-mpnet-base-v2")
             embConfig.embedding_dim = 768;
+        else if (selectedModel.find("nomic") != std::string::npos)
+            embConfig.embedding_dim = 768;
+        else
+            embConfig.embedding_dim = 384; // Fallback
+
+        // Backend selection override via environment or special model name
+        if (const char* be = std::getenv("YAMS_EMBED_BACKEND")) {
+            std::string s(be);
+            for (auto& c : s)
+                c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+            if (s == "local")
+                embConfig.backend = vector::EmbeddingConfig::Backend::Local;
+            else if (s == "daemon")
+                embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
+            else
+                embConfig.backend = vector::EmbeddingConfig::Backend::Hybrid;
         } else {
-            embConfig.embedding_dim = 384; // Default fallback
+            // Heuristic: if selected model indicates plugin/daemon usage, prefer Daemon backend
+            if (selectedModel == "onnx_plugin" || selectedModel == "daemon" ||
+                selectedModel.find("plugin") != std::string::npos) {
+                embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
+            }
         }
 
         // 2. Initialize embedding generator
@@ -349,10 +515,20 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
         }
 
-        // 3. Initialize vector database
+        // 3. Initialize vector database (using actual model-reported dim)
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath_ / "vectors.db").string();
-        vdbConfig.embedding_dim = embConfig.embedding_dim;
+        // Query generator for actual embedding dimension and max sequence length
+        size_t actualDim = embGenerator->getEmbeddingDimension();
+        size_t modelMaxSeq = embGenerator->getMaxSequenceLength();
+        if (actualDim == 0)
+            actualDim = embConfig.embedding_dim;
+        if (modelMaxSeq == 0)
+            modelMaxSeq = 512;
+        vdbConfig.embedding_dim =
+            yams::vector::dimres::resolve_dim(dataPath_, actualDim, actualDim);
+        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend=Hybrid", selectedModel,
+                     actualDim, modelMaxSeq);
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
         if (!vectorDb->initialize()) {
@@ -360,60 +536,121 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                          "Failed to initialize vector database: " + vectorDb->getLastError()};
         }
 
-        // 4. Process documents in batches (extracted logic from repair command)
-        size_t batchSize = 32; // safe default
-        if (const char* envBatch = std::getenv("YAMS_EMBED_BATCH")) {
+        // Ensure existing DB schema matches the chosen dimension; do not drop tables here
+        try {
+            size_t cfgDim = 0;
             try {
-                unsigned long v = std::stoul(std::string(envBatch));
-                // Clamp to a reasonable range to avoid OOM or tiny batches
-                if (v < 4UL)
-                    v = 4UL;
-                if (v > 128UL)
-                    v = 128UL;
-                batchSize = static_cast<size_t>(v);
+                cfgDim = vectorDb->getConfig().embedding_dim;
             } catch (...) {
-                spdlog::warn("Invalid YAMS_EMBED_BATCH='{}', using default {}", envBatch,
-                             batchSize);
+                cfgDim = actualDim;
+            }
+            if (cfgDim != vdbConfig.embedding_dim) {
+                spdlog::warn("EmbeddingService: vector DB dim={} != target dim={}, attempting "
+                             "non-destructive align",
+                             cfgDim, vdbConfig.embedding_dim);
+                (void)yams::integrity::ensureVectorSchemaAligned(dataPath_, vdbConfig.embedding_dim,
+                                                                 false);
+                // Recreate DB handle after alignment
+                vector::VectorDatabaseConfig alignedCfg = vdbConfig;
+                vectorDb = std::make_unique<vector::VectorDatabase>(alignedCfg);
+                if (!vectorDb->initialize()) {
+                    return Error{ErrorCode::DatabaseError,
+                                 "Failed to reinitialize vector database after schema align: " +
+                                     vectorDb->getLastError()};
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("EmbeddingService: schema alignment check failed: {}", e.what());
+        }
+
+        // 4. Process documents using dynamic batching (use model-reported seq length)
+
+        std::size_t advisoryDocCap = 0;
+        if (const char* adv = std::getenv("YAMS_EMBED_BATCH_TARGET")) {
+            try {
+                advisoryDocCap = static_cast<std::size_t>(std::stoul(adv));
+            } catch (...) {
             }
         }
-        spdlog::info("EmbeddingService: using batch size {}", batchSize);
+        DynamicBatcherConfig bcfg;
+        bcfg.maxSequenceLengthTokens = modelMaxSeq;
+        // TuneAdvisor-provided safety factor (env can still override via TuneAdvisor setters)
+        double safety = yams::daemon::TuneAdvisor::embedSafety();
+        bcfg.safetyFactor = safety;
+        bcfg.advisoryDocCap = advisoryDocCap;
+        // Optional advisory upper bound for docs per batch via env
+        if (bcfg.advisoryDocCap == 0) {
+            auto capTa = yams::daemon::TuneAdvisor::embedDocCap();
+            if (capTa > 0)
+                bcfg.advisoryDocCap = capTa;
+        }
+        DynamicBatcher batcher{bcfg};
+
         size_t processed = 0;
         size_t skipped = 0;
         size_t failed = 0;
 
-        for (size_t i = 0; i < documentHashes.size(); i += batchSize) {
-            size_t end = std::min(i + batchSize, documentHashes.size());
+        // Allow configurable pause between batches to reduce sustained CPU pressure
+        unsigned pause_ms = yams::daemon::TuneAdvisor::embedPauseMs();
+
+        for (size_t i = 0; i < documentHashes.size();) {
             std::vector<std::string> texts;
             std::vector<std::string> hashes;
 
-            // Collect texts for this batch
-            for (size_t j = i; j < end; ++j) {
-                const auto& docHash = documentHashes[j];
-
-                // Check if embedding already exists
+            // Pack a batch by token budget using cheap estimator on content bytes
+            auto getter = [&](std::size_t idx) {
+                if (idx >= documentHashes.size())
+                    return std::tuple<bool, std::string, std::string>{false, {}, {}};
+                const auto& docHash = documentHashes[idx];
                 if (vectorDb->hasEmbedding(docHash)) {
                     skipped++;
-                    continue;
+                    return std::tuple<bool, std::string, std::string>{false, {}, {}};
                 }
-
-                // Get document content
                 auto content = store_->retrieveBytes(docHash);
                 if (!content) {
                     failed++;
-                    continue;
+                    return std::tuple<bool, std::string, std::string>{false, {}, {}};
                 }
-
                 std::string text(reinterpret_cast<const char*>(content.value().data()),
                                  content.value().size());
-                texts.push_back(text);
-                hashes.push_back(docHash);
+                return std::tuple<bool, std::string, std::string>{true, std::move(text), docHash};
+            };
+            std::size_t selected =
+                batcher.packByTokens(i, documentHashes.size(), texts, hashes, getter);
+            if (selected == 0) {
+                ++i;
+                continue;
             }
+            i += selected; // advance window over input set
 
             if (!texts.empty()) {
-                // Generate embeddings for batch
-                auto embeddings = embGenerator->generateEmbeddings(texts);
+                // Generate embeddings with adaptive split on failure
+                std::function<std::vector<std::vector<float>>(const std::vector<std::string>&)>
+                    generate_with_adapt;
+                generate_with_adapt =
+                    [&](const std::vector<std::string>& in) -> std::vector<std::vector<float>> {
+                    auto out = embGenerator->generateEmbeddings(in);
+                    if (!out.empty() || in.size() <= 1)
+                        return out;
+                    // Split and try halves to mitigate transient/OOM issues
+                    size_t mid = in.size() / 2;
+                    auto left =
+                        generate_with_adapt(std::vector<std::string>(in.begin(), in.begin() + mid));
+                    auto right =
+                        generate_with_adapt(std::vector<std::string>(in.begin() + mid, in.end()));
+                    if (left.empty() && right.empty())
+                        return {};
+                    std::vector<std::vector<float>> merged;
+                    merged.reserve(left.size() + right.size());
+                    merged.insert(merged.end(), left.begin(), left.end());
+                    merged.insert(merged.end(), right.begin(), right.end());
+                    return merged;
+                };
+
+                auto embeddings = generate_with_adapt(texts);
                 if (embeddings.empty()) {
                     failed += texts.size();
+                    batcher.onFailure();
                     continue;
                 }
 
@@ -436,14 +673,73 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                         record.metadata["name"] = doc.fileName;
                         record.metadata["mime_type"] = doc.mimeType;
                     }
+                    // Track model used for embedding
+                    record.metadata["model"] = selectedModel;
                     records.push_back(std::move(record));
                 }
 
                 if (!records.empty()) {
-                    if (vectorDb->insertVectorsBatch(records)) {
+                    // Resolve lock file path for batch-serialized writes
+                    fs::path lockPath = dataPath_ / "vectors.db.lock";
+                    // Acquire short-lived DB lock per batch with bounded wait/backoff
+                    uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
+                    if (const char* env_ms = std::getenv("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
+                        try {
+                            timeout_ms = std::stoull(std::string(env_ms));
+                        } catch (...) {
+                        }
+                    }
+                    auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+                    uint64_t sleep_ms = 50;
+                    bool inserted = false;
+                    while (!inserted) {
+                        FileLock batchLock(lockPath);
+                        if (batchLock.locked()) {
+                            // Insert while exclusively holding the lock, then release
+                            if (vectorDb->insertVectorsBatch(records)) {
+                                inserted = true;
+                            } else {
+                                // Failure while locked; give up on this batch
+                                break;
+                            }
+                        } else {
+                            spdlog::debug("Repair thread: vector DB busy; waiting for lock...");
+                            if (std::chrono::steady_clock::now() >= deadline) {
+                                spdlog::warn(
+                                    "Repair thread: DB lock timeout; skipping batch of {} records",
+                                    records.size());
+                                break;
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                            sleep_ms = std::min<uint64_t>(sleep_ms * 2, 2000);
+                        }
+                    }
+
+                    if (inserted) {
                         processed += records.size();
+                        batcher.onSuccess(records.size());
+                        // Visibility for operators: show DB path and inserted count
+                        try {
+                            const auto& cfg = vectorDb->getConfig();
+                            spdlog::warn("[vectordb] persisted {} vectors to {} (EmbeddingService)",
+                                         records.size(), cfg.database_path);
+                        } catch (...) {
+                            spdlog::warn("[vectordb] persisted {} vectors (EmbeddingService)",
+                                         records.size());
+                        }
                     } else {
                         failed += records.size();
+                        batcher.onFailure();
+                        try {
+                            spdlog::error("[vectordb] batch insert failed: {}",
+                                          vectorDb->getLastError());
+                        } catch (...) {
+                        }
+                    }
+                    // Optional pause between dynamic batches (cooperative throttling)
+                    if (pause_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
                     }
                 }
             }

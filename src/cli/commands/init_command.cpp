@@ -43,10 +43,7 @@ static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
      "Lightweight model for semantic search", 90, 384},
     {"all-mpnet-base-v2",
      "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
-     "High-quality embeddings for better accuracy", 420, 768},
-    {"nomic-embed-text-v1.5",
-     "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx",
-     "State-of-the-art lightweight embeddings", 138, 768}};
+     "High-quality embeddings for better accuracy", 420, 768}};
 
 class InitCommand : public ICommand {
 public:
@@ -67,6 +64,8 @@ public:
         cmd->add_flag("--no-keygen", noKeygen_, "Skip authentication key generation");
         cmd->add_flag("--print", printConfig_,
                       "Print resulting configuration to stdout (secrets masked)");
+        cmd->add_flag("--enable-plugins", enablePlugins_,
+                      "Create and trust a local plugins directory (~/.local/lib/yams/plugins)");
 
         // Note: storage directory is a global option (--data-dir/--storage). Users can pass it
         // globally: yams --storage /path init We'll also allow overriding interactively.
@@ -154,6 +153,38 @@ public:
                 }
             }
 
+            // 6a) S3 Storage Setup
+            bool useS3 = false;
+            std::string s3Url, s3Region, s3Endpoint, s3AccessKey, s3SecretKey;
+            bool s3UsePathStyle = false;
+            if (!nonInteractive_) {
+                useS3 = promptYesNo(
+                    "\nConfigure S3 as the storage backend? (default: local) [y/N]: ", false);
+                if (useS3) {
+                    std::cout << "Enter S3 URL (e.g., s3://my-bucket/my-prefix): ";
+                    std::getline(std::cin, s3Url);
+                    std::cout << "Enter S3 region [us-east-1]: ";
+                    std::getline(std::cin, s3Region);
+                    if (s3Region.empty())
+                        s3Region = "us-east-1";
+                    std::cout << "Enter S3 endpoint (optional, for R2/MinIO): ";
+                    std::getline(std::cin, s3Endpoint);
+                    std::cout << "Enter S3 Access Key ID (optional, uses env var if blank): ";
+                    std::getline(std::cin, s3AccessKey);
+                    std::cout << "Enter S3 Secret Access Key (optional, uses env var if blank): ";
+                    std::getline(std::cin, s3SecretKey);
+                    s3UsePathStyle =
+                        promptYesNo("Use path-style addressing? (for MinIO) [y/N]: ", false);
+                }
+            }
+
+            // 6b) Plugins setup (local user directory + trust)
+            bool setupPlugins = enablePlugins_;
+            if (!nonInteractive_) {
+                setupPlugins =
+                    promptYesNo("Enable plugins and create a local plugins dir? [Y/n]: ", true);
+            }
+
             // 7) Generate an initial API key
             std::string apiKeyHex = generateApiKey(DEFAULT_API_KEY_BYTES);
 
@@ -165,8 +196,10 @@ public:
             }
 
             // Update the v2 config with user choices
-            auto updateResult = updateV2Config(configPath, dataPath, privateKeyPath, publicKeyPath,
-                                               apiKeyHex, enableVectorDB, selectedModel);
+            auto updateResult =
+                updateV2Config(configPath, dataPath, privateKeyPath, publicKeyPath, apiKeyHex,
+                               enableVectorDB, selectedModel, useS3, s3Url, s3Region, s3Endpoint,
+                               s3AccessKey, s3SecretKey, s3UsePathStyle);
             if (!updateResult) {
                 return updateResult;
             }
@@ -216,6 +249,11 @@ public:
                         spdlog::debug("Vector database tables created successfully");
                     }
                 }
+            }
+
+            // Seed plugins directory and trust list if requested
+            if (setupPlugins) {
+                setupUserPluginsDirAndTrust();
             }
 
             spdlog::info("YAMS initialization complete.");
@@ -275,7 +313,11 @@ private:
     static Result<void> updateV2Config(const fs::path& configPath, const fs::path& dataDir,
                                        const fs::path& privateKeyPath,
                                        const fs::path& publicKeyPath, const std::string& apiKey,
-                                       bool enableVectorDB, const std::string& selectedModel) {
+                                       bool enableVectorDB, const std::string& selectedModel,
+                                       bool useS3, const std::string& s3Url,
+                                       const std::string& s3Region, const std::string& s3Endpoint,
+                                       const std::string& s3AccessKey,
+                                       const std::string& s3SecretKey, bool s3UsePathStyle) {
         try {
             // Read the existing v2 config
             std::ifstream in(configPath);
@@ -292,8 +334,10 @@ private:
             // This is a simple string replacement approach
             // In production, we'd use a proper TOML parser
 
+            size_t pos;
+
             // Update data_dir
-            size_t pos = content.find("data_dir = ");
+            pos = content.find("data_dir = ");
             if (pos != std::string::npos) {
                 size_t endPos = content.find("\n", pos);
                 if (endPos != std::string::npos) {
@@ -367,6 +411,71 @@ private:
                                                                      .string()) +
                                                 "\"");
                         }
+                    }
+                }
+            }
+
+            if (useS3) {
+                pos = content.find("engine = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos, "engine = \"s3\"");
+                    }
+                }
+
+                pos = content.find("url = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos,
+                                        "url = \"" + escapeTomlString(s3Url) + "\"");
+                    }
+                }
+
+                pos = content.find("region = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos,
+                                        "region = \"" + escapeTomlString(s3Region) + "\"");
+                    }
+                }
+
+                pos = content.find("endpoint = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos,
+                                        "endpoint = \"" + escapeTomlString(s3Endpoint) + "\"");
+                    }
+                }
+
+                pos = content.find("access_key = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos,
+                                        "access_key = \"" + escapeTomlString(s3AccessKey) + "\"");
+                    }
+                }
+
+                pos = content.find("secret_key = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos,
+                                        "secret_key = \"" + escapeTomlString(s3SecretKey) + "\"");
+                    }
+                }
+
+                pos = content.find("use_path_style = ");
+                if (pos != std::string::npos) {
+                    size_t endPos = content.find("\n", pos);
+                    if (endPos != std::string::npos) {
+                        content.replace(pos, endPos - pos,
+                                        std::string("use_path_style = ") +
+                                            (s3UsePathStyle ? "true" : "false"));
                     }
                 }
             }
@@ -560,8 +669,70 @@ private:
         return toHex(buf.data(), buf.size());
     }
 
+    void setupUserPluginsDirAndTrust() {
+        try {
+            namespace fs = std::filesystem;
+            // Determine user plugin directory: ~/.local/lib/yams/plugins
+            fs::path userPlugins = fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") /
+                                   ".local" / "lib" / "yams" / "plugins";
+            fs::create_directories(userPlugins);
+            spdlog::info("Plugins directory: {}", userPlugins.string());
+
+            // Write trust file entry so daemon will load from here by default
+            // Trust file aligns with ServiceManager: XDG_CONFIG_HOME or
+            // ~/.config/yams/plugins_trust.txt
+            fs::path cfgHome;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                cfgHome = fs::path(xdg);
+            else if (const char* home = std::getenv("HOME"))
+                cfgHome = fs::path(home) / ".config";
+            else
+                cfgHome = fs::path(".config");
+            fs::path trustFile = cfgHome / "yams" / "plugins_trust.txt";
+            fs::create_directories(trustFile.parent_path());
+            // Append only if not already present
+            std::vector<std::string> lines;
+            {
+                std::ifstream in(trustFile);
+                std::string line;
+                while (in && std::getline(in, line)) {
+                    if (!line.empty())
+                        lines.push_back(line);
+                }
+            }
+            auto canon = fs::weakly_canonical(userPlugins).string();
+            bool present = false;
+            for (const auto& l : lines) {
+                if (fs::weakly_canonical(l).string() == canon) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                std::ofstream out(trustFile, std::ios::app);
+                out << canon << "\n";
+                spdlog::info("Trusted plugin directory added: {}", canon);
+            } else {
+                spdlog::debug("Plugin directory already trusted: {}", canon);
+            }
+
+            // Optional: if a system ONNX plugin exists, hint the user
+            fs::path sys1 = fs::path("/usr/local/lib/yams/plugins/libyams_onnx_plugin.so");
+            fs::path sys2 = fs::path("/usr/lib/yams/plugins/libyams_onnx_plugin.so");
+            if (fs::exists(sys1) || fs::exists(sys2)) {
+                spdlog::info("ONNX plugin found in system plugins. It will be auto-loaded.");
+            } else {
+                spdlog::info(
+                    "You can place plugins under '{}' or set YAMS_PLUGIN_DIR for development.",
+                    userPlugins.string());
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Plugins setup skipped: {}", e.what());
+        }
+    }
+
     std::string promptForModel(const fs::path& dataPath) {
-        std::cout << "\nAvailable embedding models:\n";
+        std::cout << "\nAvailable embedding models (recommended first):\n";
         for (size_t i = 0; i < EMBEDDING_MODELS.size(); ++i) {
             const auto& model = EMBEDDING_MODELS[i];
             std::cout << "  " << (i + 1) << ". " << model.name << " (" << model.size_mb << " MB)\n";
@@ -581,7 +752,15 @@ private:
         }
 
         if (choice < 1 || choice > static_cast<int>(EMBEDDING_MODELS.size())) {
-            choice = 1; // Default to first model
+            // Default to a sensible model (prefer nomic if present)
+            int nomicIdx = -1;
+            for (size_t i = 0; i < EMBEDDING_MODELS.size(); ++i) {
+                if (EMBEDDING_MODELS[i].name.find("nomic-embed-text") != std::string::npos) {
+                    nomicIdx = static_cast<int>(i);
+                    break;
+                }
+            }
+            choice = (nomicIdx >= 0) ? (nomicIdx + 1) : 1;
         }
 
         const auto& selectedModel = EMBEDDING_MODELS[choice - 1];
@@ -593,40 +772,17 @@ private:
         if (fs::exists(modelPath)) {
             std::cout << "\nModel already downloaded at: " << modelPath.string() << "\n";
         } else {
-            std::cout << "\nDownloading " << selectedModel.name << "...\n";
-            if (!downloadModel(selectedModel, modelDir)) {
-                spdlog::error("Failed to download model");
-                return "";
-            }
-            std::cout << "Model downloaded successfully to: " << modelPath.string() << "\n";
+            std::cout << "\nTo download this model via the unified downloader:\n";
+            std::cout << "  yams model download " << selectedModel.name << "\n";
+            std::cout << "  (or: yams model download --hf <org/name>)\n";
+            std::cout << "\nSkipping automatic curl/wget download during init.\n";
         }
 
         return selectedModel.name;
     }
 
-    bool downloadModel(const EmbeddingModel& model, const fs::path& outputDir) {
-        try {
-            // Create model directory
-            fs::create_directories(outputDir);
-            fs::path outputPath = outputDir / "model.onnx";
-
-            // Download using curl or wget
-            std::string command =
-                "curl -L --progress-bar \"" + model.url + "\" -o \"" + outputPath.string() + "\"";
-
-            int result = std::system(command.c_str());
-            if (result != 0) {
-                // Try wget as fallback
-                command = "wget -q --show-progress \"" + model.url + "\" -O \"" +
-                          outputPath.string() + "\"";
-                result = std::system(command.c_str());
-            }
-
-            return result == 0 && fs::exists(outputPath);
-        } catch (const std::exception& e) {
-            spdlog::error("Error downloading model: {}", e.what());
-            return false;
-        }
+    bool downloadModel(const EmbeddingModel& /*model*/, const fs::path& /*outputDir*/) {
+        return false;
     }
 
 private:
@@ -635,6 +791,7 @@ private:
     bool force_ = false;
     bool noKeygen_ = false;
     bool printConfig_ = false;
+    bool enablePlugins_ = false;
 };
 
 // Factory function

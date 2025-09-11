@@ -3,10 +3,14 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <sstream>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/session_store.h>
@@ -100,17 +104,26 @@ public:
             } else {
                 sessionPatterns_.clear();
             }
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            cli_->setPendingCommand(this);
         });
     }
 
     Result<void> execute() override {
-        YAMS_ZONE_SCOPED_N("GetCommand::execute");
+        std::promise<Result<void>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [this, &prom]() -> boost::asio::awaitable<void> {
+                auto r = co_await this->executeAsync();
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        return fut.get();
+    }
 
+    boost::asio::awaitable<Result<void>> executeAsync() override {
+        YAMS_ZONE_SCOPED_N("GetCommand::execute");
         try {
             // Create enhanced daemon request with ALL CLI options mapped
             yams::daemon::GetRequest dreq;
@@ -349,27 +362,39 @@ public:
                 return render(daemonResp);
             };
 
-            // Best-effort: simple direct daemon call with single-use connection,
-            // no streaming; fallback to services on any daemon error
+            // Best-effort: direct daemon call; fallback to services on error
             yams::daemon::ClientConfig cfg;
-            cfg.enableChunkedResponses = true; // allow streaming for faster TTFB
-            cfg.singleUseConnections = false;  // reuse connection within process
+            if (cli_) {
+                auto dp = cli_->getDataPath();
+                if (!dp.empty()) {
+                    cfg.dataDir = dp;
+#ifndef _WIN32
+                    ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
+                    ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
+#endif
+                }
+            }
+            cfg.headerTimeout = std::chrono::milliseconds(30000);
+            cfg.bodyTimeout = std::chrono::milliseconds(120000);
+            yams::daemon::DaemonClient::setTimeoutEnvVars(cfg.headerTimeout, cfg.bodyTimeout);
+            cfg.enableChunkedResponses = true;
+            cfg.singleUseConnections = false;
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             yams::daemon::DaemonClient client(cfg);
             client.setStreamingEnabled(cfg.enableChunkedResponses);
-            auto dres = run_sync(client.call(dreq), std::chrono::seconds(30));
+            auto dres = co_await client.call(dreq);
             if (dres) {
                 auto r = render(dres.value());
                 if (!r)
-                    return r.error();
-                return Result<void>();
+                    co_return r.error();
+                co_return Result<void>();
             }
 
-            // Fallback to local services if daemon fails
-            return fallback();
+            co_return fallback();
 
         } catch (const std::exception& e) {
-            return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};
+            co_return Error{ErrorCode::InternalError,
+                            std::string("GetCommand failed: ") + e.what()};
         }
     }
 

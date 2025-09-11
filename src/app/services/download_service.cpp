@@ -182,6 +182,18 @@ public:
                                                                                     : "false"));
                             }
 
+                            // Apply user-provided tags and metadata first
+                            for (const auto& t : req.tags) {
+                                if (!t.empty())
+                                    ctx_.metadataRepo->setMetadata(docId, "tag",
+                                                                   metadata::MetadataValue(t));
+                            }
+                            for (const auto& [k, v] : req.metadata) {
+                                if (!k.empty())
+                                    ctx_.metadataRepo->setMetadata(docId, k,
+                                                                   metadata::MetadataValue(v));
+                            }
+
                             // Derive and index helper tags for discoverability
                             // downloaded, host:..., scheme:...
                             ctx_.metadataRepo->setMetadata(docId, "tag",

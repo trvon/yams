@@ -58,11 +58,23 @@ public:
     Result<void> commitTransaction() override;
     Result<void> rollbackTransaction() override;
 
+    // Backend-specific helpers (used opportunistically by higher layers)
+    // Return the embedding dimension encoded in the vec0 table DDL, if present.
+    std::optional<size_t> getStoredEmbeddingDimension() const;
+    // Drop vector and metadata tables (safe when reinitializing an empty DB/schema).
+    Result<void> dropTables();
+
+    // Explicitly ensure sqlite-vec module is loaded (doctor can call separately)
+    Result<void> ensureVecLoaded();
+
 private:
     /**
      * @brief Internal insert method that optionally manages transactions
      */
     Result<void> insertVectorInternal(const VectorRecord& record, bool manage_transaction);
+
+    // Validate embedding dimension against known schema dimension when available
+    Result<void> validateEmbeddingDim(size_t actual_dim) const;
 
     /**
      * @brief Load sqlite-vec extension into the database

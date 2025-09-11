@@ -8,7 +8,7 @@
 #include <yams/content/binary_content_handler.h>
 #include <yams/content/content_handler_registry.h>
 #include <yams/content/image_content_handler.h>
-#include <yams/content/pdf_content_handler.h>
+
 #include <yams/content/text_content_handler.h>
 #if defined(YAMS_HAVE_FFPROBE) || defined(YAMS_HAVE_MEDIAINFO)
 #include <yams/content/video_content_handler.h>
@@ -188,7 +188,7 @@ void ContentHandlerRegistry::initializeDefaultHandlers() {
         {"ArchiveContentHandler",
          []() { return std::shared_ptr<IContentHandler>(createArchiveHandler().release()); }},
         {"TextContentHandler", []() { return std::make_shared<TextContentHandler>(); }},
-        {"PdfContentHandler", []() { return std::make_shared<PdfContentHandler>(); }},
+
         {"BinaryContentHandler", []() { return std::make_shared<BinaryContentHandler>(); }}};
 
     // C++20: Use ranges to register all handlers

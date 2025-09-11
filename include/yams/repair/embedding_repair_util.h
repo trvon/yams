@@ -2,6 +2,7 @@
 
 #include <yams/api/content_store.h>
 #include <yams/core/types.h>
+#include <yams/extraction/content_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -51,7 +52,8 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                         std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
                         const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes = {},
-                        EmbeddingRepairProgressCallback progressCallback = nullptr);
+                        EmbeddingRepairProgressCallback progressCallback = nullptr,
+                        const yams::extraction::ContentExtractorList& extractors = {});
 
 /**
  * Check if a document has embeddings in the vector database.

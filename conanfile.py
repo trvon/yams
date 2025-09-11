@@ -20,6 +20,7 @@ class YamsConan(ConanFile):
         "enable_pdf": [True, False],
         "enable_tui": [True, False],  # Separate TUI from CLI
         "enable_onnx": [True, False],  # Gate ONNX Runtime and its transitive graph
+        "enable_wasmtime": [True, False],  # Gate WASM host (wasmtime-cpp integration)
     }
     default_options = {
         "build_cli": True,
@@ -28,7 +29,8 @@ class YamsConan(ConanFile):
         "build_benchmarks": False,
         "enable_pdf": True,  # PDF support enabled by default (uses FetchContent since PDFium not in Conan Center)
         "enable_tui": False,  # TUI disabled by default to reduce dependencies
-        "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
+        "enable_onnx": True,      # ONNX enabled by default; can be disabled to drop Boost
+        "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
     }
 
     generators = "CMakeDeps"  # CMakeToolchain is handled in generate()
@@ -66,6 +68,14 @@ class YamsConan(ConanFile):
         # ONNX Runtime for embeddings and LLM inference (optional)
         if self.options.enable_onnx:
             self.requires("onnxruntime/1.18.1")
+
+        # WASM runtime (optional): wasmtime-cpp is not in ConanCenter by default.
+        # If you have a package available on your remotes, you can enable this and
+        # provide the correct reference here (e.g., "wasmtime-cpp/x.y.z").
+        # Otherwise, YAMS_HAVE_WASMTIME just toggles build codepaths and you must
+        # supply include/link flags via your toolchain or presets.
+        if self.options.enable_wasmtime:
+            pass  # Intentionally no default requires; see note above.
 
     def build_requirements(self):
         if self.options.build_tests:
@@ -112,6 +122,8 @@ class YamsConan(ConanFile):
         tc.variables["YAMS_ENABLE_PDF"] = "ON" if self.options.enable_pdf else "OFF"
         tc.variables["YAMS_ENABLE_TUI"] = "ON" if self.options.enable_tui else "OFF"
         tc.variables["YAMS_ENABLE_ONNX"] = "ON" if self.options.enable_onnx else "OFF"
+        # Toggle WASM runtime integration in CMake; external toolchain must supply wasmtime-cpp
+        tc.variables["YAMS_HAVE_WASMTIME"] = "ON" if self.options.enable_wasmtime else "OFF"
         tc.generate()
 
     def build(self):

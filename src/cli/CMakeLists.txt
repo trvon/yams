@@ -30,6 +30,10 @@ set(CLI_SOURCES
     commands/model_command.cpp
     commands/daemon_command.cpp
     commands/download_command.cpp
+    commands/plugin_command.cpp
+    commands/doctor_command.cpp
+    commands/dr_command.cpp
+    commands/graph_command.cpp
 )
 
 # Add TUI sources only if enabled
@@ -57,11 +61,13 @@ set_target_properties(yams_cli PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 target_link_libraries(yams_cli
     PUBLIC
         yams_api
+        yams::vector
         yams_search
         yams_metadata
         yams_detection
         yams_config
         yams_daemon
+        yams::daemon_client
         yams_boost_headers
     $<$<TARGET_EXISTS:boost::_libboost>:boost::_libboost>
     $<$<TARGET_EXISTS:Boost::headers>:Boost::headers>
@@ -74,6 +80,7 @@ target_link_libraries(yams_cli
         $<$<BOOL:${YAMS_ENABLE_TUI}>:imtui-ncurses>
         sqlite3
         yams_downloader
+        $<$<PLATFORM_ID:Linux>:dl>
 )
 
 # Boost.Asio headers are provided via yams_boost_headers
@@ -98,6 +105,7 @@ target_include_directories(yams_cli
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/cli
         ${CMAKE_BINARY_DIR}/_deps/imtui-src/third-party/imgui/imgui
         $<INSTALL_INTERFACE:include>
 )

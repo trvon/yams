@@ -8,6 +8,18 @@ on:
     workflows: ["CI"]
     types:
       - completed
+  # Nightly at 02:00 UTC (adjust as desired)
+  schedule:
+    - cron: "0 2 * * *"
+    # Weekly (every Monday) at 03:00 UTC (adjust as desired)
+    - cron: "0 3 * * 1"
+  # Optional manual run with channel override
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel (stable|weekly|nightly)"
+        required: false
+        default: "nightly"
 
 permissions:
   contents: write
@@ -15,8 +27,12 @@ permissions:
 jobs:
   build-release:
     name: Build and Release (${{ matrix.os }})
-    # Only run release if CI passed successfully
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'push' }}
+    # Only run if:
+    # - CI passed successfully (workflow_run), OR
+    # - it's a tag push, OR
+    # - it's a scheduled build (nightly/weekly), OR
+    # - it's manually dispatched
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -43,12 +59,6 @@ jobs:
             cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             suffix: macos-x86_64
             hosted: true
-          - os: windows-hosted-x64
-            runs_on: "windows-2022"
-            packaging: zip
-            cmake_args: ""
-            suffix: windows-x86_64
-            hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
       BUILD_DIR: build/yams-release
@@ -60,6 +70,64 @@ jobs:
         with:
           # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
+
+      - name: Determine release channel and version/tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EVENT="${{ github.event_name }}"
+          # When schedule triggers, this contains the cron expression that matched
+          SCHEDULE_CRON="${{ github.event.schedule || '' }}"
+          INPUT_CHANNEL="${{ inputs.channel || '' }}"
+
+          channel=""
+          if [ "$EVENT" = "push" ]; then
+            channel="stable"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
+            case "$INPUT_CHANNEL" in
+              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
+              *) channel="nightly" ;;
+            esac
+          elif [ "$EVENT" = "schedule" ]; then
+            # Tie channel to the configured crons above
+            if [ "$SCHEDULE_CRON" = "0 3 * * 1" ]; then
+              channel="weekly"
+            else
+              channel="nightly"
+            fi
+          else
+            # Fallback for workflow_run or any other event
+            channel="stable"
+          fi
+
+          # Derive version and tag
+          if [ "$channel" = "stable" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+            TAG_OUT="${GITHUB_REF_NAME}"
+          elif [ "$channel" = "nightly" ]; then
+            DATE="$(date -u +%Y%m%d)"
+            VERSION="nightly-${DATE}"
+            TAG_OUT="$VERSION"
+          else # weekly
+            YEAR="$(date -u +%G)"   # ISO week-numbering year
+            WEEK="$(date -u +%V)"   # ISO week number 01-53
+            VERSION="weekly-${YEAR}w${WEEK}"
+            TAG_OUT="$VERSION"
+          fi
+
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
+          if [ "$channel" = "stable" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
 
       - name: Download CI benchmark artifacts (-yams, if available)
         if: github.event_name == 'workflow_run'
@@ -104,24 +172,16 @@ jobs:
             yams-release-${{ runner.os }}-${{ matrix.suffix }}-
             yams-${{ runner.os }}-
 
-      - name: Extract version from tag
-        id: v
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VERSION"
-
-      - name: Extract release notes from CHANGELOG.md
+      - name: Extract release notes from CHANGELOG.md (stable only)
         id: changelog
+        if: steps.meta.outputs.channel == 'stable'
         uses: ffurrer2/extract-release-notes@v2
         with:
           changelog_file: CHANGELOG.md
 
       # Hosted runners: install and configure Conan (self-hosted must already be configured)
       - name: Install Conan (hosted only)
-        if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
+        if: ${{ matrix.hosted }}
         shell: bash
         run: |
           python3 -m pip install --upgrade "conan>=2,<3" || python -m pip install --upgrade "conan>=2,<3"
@@ -131,74 +191,48 @@ jobs:
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
       - name: Ensure build tools (cmake, ninja) for local runners/act
-        if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
+        if: ${{ matrix.hosted }}
         shell: bash
         run: |
-          set -e
-          if ! command -v cmake >/dev/null 2>&1; then
-            echo "cmake not found; installing build tools..."
-            if command -v apt-get >/dev/null 2>&1; then
-              sudo -n true 2>/dev/null || true
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y cmake ninja-build build-essential pkg-config
-            elif command -v brew >/dev/null 2>&1; then
-              brew update
-              brew install cmake ninja
-            else
-              echo "No supported package manager found; please ensure cmake & ninja are installed" >&2
+          set -euo pipefail
+          need_modern_cmake() {
+            if ! command -v cmake >/dev/null 2>&1; then
+              return 0
             fi
+            v=$(cmake --version | head -1 | sed -E 's/.* ([0-9]+)\.([0-9]+)\..*/\1.\2/')
+            awk -v have="$v" 'BEGIN{ split(have,a,"."); if (a[1]>3 || (a[1]==3 && a[2]>=25)) exit 1; else exit 0 }'
+          }
+
+          add_user_bin_to_path() {
+            if [ -n "${GITHUB_PATH:-}" ]; then
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            else
+              export PATH="$HOME/.local/bin:$PATH"
+            fi
+          }
+
+          if need_modern_cmake; then
+            echo "Installing modern CMake and Ninja via pip"
+            python3 -m pip install --user --upgrade cmake 'ninja>=1.10' || python -m pip install --user --upgrade cmake 'ninja>=1.10'
+            add_user_bin_to_path
+            echo "cmake version: $(cmake --version | head -1)"
+            echo "ninja version: $(ninja --version || true)"
+          elif ! command -v ninja >/dev/null 2>&1; then
+            echo "Installing Ninja via pip"
+            python3 -m pip install --user --upgrade 'ninja>=1.10' || true
+            add_user_bin_to_path
           else
             echo "cmake present: $(cmake --version | head -1)"
+            echo "ninja present: $(ninja --version || true)"
           fi
 
       - name: Setup Conan (hosted Linux/macOS)
-        if: ${{ matrix.hosted && !startsWith(matrix.os, 'windows') }}
+        if: ${{ matrix.hosted  }}
         shell: bash
         run: |
           set -e
           conan profile detect --force
           echo "Conan detected default profile. Will use host profile conan/profiles/host.jinja at install time."
-
-      - name: Setup Python (hosted Windows)
-        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Install Conan (hosted Windows)
-        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --user pipx
-          python -m pipx ensurepath
-          try {
-            pipx install "conan>=2,<3" --force
-          } catch {
-            Write-Host "pipx install failed; falling back to pip"
-            python -m pip install --upgrade "conan>=2,<3"
-          }
-          $scriptDir = "$env:PythonLocation\Scripts"
-          $localBin = "$env:USERPROFILE\.local\bin"
-          $env:PATH = "$localBin;$scriptDir;$env:PATH"
-          "$localBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          conan --version
-
-      - name: Setup Conan (hosted Windows)
-        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          conan profile detect --force
-          Write-Host "Conan detected default profile. Will use host profile conan/profiles/host.jinja at install time."
-
-      - name: Install Ninja (Windows)
-        if: ${{ matrix.hosted && startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          choco install ninja --yes --no-progress
-          ninja --version
 
       - name: Check Conan (self-hosted sanity)
         if: ${{ !matrix.hosted }}
@@ -219,7 +253,6 @@ jobs:
 
       # Release build for ALL targets
       - name: Configure and Build Release (Optimized)
-        if: ${{ !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
@@ -239,60 +272,12 @@ jobs:
           conan install . $CONAN_ARGS
           cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
-            -DYAMS_VERSION="${{ steps.v.outputs.version }}" \
+            -DYAMS_VERSION="${{ steps.meta.outputs.version }}" \
             -DCMAKE_CXX_STANDARD=20 \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
             ${{ matrix.cmake_args}}
           cmake --build --preset yams-release --parallel
           echo "BUILD_DIR=build/yams-release" >> $GITHUB_ENV
-
-      - name: Configure and Build Release (Optimized) [Windows]
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          Write-Host "Optimized release build for ${{ matrix.suffix }}"
-          Remove-Item -Recurse -Force build\yams-release -ErrorAction SilentlyContinue
-          Remove-Item -Force CMakeUserPresets.json -ErrorAction SilentlyContinue
-
-          # Ensure Conan is available (pipx first, fallback to pip), and update PATH
-          python -m pip install --upgrade pip
-          python -m pip install --user pipx
-          python -m pipx ensurepath
-          try {
-            pipx install conan --force
-          } catch {
-            Write-Host "pipx install failed; falling back to pip"
-            python -m pip install --upgrade conan
-          }
-          $scriptDir = "$env:PythonLocation\Scripts"
-          $localBin = "$env:USERPROFILE\.local\bin"
-          $env:PATH = "$localBin;$scriptDir;$env:PATH"
-          "$localBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "$scriptDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          conan --version
-
-          # Use Conan 2 profiles: default build profile + host profile forcing C++20
-          # Disable ONNX on Windows to avoid MSVC build issues.
-          conan install . -of build/yams-release -pr:h=./conan/profiles/host.jinja -pr:b=default -s build_type=Release -o enable_onnx=False --build=missing -g CMakeToolchain -g CMakeDeps
-
-          # Ensure toolchain path exists where preset expects it; copy if needed
-          $expected = "build/yams-release/generators/conan_toolchain.cmake"
-          $flat = "build/yams-release/conan_toolchain.cmake"
-          if (!(Test-Path $expected) -and (Test-Path $flat)) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $expected) | Out-Null
-            Copy-Item $flat $expected -Force
-          }
-
-          cmake --preset yams-release -DCMAKE_TOOLCHAIN_FILE=build/yams-release/generators/conan_toolchain.cmake `
-            -DYAMS_BUILD_PROFILE=release `
-            -DYAMS_VERSION="${{ steps.v.outputs.version }}" `
-            -DCMAKE_CXX_STANDARD=20 `
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\${{ env.STAGE_DIR }}" `
-            ${{ matrix.cmake_args }}
-
-          cmake --build --preset yams-release --parallel
-
-          "BUILD_DIR=build/yams-release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: Collect benchmark results
         shell: bash
@@ -326,10 +311,11 @@ jobs:
         shell: bash
         run: |
           SUMMARY_FILE="$BUILD_DIR/release_summary.md"
-          echo "## Release Build Information (v${{ steps.v.outputs.version }})" > "$SUMMARY_FILE"
+          echo "## Release Build Information (${{ steps.meta.outputs.version }})" > "$SUMMARY_FILE"
           echo "" >> "$SUMMARY_FILE"
           echo "**Platform:** ${{ matrix.suffix }}" >> "$SUMMARY_FILE"
           echo "**Build Type:** Release" >> "$SUMMARY_FILE"
+          echo "**Channel:** ${{ steps.meta.outputs.channel }}" >> "$SUMMARY_FILE"
 
           # Only mention CI validation if we actually have CI artifacts
           if [ -d "ci-artifacts" ] && [ "$(ls -A ci-artifacts/ 2>/dev/null)" ]; then
@@ -370,23 +356,23 @@ jobs:
             do
               if [ -f "$json_file" ]; then
                 python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
-import json, sys
-try:
-    path = sys.argv[1]
-    with open(path) as f:
-        data = json.load(f)
-        if 'benchmarks' in data:
-            for bench in data['benchmarks']:
-                name = bench.get('name', 'Unknown')
-                real_time = bench.get('real_time', 0.0)
-                cpu_time = bench.get('cpu_time', 0.0)
-                bytes_per_sec = bench.get('bytes_per_second', 0.0)
-                items_per_sec = bench.get('items_per_second', 0.0)
-                memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
-                print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
-except Exception:
-    pass
-PY
+                  import json, sys
+                  try:
+                      path = sys.argv[1]
+                      with open(path) as f:
+                          data = json.load(f)
+                          if 'benchmarks' in data:
+                              for bench in data['benchmarks']:
+                                  name = bench.get('name', 'Unknown')
+                                  real_time = bench.get('real_time', 0.0)
+                                  cpu_time = bench.get('cpu_time', 0.0)
+                                  bytes_per_sec = bench.get('bytes_per_second', 0.0)
+                                  items_per_sec = bench.get('items_per_second', 0.0)
+                                  memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
+                                  print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
+                  except Exception:
+                      pass
+                  PY
               fi
             done
             echo "" >> "$SUMMARY_FILE"
@@ -396,11 +382,10 @@ PY
           cat "$SUMMARY_FILE"
 
       - name: Package
-        if: ${{ !startsWith(matrix.os, 'windows') }}
         shell: bash
         run: |
           cd "$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}"
-          VERSION="${{ steps.v.outputs.version }}"
+          VERSION="${{ steps.meta.outputs.version }}"
           SUFFIX="${{ matrix.suffix }}"
           OUTDIR="$GITHUB_WORKSPACE"
           if [ "${{ matrix.packaging }}" = "zip" ]; then
@@ -413,25 +398,12 @@ PY
           echo "ASSET_PATH=$OUTDIR/$ASSET" >> "$GITHUB_ENV"
           echo "Created asset: $OUTDIR/$ASSET"
 
-      - name: Package (Windows)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          $stage = "${{ github.workspace }}\${{ env.STAGE_DIR }}"
-          $version = "${{ steps.v.outputs.version }}"
-          $suffix = "${{ matrix.suffix }}"
-          $out = "${{ github.workspace }}\yams-$version-$suffix.zip"
-          if (Test-Path $out) { Remove-Item $out -Force }
-          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $out
-          "ASSET_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-          Write-Host "Created asset: $out"
-
       - name: Build Linux packages (DEB/RPM)
         if: matrix.build_packages == true && matrix.os == 'linux-hosted'
         shell: bash
         run: |
           cd "$BUILD_DIR"
-          VERSION="${{ steps.v.outputs.version }}"
+          VERSION="${{ steps.meta.outputs.version }}"
 
           # Generate DEB package
           cpack -G DEB -D CPACK_PACKAGE_VERSION="${VERSION}"
@@ -470,7 +442,8 @@ PY
             echo "appimage-builder not found, skipping AppImage generation"
           fi
 
-      - name: Combine release notes with build information
+      - name: Combine release notes with build information (stable only)
+        if: steps.meta.outputs.channel == 'stable'
         shell: bash
         run: |
           COMBINED_NOTES="$BUILD_DIR/combined_release_notes.md"
@@ -488,7 +461,8 @@ PY
       - name: Publish matrix.json (expected platform count)
         shell: bash
         run: |
-          echo '{"total": 4}' > matrix.json
+          # Update to reflect current matrix total (3 platforms)
+          echo '{"total": 3}' > matrix.json
 
       - name: Upload matrix metadata
         uses: actions/upload-artifact@v4
@@ -521,11 +495,66 @@ PY
       contents: write
       actions: read
     steps:
+      - name: Determine release channel and version/tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EVENT="${{ github.event_name }}"
+          SCHEDULE_CRON="${{ github.event.schedule || '' }}"
+          INPUT_CHANNEL="${{ inputs.channel || '' }}"
+
+          channel=""
+          if [ "$EVENT" = "push" ]; then
+            channel="stable"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
+            case "$INPUT_CHANNEL" in
+              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
+              *) channel="nightly" ;;
+            esac
+          elif [ "$EVENT" = "schedule" ]; then
+            if [ "$SCHEDULE_CRON" = "0 3 * * 1" ]; then
+              channel="weekly"
+            else
+              channel="nightly"
+            fi
+          else
+            channel="stable"
+          fi
+
+          if [ "$channel" = "stable" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+            TAG_OUT="${GITHUB_REF_NAME}"
+          elif [ "$channel" = "nightly" ]; then
+            DATE="$(date -u +%Y%m%d)"
+            VERSION="nightly-${DATE}"
+            TAG_OUT="$VERSION"
+          else
+            YEAR="$(date -u +%G)"
+            WEEK="$(date -u +%V)"
+            VERSION="weekly-${YEAR}w${WEEK}"
+            TAG_OUT="$VERSION"
+          fi
+
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
+          if [ "$channel" = "stable" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           pattern: "*"
+
       - name: Check job completion status
         id: check-status
         shell: bash
@@ -575,27 +604,20 @@ PY
         with:
           fetch-depth: 0
 
-      - name: Extract version from tag
-        id: v
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VERSION"
-
-      - name: Extract release notes from CHANGELOG.md
+      - name: Extract release notes from CHANGELOG.md (stable only)
         id: changelog
+        if: steps.meta.outputs.channel == 'stable'
         uses: ffurrer2/extract-release-notes@v2
         with:
           changelog_file: CHANGELOG.md
 
-      - name: Extract grouped changelogs for minor version
+      - name: Extract grouped changelogs for minor version (stable only)
         id: grouped-changelog
+        if: steps.meta.outputs.channel == 'stable'
         shell: bash
         run: |
           # Extract minor version from current tag
-          CURRENT_VERSION="${{ steps.v.outputs.version }}"
+          CURRENT_VERSION="${{ steps.meta.outputs.version }}"
           MINOR_VERSION=$(echo "$CURRENT_VERSION" | sed -E 's/^v?([0-9]+\.[0-9]+).*/\1/')
 
           echo "Current version: $CURRENT_VERSION"
@@ -613,7 +635,6 @@ PY
           # Parse CHANGELOG.md and extract all sections matching the minor version
           awk -v minor="$MINOR_VERSION" '
             /^## \[v?[0-9]+\.[0-9]+\.[0-9]+/ {
-              # Extract version parts using simpler approach
               version_str = $2
               gsub(/\ \[v?/, "", version_str)
               gsub(/\ /, "", version_str)
@@ -662,63 +683,92 @@ PY
         run: |
           COMBINED_NOTES="combined_release_notes.md"
 
-          # Start with current version changes
-          echo "# YAMS ${{ steps.v.outputs.version }}" > "$COMBINED_NOTES"
-          echo "" >> "$COMBINED_NOTES"
-          echo "${{ steps.changelog.outputs.release_notes }}" >> "$COMBINED_NOTES"
-          echo "" >> "$COMBINED_NOTES"
+          if [ "${{ steps.meta.outputs.channel }}" = "stable" ]; then
+            echo "# YAMS ${{ steps.meta.outputs.version }}" > "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            echo "${{ steps.changelog.outputs.release_notes }}" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
 
-          # Add platform build status
-          echo "## Platform Builds" >> "$COMBINED_NOTES"
-          echo "" >> "$COMBINED_NOTES"
-          echo "Successfully built for ${{ steps.check-status.outputs.success_count }} out of ${{ steps.check-status.outputs.total_expected }} platforms:" >> "$COMBINED_NOTES"
-          echo "" >> "$COMBINED_NOTES"
+            # Add platform build status
+            echo "## Platform Builds" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            echo "Successfully built for ${{ steps.check-status.outputs.success_count }} out of ${{ steps.check-status.outputs.total_expected }} platforms:" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
 
-          # Add summaries from each platform
-          for summary in release-artifacts/release-*/release_summary.md;
-          do
-            if [ -f "$summary" ]; then
-              platform=$(basename $(dirname "$summary") | sed 's/release-//')
-              echo "### ✅ $platform" >> "$COMBINED_NOTES"
-              tail -n +2 "$summary" >> "$COMBINED_NOTES"
+            # Add summaries from each platform
+            for summary in release-artifacts/release-*/release_summary.md;
+            do
+              if [ -f "$summary" ]; then
+                platform=$(basename $(dirname "$summary") | sed 's/release-//')
+                echo "### ✅ $platform" >> "$COMBINED_NOTES"
+                tail -n +2 "$summary" >> "$COMBINED_NOTES"
+                echo "" >> "$COMBINED_NOTES"
+              fi
+            done
+
+            # List missing platforms if any
+            if [ "${{ steps.check-status.outputs.success_count }}" -lt "3" ]; then
+              echo "### ⚠️ Missing Platforms" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+              echo "Some platforms failed to build. They may be added in a future patch release." >> "$COMBINED_NOTES"
               echo "" >> "$COMBINED_NOTES"
             fi
-          done
 
-          # List missing platforms if any
-          if [ "${{ steps.check-status.outputs.success_count }}" -lt "3" ]; then
-            echo "### ⚠️ Missing Platforms" >> "$COMBINED_NOTES"
+            # Add series changelog if not a patch 0 release
+            PATCH_VERSION=$(echo "${{ steps.meta.outputs.version }}" | sed -E 's/^v?[0-9]+\.[0-9]+\.([0-9]+).*/\1/')
+            if [ "$PATCH_VERSION" != "0" ]; then
+              echo "---" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+              echo "## All Changes in v${{ steps.grouped-changelog.outputs.minor_version }}.x Series" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+              echo "<details>" >> "$COMBINED_NOTES"
+              echo "<summary>Click to expand full series changelog</summary>" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+              # Include grouped changelog content
+              if [ -f "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" ]; then
+                tail -n +4 "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" >> "$COMBINED_NOTES"
+              fi
+              echo "" >> "$COMBINED_NOTES"
+              echo "</details>" >> "$COMBINED_NOTES"
+            fi
+          else
+            # Nightly/Weekly: generate minimal, automatic notes with commit log since last tag
+            echo "# YAMS ${{ steps.meta.outputs.version }}" > "$COMBINED_NOTES"
             echo "" >> "$COMBINED_NOTES"
-            echo "Some platforms failed to build. They may be added in a future patch release." >> "$COMBINED_NOTES"
+            echo "This is an automated ${{ steps.meta.outputs.channel }} build." >> "$COMBINED_NOTES"
             echo "" >> "$COMBINED_NOTES"
-          fi
-
-          # Add series changelog if not a patch 0 release
-          PATCH_VERSION=$(echo "${{ steps.v.outputs.version }}" | sed -E 's/^v?[0-9]+\.[0-9]+\.([0-9]+).*/\1/')
-          if [ "$PATCH_VERSION" != "0" ]; then
-            echo "---" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            echo "## All Changes in v${{ steps.grouped-changelog.outputs.minor_version }}.x Series" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            echo "<details>" >> "$COMBINED_NOTES"
-            echo "<summary>Click to expand full series changelog</summary>" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            # Include grouped changelog content
-            if [ -f "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" ]; then
-              tail -n +4 "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" >> "$COMBINED_NOTES"
+            PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+            if [ -n "$PREV_TAG" ]; then
+              echo "## Changes since $PREV_TAG" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+              git log --pretty=format:"- %h %s (%an)" "${PREV_TAG}..HEAD" >> "$COMBINED_NOTES" || true
+            else
+              echo "## Recent changes" >> "$COMBINED_NOTES"
+              echo "" >> "$COMBINED_NOTES"
+              git log -n 50 --pretty=format:"- %h %s (%an)" >> "$COMBINED_NOTES" || true
             fi
             echo "" >> "$COMBINED_NOTES"
-            echo "</details>" >> "$COMBINED_NOTES"
+            echo "## Platform Builds" >> "$COMBINED_NOTES"
+            echo "" >> "$COMBINED_NOTES"
+            echo "Successfully built for ${{ steps.check-status.outputs.success_count }} out of ${{ steps.check-status.outputs.total_expected }} platforms." >> "$COMBINED_NOTES"
           fi
 
+      - name: "Dry-run: print release notes (act only)"
+        if: ${{ github.actor == 'nektos/act' }}
+        shell: bash
+        run: |
+          echo "--- Combined Release Notes (dry-run) ---"
+          cat combined_release_notes.md
+
       - name: Create GitHub Release
+        if: ${{ github.actor != 'nektos/act' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: YAMS ${{ steps.v.outputs.version }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: YAMS ${{ steps.meta.outputs.version }}
           body_path: combined_release_notes.md
           files: assets/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,5 +1,7 @@
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <sstream>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -94,6 +96,16 @@ SqliteVecBackend& SqliteVecBackend::operator=(SqliteVecBackend&& other) noexcept
     return *this;
 }
 
+Result<void> SqliteVecBackend::validateEmbeddingDim(size_t actual_dim) const {
+    if (embedding_dim_ > 0 && actual_dim != embedding_dim_) {
+        std::stringstream ss;
+        ss << "Embedding dimension mismatch (expected=" << embedding_dim_ << ", got=" << actual_dim
+           << ")";
+        return Error{ErrorCode::InvalidArgument, ss.str()};
+    }
+    return Result<void>();
+}
+
 Result<void> SqliteVecBackend::initialize(const std::string& db_path) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::initialize");
     std::lock_guard<std::mutex> lock(mutex_);
@@ -106,7 +118,10 @@ Result<void> SqliteVecBackend::initialize(const std::string& db_path) {
     int rc;
     {
         YAMS_ZONE_SCOPED_N("SQLite::OpenDatabase");
-        rc = sqlite3_open(db_path.c_str(), &db_);
+        // Prefer open_v2 with FULLMUTEX to avoid cross-thread hazards
+        rc = sqlite3_open_v2(db_path.c_str(), &db_,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                             nullptr);
     }
 
     if (rc != SQLITE_OK) {
@@ -116,44 +131,106 @@ Result<void> SqliteVecBackend::initialize(const std::string& db_path) {
         return Error{ErrorCode::DatabaseError, "Failed to open database: " + error};
     }
 
-    // Set busy timeout to avoid indefinite blocking
-    sqlite3_busy_timeout(db_, 5000); // 5 second timeout
+    // Set busy timeout to avoid indefinite blocking (configurable)
+    int busy_ms = 5000; // default 5s
+    if (const char* env_busy = std::getenv("YAMS_SQLITE_BUSY_TIMEOUT_MS")) {
+        try {
+            busy_ms = std::max(100, std::stoi(env_busy));
+        } catch (...) {
+        }
+    }
+    sqlite3_busy_timeout(db_, busy_ms);
 
     db_path_ = db_path;
 
     spdlog::info("Database opened successfully: {}", db_path);
-    // Enable additional pragmas for robustness and performance
-    executeSQL("PRAGMA foreign_keys=ON");
-    executeSQL("PRAGMA temp_store=MEMORY");
-    // 256 MiB memory map for improved I/O performance (bytes)
-    executeSQL("PRAGMA mmap_size=268435456");
+    // Optional minimal mode (for doctor/maintenance) to avoid heavyweight PRAGMAs
+    bool minimal_pragmas = false;
+    if (const char* env_min = std::getenv("YAMS_SQLITE_MINIMAL_PRAGMAS")) {
+        std::string v(env_min);
+        for (auto& c : v)
+            c = static_cast<char>(std::tolower(c));
+        minimal_pragmas = (v == "1" || v == "true" || v == "yes" || v == "on");
+    }
+    // Enable additional pragmas for robustness and performance (skippable)
+    if (!minimal_pragmas) {
+        executeSQL("PRAGMA foreign_keys=ON");
+        executeSQL("PRAGMA temp_store=MEMORY");
+        // 256 MiB memory map for improved I/O performance (bytes)
+        executeSQL("PRAGMA mmap_size=268435456");
+    } else {
+        // Minimal footprint: avoid any PRAGMA that could contend or block
+        // Diagnostics-only mode relies on sane SQLite defaults.
+    }
 
-    // Harden connection against SQLITE_BUSY/LOCKED and enable WAL for better concurrency
+    // Harden connection against SQLITE_BUSY/LOCKED
     sqlite3_extended_result_codes(db_, 1);
-    sqlite3_busy_timeout(db_, 10000);
-
-    {
+    // In minimal mode, skip WAL-related PRAGMAs to minimize lock contention
+    if (!minimal_pragmas) {
         auto pragma = executeSQL("PRAGMA journal_mode=WAL");
         if (!pragma) {
             spdlog::warn("Failed to enable WAL journal mode: {}. Continuing with default mode.",
                          pragma.error().message);
         }
+        // Reasonable durability/performance trade-offs for WAL
+        executeSQL("PRAGMA synchronous=NORMAL");
+        executeSQL("PRAGMA wal_autocheckpoint=1000");
     }
-    // Reasonable durability/performance trade-offs for WAL
-    executeSQL("PRAGMA synchronous=NORMAL");
-    executeSQL("PRAGMA wal_autocheckpoint=1000");
 
-    // Load sqlite-vec extension
-    Result<void> result;
-    {
-        YAMS_ZONE_SCOPED_N("SQLite::LoadVecExtension");
-        result = loadSqliteVecExtension();
+    // Optionally defer sqlite-vec initialization (doctor may load it separately)
+    bool skip_vec = false;
+    if (const char* env = std::getenv("YAMS_SQLITE_VEC_SKIP_INIT")) {
+        std::string v(env);
+        for (auto& c : v)
+            c = static_cast<char>(std::tolower(c));
+        skip_vec = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
-    if (!result) {
-        close();
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to load sqlite-vec extension: " + result.error().message};
+    if (!skip_vec) {
+        Result<void> result;
+        {
+            YAMS_ZONE_SCOPED_N("SQLite::LoadVecExtension");
+            int timeout_ms = 5000; // default 5s
+            if (const char* env = std::getenv("YAMS_SQLITE_VEC_INIT_TIMEOUT_MS")) {
+                try {
+                    timeout_ms = std::stoi(env);
+                    if (timeout_ms < 500)
+                        timeout_ms = 500;
+                } catch (...) {
+                }
+            }
+            auto fut =
+                std::async(std::launch::async, [this]() { return loadSqliteVecExtension(); });
+            if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+                std::future_status::timeout) {
+                close();
+                return Error{ErrorCode::Timeout,
+                             std::string("sqlite-vec extension initialization timed out after ") +
+                                 std::to_string(timeout_ms) + " ms"};
+            }
+            result = fut.get();
+        }
+        if (!result) {
+            close();
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to load sqlite-vec extension: " + result.error().message};
+        }
     }
+
+    // Configure busy timeout (env override)
+    try {
+        busy_ms = 10000;
+        if (const char* env = std::getenv("YAMS_SQLITE_BUSY_TIMEOUT_MS")) {
+            try {
+                busy_ms = std::max(0, std::stoi(env));
+            } catch (...) {
+            }
+        }
+        sqlite3_busy_timeout(db_, busy_ms);
+    } catch (...) {
+    }
+
+    // Pre-populating embedding_dim_ from existing schema is now handled by the caller
+    // (e.g., doctor command) before initialization, to avoid queries during open.
 
     initialized_ = true;
     spdlog::info("SqliteVecBackend initialized with database: {}", db_path);
@@ -328,6 +405,55 @@ bool SqliteVecBackend::tablesExist() const {
     return true;
 }
 
+std::optional<size_t> SqliteVecBackend::getStoredEmbeddingDimension() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_) {
+        return std::nullopt;
+    }
+    const char* sql = "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
+    sqlite3_stmt* stmt = nullptr;
+    std::optional<size_t> out{};
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const unsigned char* txt = sqlite3_column_text(stmt, 0);
+            if (txt) {
+                std::string ddl(reinterpret_cast<const char*>(txt));
+                auto pos = ddl.find("float[");
+                if (pos != std::string::npos) {
+                    auto end = ddl.find(']', pos);
+                    if (end != std::string::npos && end > pos + 6) {
+                        std::string num = ddl.substr(pos + 6, end - (pos + 6));
+                        try {
+                            size_t dim = static_cast<size_t>(std::stoul(num));
+                            out = dim;
+                        } catch (...) {
+                        }
+                    }
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+Result<void> SqliteVecBackend::dropTables() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_) {
+        return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+    }
+    // Best-effort drops; proceed even if one is missing
+    auto r1 = executeSQL("DROP TABLE IF EXISTS doc_embeddings");
+    if (!r1) {
+        spdlog::warn("Failed to drop doc_embeddings: {}", r1.error().message);
+    }
+    auto r2 = executeSQL("DROP TABLE IF EXISTS doc_metadata");
+    if (!r2) {
+        spdlog::warn("Failed to drop doc_metadata: {}", r2.error().message);
+    }
+    return Result<void>();
+}
+
 Result<void> SqliteVecBackend::insertVector(const VectorRecord& record) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::insertVector");
     YAMS_PLOT("VectorInsert", static_cast<int64_t>(1));
@@ -347,6 +473,9 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
                                                     bool manage_transaction) {
     spdlog::info("insertVectorInternal called for chunk_id: {}, model_id: {}", record.chunk_id,
                  record.model_id);
+
+    if (auto vr = validateEmbeddingDim(record.embedding.size()); !vr)
+        return vr;
 
     // Check if chunk_id already exists (for upsert behavior)
     const char* check_sql = "SELECT rowid FROM doc_metadata WHERE chunk_id = ?";
@@ -593,6 +722,8 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
     YAMS_PLOT("BatchInsertSize", static_cast<int64_t>(records.size()));
 
     spdlog::debug("insertVectorsBatch called with {} records", records.size());
+    // Promote a high-visibility log so operators can confirm vectordb writes during repair jobs
+    spdlog::warn("[vectordb] batch insert starting: count={} db={}", records.size(), db_path_);
 
     if (records.empty()) {
         return Result<void>();
@@ -603,6 +734,11 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+    }
+
+    for (size_t i = 0; i < records.size(); ++i) {
+        if (auto vr = validateEmbeddingDim(records[i].embedding.size()); !vr)
+            return vr;
     }
 
     // Start transaction for batch insert
@@ -653,6 +789,9 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
     // Mark transaction as successfully committed
     guard.commit();
 
+    // High-visibility confirmation after successful commit
+    spdlog::warn("[vectordb] batch insert committed: inserted={} db={}", records.size(), db_path_);
+
     return Result<void>();
 }
 
@@ -666,6 +805,9 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
     }
+
+    if (auto vr = validateEmbeddingDim(record.embedding.size()); !vr)
+        return vr;
 
     // Start transaction
     auto tx_result = executeSQL("BEGIN TRANSACTION");
@@ -1550,6 +1692,10 @@ Result<void> SqliteVecBackend::loadSqliteVecExtension() {
     }
 
     return Result<void>();
+}
+
+Result<void> SqliteVecBackend::ensureVecLoaded() {
+    return loadSqliteVecExtension();
 }
 
 Result<void> SqliteVecBackend::prepareStatements() {

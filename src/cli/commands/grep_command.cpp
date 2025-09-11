@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <unistd.h>
+#include <unordered_set>
 #include <vector>
 #include <yams/cli/command.h>
 #include <yams/cli/session_store.h>
@@ -16,7 +17,14 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first grep
-#include <yams/cli/async_bridge.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
+#include <boost/asio/this_coro.hpp>
+// Timers for streaming guard
+#include <future>
+#include <boost/asio/steady_timer.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -48,6 +56,8 @@ private:
     bool regexOnly_ = false;
     // Default to streaming for quicker first results; user can opt out
     bool disableStreaming_ = false;
+    // Force thorough (unary) mode: disables streaming and the guard
+    bool cold_{false};
     size_t semanticLimit_ = 10;
     std::string filterTags_;
     bool matchAllTags_ = false;
@@ -70,8 +80,15 @@ public:
 
         auto* cmd = app.add_subcommand("grep", getDescription());
 
-        cmd->add_option("pattern", pattern_, "Regular expression pattern to search for")
-            ->required();
+        // Positional pattern: make optional and provide friendly alternatives (-e/--pattern or --)
+        cmd->add_option("pattern", pattern_,
+                        "Regular expression pattern to search for (if it begins with '-', use -- "
+                        "to end options or -e/--expr)");
+
+        // Explicit pattern option to handle leading '-' patterns ergonomically
+        cmd->add_option(
+            "-e,--expr", pattern_,
+            "Explicit pattern (use when pattern starts with '-' or to avoid ambiguity)");
 
         cmd->add_option("paths", paths_,
                         "Files or directories to search (default: all indexed files)");
@@ -127,17 +144,72 @@ public:
         // Streaming control
         cmd->add_flag("--no-streaming", disableStreaming_,
                       "Disable streaming responses from daemon");
+        // Thorough (non-streaming) mode
+        cmd->add_flag("--cold", cold_, "Force thorough (non-streaming) execution");
 
         // Session scoping controls
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
 
         cmd->callback([this]() {
+            // Validate presence of a pattern with helpful guidance
+            if (pattern_.empty()) {
+                throw CLI::ValidationError(
+                    "pattern",
+                    "Pattern not provided. Tip: if your pattern starts with '-' (e.g., "
+                    "'--tags|foo'), use -- to end options: \n  yams grep -- \"--tags|knowledge "
+                    "graph|kg\" --include=\"docs/**/*.md\"\nOr use the explicit option: \n  yams "
+                    "grep -e \"--tags|knowledge graph|kg\" --include=\"docs/**/*.md\"");
+            }
+            // Normalize popular PCRE inline flags like (?i) to CLI flags and ECMAScript-compatible
+            // regex Detect and strip all occurrences of (?i) while enabling -i when present
+            bool modified = false;
+            {
+                std::string normalized = pattern_;
+                const std::string needle = "(?i)";
+                size_t pos = 0;
+                while ((pos = normalized.find(needle, pos)) != std::string::npos) {
+                    normalized.erase(pos, needle.size());
+                    modified = true;
+                }
+                // Also handle the common anchored form (?i:...)
+                // Replace leading "(?i:" with "(" and trailing matching ')' already present
+                // remains.
+                if (normalized.rfind("(?i:", 0) == 0) {
+                    normalized.erase(2, 2); // remove 'i:' after '(?'
+                    modified = true;
+                }
+                if (modified) {
+                    if (!ignoreCase_)
+                        ignoreCase_ = true;
+                    pattern_ = normalized;
+                    // Best-effort UX: print a proposed normalized command preview
+                    std::ostringstream pcmd;
+                    pcmd << "Proposed Command\n  └ yams grep \"" << pattern_ << "\"";
+                    if (!includePatterns_.empty()) {
+                        pcmd << " --include=\"" << includePatterns_ << "\"";
+                    }
+                    if (showFilename_)
+                        pcmd << " -H";
+                    if (showLineNumbers_)
+                        pcmd << " -n";
+                    if (regexOnly_)
+                        pcmd << " --regex-only";
+                    if (ignoreCase_)
+                        pcmd << " -i";
+                    if (pathsOnly_)
+                        pcmd << " --paths-only";
+                    std::cerr << pcmd.str() << std::endl;
+                }
+            }
             if (!noSession_) {
                 sessionPatterns_ =
                     yams::cli::session_store::active_include_patterns(sessionOverride_);
             } else {
                 sessionPatterns_.clear();
+            }
+            if (cold_) {
+                disableStreaming_ = true;
             }
             auto result = execute();
             if (!result) {
@@ -191,6 +263,24 @@ public:
                 dreq.maxMatches = maxCount_;
 
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                    // Informative note: reflect the normalized command actually executed
+                    {
+                        std::ostringstream ran;
+                        ran << "Ran yams grep \"" << pattern_ << "\"";
+                        if (!includePatterns_.empty())
+                            ran << " --include=\"" << includePatterns_ << "\"";
+                        if (showFilename_)
+                            ran << " -H";
+                        if (showLineNumbers_)
+                            ran << " -n";
+                        if (regexOnly_)
+                            ran << " --regex-only";
+                        if (ignoreCase_)
+                            ran << " -i";
+                        if (pathsOnly_)
+                            ran << " --paths-only";
+                        std::cerr << ran.str() << std::endl;
+                    }
                     // Handle different output modes
                     if (pathsOnly_ || filesOnly_) {
                         // Show files from regex and semantic results (semantic marked with
@@ -268,6 +358,10 @@ public:
                             }
                         }
                     } else {
+                        if (resp.matches.empty()) {
+                            std::cout << "(no results)" << std::endl;
+                            return Result<void>();
+                        }
                         // Full match output with match type indicators
                         size_t regexCount = 0, semanticCount = 0;
 
@@ -326,27 +420,104 @@ public:
                     return Result<void>();
                 };
 
-                auto fallback = [&]() -> Result<void> {
-                    // Fall back to local execution
-                    return executeLocal();
-                };
-
                 // Simple direct daemon client (no pool) for reliability
                 yams::daemon::ClientConfig cfg;
+                // Align storage with CLI data path (parity with SearchCommand)
+                if (cli_) {
+                    auto dp = cli_->getDataPath();
+                    if (!dp.empty()) {
+                        cfg.dataDir = dp;
+#ifndef _WIN32
+                        ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
+                        ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
+#endif
+                    }
+                }
+                // Configure timeouts similar to search for reliability on large scans
+                cfg.headerTimeout = std::chrono::milliseconds(30000);
+                cfg.bodyTimeout = std::chrono::milliseconds(120000);
+                yams::daemon::DaemonClient::setTimeoutEnvVars(cfg.headerTimeout, cfg.bodyTimeout);
                 cfg.enableChunkedResponses = !disableStreaming_;
                 cfg.singleUseConnections = false;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
                 yams::daemon::DaemonClient client(cfg);
                 client.setStreamingEnabled(cfg.enableChunkedResponses);
-                auto result = cfg.enableChunkedResponses
-                                  ? run_sync(client.streamingGrep(dreq), std::chrono::seconds(30))
-                                  : run_sync(client.call(dreq), std::chrono::seconds(30));
-                if (result) {
-                    auto r = render(result.value());
-                    if (!r)
-                        return r.error();
-                    return Result<void>();
+                // Fully asynchronous path using a single top-level co_spawn
+                std::promise<Result<void>> done;
+                auto fut = done.get_future();
+                auto work = [&, dreq,
+                             disableStreaming =
+                                 disableStreaming_]() -> boost::asio::awaitable<void> {
+                    auto finish = [&](Result<yams::daemon::GrepResponse> result) {
+                        if (result) {
+                            auto r = render(result.value());
+                            if (!r) {
+                                done.set_value(r.error());
+                                return;
+                            }
+                            done.set_value(Result<void>());
+                        } else {
+                            done.set_value(result.error());
+                        }
+                    };
+                    if (disableStreaming) {
+                        auto ur = co_await client.call(dreq);
+                        finish(std::move(ur));
+                        co_return;
+                    }
+                    // Guard: race streaming vs delayed unary (2s)
+                    std::shared_ptr<std::atomic_bool> decided =
+                        std::make_shared<std::atomic_bool>(false);
+                    std::shared_ptr<std::promise<Result<yams::daemon::GrepResponse>>> p =
+                        std::make_shared<std::promise<Result<yams::daemon::GrepResponse>>>();
+                    auto fut2 = p->get_future();
+
+                    // Streaming path
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor{},
+                        [&, decided, p, dreq]() -> boost::asio::awaitable<void> {
+                            auto sr = co_await client.streamingGrep(dreq);
+                            if (!decided->exchange(true))
+                                p->set_value(std::move(sr));
+                            co_return;
+                        },
+                        boost::asio::detached);
+
+                    // Delayed unary path (2s after start)
+                    boost::asio::co_spawn(
+                        boost::asio::system_executor{},
+                        [&, decided, p, dreq]() -> boost::asio::awaitable<void> {
+                            boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
+                            t.expires_after(std::chrono::seconds(2));
+                            co_await t.async_wait(boost::asio::use_awaitable);
+                            if (!decided->load()) {
+                                auto ur = co_await client.call(dreq);
+                                if (!decided->exchange(true))
+                                    p->set_value(std::move(ur));
+                            }
+                            co_return;
+                        },
+                        boost::asio::detached);
+
+                    // Wait up to body timeout (120s default here) for winner
+                    auto wait = std::chrono::milliseconds(120000);
+                    if (fut2.wait_for(wait) == std::future_status::ready) {
+                        finish(fut2.get());
+                    } else {
+                        done.set_value(Error{ErrorCode::Timeout, "Grep timed out"});
+                    }
+                    co_return;
+                };
+                boost::asio::co_spawn(boost::asio::system_executor{}, work(),
+                                      boost::asio::detached);
+                if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+                    spdlog::warn("grep: daemon call timed out; falling back to local execution");
+                    return executeLocal();
                 }
+                auto rv = fut.get();
+                if (rv)
+                    return Result<void>();
+                return rv.error();
             }
 
             // Fall back to local execution if daemon failed
@@ -559,6 +730,30 @@ private:
             documents = filteredDocs;
         }
 
+        // Optional FTS prefilter: when literal/word-style queries, use the SQLite FTS index
+        // to narrow the candidate document set before content scanning.
+        if (!documents.empty() && (literalText_ || wholeWord_)) {
+            try {
+                auto sRes = metadataRepo->search(pattern_, /*limit*/ 2000, /*offset*/ 0);
+                if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
+                    std::unordered_set<int64_t> allow;
+                    allow.reserve(sRes.value().results.size());
+                    for (const auto& r : sRes.value().results)
+                        allow.insert(r.document.id);
+                    std::vector<metadata::DocumentInfo> filtered;
+                    filtered.reserve(documents.size());
+                    for (auto& d : documents) {
+                        if (allow.find(d.id) != allow.end())
+                            filtered.push_back(std::move(d));
+                    }
+                    if (!filtered.empty())
+                        documents.swap(filtered);
+                }
+            } catch (...) {
+                // Best-effort optimization; ignore failures
+            }
+        }
+
         if (documents.empty()) {
             std::cerr << "No files to search" << std::endl;
             return Result<void>();
@@ -604,9 +799,11 @@ private:
                     .withKGStore(cli_->getKnowledgeGraphStore());
 
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                // Prefer fast, exact FTS5 keyword results over vector similarity for grep-like use
                 opts.hybrid.final_top_k = semanticLimit_ * 3; // Get more results to filter
-                opts.hybrid.vector_weight = 0.8f;             // Prioritize semantic similarity
-                opts.hybrid.keyword_weight = 0.2f;
+                opts.hybrid.vector_weight = 0.40f;
+                opts.hybrid.keyword_weight = 0.60f;
+                opts.hybrid.enable_kg = false; // Disable KG for grep scenarios
 
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {

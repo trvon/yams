@@ -102,6 +102,13 @@ public:
     virtual Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() = 0;
     // Count documents by extraction status
     virtual Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) = 0;
+
+    // Embedding status operations
+    virtual Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
+                                                       const std::string& modelId = "") = 0;
+    virtual Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash,
+                                                             bool hasEmbedding,
+                                                             const std::string& modelId = "") = 0;
 };
 
 /**
@@ -192,6 +199,12 @@ public:
     Result<int64_t> getIndexedDocumentCount() override;
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
     Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
+
+    // Embedding status operations
+    Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
+                                               const std::string& modelId = "") override;
+    Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,
+                                                     const std::string& modelId = "") override;
 
 private:
     ConnectionPool& pool_;

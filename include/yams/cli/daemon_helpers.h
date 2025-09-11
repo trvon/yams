@@ -21,8 +21,6 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/response_of.hpp>
-// Bridge to run async Task<Result<T>> paths synchronously in CLI/tests
-#include <yams/cli/async_bridge.h>
 
 namespace yams::cli {
 
@@ -306,15 +304,7 @@ private:
         }
         auto client = std::make_unique<yams::daemon::DaemonClient>(client_cfg);
 
-        // Connect the client before adding to pool
-        auto connect_result = client->connect();
-        if (!connect_result) {
-            if (cfg_.verbose) {
-                spdlog::error("[DaemonClientPool] Failed to connect client: {}",
-                              connect_result.error().message);
-            }
-            return npos;
-        }
+        // Do not eagerly connect here; AsioTransportAdapter manages connections per-request.
 
         auto e = std::make_shared<Entry>();
         e->client = std::move(client);
@@ -466,15 +456,13 @@ public:
 
     // Synchronous execute method - DEPRECATED and only for test compatibility
     // This will return NotImplemented in production code
-    Result<void> execute(const TRequest& req, std::function<Result<void>()> fallback,
-                         RenderFunc render) {
-        // Compatibility bridge for existing sync tests. Production code should
-        // prefer execute_async and run via cli::run_sync from async_bridge.h.
-        // Keep a generous timeout to avoid flakiness under CI.
-        using yams::cli::run_sync;
-        auto task = execute_async(req, std::move(fallback), std::move(render));
-        // 30s default timeout for tests covering daemon startup or large streams
-        return run_sync<void>(std::move(task), std::chrono::milliseconds{30000});
+    Result<void> execute(const TRequest& /*req*/, std::function<Result<void>()> fallback,
+                         RenderFunc /*render*/) {
+        // Synchronous bridge has been removed; prefer execute_async.
+        // Use fallback if provided; otherwise signal not implemented.
+        if (fallback)
+            return fallback();
+        return Error{ErrorCode::NotImplemented, "Synchronous execute() is not available"};
     }
 
     // Async (coroutine) execution path using pooled DaemonClient::call<TRequest>()

@@ -180,6 +180,24 @@ public:
                 std::exit(1);
             }
         });
+
+        // Storage subcommand
+        auto* storageCmd = cmd->add_subcommand("storage", "Configure storage settings");
+        storageCmd->add_option("--engine", storageEngine_, "Storage engine (local or s3)");
+        storageCmd->add_option("--s3-url", s3Url_, "S3 URL (e.g., s3://bucket/prefix)");
+        storageCmd->add_option("--s3-region", s3Region_, "S3 region");
+        storageCmd->add_option("--s3-endpoint", s3Endpoint_, "S3 custom endpoint");
+        storageCmd->add_option("--s3-access-key", s3AccessKey_, "S3 access key");
+        storageCmd->add_option("--s3-secret-key", s3SecretKey_, "S3 secret key");
+        storageCmd->add_flag("--s3-use-path-style", s3UsePathStyle_,
+                             "Enable S3 path style addressing");
+        storageCmd->callback([this]() {
+            auto result = executeStorage();
+            if (!result) {
+                spdlog::error("Config storage failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
     }
 
     Result<void> execute() override {
@@ -197,6 +215,15 @@ private:
     std::string embeddingPreset_;
     bool noBackup_ = false;
     bool dryRun_ = false;
+
+    // Storage config members
+    std::string storageEngine_;
+    std::string s3Url_;
+    std::string s3Region_;
+    std::string s3Endpoint_;
+    std::string s3AccessKey_;
+    std::string s3SecretKey_;
+    bool s3UsePathStyle_ = false;
 
     fs::path getConfigPath() const {
         if (!configPath_.empty()) {
@@ -579,7 +606,8 @@ private:
             auto models = getAvailableModels();
             if (models.empty()) {
                 std::cout << "⚠ No embedding models found.\n";
-                std::cout << "Download a model first: yams model --download all-MiniLM-L6-v2\n";
+                std::cout << "Download a model first: yams model download nomic-embed-text-v1.5\n";
+                std::cout << "  (or use --hf nomic-ai/nomic-embed-text-v1.5)\n";
                 return Error{ErrorCode::NotFound, "No embedding models available"};
             }
 
@@ -647,7 +675,7 @@ private:
             std::cout << "Available models: ";
             if (models.empty()) {
                 std::cout << "None\n";
-                std::cout << "  → Download: yams model --download all-MiniLM-L6-v2\n";
+                std::cout << "  → Download: yams model download nomic-embed-text-v1.5\n";
             } else {
                 std::cout << models.size() << " found\n";
                 for (const auto& model : models) {
@@ -717,7 +745,13 @@ private:
                 result = writeConfigValue("embeddings.generation_delay_ms", "500");
                 if (!result)
                     return result;
-                result = writeConfigValue("embeddings.preferred_model", "all-MiniLM-L6-v2");
+                // Keep user's preferred model unless unset; recommend nomic for performance/quality
+                if (parseSimpleToml(getConfigPath())["embeddings.preferred_model"].empty()) {
+                    result =
+                        writeConfigValue("embeddings.preferred_model", "nomic-embed-text-v1.5");
+                } else {
+                    result = Result<void>();
+                }
                 if (!result)
                     return result;
 
@@ -992,6 +1026,51 @@ private:
 
             return Result<void>();
 
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeStorage() {
+        try {
+            if (!storageEngine_.empty()) {
+                auto r = writeConfigValue("storage.engine", storageEngine_);
+                if (!r)
+                    return r;
+            }
+            if (!s3Url_.empty()) {
+                auto r = writeConfigValue("storage.s3.url", s3Url_);
+                if (!r)
+                    return r;
+            }
+            if (!s3Region_.empty()) {
+                auto r = writeConfigValue("storage.s3.region", s3Region_);
+                if (!r)
+                    return r;
+            }
+            if (!s3Endpoint_.empty()) {
+                auto r = writeConfigValue("storage.s3.endpoint", s3Endpoint_);
+                if (!r)
+                    return r;
+            }
+            if (!s3AccessKey_.empty()) {
+                auto r = writeConfigValue("storage.s3.access_key", s3AccessKey_);
+                if (!r)
+                    return r;
+            }
+            if (!s3SecretKey_.empty()) {
+                auto r = writeConfigValue("storage.s3.secret_key", s3SecretKey_);
+                if (!r)
+                    return r;
+            }
+            if (s3UsePathStyle_) {
+                auto r = writeConfigValue("storage.s3.use_path_style", "true");
+                if (!r)
+                    return r;
+            }
+
+            std::cout << "Storage configuration updated successfully." << std::endl;
+            return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }

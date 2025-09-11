@@ -74,6 +74,30 @@ template <> struct ResponseOf<PrepareSessionRequest> {
 template <> struct ResponseOf<DownloadRequest> {
     using type = DownloadResponse;
 };
+// Embedding documents (persist)
+template <> struct ResponseOf<EmbedDocumentsRequest> {
+    using type = EmbedDocumentsResponse;
+};
+
+// Plugin management requests
+template <> struct ResponseOf<PluginScanRequest> {
+    using type = PluginScanResponse;
+};
+template <> struct ResponseOf<PluginLoadRequest> {
+    using type = PluginLoadResponse;
+};
+template <> struct ResponseOf<PluginUnloadRequest> {
+    using type = SuccessResponse;
+};
+template <> struct ResponseOf<PluginTrustListRequest> {
+    using type = PluginTrustListResponse;
+};
+template <> struct ResponseOf<PluginTrustAddRequest> {
+    using type = SuccessResponse;
+};
+template <> struct ResponseOf<PluginTrustRemoveRequest> {
+    using type = SuccessResponse;
+};
 
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;

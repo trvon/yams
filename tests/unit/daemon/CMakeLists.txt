@@ -1,126 +1,151 @@
-# Daemon Unit Tests
+add_executable(daemon_stats_unit_tests
+    get_stats_wal_metrics_test.cpp
+)
 
-# Helper function to create daemon unit tests
-function(yams_add_daemon_test TEST_NAME)
-    cmake_parse_arguments(ARG "" "TIMEOUT" "SOURCES;LIBRARIES" ${ARGN})
+target_link_libraries(daemon_stats_unit_tests
+    PRIVATE
+        gtest_main
+        yams_daemon
+        yams::core
+)
 
-    # Default timeout if not specified
-    if(NOT ARG_TIMEOUT)
-        set(ARG_TIMEOUT 30)
-    endif()
+target_include_directories(daemon_stats_unit_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests/utils
+)
 
-    add_executable(${TEST_NAME} ${ARG_SOURCES})
+target_compile_features(daemon_stats_unit_tests PRIVATE cxx_std_20)
 
-    target_link_libraries(${TEST_NAME} PRIVATE
+add_test(NAME DaemonStatsUnitTests COMMAND daemon_stats_unit_tests)
+
+# Streaming processor unit tests
+add_executable(streaming_processor_test
+    streaming_processor_test.cpp
+)
+
+target_link_libraries(streaming_processor_test
+    PRIVATE
         test_utils
         gtest_main
-        ${ARG_LIBRARIES}
-    )
-
-    # test_utils already wires gtest includes via link targets
-
-    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "daemon;unit" TIMEOUT ${ARG_TIMEOUT})
-endfunction()
-
-# Main daemon test
-add_executable(daemon_test
-    daemon_test.cpp
-)
-target_link_libraries(daemon_test PRIVATE
-    test_utils
-    gtest_main
-    yams::daemon
-    yams::daemon_client
-)
-# Define YAMS_TESTING to enable test API
-target_compile_definitions(daemon_test PRIVATE YAMS_TESTING)
-add_test(NAME daemon_test COMMAND daemon_test)
-set_tests_properties(daemon_test PROPERTIES LABELS "daemon;unit" TIMEOUT 45)
-
-## Removed legacy tests during Boost.Asio migration:
-## - async_io_socketpair_test (AsyncSocket tests)
-## - async_ipc_server tests
-
-# Connection FSM tests
-yams_add_daemon_test(connection_fsm_test
-    SOURCES connection_fsm_test.cpp
-    LIBRARIES yams::daemon
-)
-
-# IPC client tests removed - API changed with Boost.ASIO migration
-
-# Repair scheduling adapter tests
-yams_add_daemon_test(repair_scheduling_adapter_test
-    SOURCES repair_scheduling_adapter_test.cpp
-    LIBRARIES yams::daemon
-)
-
-# RepairCoordinator basic behavior test (gating/metrics)
-yams_add_daemon_test(repair_coordinator_test
-    SOURCES repair_coordinator_test.cpp
-    LIBRARIES yams::daemon
-)
-
-# Message framing tests
-yams_add_daemon_test(message_framing_test
-    SOURCES message_framing_test.cpp
-    LIBRARIES yams::daemon ZLIB::ZLIB  # For CRC32
-)
-
-# Resource pool tests
-yams_add_daemon_test(resource_pool_test
-    SOURCES resource_pool_test.cpp
-    LIBRARIES yams::daemon
-)
-
-# Plugin loader tests
-yams_add_daemon_test(plugin_loader_test
-    SOURCES plugin_loader_test.cpp
-    LIBRARIES yams::daemon ${CMAKE_DL_LIBS}  # For dlopen/dlsym
-)
-
-# ONNX Model pool tests - only if ONNX plugin is available
-find_package(onnxruntime QUIET)
-
-if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX)
-    add_executable(onnx_model_pool_test
-        onnx_model_pool_test.cpp
-    )
-    target_link_libraries(onnx_model_pool_test PRIVATE
-        gtest_main
-        test_utils
         yams::daemon
-        yams::vector
-        yams::onnx_plugin
-    )
-    add_test(NAME onnx_model_pool_test COMMAND onnx_model_pool_test)
-    set_tests_properties(onnx_model_pool_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)
+        yams::daemon_ipc
+)
 
-    # ONNX Model Provider tests
-    add_executable(onnx_model_provider_test
-        onnx_model_provider_test.cpp
-    )
-    target_link_libraries(onnx_model_provider_test PRIVATE
+target_compile_features(streaming_processor_test PRIVATE cxx_std_20)
+
+add_test(NAME streaming_processor_test COMMAND streaming_processor_test)
+set_tests_properties(streaming_processor_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
+
+# Connection FSM legality and behavior tests
+add_executable(connection_fsm_legality_test
+    connection_fsm_legality_test.cpp
+)
+target_link_libraries(connection_fsm_legality_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(connection_fsm_legality_test PRIVATE cxx_std_20)
+add_test(NAME connection_fsm_legality_test COMMAND connection_fsm_legality_test)
+set_tests_properties(connection_fsm_legality_test PROPERTIES LABELS "daemon;unit" TIMEOUT 15)
+
+add_executable(connection_fsm_backpressure_test
+    connection_fsm_backpressure_test.cpp
+)
+target_link_libraries(connection_fsm_backpressure_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(connection_fsm_backpressure_test PRIVATE cxx_std_20)
+add_test(NAME connection_fsm_backpressure_test COMMAND connection_fsm_backpressure_test)
+set_tests_properties(connection_fsm_backpressure_test PROPERTIES LABELS "daemon;unit" TIMEOUT 15)
+
+add_executable(connection_fsm_timeout_retry_test
+    connection_fsm_timeout_retry_test.cpp
+)
+target_link_libraries(connection_fsm_timeout_retry_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(connection_fsm_timeout_retry_test PRIVATE cxx_std_20)
+add_test(NAME connection_fsm_timeout_retry_test COMMAND connection_fsm_timeout_retry_test)
+set_tests_properties(connection_fsm_timeout_retry_test PROPERTIES LABELS "daemon;unit" TIMEOUT 15)
+
+add_executable(connection_fsm_shutdown_test
+    connection_fsm_shutdown_test.cpp
+)
+target_link_libraries(connection_fsm_shutdown_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(connection_fsm_shutdown_test PRIVATE cxx_std_20)
+add_test(NAME connection_fsm_shutdown_test COMMAND connection_fsm_shutdown_test)
+set_tests_properties(connection_fsm_shutdown_test PROPERTIES LABELS "daemon;unit" TIMEOUT 15)
+
+add_executable(connection_fsm_error_flow_test
+    connection_fsm_error_flow_test.cpp
+)
+target_link_libraries(connection_fsm_error_flow_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(connection_fsm_error_flow_test PRIVATE cxx_std_20)
+add_test(NAME connection_fsm_error_flow_test COMMAND connection_fsm_error_flow_test)
+set_tests_properties(connection_fsm_error_flow_test PROPERTIES LABELS "daemon;unit" TIMEOUT 15)
+
+add_executable(connection_fsm_streaming_sequence_test
+    connection_fsm_streaming_sequence_test.cpp
+)
+target_link_libraries(connection_fsm_streaming_sequence_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(connection_fsm_streaming_sequence_test PRIVATE cxx_std_20)
+add_test(NAME connection_fsm_streaming_sequence_test COMMAND connection_fsm_streaming_sequence_test)
+set_tests_properties(connection_fsm_streaming_sequence_test PROPERTIES LABELS "daemon;unit" TIMEOUT 15)
+
+add_executable(request_handler_io_edge_test
+    request_handler_io_edge_test.cpp
+)
+target_link_libraries(request_handler_io_edge_test PRIVATE gtest_main yams::daemon_ipc)
+target_compile_features(request_handler_io_edge_test PRIVATE cxx_std_20)
+add_test(NAME request_handler_io_edge_test COMMAND request_handler_io_edge_test)
+set_tests_properties(request_handler_io_edge_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
+
+# Plugin host unit tests (ABI + WASM host behaviors without requiring real plugins)
+add_executable(plugin_host_test
+    plugin_host_test.cpp
+)
+
+target_link_libraries(plugin_host_test
+    PRIVATE
         gtest_main
-        test_utils
         yams::daemon
-        yams::onnx_plugin
-    )
-    add_test(NAME onnx_model_provider_test COMMAND onnx_model_provider_test)
-    set_tests_properties(onnx_model_provider_test PROPERTIES LABELS "daemon;unit" TIMEOUT 60)
-else()
-    message(STATUS "Skipping ONNX tests - ONNX Runtime not available")
+        yams::core
+)
+
+target_compile_features(plugin_host_test PRIVATE cxx_std_20)
+
+add_test(NAME plugin_host_test COMMAND plugin_host_test)
+set_tests_properties(plugin_host_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)
+
+# Ensure test can reference the built mock plugin file path
+add_dependencies(plugin_host_test yams_mock_model_plugin)
+target_compile_definitions(plugin_host_test PRIVATE TEST_ABI_PLUGIN_FILE="$<TARGET_FILE:yams_mock_model_plugin>")
+
+# Conditional ONNX plugin harness: if target exists, pass its path; otherwise
+# test can use env TEST_ONNX_PLUGIN_FILE
+add_executable(onnx_plugin_harness_test onnx_plugin_harness_test.cpp)
+target_link_libraries(onnx_plugin_harness_test PRIVATE gtest_main yams::daemon yams::core)
+target_compile_features(onnx_plugin_harness_test PRIVATE cxx_std_20)
+if(TARGET yams_onnx_plugin)
+    add_dependencies(onnx_plugin_harness_test yams_onnx_plugin)
+    target_compile_definitions(onnx_plugin_harness_test PRIVATE yams_onnx_plugin_BUILT="$<TARGET_FILE:yams_onnx_plugin>")
 endif()
+add_test(NAME onnx_plugin_harness_test COMMAND onnx_plugin_harness_test)
+set_tests_properties(onnx_plugin_harness_test PROPERTIES LABELS "daemon;unit" TIMEOUT 45)
 
-# ResponseOf trait tests
-yams_add_daemon_test(response_of_test
-    SOURCES response_of_test.cpp
-    LIBRARIES yams::daemon
+# Conditional WASM plugin harness: relies on TEST_WASM_PLUGIN_FILE
+add_executable(wasm_plugin_harness_test wasm_plugin_harness_test.cpp)
+target_link_libraries(wasm_plugin_harness_test PRIVATE gtest_main yams::daemon yams::core)
+target_compile_features(wasm_plugin_harness_test PRIVATE cxx_std_20)
+add_test(NAME wasm_plugin_harness_test COMMAND wasm_plugin_harness_test)
+set_tests_properties(wasm_plugin_harness_test PROPERTIES LABELS "daemon;unit" TIMEOUT 45)
+
+# StatusResponse proto roundtrip tests
+add_executable(status_response_proto_test
+    status_response_proto_test.cpp
 )
 
-# Download protocol tests
-yams_add_daemon_test(download_protocol_test
-    SOURCES download_protocol_test.cpp
-    LIBRARIES yams::daemon ZLIB::ZLIB  # For CRC32
+target_link_libraries(status_response_proto_test
+    PRIVATE
+        gtest_main
+        yams::daemon
+        yams::daemon_ipc
 )
+
+target_compile_features(status_response_proto_test PRIVATE cxx_std_20)
+
+add_test(NAME status_response_proto_test COMMAND status_response_proto_test)
+set_tests_properties(status_response_proto_test PROPERTIES LABELS "daemon;unit" TIMEOUT 30)

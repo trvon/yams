@@ -18,8 +18,8 @@ public:
     struct Session {
         std::vector<std::byte> data;
         uint64_t totalSize = 0;
-        uint64_t maxBytes = 0; // 0 = unlimited
-        uint32_t chunkSize = 256 * 1024;
+        uint64_t maxBytes = 0;           // 0 = unlimited
+        uint32_t chunkSize = 512 * 1024; // increased default
         std::chrono::steady_clock::time_point createdAt;
     };
 

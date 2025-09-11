@@ -129,7 +129,8 @@ Result<void> ConfigMigrator::createDefaultV2Config(const fs::path& configPath) {
 
 std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2AdditiveDefaults() {
     // Additive keys introduced post-initial v2 rollout. These will be merged non-destructively.
-    return {{"cli.streaming",
+    return {{"embeddings", {{"auto_on_add", "false"}}},
+            {"cli.streaming",
              {{"enable", "true"},
               {"payload_threshold_bytes", "262144"},
               {"ttfb_threshold_ms", "150"},
@@ -308,6 +309,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
             {"embeddings",
              {{"enable", "true"},
               {"auto_generate", "false"},
+              {"auto_on_add", "false"},
               {"preferred_model", "all-MiniLM-L6-v2"},
               {"model_path", "~/.yams/models"},
               {"tokenizer_path", "models/tokenizer.json"},
@@ -355,6 +357,15 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"enable_cache", "true"},
               {"cache_size", "1000"},
               {"cache_ttl_minutes", "60"}}},
+
+            // Daemon service defaults: enable model provider + plugin autoload by default
+            {"daemon",
+             {{"enable", "true"},
+              {"auto_load_plugins", "true"},
+              {"plugin_dir", ""},
+              {"worker_threads", "0"},
+              {"max_memory_gb", "0"},
+              {"log_level", "info"}}},
 
             {"search.hybrid",
              {{"enable", "true"},

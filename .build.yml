@@ -2,13 +2,13 @@
 #
 # SourceHut build manifest for YAMS (single Linux target).
 # Key points:
-# - Compute version from Git ref (GIT_REF) at runtime; no manifest expressions.
+# - Compute version from Git ref (GIT_REF) or release channel (RELEASE_CHANNEL) at runtime; no manifest expressions.
 # - Persist computed version into ~/.buildenv for subsequent tasks.
 # - Add static build tags for search/badges.
-# - Gate packaging steps so they only run on tag builds.
-# - Fix CMake configure line continuation.
+# - Gate packaging steps so they run for tag builds and for nightly/weekly channels.
+# - Install Conan via pipx (or venv fallback), since Debian doesn't provide python3-conan.
 
-image: archlinux
+image: debian/trixie
 # Other possible images:
 # image: ubuntu/22.04
 # image: debian/stable
@@ -20,22 +20,34 @@ tags:
   - cmake
   - conan
   - yams
+  - nightly
+  - weekly
 
 environment:
   # Define consistent directories.
   BUILD_DIR: build/yams-release
   STAGE_DIR: stage
+  # Optional: set this to "nightly" or "weekly" via scheduler/env to produce
+  # date/week-based releases on non-tag builds.
+  # RELEASE_CHANNEL:
 
 packages:
-  # Build dependencies. Arch Linux provides up-to-date toolchains.
-  - base-devel # gcc, make, etc.
+  # Build dependencies (Debian/apt)
+  - build-essential # gcc, make, etc.
   - cmake
-  - conan # Conan v2 from distro package to avoid PEP 668 issues
-  - ninja
+  - ninja-build
   - zip
   - lld
   - clang
   - llvm
+  - python3
+  - python3-pip
+  - python3-venv
+  - pipx
+  - git
+  - libncurses-dev
+  - libtinfo-dev
+  - pkg-config
 
 tasks:
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.
@@ -44,29 +56,77 @@ tasks:
       # Move into repository directory (SourceHut clones into ./yams)
       cd yams
 
-      # Prefer tag-triggered builds; fall back to latest tag or a default.
-      if [[ "${GIT_REF:-}" =~ ^refs/tags/ ]]; then
-        RAW_TAG="${GIT_REF#refs/tags/}"
-      else
-        RAW_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0-dev)"
-      fi
+      CHANNEL="${RELEASE_CHANNEL:-}"
 
-      # Strip optional leading 'v' (e.g., v1.2.3 -> 1.2.3)
-      CLEAN_VERSION="${RAW_TAG#v}"
+      if [ "$CHANNEL" = "nightly" ]; then
+        CLEAN_VERSION="nightly-$(date -u +%Y%m%d)"
+      elif [ "$CHANNEL" = "weekly" ]; then
+        CLEAN_VERSION="weekly-$(date -u +%G)w$(date -u +%V)"
+      else
+        # Prefer tag-triggered builds; fall back to latest tag or a default.
+        if [[ "${GIT_REF:-}" =~ ^refs/tags/ ]]; then
+          RAW_TAG="${GIT_REF#refs/tags/}"
+        else
+          RAW_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0-dev)"
+        fi
+        # Strip optional leading 'v' (e.g., v1.2.3 -> 1.2.3)
+        CLEAN_VERSION="${RAW_TAG#v}"
+      fi
 
       # Persist for subsequent tasks
       echo "YAMS_VERSION=${CLEAN_VERSION}" >> ~/.buildenv
-      echo "Computed YAMS_VERSION=${CLEAN_VERSION} (GIT_REF=${GIT_REF:-n/a})"
+      echo "Computed YAMS_VERSION=${CLEAN_VERSION} (GIT_REF=${GIT_REF:-n/a}, RELEASE_CHANNEL=${CHANNEL:-n/a})"
 
   - setup: |
+      set -e
+      # Ensure pipx/venv/pip path is prepared
+      export PATH="${HOME}/.local/bin:${PATH}"
+
+      # Install Conan via pipx when available; otherwise fallback to user pip or an isolated venv
+      if ! command -v conan >/dev/null 2>&1; then
+        if command -v pipx >/dev/null 2>&1; then
+          pipx install 'conan<3' --pip-args='--upgrade' || true
+        fi
+      fi
+      if ! command -v conan >/dev/null 2>&1; then
+        python3 -m pip install --user --upgrade 'conan<3' || true
+        hash -r
+      fi
+      if ! command -v conan >/dev/null 2>&1; then
+        python3 -m venv /opt/conan
+        . /opt/conan/bin/activate
+        python -m pip install --upgrade pip setuptools wheel
+        python -m pip install 'conan<3'
+        export PATH="/opt/conan/bin:${PATH}"
+        hash -r
+      fi
+
       # Move into repository directory (SourceHut clones into ./yams)
       cd yams
+
       # Configure the Conan profile.
-      conan profile detect --force
+      # Prefer clang to avoid GCC 15 regressions with onnxruntime
+      export CC=clang
+      export CXX=clang++
+      echo "CC=clang" >> ~/.buildenv
+      echo "CXX=clang++" >> ~/.buildenv
+
+      conan --version
+      conan profile detect --force || true
+      # Ensure default profile uses clang and libstdc++11
+      conan profile update settings.compiler=clang default || true
+      conan profile update settings.compiler.libcxx=libstdc++11 default || true
+      # Keep C++20
       sed -i 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
-      echo "Conan profile configured:"
-      # Conan v2 syntax: show takes --profile/-pr flag
-      conan profile show -pr default || conan profile show
+
+      echo "Conan profile configured (clang):"
+      conan profile show -pr default || conan profile show || true
+
+  - yams_semver_guard: |
+      set -e
+      cd yams
+      echo "Running YAMS semver guard..."
+      python3 scripts/ci/check_yams_semver.py
 
   - build: |
       cd yams
@@ -75,19 +135,19 @@ tasks:
       echo "Starting build for version ${CLEAN_VERSION}"
 
       # Fetch dependencies and generate CMake toolchain/deps.
-      # GCC 15 on Arch triggers upstream onnxruntime 1.18 build errors; disable ONNX here.
+      # Use clang toolchain to avoid GCC 15 onnxruntime 1.18 build issues.
       conan install . \
         -of "${BUILD_DIR}" \
         -pr:h=./conan/profiles/host.jinja \
-        -pr:b=default \
         -s build_type=Release \
-        -o enable_onnx=False \
+        -c tools.build:jobs="${CONAN_CPU_COUNT}" \
         --build=missing
 
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
-        -DYAMS_BUILD_PROFILE=release \
-        -DYAMS_VERSION="${CLEAN_VERSION}"
+        -DYAMS_VERSION="${CLEAN_VERSION}" \
+        -DCURSES_NEED_NCURSES=ON \
+        -DCURSES_NEED_WIDE=ON
 
       # Build the project.
       cmake --build --preset yams-release
@@ -96,9 +156,9 @@ tasks:
       cmake --install "${BUILD_DIR}" --config Release
 
   - package: |
-      # Only package on tag builds
-      if [[ "${GIT_REF:-}" != refs/tags/* ]]; then
-        echo "Skipping packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
+      # Package on tag builds or when explicitly channelized as nightly/weekly
+      if [[ "${GIT_REF:-}" != refs/tags/* && "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
+        echo "Skipping packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
         exit 0
       fi
 
@@ -110,9 +170,9 @@ tasks:
       echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
 
   - package_cpack: |
-      # Only package on tag builds
-      if [[ "${GIT_REF:-}" != refs/tags/* ]]; then
-        echo "Skipping CPack packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
+      # Package on tag builds or when explicitly channelized as nightly/weekly
+      if [[ "${GIT_REF:-}" != refs/tags/* && "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
+        echo "Skipping CPack packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
         exit 0
       fi
 

@@ -537,9 +537,7 @@ private:
 CompressedStorageEngine::CompressedStorageEngine(std::shared_ptr<StorageEngine> underlying,
                                                  Config config)
     : StorageEngine(
-          {.basePath =
-               "/tmp/compressed_storage_dummy"}) // Dummy config since we delegate to underlying
-      ,
+          {.basePath = underlying ? underlying->getBasePath() : std::filesystem::path{"/tmp"}}),
       pImpl(std::make_unique<Impl>(std::move(underlying), std::move(config))) {}
 
 CompressedStorageEngine::~CompressedStorageEngine() = default;

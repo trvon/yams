@@ -50,7 +50,10 @@ TEST_F(WALManagerTest, InitializationAndShutdown) {
 }
 
 TEST_F(WALManagerTest, BasicTransactionWorkflow) {
-    wal->initialize();
+    {
+        auto initResult = wal->initialize();
+        ASSERT_TRUE(initResult.has_value());
+    }
 
     // Begin transaction using WAL's API
     auto transaction = wal->beginTransaction();
@@ -64,11 +67,15 @@ TEST_F(WALManagerTest, BasicTransactionWorkflow) {
     auto commitResult = transaction->commit();
     ASSERT_TRUE(commitResult.has_value());
 
-    wal->shutdown();
+    {
+        auto shutdownResult = wal->shutdown();
+        ASSERT_TRUE(shutdownResult.has_value());
+    }
 }
 
 TEST_F(WALManagerTest, TransactionRollback) {
-    wal->initialize();
+    auto initResult_rollback = wal->initialize();
+    ASSERT_TRUE(initResult_rollback.has_value());
 
     // Begin transaction
     auto transaction = wal->beginTransaction();
@@ -82,18 +89,23 @@ TEST_F(WALManagerTest, TransactionRollback) {
     auto rollbackResult = transaction->rollback();
     ASSERT_TRUE(rollbackResult.has_value());
 
-    wal->shutdown();
+    auto shutdownResult_rollback = wal->shutdown();
+    ASSERT_TRUE(shutdownResult_rollback.has_value());
 }
 
 TEST_F(WALManagerTest, Recovery) {
-    wal->initialize();
+    auto initResult_recovery = wal->initialize();
+    ASSERT_TRUE(initResult_recovery.has_value());
 
     // Create and commit a transaction
     auto transaction = wal->beginTransaction();
-    transaction->storeBlock("test_hash", 1024, 1);
-    transaction->commit();
+    auto storeResult_recovery = transaction->storeBlock("test_hash", 1024, 1);
+    ASSERT_TRUE(storeResult_recovery.has_value());
+    auto commitResult_recovery = transaction->commit();
+    ASSERT_TRUE(commitResult_recovery.has_value());
 
-    wal->shutdown();
+    auto shutdownResult_recovery1 = wal->shutdown();
+    ASSERT_TRUE(shutdownResult_recovery1.has_value());
 
     // Recreate WAL and test recovery
     wal = std::make_unique<WALManager>(
@@ -101,7 +113,8 @@ TEST_F(WALManagerTest, Recovery) {
                            .maxLogSize = 1024 * 1024,
                            .syncInterval = 1000,
                            .syncTimeout = std::chrono::milliseconds(100)});
-    wal->initialize();
+    auto initResult_recovery2 = wal->initialize();
+    ASSERT_TRUE(initResult_recovery2.has_value());
 
     // Test recovery
     std::vector<WALEntry> recoveredEntries;
@@ -116,43 +129,53 @@ TEST_F(WALManagerTest, Recovery) {
     EXPECT_GT(stats.entriesProcessed, 0u);
     EXPECT_GT(recoveredEntries.size(), 0u);
 
-    wal->shutdown();
+    auto shutdownResult_recovery2 = wal->shutdown();
+    ASSERT_TRUE(shutdownResult_recovery2.has_value());
 }
 
 TEST_F(WALManagerTest, Checkpoint) {
-    wal->initialize();
+    auto initResult_checkpoint = wal->initialize();
+    ASSERT_TRUE(initResult_checkpoint.has_value());
 
     // Create some transactions
     for (int i = 0; i < 3; ++i) {
         auto transaction = wal->beginTransaction();
-        transaction->storeBlock(std::format("hash_{}", i), 1024, 1);
-        transaction->commit();
+        auto storeRes_loop = transaction->storeBlock(std::format("hash_{}", i), 1024, 1);
+        ASSERT_TRUE(storeRes_loop.has_value());
+        auto commitRes_loop = transaction->commit();
+        ASSERT_TRUE(commitRes_loop.has_value());
     }
 
     // Create checkpoint
     auto checkpointResult = wal->checkpoint();
     ASSERT_TRUE(checkpointResult.has_value());
 
-    wal->shutdown();
+    auto shutdownResult_checkpoint = wal->shutdown();
+    ASSERT_TRUE(shutdownResult_checkpoint.has_value());
 }
 
 TEST_F(WALManagerTest, Sync) {
-    wal->initialize();
+    auto initResult_sync = wal->initialize();
+    ASSERT_TRUE(initResult_sync.has_value());
 
     // Create a transaction
     auto transaction = wal->beginTransaction();
-    transaction->storeBlock("test_hash", 1024, 1);
-    transaction->commit();
+    auto storeResult_sync = transaction->storeBlock("test_hash", 1024, 1);
+    ASSERT_TRUE(storeResult_sync.has_value());
+    auto commitResult_sync = transaction->commit();
+    ASSERT_TRUE(commitResult_sync.has_value());
 
     // Force sync
     auto syncResult = wal->sync();
     ASSERT_TRUE(syncResult.has_value());
 
-    wal->shutdown();
+    auto shutdownResult_sync = wal->shutdown();
+    ASSERT_TRUE(shutdownResult_sync.has_value());
 }
 
 TEST_F(WALManagerTest, CurrentState) {
-    wal->initialize();
+    auto initResult_currentState = wal->initialize();
+    ASSERT_TRUE(initResult_currentState.has_value());
 
     // Test state methods
     auto sequence = wal->getCurrentSequence();
@@ -164,5 +187,6 @@ TEST_F(WALManagerTest, CurrentState) {
     auto logPath = wal->getCurrentLogPath();
     EXPECT_FALSE(logPath.empty());
 
-    wal->shutdown();
+    auto shutdownResult_currentState = wal->shutdown();
+    ASSERT_TRUE(shutdownResult_currentState.has_value());
 }

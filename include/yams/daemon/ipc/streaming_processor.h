@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <future>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -32,6 +31,13 @@ public:
 
     [[nodiscard]] boost::asio::awaitable<RequestProcessor::ResponseChunk> next_chunk() override;
 
+#ifdef YAMS_TESTING
+    // Lightweight test counters to verify embed streaming paths are exercised
+    static int _test_get_batch_embed_steps();
+    static int _test_get_embed_docs_steps();
+    static int _test_get_final_emits();
+#endif
+
 private:
     // Lazy compute: store request to compute on first next_chunk() to allow
     // header to be written immediately by RequestHandler before heavy work
@@ -59,35 +65,16 @@ private:
         std::size_t pos{0};
     };
 
-    enum class Mode { None, Search, List, Grep };
+    enum class Mode { None, Search, List, Grep, BatchEmbed, EmbedDocs };
 
     std::size_t compute_item_chunk_count(std::size_t approx_bytes_per_item) const;
 
     std::shared_ptr<RequestProcessor> delegate_;
     RequestHandler::Config cfg_;
-
     Mode mode_{Mode::None};
     std::optional<SearchState> search_;
     std::optional<ListState> list_;
     std::optional<GrepState> grep_;
-
-    // Background compute support and keepalive
-    std::optional<std::future<Response>> compute_future_;
-    // First-results-first staged compute
-    std::optional<std::future<Response>> fast_future_;
-    std::optional<std::future<Response>> full_future_;
-    bool first_burst_emitted_{false};
-    std::size_t already_sent_{0};
-    std::size_t first_burst_limit_{20};
-    std::chrono::steady_clock::time_point last_keepalive_{};
-    std::chrono::milliseconds keepalive_interval_{500};
-
-    // Grep race controls (PBI-008)
-    std::chrono::steady_clock::time_point first_batch_start_{};
-    std::chrono::milliseconds grep_first_batch_max_wait_{300};
-    std::size_t grep_batch_size_override_{0};
-    bool grep_env_applied_{false};
-    bool cancel_cold_on_hot_{true};
 };
 
 } // namespace yams::daemon

@@ -1,9 +1,12 @@
+#include <yams/extraction/extraction_util.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <ctime>
 #include <fcntl.h>
+#include <filesystem>
 #include <thread>
 #include <unistd.h>
 
@@ -24,6 +27,17 @@ public:
             if (fcntl(fd_, F_SETLK, &fl) == -1) {
                 ::close(fd_);
                 fd_ = -1;
+            } else {
+                // Stamp PID and timestamp for diagnostics
+                try {
+                    (void)ftruncate(fd_, 0);
+                    std::string stamp = std::to_string(static_cast<long long>(::getpid())) + " " +
+                                        std::to_string(static_cast<long long>(::time(nullptr))) +
+                                        "\n";
+                    (void)::write(fd_, stamp.data(), stamp.size());
+                    (void)lseek(fd_, 0, SEEK_SET);
+                } catch (...) {
+                }
             }
         }
     }
@@ -54,7 +68,8 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                         std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
                         const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes,
-                        EmbeddingRepairProgressCallback progressCallback) {
+                        EmbeddingRepairProgressCallback progressCallback,
+                        const yams::extraction::ContentExtractorList& extractors) {
     EmbeddingRepairStats stats;
 
     if (!contentStore || !metadataRepo || !embeddingGenerator) {
@@ -68,17 +83,15 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         }
     }
 
-    // Initialize vector database
+    // Initialize vector database. If missing, create with the generator's dimension.
     vector::VectorDatabaseConfig vdbConfig;
     vdbConfig.database_path = (config.dataPath / "vectors.db").string();
     vdbConfig.embedding_dim = embeddingGenerator->getEmbeddingDimension();
+    // Allow creation on first repair run so CLI can bootstrap the DB without a daemon race.
+    vdbConfig.create_if_missing = true;
 
-    // Acquire lock for vector database access
-    VectorDbLock vlock(config.dataPath / "vectors.db.lock");
-    if (!vlock.isLocked()) {
-        spdlog::debug("Another process is updating the vector database");
-        return Error{ErrorCode::InvalidState, "Vector database is locked by another process"};
-    }
+    // Note: We no longer hold a long-lived exclusive DB lock across the entire repair.
+    // Writes are serialized per-batch below; reads and compute proceed concurrently.
 
     auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
     if (!vectorDb->initialize()) {
@@ -118,7 +131,7 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         std::vector<std::string> texts;
         std::vector<metadata::DocumentInfo> batchDocs;
 
-        // Collect texts for this batch
+        // Collect texts for this batch (extract text; avoid raw bytes)
         for (size_t j = i; j < end; ++j) {
             const auto& doc = documents[j];
             stats.documentsProcessed++;
@@ -129,24 +142,22 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                 continue;
             }
 
-            // Get document content
-            auto content = contentStore->retrieveBytes(doc.sha256Hash);
-            if (!content) {
-                stats.failedOperations++;
-                spdlog::debug("Failed to retrieve content for {}: {}", doc.sha256Hash.substr(0, 12),
-                              content.error().message);
-                continue;
-            }
-
-            std::string text(reinterpret_cast<const char*>(content.value().data()),
-                             content.value().size());
-
-            // Skip empty or very large documents
-            if (text.empty() || text.size() > 1000000) { // 1MB limit
+            // Extract text using util (plugins + built-ins)
+            std::string ext = doc.fileExtension;
+            if (!ext.empty() && ext[0] == '.')
+                ext.erase(0, 1);
+            auto extractedOpt = yams::extraction::util::extractDocumentText(
+                contentStore, doc.sha256Hash, doc.mimeType, ext, extractors);
+            if (!extractedOpt || extractedOpt->empty()) {
                 stats.failedOperations++;
                 continue;
             }
 
+            std::string text = std::move(*extractedOpt);
+            // Guard overly large text
+            if (text.size() > 1000000) { // 1MB limit
+                text.resize(1000000);
+            }
             texts.push_back(std::move(text));
             batchDocs.push_back(doc);
         }
@@ -160,7 +171,7 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                 continue;
             }
 
-            // Store embeddings in vector database
+            // Store embeddings in vector database (acquire short-lived lock per batch)
             std::vector<vector::VectorRecord> records;
             records.reserve(embeddings.size());
 
@@ -177,12 +188,68 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             }
 
             if (!records.empty()) {
-                if (vectorDb->insertVectorsBatch(records)) {
+                // Bounded wait/backoff for the DB lock
+                const auto lockPath = config.dataPath / "vectors.db.lock";
+                auto now = std::chrono::steady_clock::now();
+                uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
+                if (const char* env_ms = std::getenv("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
+                    try {
+                        timeout_ms = std::stoull(std::string(env_ms));
+                    } catch (...) {
+                    }
+                }
+                const auto deadline = now + std::chrono::milliseconds(timeout_ms);
+                uint64_t sleep_ms = 50;
+                bool locked = false;
+                while (!locked) {
+                    VectorDbLock vlock(lockPath);
+                    if (vlock.isLocked()) {
+                        // Insert while holding the lock, then release at scope end
+                        if (vectorDb->insertVectorsBatch(records)) {
+                            locked = true; // success path exits loop
+                            // vlock destructs here after insert
+                        } else {
+                            // Insert failed while holding the lock; treat as batch failure
+                            stats.failedOperations += records.size();
+                            spdlog::debug("Failed to insert {} embeddings into vector database",
+                                          records.size());
+                            break;
+                        }
+                    } else {
+                        spdlog::debug("Another process is updating the vector database");
+                        if (progressCallback) {
+                            progressCallback(0, 0, "Waiting for vector DB lock...");
+                        }
+                        if (std::chrono::steady_clock::now() >= deadline) {
+                            spdlog::warn("Vector database lock timeout; skipping current batch of "
+                                         "{} records",
+                                         records.size());
+                            stats.failedOperations += records.size();
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                        sleep_ms = std::min<uint64_t>(sleep_ms * 2, 2000);
+                    }
+                }
+
+                if (locked) {
                     stats.embeddingsGenerated += records.size();
+
+                    // Update metadata repository to track embedding status
+                    for (const auto& record : records) {
+                        auto updateResult = metadataRepo->updateDocumentEmbeddingStatusByHash(
+                            record.document_hash, true, embeddingGenerator->getConfig().model_name);
+                        if (!updateResult) {
+                            spdlog::warn("Failed to update embedding status for {}: {}",
+                                         record.document_hash, updateResult.error().message);
+                        }
+                    }
                 } else {
-                    stats.failedOperations += records.size();
-                    spdlog::debug("Failed to insert {} embeddings into vector database",
-                                  records.size());
+                    try {
+                        spdlog::error("[vectordb] batch insert failed: {}",
+                                      vectorDb->getLastError());
+                    } catch (...) {
+                    }
                 }
             }
         }
@@ -205,7 +272,10 @@ bool hasEmbedding(const std::string& documentHash, const std::filesystem::path& 
     try {
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath / "vectors.db").string();
-        vdbConfig.embedding_dim = 384; // Default, actual value doesn't matter for existence check
+        vdbConfig.embedding_dim = 384; // Default
+                                       // actual value does not matter for existence check
+        vdbConfig.create_if_missing = false;
+        vdbConfig.create_if_missing = false; // Never create from util
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
         if (!vectorDb->initialize()) {
@@ -233,6 +303,7 @@ getDocumentsMissingEmbeddings(std::shared_ptr<metadata::IMetadataRepository> met
     vector::VectorDatabaseConfig vdbConfig;
     vdbConfig.database_path = (dataPath / "vectors.db").string();
     vdbConfig.embedding_dim = 384; // Default
+    vdbConfig.create_if_missing = false;
 
     auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
     if (!vectorDb->initialize()) {

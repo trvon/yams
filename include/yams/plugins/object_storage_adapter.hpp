@@ -18,6 +18,12 @@ std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* v1_ifa
 // impl.
 yams_object_storage_v1* expose_as_c_abi(std::shared_ptr<IObjectStorageBackend> impl);
 
+// Variant that also returns an opaque backend handle to pass into the function table
+// when invoking methods directly without calling create(). The caller is responsible
+// for eventually calling destroy(handle) via the function table to free resources.
+std::pair<yams_object_storage_v1*, void*>
+expose_as_c_abi_with_state(std::shared_ptr<IObjectStorageBackend> impl);
+
 // Utility: serialize/deserialize options/metadata to/from JSON for C ABI calls.
 std::string to_json(const PutOptions& opts);
 std::string to_json(const GetOptions& opts);

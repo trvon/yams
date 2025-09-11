@@ -1,10 +1,12 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <vector>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
@@ -45,133 +47,32 @@ public:
     }
 
     Result<void> execute() override {
-        YAMS_ZONE_SCOPED_N("StatusCommand::execute");
+        std::promise<Result<void>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [this, &prom]() -> boost::asio::awaitable<void> {
+                auto r = co_await this->executeAsync();
+                prom.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        return fut.get();
+    }
 
+    boost::asio::awaitable<Result<void>> executeAsync() override {
+        YAMS_ZONE_SCOPED_N("StatusCommand::execute");
         try {
             // Try daemon-first for quick status snapshot
             {
-                // Use DaemonClient with CLI data path to align storage
                 yams::daemon::ClientConfig cfg;
                 cfg.dataDir = cli_->getDataPath();
                 yams::daemon::DaemonClient client(cfg);
-                if (auto st = yams::cli::run_sync(client.status(), std::chrono::seconds(5)); st) {
+                auto st = co_await client.status();
+                if (st) {
                     auto s = st.value();
-
-                    // Build services summary from stats JSON for a quick health glance
                     std::string svcSummary;
                     std::string waitingSummary;
-
-                    // Supplement Status with daemon stats JSON to avoid zeros from proto path
-                    // (StatusResponse over proto currently only carries a 'state' string)
-                    try {
-                        yams::daemon::GetStatsRequest sreq; // defaults are fine
-                        if (auto gres =
-                                yams::cli::run_sync(client.getStats(sreq), std::chrono::seconds(2));
-                            gres) {
-                            const auto& g = gres.value();
-                            auto itJson = g.additionalStats.find("json");
-                            if (itJson != g.additionalStats.end()) {
-                                auto j = nlohmann::json::parse(itJson->second);
-                                if (s.version.empty() && j.contains("version"))
-                                    s.version = j["version"].get<std::string>();
-                                if (s.uptimeSeconds == 0 && j.contains("uptime_seconds"))
-                                    s.uptimeSeconds = j["uptime_seconds"].get<uint64_t>();
-                                if (s.memoryUsageMb == 0 && j.contains("memory_mb"))
-                                    s.memoryUsageMb = j["memory_mb"].get<double>();
-                                if (s.cpuUsagePercent == 0 && j.contains("cpu_pct"))
-                                    s.cpuUsagePercent = j["cpu_pct"].get<double>();
-
-                                // Derive services summary
-                                auto flag = [&](const char* key, const char* good) -> std::string {
-                                    if (j.contains("services") && j["services"].contains(key)) {
-                                        auto v = j["services"][key].get<std::string>();
-                                        if (v == good)
-                                            return "✓";
-                                        if (v == std::string("available") ||
-                                            v == std::string("initialized"))
-                                            return "✓";
-                                        return "⚠";
-                                    }
-                                    return "⚠";
-                                };
-                                std::string content = flag("contentstore", "running");
-                                std::string repo = flag("metadatarepo", "running");
-                                std::string search;
-                                if (j.contains("services") &&
-                                    j["services"].contains("searchexecutor")) {
-                                    auto sv = j["services"]["searchexecutor"].get<std::string>();
-                                    if (sv == "available")
-                                        search = "✓";
-                                    else {
-                                        std::string reason =
-                                            j["services"].value("searchexecutor_reason", "");
-                                        search = reason.empty() ? "⚠" : ("⚠ (" + reason + ")");
-                                    }
-                                } else {
-                                    search = "⚠";
-                                }
-                                std::string models;
-                                if (j.contains("services") &&
-                                    j["services"].contains("embeddingservice")) {
-                                    auto ev = j["services"]["embeddingservice"].get<std::string>();
-                                    if (ev == "available") {
-                                        std::string count =
-                                            j["services"].contains("onnx_models_loaded")
-                                                ? j["services"]["onnx_models_loaded"].dump()
-                                                : std::string{"0"};
-                                        models = (count == "0" || count == "\"0\"") ? "⚠ (0)" : "✓";
-                                    } else {
-                                        models = "⚠";
-                                    }
-                                } else {
-                                    models = "⚠";
-                                }
-                                svcSummary = content + " Content | " + repo + " Repo | " + search +
-                                             " Search | " + models + " Models";
-
-                                // Build waiting summary when not ready
-                                if (!s.ready && j.contains("readiness")) {
-                                    std::vector<std::string> waiting;
-                                    for (auto it = j["readiness"].begin();
-                                         it != j["readiness"].end(); ++it) {
-                                        bool ok = false;
-                                        try {
-                                            ok = it.value().get<bool>();
-                                        } catch (...) {
-                                        }
-                                        if (!ok) {
-                                            std::ostringstream os;
-                                            os << it.key();
-                                            if (j.contains("progress") &&
-                                                j["progress"].contains(it.key())) {
-                                                try {
-                                                    os << " (" << j["progress"][it.key()].get<int>()
-                                                       << "%)";
-                                                } catch (...) {
-                                                }
-                                            }
-                                            waiting.push_back(os.str());
-                                        }
-                                    }
-                                    if (!waiting.empty()) {
-                                        std::ostringstream line;
-                                        for (size_t i = 0; i < waiting.size(); ++i) {
-                                            if (i)
-                                                line << ", ";
-                                            line << waiting[i];
-                                            if (i >= 4) {
-                                                line << ", …";
-                                                break;
-                                            }
-                                        }
-                                        waitingSummary = line.str();
-                                    }
-                                }
-                            }
-                        }
-                    } catch (...) {
-                        // best-effort supplement only
-                    }
                     if (jsonOutput_) {
                         nlohmann::json j;
                         j["running"] = s.running;
@@ -209,7 +110,6 @@ public:
                         }
                         std::cout << j.dump(2) << std::endl;
                     } else {
-                        // Retro, compact output (using supplemented values when available)
                         std::cout << "== DAEMON STATUS ==\n";
                         std::cout << "RUN  : " << (s.running ? "yes" : "no") << "\n";
                         std::cout << "VER  : " << s.version << "\n";
@@ -225,20 +125,40 @@ public:
                         std::cout << "MEM  : " << std::fixed << std::setprecision(1)
                                   << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
                                   << "%\n";
-                        if (!svcSummary.empty()) {
-                            std::cout << "SVC  : " << svcSummary << "\n";
-                        }
                         if (!s.ready && !waitingSummary.empty()) {
                             std::cout << "WAIT : " << waitingSummary << "\n";
                         }
                     }
-                    return Result<void>();
+                    // In verbose mode, pull vector DB quick stats (size + rows) from daemon stats
+                    if (!jsonOutput_ && verbose_) {
+                        try {
+                            yams::daemon::ClientConfig scfg;
+                            scfg.dataDir = cli_->getDataPath();
+                            scfg.singleUseConnections = true;
+                            yams::daemon::DaemonClient scli(scfg);
+                            yams::daemon::GetStatsRequest greq;
+                            greq.detailed = true;
+                            auto gs = co_await scli.getStats(greq);
+                            if (gs) {
+                                const auto& resp = gs.value();
+                                std::string line = "VECDB: ";
+                                line += (resp.vectorIndexSize > 0)
+                                            ? ("Initialized - " + formatSize(resp.vectorIndexSize))
+                                            : "Not initialized";
+                                auto it = resp.additionalStats.find("vector_rows");
+                                if (it != resp.additionalStats.end()) {
+                                    line += " (" + it->second + " rows)";
+                                }
+                                std::cout << line << "\n";
+                            }
+                        } catch (...) {
+                        }
+                    }
+                    co_return Result<void>();
                 }
             }
-            // Ensure storage is initialized (will detect existing storage)
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
-                // Storage doesn't exist or can't be initialized
                 if (jsonOutput_) {
                     std::cout
                         << R"({"status": "not_initialized", "message": "YAMS not initialized"})"
@@ -249,30 +169,20 @@ public:
                     std::cout << "✗ Not initialized\n";
                     std::cout << "  → Run 'yams init' to get started\n";
                 }
-                return Result<void>();
+                co_return Result<void>();
             }
-
-            // Get system components
             auto store = cli_->getContentStore();
             auto metadataRepo = cli_->getMetadataRepository();
-
-            if (!store || !metadataRepo) {
-                return Error{ErrorCode::NotInitialized, "Failed to access storage components"};
-            }
-
-            // Gather status information
+            if (!store || !metadataRepo)
+                co_return Error{ErrorCode::NotInitialized, "Failed to access storage components"};
             StatusInfo status = gatherStatusInfo(store, metadataRepo);
-
-            if (jsonOutput_) {
+            if (jsonOutput_)
                 outputJson(status);
-            } else {
+            else
                 outputText(status);
-            }
-
-            return Result<void>();
-
+            co_return Result<void>();
         } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
+            co_return Error{ErrorCode::Unknown, std::string(e.what())};
         }
     }
 
@@ -302,6 +212,12 @@ private:
         uint64_t embeddingCount = 0;
         bool vectorDbHealthy = false;
         std::string preferredModel;
+
+        // Worker pool (daemon)
+        uint64_t workerThreads = 0;
+        uint64_t workerActive = 0;
+        uint64_t workerQueued = 0;
+        uint64_t workerUtilPct = 0;
 
         // Issues/Recommendations
         std::vector<std::string> warnings;
@@ -399,17 +315,56 @@ private:
         info.autoGenerationEnabled = embeddingService && embeddingService->isAvailable();
         info.preferredModel = info.hasModels ? info.availableModels[0] : "none";
 
+        // Pull worker pool metrics from daemon status (best-effort, short timeout)
+        try {
+            yams::daemon::DaemonClient probe{};
+            std::promise<Result<yams::daemon::StatusResponse>> promProbe;
+            auto futProbe = promProbe.get_future();
+            auto workProbe = [&]() -> boost::asio::awaitable<void> {
+                auto sr = co_await probe.status();
+                promProbe.set_value(std::move(sr));
+                co_return;
+            };
+            boost::asio::co_spawn(boost::asio::system_executor{}, workProbe(),
+                                  boost::asio::detached);
+            if (futProbe.wait_for(std::chrono::milliseconds(800)) == std::future_status::ready) {
+                auto sres = futProbe.get();
+                if (sres) {
+                    const auto& s = sres.value();
+                    auto itT = s.requestCounts.find("worker_threads");
+                    auto itA = s.requestCounts.find("worker_active");
+                    auto itQ = s.requestCounts.find("worker_queued");
+                    if (itT != s.requestCounts.end())
+                        info.workerThreads = itT->second;
+                    if (itA != s.requestCounts.end())
+                        info.workerActive = itA->second;
+                    if (itQ != s.requestCounts.end())
+                        info.workerQueued = itQ->second;
+                    if (info.workerThreads > 0)
+                        info.workerUtilPct =
+                            static_cast<uint64_t>((100.0 * info.workerActive) / info.workerThreads);
+                }
+            }
+        } catch (...) {
+        }
+
         // Check vector database status
         try {
-            vector::VectorDatabaseConfig vdbConfig;
-            vdbConfig.database_path = (cli_->getDataPath() / "vectors.db").string();
-            vdbConfig.embedding_dim = 384; // Default for status check
-
-            auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-            if (vectorDb->initialize()) {
+            auto dbPath = (cli_->getDataPath() / "vectors.db");
+            if (!std::filesystem::exists(dbPath)) {
+                // Do not create vectors.db during status; report absence only
                 info.vectorDbHealthy = true;
-                if (vectorDb->tableExists()) {
-                    info.embeddingCount = vectorDb->getVectorCount();
+            } else {
+                vector::VectorDatabaseConfig vdbConfig;
+                vdbConfig.database_path = dbPath.string();
+                // Use a conservative default; existing table schema determines dimension
+                vdbConfig.embedding_dim = 384;
+                auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
+                if (vectorDb->initialize()) {
+                    info.vectorDbHealthy = true;
+                    if (vectorDb->tableExists()) {
+                        info.embeddingCount = vectorDb->getVectorCount();
+                    }
                 }
             }
         } catch (const std::exception& e) {
@@ -655,6 +610,12 @@ private:
             {std::string(info.vectorDbHealthy ? "✓ Vector DB" : "⚠ Vector DB"),
              std::string(info.vectorDbHealthy ? "Ready for semantic search" : "Not available"),
              ""});
+        if (info.workerThreads > 0) {
+            std::ostringstream oss;
+            oss << "threads=" << info.workerThreads << ", active=" << info.workerActive
+                << ", queued=" << info.workerQueued << ", util=" << info.workerUtilPct << "%";
+            rows.push_back({"✓ Worker Pool", "Healthy", oss.str()});
+        }
         renderRows(rows);
 
         if (!info.recommendations.empty()) {

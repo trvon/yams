@@ -7,6 +7,8 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -98,6 +100,35 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
         } catch (...) {
         }
     }
+    // Timeout overrides: prefer explicit env, else bump conservative defaults to 120s
+    auto parse_ms = [](const char* v) -> std::optional<std::chrono::milliseconds> {
+        if (!v)
+            return std::nullopt;
+        try {
+            long ms = std::stol(std::string(v));
+            if (ms > 0)
+                return std::chrono::milliseconds(ms);
+        } catch (...) {
+        }
+        return std::nullopt;
+    };
+    // Unified request timeout sets both header/body
+    if (auto rt = parse_ms(std::getenv("YAMS_REQUEST_TIMEOUT_MS"))) {
+        pImpl->headerTimeout_ = *rt;
+        pImpl->bodyTimeout_ = *rt;
+    }
+    if (auto ht = parse_ms(std::getenv("YAMS_HEADER_TIMEOUT_MS"))) {
+        pImpl->headerTimeout_ = *ht;
+    }
+    if (auto bt = parse_ms(std::getenv("YAMS_BODY_TIMEOUT_MS"))) {
+        pImpl->bodyTimeout_ = *bt;
+    }
+    // If still at legacy defaults (30s/60s), raise to 120s to tolerate large inference
+    if (pImpl->headerTimeout_ == std::chrono::milliseconds(30000) &&
+        pImpl->bodyTimeout_ == std::chrono::milliseconds(60000)) {
+        pImpl->headerTimeout_ = std::chrono::milliseconds(120000);
+        pImpl->bodyTimeout_ = std::chrono::milliseconds(120000);
+    }
     spdlog::debug("DaemonClient init: resolved socket='{}'", pImpl->config_.socketPath.string());
 }
 
@@ -143,45 +174,74 @@ pingDaemonSync(const std::filesystem::path& socketPath,
     }
 }
 
-Result<void> DaemonClient::connect() {
-    // Treat connect() as a liveness gate. If the daemon is not reachable and
-    // autoStart is disabled, surface a failure so callers (e.g., pools/tests)
-    // can react accordingly.
-    const bool alive = pingDaemonSync(pImpl->config_.socketPath);
-    if (!alive && !pImpl->config_.autoStart) {
-        return Error{ErrorCode::NetworkError, "Daemon not running"};
+Task<Result<void>> DaemonClient::connect() {
+    // Async variant using adapter's connect helper and timers; avoids blocking sleeps
+    // If daemon is not reachable and autoStart is disabled, surface a failure.
+    const auto socketPath = pImpl->config_.socketPath.empty()
+                                ? yams::daemon::ConnectionFsm::resolve_socket_path_config_first()
+                                : pImpl->config_.socketPath;
+    if (socketPath.empty()) {
+        co_return Error{ErrorCode::NetworkError, "Socket path not resolved"};
     }
 
-    // Ensure daemon is running if auto-start is enabled; no persistent socket is kept.
-    if (!alive && pImpl->config_.autoStart) {
-        spdlog::info("Daemon not running, attempting to auto-start...");
-        if (auto result = startDaemon(pImpl->config_); !result) {
-            spdlog::warn("Failed to auto-start daemon: {}",
-                         sanitize_for_terminal(result.error().message));
-            spdlog::info("Please manually start the daemon with: yams daemon start");
-            return result.error();
+    using boost::asio::awaitable;
+    using boost::asio::steady_timer;
+    using boost::asio::use_awaitable;
+    using boost::asio::this_coro::executor;
+    using boost::asio::experimental::awaitable_operators::operator||;
+
+    auto try_connect = [&](std::chrono::milliseconds timeout) -> Task<Result<void>> {
+        auto ex = co_await executor;
+        boost::asio::local::stream_protocol::socket sock(ex);
+        boost::asio::local::stream_protocol::endpoint ep(socketPath.string());
+        steady_timer t(ex);
+        t.expires_after(timeout);
+        auto which =
+            co_await (sock.async_connect(ep, use_awaitable) || t.async_wait(use_awaitable));
+        if (which.index() == 1) {
+            co_return Error{ErrorCode::Timeout, "Connection timeout"};
         }
-        // Wait for daemon readiness with exponential backoff
-        const int maxRetries = 10;
-        const auto baseDelay = std::chrono::milliseconds(100);
-        for (int i = 0; i < maxRetries; ++i) {
-            auto delay = baseDelay * (1 << std::min(i, 5));
-            std::this_thread::sleep_for(delay);
-            if (pingDaemonSync(pImpl->config_.socketPath)) {
-                spdlog::debug("Daemon started successfully after {} retries", i + 1);
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                break;
-            }
-            if (i == maxRetries - 1) {
-                return Error{ErrorCode::Timeout, "Daemon failed to start after retries"};
-            }
+        // Success
+        boost::system::error_code ec;
+        sock.close(ec);
+        co_return Result<void>();
+    };
+
+    {
+        auto r = co_await try_connect(pImpl->config_.connectTimeout);
+        if (r) {
+            if (!pImpl->config_.enableCircuitBreaker)
+                pImpl->breaker_.recordSuccess();
+            co_return Result<void>();
+        }
+        if (!pImpl->config_.autoStart) {
+            co_return r.error();
         }
     }
-    // Reset breaker state if disabled
-    if (!pImpl->config_.enableCircuitBreaker) {
-        pImpl->breaker_.recordSuccess();
+
+    // Auto-start path
+    if (auto result = startDaemon(pImpl->config_); !result) {
+        spdlog::warn("Failed to auto-start daemon: {}",
+                     sanitize_for_terminal(result.error().message));
+        spdlog::info("Please manually start the daemon with: yams daemon start");
+        co_return result.error();
     }
-    return Result<void>();
+
+    // Retry with exponential backoff using steady_timer
+    const int maxRetries = 10;
+    const auto baseDelay = std::chrono::milliseconds(100);
+    for (int i = 0; i < maxRetries; ++i) {
+        auto r = co_await try_connect(pImpl->config_.connectTimeout);
+        if (r) {
+            spdlog::debug("Daemon started successfully after {} retries", i + 1);
+            co_return Result<void>();
+        }
+        steady_timer t(co_await executor);
+        auto delay = baseDelay * (1 << std::min(i, 5));
+        t.expires_after(delay);
+        co_await t.async_wait(boost::asio::use_awaitable);
+    }
+    co_return Error{ErrorCode::Timeout, "Daemon failed to start after retries"};
 }
 
 void DaemonClient::disconnect() {
@@ -213,20 +273,43 @@ Task<Result<SearchResponse>> DaemonClient::streamingSearch(const SearchRequest& 
 }
 
 Task<Result<GetResponse>> DaemonClient::get(const GetRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
+    struct GetHandler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* res = std::get_if<GetResponse>(&r)) {
+                response_ = *res;
+            } else if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error_ = Error{err->code, err->message};
+            }
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* res = std::get_if<GetResponse>(&r)) {
+                response_.content.append(res->content);
+            } else if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error_ = Error{err->code, err->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error_ = e; }
+        void onComplete() override {}
 
-    if (auto* res = std::get_if<GetResponse>(&response.value())) {
-        co_return *res;
-    }
+        Result<GetResponse> getResults() {
+            if (error_) {
+                return *error_;
+            }
+            return response_;
+        }
 
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
+        GetResponse response_;
+        std::optional<Error> error_;
+    };
 
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    auto handler = std::make_shared<GetHandler>();
+    auto result = co_await sendRequestStreaming(req, handler);
+    if (!result) {
+        co_return result.error();
+    }
+    co_return handler->getResults();
 }
 
 Task<Result<ListResponse>> DaemonClient::list(const ListRequest& req) {
@@ -272,8 +355,9 @@ Task<Result<StatusResponse>> DaemonClient::status() {
             co_return lastErr;
         }
         using namespace std::chrono_literals;
-        // Can't mix Task with boost::asio::awaitable, use sync sleep
-        std::this_thread::sleep_for(std::chrono::milliseconds(75 * (attempt + 1)));
+        boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
+        t.expires_after(std::chrono::milliseconds(75 * (attempt + 1)));
+        co_await t.async_wait(boost::asio::use_awaitable);
     }
     co_return lastErr;
 }
@@ -286,41 +370,66 @@ Task<Result<void>> DaemonClient::shutdown(bool graceful) {
     ShutdownRequest req;
     req.graceful = graceful;
 
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return Error{response.error().code, response.error().message};
-    }
-
-    if (std::holds_alternative<SuccessResponse>(response.value())) {
-        co_return Result<void>();
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+            else
+                ok = true;
+        }
+        bool onChunkReceived(const Response& r, bool /*last*/) override {
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            ok = true;
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        bool ok{false};
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    co_return Result<void>();
 }
 
 Task<Result<void>> DaemonClient::ping() {
     PingRequest req;
 
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return Error{response.error().code, response.error().message};
-    }
-
-    if (std::holds_alternative<PongResponse>(response.value())) {
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (std::holds_alternative<PongResponse>(r))
+                pong = true;
+            else if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (std::holds_alternative<PongResponse>(r))
+                pong = true;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        bool pong{false};
+        std::optional<Error> error;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->pong)
         co_return Result<void>();
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    int mt = static_cast<int>(getMessageType(response.value()));
-    spdlog::error("Ping: unexpected response variant (type={})", mt);
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type for ping"};
 }
 
 Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
@@ -695,6 +804,26 @@ DaemonClient::sendRequestStreaming(const Request& req,
 
     auto onHeader = [handler](const Response& r) { handler->onHeaderReceived(r); };
     auto onChunk = [handler](const Response& r, bool last) {
+        // Pretty-print progress events if present, then forward to handler
+        if (auto* ev = std::get_if<EmbeddingEvent>(&r)) {
+            spdlog::info(
+                "[embed] model={} processed={}/{} success={} failure={} inserted={} phase={} {}",
+                ev->modelName, ev->processed, ev->total, ev->success, ev->failure, ev->inserted,
+                ev->phase, ev->message);
+            // Do not terminate stream on events
+            (void)last;
+            return true;
+        }
+        if (auto* ml = std::get_if<ModelLoadEvent>(&r)) {
+            if (ml->bytesTotal > 0) {
+                spdlog::info("[model] {} {} {}/{} bytes {}", ml->modelName, ml->phase,
+                             ml->bytesLoaded, ml->bytesTotal, ml->message);
+            } else {
+                spdlog::info("[model] {} {} {}", ml->modelName, ml->phase, ml->message);
+            }
+            (void)last;
+            return true;
+        }
         return handler->onChunkReceived(r, last);
     };
     auto onError = [handler](const Error& e) { handler->onError(e); };
@@ -712,7 +841,25 @@ DaemonClient::sendRequestStreaming(const Request& req,
 Task<Result<AddDocumentResponse>>
 DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
     struct AddDocHandler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& /*headerResponse*/) override {}
+        void onHeaderReceived(const Response& headerResponse) override {
+            // In unary (non-streaming) server paths, the full AddDocumentResponse may arrive here.
+            if (auto* add = std::get_if<AddDocumentResponse>(&headerResponse)) {
+                value = *add;
+                return;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                error = Error{err->code, err->message};
+                return;
+            }
+            if (auto* st = std::get_if<StatusResponse>(&headerResponse)) {
+                std::string status = st->overallStatus.empty()
+                                         ? (st->ready ? "ready" : "initializing")
+                                         : st->overallStatus;
+                error = Error{ErrorCode::InvalidState,
+                              std::string("Daemon not ready yet (status=") + status + ")"};
+                return;
+            }
+        }
         bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override {
             if (auto* err = std::get_if<ErrorResponse>(&chunkResponse)) {
                 error = Error{err->code, err->message};
@@ -761,124 +908,462 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
 
 Task<Result<EmbeddingResponse>>
 DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<EmbeddingResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* fin = std::get_if<EmbeddingResponse>(&r))
+                value = *fin;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool isLast) override {
+            if (auto* ev = std::get_if<EmbeddingEvent>(&r)) {
+                spdlog::info("[embed] model={} processed={} total={} success={} failure={} {}",
+                             ev->modelName, ev->processed, ev->total, ev->success, ev->failure,
+                             ev->message);
+                (void)isLast;
+                return true;
+            }
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            if (auto* fin = std::get_if<EmbeddingResponse>(&r)) {
+                if (isLast)
+                    value = *fin;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<EmbeddingResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing EmbeddingResponse in stream"};
 }
 
 Task<Result<BatchEmbeddingResponse>>
 DaemonClient::generateBatchEmbeddings(const BatchEmbeddingRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
+    // Route through streaming path even for batch for progress events
+    co_return co_await streamingBatchEmbeddings(req);
+}
 
-    if (auto* res = std::get_if<BatchEmbeddingResponse>(&response.value())) {
-        co_return *res;
-    }
+Task<Result<BatchEmbeddingResponse>>
+DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
+    struct Handler : public ChunkedResponseHandler {
+        Handler() {}
+        void onHeaderReceived(const Response& headerResponse) override {
+            // Support unary (non-chunked) server responses: final may arrive as header
+            if (auto* fin = std::get_if<BatchEmbeddingResponse>(&headerResponse)) {
+                // Treat as final; no partials were sent
+                value = *fin;
+                return;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                error = Error{err->code, err->message};
+                return;
+            }
+        }
+        bool onChunkReceived(const Response& r, bool isLast) override {
+            if (auto* e = std::get_if<EmbeddingEvent>(&r)) {
+                // Progress only; continue
+                (void)e;
+                return true;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error = Error{err->code, err->message};
+                return false;
+            }
+            if (auto* fin = std::get_if<BatchEmbeddingResponse>(&r)) {
+                if (!isLast) {
+                    // Partial chunk – accumulate embeddings client-side
+                    if (fin->dimensions > 0 && dim == 0)
+                        dim = fin->dimensions;
+                    if (!value)
+                        value = BatchEmbeddingResponse{};
+                    if (value->dimensions == 0 && fin->dimensions > 0)
+                        value->dimensions = fin->dimensions;
+                    value->embeddings.reserve(value->embeddings.size() + fin->embeddings.size());
+                    for (auto& v : fin->embeddings)
+                        value->embeddings.push_back(std::move(v));
+                    value->successCount += static_cast<uint32_t>(fin->embeddings.size());
+                    return true;
+                }
+                // Last chunk – may be summary only; ensure value is set
+                if (!value)
+                    value = *fin; // fallback if server sent full final
+                else {
+                    value->modelUsed = fin->modelUsed;
+                    if (value->dimensions == 0)
+                        value->dimensions = fin->dimensions;
+                }
+                return true;
+            }
+            if (auto* init = std::get_if<GetInitResponse>(&r)) {
+                // Store handle to download after stream completes
+                initResp = *init;
+                return true;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        void onComplete() override {}
+        std::optional<Error> error;
+        std::optional<BatchEmbeddingResponse> value;
+        size_t dim{0};
+        std::optional<GetInitResponse> initResp;
+    };
 
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
+    auto handler = std::make_shared<Handler>();
+    auto result = co_await sendRequestStreaming(req, handler);
+    if (!result)
+        co_return result.error();
+    if (handler->error)
+        co_return handler->error.value();
+    if (handler->value)
+        co_return handler->value.value();
+    if (handler->initResp.has_value()) {
+        // Download to memory, reconstruct BatchEmbeddingResponse
+        auto ir = handler->initResp.value();
+        // Fetch bytes
+        std::string data;
+        data.reserve(static_cast<size_t>(ir.totalSize));
+        uint64_t remaining = ir.totalSize;
+        uint64_t offset = 0;
+        const uint32_t step = ir.chunkSize > 0 ? ir.chunkSize : 256 * 1024;
+        while (remaining > 0) {
+            GetChunkRequest creq{ir.transferId, offset,
+                                 static_cast<uint32_t>(std::min<uint64_t>(remaining, step))};
+            auto cres = co_await sendRequest(Request{creq});
+            if (!cres)
+                co_return cres.error();
+            auto* chunk = std::get_if<GetChunkResponse>(&cres.value());
+            if (!chunk)
+                co_return Error{ErrorCode::InvalidData, "Invalid chunk response"};
+            if (!chunk->data.empty())
+                data.append(chunk->data);
+            const uint64_t wrote = chunk->data.size();
+            if (wrote == 0 && chunk->bytesRemaining == remaining)
+                break;
+            offset += wrote;
+            remaining = chunk->bytesRemaining;
+        }
+        if (ir.transferId != 0) {
+            GetEndRequest ereq{ir.transferId};
+            (void)co_await sendRequest(Request{ereq});
+        }
+        // Parse metadata
+        size_t dim = 0, count = 0;
+        try {
+            auto it = ir.metadata.find("dim");
+            if (it != ir.metadata.end())
+                dim = static_cast<size_t>(std::stoul(it->second));
+            it = ir.metadata.find("count");
+            if (it != ir.metadata.end())
+                count = static_cast<size_t>(std::stoul(it->second));
+        } catch (...) {
+            dim = 0;
+            count = 0;
+        }
+        if (dim == 0 || count == 0)
+            co_return Error{ErrorCode::InvalidData, "Missing embedding metadata"};
+        // Reconstruct embeddings from little-endian f32
+        const size_t bytes_needed = dim * count * sizeof(float);
+        if (data.size() < bytes_needed)
+            co_return Error{ErrorCode::InvalidData, "Downloaded size mismatch"};
+        BatchEmbeddingResponse out;
+        out.dimensions = dim;
+        out.modelUsed = ir.metadata.count("model") ? ir.metadata.at("model") : std::string{};
+        out.processingTimeMs = 0;
+        out.successCount = count;
+        out.failureCount = 0;
+        out.embeddings.resize(count);
+        const char* ptr = data.data();
+        for (size_t i = 0; i < count; ++i) {
+            out.embeddings[i].resize(dim);
+            std::memcpy(out.embeddings[i].data(), ptr + i * dim * sizeof(float),
+                        dim * sizeof(float));
+        }
+        co_return out;
     }
+    co_return Error{ErrorCode::InvalidData, "Missing BatchEmbeddingResponse or handle in stream"};
+}
 
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+Task<Result<EmbedDocumentsResponse>>
+DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& headerResponse) override {
+            // Support unary (non-chunked) server responses: final may arrive as header
+            if (auto* fin = std::get_if<EmbedDocumentsResponse>(&headerResponse)) {
+                value = *fin;
+                return;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                error = Error{err->code, err->message};
+                return;
+            }
+        }
+        bool onChunkReceived(const Response& r, bool isLast) override {
+            if (auto* e = std::get_if<EmbeddingEvent>(&r)) {
+                // Emit a simple, user-visible progress line for repair UI and CLI flows
+                // Format: [embed] model processed/total success failure inserted phase message
+                try {
+                    std::cout << "[embed] model=" << e->modelName << " " << e->processed << "/"
+                              << e->total << " success=" << e->success << " failure=" << e->failure
+                              << " inserted=" << e->inserted << " phase=" << e->phase
+                              << (e->message.empty() ? "" : (" " + e->message)) << "\n";
+                    std::cout.flush();
+                } catch (...) {
+                }
+                return true;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error = Error{err->code, err->message};
+                return false;
+            }
+            if (auto* fin = std::get_if<EmbedDocumentsResponse>(&r)) {
+                if (!isLast)
+                    return true;
+                value = *fin;
+                return true;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        void onComplete() override {}
+        std::optional<Error> error;
+        std::optional<EmbedDocumentsResponse> value;
+    };
+
+    auto handler = std::make_shared<Handler>();
+    auto result = co_await sendRequestStreaming(req, handler);
+    if (!result)
+        co_return result.error();
+    if (handler->error)
+        co_return handler->error.value();
+    if (handler->value)
+        co_return handler->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing EmbedDocumentsResponse in stream"};
+}
+
+Task<Result<std::vector<EmbeddingEvent>>>
+DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& headerResponse) override {
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                error = Error{err->code, err->message};
+            }
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* e = std::get_if<EmbeddingEvent>(&r)) {
+                try {
+                    events.push_back(*e);
+                } catch (...) {
+                }
+                return true;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error = Error{err->code, err->message};
+                return false;
+            }
+            if (auto* fin = std::get_if<EmbedDocumentsResponse>(&r)) {
+                (void)fin; // final stats are implied by events; keep API lean
+                return true;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        void onComplete() override {}
+        std::optional<Error> error;
+        std::vector<EmbeddingEvent> events;
+    };
+
+    auto handler = std::make_shared<Handler>();
+    auto result = co_await sendRequestStreaming(req, handler);
+    if (!result)
+        co_return result.error();
+    if (handler->error)
+        co_return handler->error.value();
+    co_return handler->events;
 }
 
 Task<Result<ModelLoadResponse>> DaemonClient::loadModel(const LoadModelRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<ModelLoadResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* fin = std::get_if<ModelLoadResponse>(&r))
+                value = *fin;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool isLast) override {
+            if (auto* ev = std::get_if<ModelLoadEvent>(&r)) {
+                if (ev->bytesTotal > 0) {
+                    spdlog::info("[model] {} {} {}/{} bytes {}", ev->modelName, ev->phase,
+                                 ev->bytesLoaded, ev->bytesTotal, ev->message);
+                } else {
+                    spdlog::info("[model] {} {} {}", ev->modelName, ev->phase, ev->message);
+                }
+                (void)isLast;
+                return true;
+            }
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            if (auto* fin = std::get_if<ModelLoadResponse>(&r)) {
+                if (isLast)
+                    value = *fin;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<ModelLoadResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing ModelLoadResponse in stream"};
 }
 
 Task<Result<SuccessResponse>> DaemonClient::unloadModel(const UnloadModelRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<SuccessResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* ok = std::get_if<SuccessResponse>(&r))
+                value = *ok;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* ok = std::get_if<SuccessResponse>(&r))
+                value = *ok;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<SuccessResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }
 
 Task<Result<ModelStatusResponse>> DaemonClient::getModelStatus(const ModelStatusRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<ModelStatusResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* s = std::get_if<ModelStatusResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* s = std::get_if<ModelStatusResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<ModelStatusResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing ModelStatusResponse in stream"};
 }
 
 Task<Result<GetStatsResponse>> DaemonClient::getStats(const GetStatsRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<GetStatsResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* s = std::get_if<GetStatsResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* s = std::get_if<GetStatsResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<GetStatsResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing GetStatsResponse in stream"};
 }
 
 Task<Result<UpdateDocumentResponse>>
 DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<UpdateDocumentResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* s = std::get_if<UpdateDocumentResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* s = std::get_if<UpdateDocumentResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<UpdateDocumentResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing UpdateDocumentResponse in stream"};
 }
 
 std::filesystem::path DaemonClient::resolveSocketPath() {
@@ -1039,41 +1524,9 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         exit(1);
     }
 
-    // Parent process: detach a lightweight reaper so short-lived intermediary
-    // children (e.g., if the daemon double-forks) do not become zombies. This
-    // thread will block until the first child exits and will then clean up.
-#ifndef _WIN32
-    {
-        std::thread([pid]() {
-            int status = 0;
-            (void)::waitpid(pid, &status, 0);
-        }).detach();
-    }
-#endif
+    // Parent process: we don't wait for the daemon to exit.
 
-    // Do not enforce a hard readiness timeout here.
-    // Perform a brief best-effort check for the socket, then return success so
-    // the caller (CLI) can show a live spinner and poll detailed status.
-    // Optional override via env: YAMS_STARTUP_SOCKET_WAIT_MS (default ~500ms)
-    int wait_ms = 500;
-    if (const char* env = std::getenv("YAMS_STARTUP_SOCKET_WAIT_MS")) {
-        try {
-            wait_ms = std::max(0, std::stoi(env));
-        } catch (...) {
-        }
-    }
-    if (wait_ms > 0) {
-        const auto start = std::chrono::steady_clock::now();
-        const auto timeout = std::chrono::milliseconds(wait_ms);
-        while (std::chrono::steady_clock::now() - start < timeout) {
-            if (pingDaemonSync(socketPath)) {
-                spdlog::info("Daemon process spawned and socket accepting");
-                return Result<void>();
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    }
-    spdlog::info("Daemon process spawned; socket not accepting yet (continuing)");
+    spdlog::info("Daemon process spawned, client will now poll for readiness");
     return Result<void>();
 #endif
 }
@@ -1145,37 +1598,67 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
 }
 
 Task<Result<AddResponse>> DaemonClient::add(const AddRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<AddResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* s = std::get_if<AddResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* s = std::get_if<AddResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<AddResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing AddResponse in stream"};
 }
 
 Task<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
-    auto response = co_await sendRequest(req);
-    if (!response) {
-        co_return response.error();
-    }
-
-    if (auto* res = std::get_if<SuccessResponse>(&response.value())) {
-        co_return *res;
-    }
-
-    if (auto* err = std::get_if<ErrorResponse>(&response.value())) {
-        co_return Error{err->code, err->message};
-    }
-
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+    struct Handler : public ChunkedResponseHandler {
+        void onHeaderReceived(const Response& r) override {
+            if (auto* s = std::get_if<SuccessResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r))
+                error = Error{er->code, er->message};
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* s = std::get_if<SuccessResponse>(&r))
+                value = *s;
+            if (auto* er = std::get_if<ErrorResponse>(&r)) {
+                error = Error{er->code, er->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        std::optional<Error> error;
+        std::optional<SuccessResponse> value;
+    };
+    auto h = std::make_shared<Handler>();
+    auto r = co_await sendRequestStreaming(req, h);
+    if (!r)
+        co_return r.error();
+    if (h->error)
+        co_return h->error.value();
+    if (h->value)
+        co_return h->value.value();
+    co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }
 
 } // namespace yams::daemon

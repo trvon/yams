@@ -1,4 +1,7 @@
+#include <filesystem>
+#include <yams/integrity/repair_utils.h>
 #include <yams/integrity/verifier.h>
+#include <yams/vector/sqlite_vec_backend.h>
 
 #include <spdlog/spdlog.h>
 

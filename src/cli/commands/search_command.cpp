@@ -16,11 +16,22 @@
 #include <yams/search/search_executor.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first search
-#include <yams/cli/async_bridge.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
+// Async helpers (interim bridge-free execution)
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/system_executor.hpp>
+// Timers and coroutine executor helpers for guard race
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+
+// Hot/Cold mode helpers (env-driven)
+#include <future>
+#include "hot_cold_utils.h"
 
 namespace yams::cli {
 
@@ -30,7 +41,7 @@ class SearchCommand : public ICommand {
 private:
     // Streaming configuration
     bool enableStreaming_ = true;
-    int headerTimeoutMs_ = 30000;
+    int headerTimeoutMs_ = 15000;
     int bodyTimeoutMs_ = 60000;
     int chunkSize_ = 64 * 1024;
     // Default to streaming; users can opt out with --no-streaming
@@ -43,7 +54,9 @@ private:
     std::vector<std::string> extraArgs_;
     std::string pathFilter_;
     size_t limit_ = 20;
-    std::string searchType_ = "keyword";
+    std::string searchType_ = "hybrid";
+    // Default list mode derived from env; currently not used directly here but kept for consistency
+    yams::cli::HotColdMode listMode_ = yams::cli::getListMode();
     bool fuzzySearch_ = false;
     float minSimilarity_ = 0.7f;
     bool pathsOnly_ = false;
@@ -66,9 +79,26 @@ private:
     // Include globs filtering
     std::vector<std::string> includeGlobs_;
 
+    // File-type and MIME filtering
+    std::string extension_;
+    std::string mimeType_;
+    std::string fileType_;
+    bool textOnly_{false};
+    bool binaryOnly_{false};
+
+    // Time filters
+    std::string createdAfter_;
+    std::string createdBefore_;
+    std::string modifiedAfter_;
+    std::string modifiedBefore_;
+    std::string indexedAfter_;
+    std::string indexedBefore_;
+
     // Session scoping controls
     std::optional<std::string> sessionOverride_{};
     bool noSession_{false};
+    // Force thorough, non-streaming execution (disables streaming guard)
+    bool cold_{false};
 
     // Helper function to truncate snippet to a maximum length at word boundary
     std::string truncateSnippet(const std::string& snippet, size_t maxLength) {
@@ -192,7 +222,7 @@ public:
 
         cmd->add_option("--header-timeout", headerTimeoutMs_,
                         "Timeout for receiving response headers (milliseconds)")
-            ->default_val(30000);
+            ->default_val(15000);
 
         cmd->add_option("--body-timeout", bodyTimeoutMs_,
                         "Timeout for receiving response body (milliseconds)")
@@ -220,6 +250,9 @@ public:
         cmd->add_option("--hash", hashQuery_,
                         "Search by file hash (full or partial, minimum 8 characters)");
 
+        // Execution mode
+        cmd->add_flag("--cold", cold_, "Force thorough (non-streaming) execution");
+
         // Tag filtering options
         cmd->add_option("--tags", filterTags_,
                         "Filter results by tags (comma-separated, e.g., work,important)");
@@ -231,13 +264,35 @@ public:
                         "Limit results to paths matching globs (comma-separated or repeated). "
                         "Examples: \"*.cpp\", \"*.{cpp,hpp}\", \"src/**/*.cpp,include/**/*.hpp\"");
 
+        // File-type and MIME filters
+        cmd->add_option("--ext,--extension", extension_,
+                        "Filter by file extension (e.g., .cpp or cpp)");
+        cmd->add_option("--mime,--mime-type", mimeType_, "Filter by MIME type (e.g., text/plain)");
+        cmd->add_option("--file-type", fileType_,
+                        "Filter by file type (text, binary, image, document, archive, audio, "
+                        "video, executable)");
+        cmd->add_flag("--text-only", textOnly_, "Limit results to text documents");
+        cmd->add_flag("--binary-only", binaryOnly_, "Limit results to binary documents");
+
+        // Time filters (ISO 8601, relative like 7d, or natural like 'yesterday')
+        cmd->add_option("--created-after", createdAfter_, "Created after (ISO/relative/natural)");
+        cmd->add_option("--created-before", createdBefore_,
+                        "Created before (ISO/relative/natural)");
+        cmd->add_option("--modified-after", modifiedAfter_,
+                        "Modified after (ISO/relative/natural)");
+        cmd->add_option("--modified-before", modifiedBefore_,
+                        "Modified before (ISO/relative/natural)");
+        cmd->add_option("--indexed-after", indexedAfter_, "Indexed after (ISO/relative/natural)");
+        cmd->add_option("--indexed-before", indexedBefore_,
+                        "Indexed before (ISO/relative/natural)");
+
         cmd->callback([this, cmd]() {
             // Capture extras for folding into the query string
             this->extraArgs_ = cmd->remaining();
-            auto result = execute();
-            if (!result) {
-                std::cerr << "[FAIL] " << result.error().message << "\n";
-                throw CLI::RuntimeError(1);
+            cli_->setPendingCommand(this);
+            if (cold_) {
+                // When --cold is provided, prefer non-streaming thorough execution
+                disableStreaming_ = true;
             }
         });
     }
@@ -322,10 +377,6 @@ public:
             }
             // Normalize include globs (split commas)
             auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
-            if (!noSession_) {
-                auto sess = yams::cli::session_store::active_include_patterns(sessionOverride_);
-                includeGlobsExpanded.insert(includeGlobsExpanded.end(), sess.begin(), sess.end());
-            }
             // Session-aware scoping: merge active session include patterns unless disabled
             if (!noSession_) {
                 auto sessionName = (sessionOverride_ ? std::optional<std::string>(*sessionOverride_)
@@ -338,16 +389,11 @@ public:
                 includeGlobsExpanded.push_back(pathFilter_);
             }
 
-            // Attempt daemon-first using a single DaemonClient instance (no pool).
-            // Keep it simple and deterministic for reliability.
-            yams::daemon::DaemonClient::setTimeoutEnvVars(
-                std::chrono::milliseconds(headerTimeoutMs_),
-                std::chrono::milliseconds(bodyTimeoutMs_));
-
             yams::daemon::ClientConfig clientConfig;
             clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
             clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
             clientConfig.requestTimeout = std::chrono::milliseconds(30000);
+            // Allow streaming by default; CLI will retry unary on timeout
             clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
@@ -375,13 +421,37 @@ public:
             dreq.limit = static_cast<size_t>(limit_);
             dreq.fuzzy = true; // favor resilient defaults; CLI still refines client-side
             dreq.literalText = literalText_;
-            dreq.similarity = (minSimilarity_ > 0.0) ? static_cast<double>(minSimilarity_) : 0.7;
+            dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
             dreq.pathsOnly = pathsOnly_;
             dreq.searchType = searchType_;
             dreq.jsonOutput = jsonOutput_;
             dreq.showHash = showHash_;
             dreq.verbose = verbose_;
             dreq.showLineNumbers = showLineNumbers_;
+            // Engine-level filters
+            dreq.pathPattern = pathFilter_;
+            if (!filterTags_.empty()) {
+                std::stringstream ss(filterTags_);
+                std::string tag;
+                while (std::getline(ss, tag, ',')) {
+                    // trim
+                    auto s = trim(tag);
+                    if (!s.empty())
+                        dreq.tags.push_back(s);
+                }
+                dreq.matchAllTags = matchAllTags_;
+            }
+            dreq.extension = extension_;
+            dreq.mimeType = mimeType_;
+            dreq.fileType = fileType_;
+            dreq.textOnly = textOnly_;
+            dreq.binaryOnly = binaryOnly_;
+            dreq.createdAfter = createdAfter_;
+            dreq.createdBefore = createdBefore_;
+            dreq.modifiedAfter = modifiedAfter_;
+            dreq.modifiedBefore = modifiedBefore_;
+            dreq.indexedAfter = indexedAfter_;
+            dreq.indexedBefore = indexedBefore_;
             // Note: daemon protocol currently lacks includeGlobs; apply client-side filtering below
 
             auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
@@ -403,7 +473,8 @@ public:
                 }
 
                 if (pathsOnly_) {
-                    if (!enableStreaming_) {
+                    const bool enableStreamEffective = clientConfig.enableChunkedResponses;
+                    if (!enableStreamEffective) {
                         if (items.empty()) {
                             std::cout << "(no results)" << std::endl;
                         } else {
@@ -418,6 +489,11 @@ public:
                                 }
                             }
                         }
+                    } else {
+                        // Streaming prints progressively; add explicit marker when empty
+                        if (resp.totalCount == 0) {
+                            std::cout << "(no results)" << std::endl;
+                        }
                     }
                     return Result<void>();
                 }
@@ -427,31 +503,6 @@ public:
                     output["method"] = "daemon";
                     output["total_results"] = items.size();
                     output["returned"] = items.size();
-                    // Enrich with extraction progress indicator
-                    try {
-                        yams::daemon::GetStatsRequest sreq;
-                        auto sres = run_sync(client.getStats(sreq), std::chrono::seconds(5));
-                        if (sres) {
-                            const auto& s = sres.value();
-                            size_t total = s.totalDocuments;
-                            // Prefer detailed additionalStats if present
-                            size_t indexed = 0;
-                            if (s.additionalStats.count("meta_indexed_documents")) {
-                                indexed =
-                                    std::stoull(s.additionalStats.at("meta_indexed_documents"));
-                            } else {
-                                indexed = s.indexedDocuments;
-                            }
-                            if (total >= indexed) {
-                                output["extraction_pending"] =
-                                    static_cast<uint64_t>(total - indexed);
-                                output["documents_total"] = static_cast<uint64_t>(total);
-                                output["documents_extracted"] = static_cast<uint64_t>(indexed);
-                            }
-                        }
-                    } catch (...) {
-                        // Best-effort diagnostics only
-                    }
                     json results = json::array();
                     for (const auto& r : items) {
                         json doc;
@@ -468,6 +519,10 @@ public:
                     output["results"] = results;
                     std::cout << output.dump(2) << std::endl;
                 } else {
+                    if (items.empty()) {
+                        std::cout << "(no results)" << std::endl;
+                        return Result<void>();
+                    }
                     for (const auto& r : items) {
                         std::cout << r.score << "  ";
                         if (!r.path.empty()) {
@@ -482,11 +537,8 @@ public:
                         }
                         std::cout << "\n";
                     }
-
-                    if (!items.empty()) {
-                        std::cout << "Found " << resp.totalCount << " results in "
-                                  << resp.elapsed.count() << "ms" << std::endl;
-                    }
+                    std::cout << "Found " << resp.totalCount << " results in "
+                              << resp.elapsed.count() << "ms" << std::endl;
                 }
                 return Result<void>();
             };
@@ -519,6 +571,17 @@ public:
                 sreq.afterContext = static_cast<int>(afterContext_);
                 sreq.context = static_cast<int>(context_);
                 sreq.pathPattern = pathFilter_;
+                sreq.extension = extension_;
+                sreq.mimeType = mimeType_;
+                sreq.fileType = fileType_;
+                sreq.textOnly = textOnly_;
+                sreq.binaryOnly = binaryOnly_;
+                sreq.createdAfter = createdAfter_;
+                sreq.createdBefore = createdBefore_;
+                sreq.modifiedAfter = modifiedAfter_;
+                sreq.modifiedBefore = modifiedBefore_;
+                sreq.indexedAfter = indexedAfter_;
+                sreq.indexedBefore = indexedBefore_;
 
                 // Parse tags from comma-separated string
                 if (!filterTags_.empty()) {
@@ -535,12 +598,24 @@ public:
                     sreq.matchAllTags = matchAllTags_;
                 }
 
-                auto result = searchService->search(sreq);
-                if (!result) {
-                    return result.error();
+                std::promise<Result<app::services::SearchResponse>> prom;
+                auto fut = prom.get_future();
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [&]() -> boost::asio::awaitable<void> {
+                        auto r = co_await searchService->search(sreq);
+                        prom.set_value(std::move(r));
+                        co_return;
+                    },
+                    boost::asio::detached);
+                if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+                    return Error{ErrorCode::Timeout, "Local search timed out"};
                 }
-
-                auto resp = result.value();
+                auto rlocal = fut.get();
+                if (!rlocal) {
+                    return rlocal.error();
+                }
+                auto resp = rlocal.value();
 
                 // Apply client-side include filtering if needed
                 if (!includeGlobsExpanded.empty()) {
@@ -576,29 +651,7 @@ public:
                     output["method"] = resp.type;
                     output["total_results"] = resp.total;
                     output["execution_time_ms"] = resp.executionTimeMs;
-                    // Extraction progress indicator from stats
-                    try {
-                        yams::daemon::GetStatsRequest sreq;
-                        auto sres = run_sync(client.getStats(sreq), std::chrono::seconds(5));
-                        if (sres) {
-                            const auto& s = sres.value();
-                            size_t total = s.totalDocuments;
-                            size_t indexed = 0;
-                            if (s.additionalStats.count("meta_indexed_documents")) {
-                                indexed =
-                                    std::stoull(s.additionalStats.at("meta_indexed_documents"));
-                            } else {
-                                indexed = s.indexedDocuments;
-                            }
-                            if (total >= indexed) {
-                                output["extraction_pending"] =
-                                    static_cast<uint64_t>(total - indexed);
-                                output["documents_total"] = static_cast<uint64_t>(total);
-                                output["documents_extracted"] = static_cast<uint64_t>(indexed);
-                            }
-                        }
-                    } catch (...) {
-                    }
+                    // Best-effort extraction stats removed; hybrid engine surfaces progress
 
                     json results = json::array();
                     for (const auto& item : resp.results) {
@@ -654,92 +707,541 @@ public:
 
                 return Result<void>();
             };
-            // Call daemon directly; stream when enabled, otherwise unary.
-            auto daemonResult =
-                clientConfig.enableChunkedResponses
-                    ? run_sync(client.streamingSearch(dreq), std::chrono::seconds(30))
-                    : run_sync(client.call(dreq), std::chrono::seconds(30));
-
-            if (!daemonResult && clientConfig.enableChunkedResponses) {
-                // Transitional fallback: if streaming timed out waiting for header/chunks,
-                // retry a unary call with a longer header timeout to allow full compute.
-                const auto& err = daemonResult.error();
-                if (err.code == ErrorCode::Timeout &&
-                    err.message.find("Read timeout") != std::string::npos) {
-                    spdlog::warn("Streaming search timed out; retrying unary path with extended "
-                                 "header timeout");
-                    // Bump header timeout to body timeout for unary retry
-                    client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs_));
-                    auto unaryRetry = run_sync(client.call(dreq), std::chrono::seconds(60));
-                    if (unaryRetry) {
-                        auto r = render(unaryRetry.value());
-                        if (!r)
-                            return r.error();
-                        return Result<void>();
+            // Fully async daemon path with a single co_spawn and promise completion
+            std::promise<Result<void>> done;
+            auto fut = done.get_future();
+            auto work = [&, dreq, enableStream = clientConfig.enableChunkedResponses,
+                         bodyTimeoutMs = bodyTimeoutMs_, fuzzyFlag = fuzzySearch_,
+                         literalFlag = literalText_]() -> boost::asio::awaitable<void> {
+                auto callOnce = [&](const yams::daemon::SearchRequest& rq)
+                    -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+                    if (enableStream)
+                        co_return co_await client.streamingSearch(rq);
+                    co_return co_await client.call(rq);
+                };
+                auto r = co_await callOnce(dreq);
+                if (!r && enableStream) {
+                    const auto& err = r.error();
+                    if (err.code == ErrorCode::Timeout &&
+                        err.message.find("Read timeout") != std::string::npos) {
+                        spdlog::warn("Streaming search timed out; retrying unary path with "
+                                     "extended header timeout");
+                        client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs));
+                        auto ur = co_await client.call(dreq);
+                        if (ur) {
+                            auto ok = render(ur.value());
+                            done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                            co_return;
+                        }
                     }
                 }
-            }
-            if (daemonResult) {
-                auto resp = daemonResult.value();
-                bool noResults = resp.results.empty() || resp.totalCount == 0;
-                if (noResults && !fuzzySearch_) {
-                    // Retry once with fuzzy enabled to provide true hybrid fallback behavior
-                    yams::daemon::SearchRequest retryReq = dreq;
-                    retryReq.fuzzy = true;
-                    auto fuzzyRetry =
-                        clientConfig.enableChunkedResponses
-                            ? run_sync(client.streamingSearch(retryReq), std::chrono::seconds(30))
-                            : run_sync(client.call(retryReq), std::chrono::seconds(30));
-                    if (fuzzyRetry) {
-                        auto rr = render(fuzzyRetry.value());
-                        if (!rr)
-                            return rr.error();
-                        return Result<void>();
+                if (r) {
+                    auto resp = r.value();
+                    bool noResults = resp.results.empty() || resp.totalCount == 0;
+                    if (noResults && !fuzzyFlag) {
+                        auto retryReq = dreq;
+                        retryReq.fuzzy = true;
+                        auto fr = co_await callOnce(retryReq);
+                        if (fr) {
+                            auto ok = render(fr.value());
+                            done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                            co_return;
+                        }
                     }
+                    auto ok = render(resp);
+                    done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                    co_return;
                 }
-                auto r = render(resp);
-                if (!r)
-                    return r.error();
-                return Result<void>();
-            } else {
-                // Heuristic retry: if the daemon path failed and the query may contain
-                // syntax/special characters, retry once with literalText enabled (unless user
-                // already requested it).
-                const auto& derr = daemonResult.error();
+                // Heuristic retry with literal-text when parse-like failure
+                const auto& derr = r.error();
                 bool parseLike = derr.code == ErrorCode::InvalidArgument ||
                                  derr.message.find("syntax") != std::string::npos ||
                                  derr.message.find("FTS5") != std::string::npos ||
                                  derr.message.find("unbalanced") != std::string::npos ||
                                  derr.message.find("near") != std::string::npos ||
                                  derr.message.find("tokenize") != std::string::npos;
-
-                if (!literalText_ && parseLike) {
-                    spdlog::warn("Search failed ({}); retrying with --literal-text enabled",
-                                 derr.message);
-                    yams::daemon::SearchRequest retryReq = dreq;
+                if (!literalFlag && parseLike) {
+                    // Silent retry with literal-text for better ergonomics
+                    auto retryReq = dreq;
                     retryReq.literalText = true;
-
-                    auto retryRes =
-                        clientConfig.enableChunkedResponses
-                            ? run_sync(client.streamingSearch(retryReq), std::chrono::seconds(30))
-                            : run_sync(client.call(retryReq), std::chrono::seconds(30));
-                    if (retryRes) {
-                        auto rr = render(retryRes.value());
-                        if (!rr)
-                            return rr.error();
-                        return Result<void>();
+                    auto rr = co_await callOnce(retryReq);
+                    if (rr) {
+                        auto ok = render(rr.value());
+                        done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                        co_return;
                     }
                 }
+                done.set_value(r.error());
+                co_return;
+            };
+            boost::asio::co_spawn(boost::asio::system_executor{}, work(), boost::asio::detached);
+            if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+                spdlog::warn("search: daemon call timed out; falling back to local execution");
+                auto fb = fallback();
+                if (!fb)
+                    return fb.error();
+                return Result<void>();
             }
-            // Fallback to local on error
-            auto fb = fallback();
-            if (!fb)
-                return fb.error();
-            return Result<void>();
+            auto rv = fut.get();
+            if (rv)
+                return Result<void>();
+            // Fallback to local when daemon path returns error
+            {
+                auto fb = fallback();
+                if (!fb)
+                    return fb.error();
+                return Result<void>();
+            }
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
+    }
+
+    boost::asio::awaitable<Result<void>> executeAsync() override {
+        try {
+            // Resolve base query (reuse sync logic for assembling fields)
+            // Defer to execute() for argument normalization, then re-run daemon path with co_await
+            // If execute() succeeded synchronously (local), return its result; otherwise, we
+            // proceed async.
+        } catch (...) {
+        }
+
+        // Build normalized arguments (copy of execute() preamble)
+        if (query_.empty()) {
+            if (!queryFile_.empty() && queryFile_ != "-") {
+                std::ifstream fin(queryFile_, std::ios::in | std::ios::binary);
+                if (!fin.good()) {
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    std::string("Failed to open query file: ") + queryFile_};
+                }
+                std::ostringstream ss;
+                ss << fin.rdbuf();
+                query_ = trim(ss.str());
+            } else if (readStdin_ || (!queryFile_.empty() && queryFile_ == "-")) {
+                std::ostringstream ss;
+                ss << std::cin.rdbuf();
+                query_ = trim(ss.str());
+            }
+        }
+        // Fold extra positional tokens already captured in callback
+        if (!extraArgs_.empty()) {
+            std::ostringstream joiner;
+            for (size_t i = 0; i < extraArgs_.size(); ++i) {
+                if (i)
+                    joiner << ' ';
+                joiner << extraArgs_[i];
+            }
+            auto extras = trim(joiner.str());
+            if (!extras.empty()) {
+                if (query_.empty())
+                    query_ = extras;
+                else
+                    query_ += std::string(" ") + extras;
+            }
+        }
+        // Auto-enable literal text heuristics (reuse minimal subset)
+        if (!literalText_ && !fuzzySearch_) {
+            const std::string& q = query_;
+            bool punct = false;
+            for (char c : q) {
+                if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
+                    c == '"' || c == '\'' || c == '\\' || c == '`' || c == ';') {
+                    punct = true;
+                    break;
+                }
+            }
+            if (punct || q.find("::") != std::string::npos || q.find("->") != std::string::npos ||
+                q.find("#include") != std::string::npos || q.find("std::") != std::string::npos) {
+                literalText_ = true;
+            }
+        }
+
+        // Includes/session scoping
+        auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
+        if (!noSession_) {
+            auto sess = yams::cli::session_store::active_include_patterns(sessionOverride_);
+            includeGlobsExpanded.insert(includeGlobsExpanded.end(), sess.begin(), sess.end());
+        }
+        if (includeGlobsExpanded.empty() && !pathFilter_.empty())
+            includeGlobsExpanded.push_back(pathFilter_);
+
+        // Daemon client config
+        yams::daemon::DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds(headerTimeoutMs_),
+                                                      std::chrono::milliseconds(bodyTimeoutMs_));
+        yams::daemon::ClientConfig clientConfig;
+        clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
+        clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
+        clientConfig.requestTimeout = std::chrono::milliseconds(30000);
+        clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
+        clientConfig.progressiveOutput = true;
+        clientConfig.maxChunkSize = chunkSize_;
+        clientConfig.singleUseConnections = false;
+        if (cli_) {
+            auto dp = cli_->getDataPath();
+            if (!dp.empty())
+                clientConfig.dataDir = dp;
+        }
+        yams::daemon::DaemonClient client(clientConfig);
+        client.setStreamingEnabled(clientConfig.enableChunkedResponses);
+
+        // Request + render
+        yams::daemon::SearchRequest dreq;
+        dreq.query = query_;
+        dreq.limit = static_cast<size_t>(limit_);
+        dreq.fuzzy = true;
+        dreq.literalText = literalText_;
+        dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
+        dreq.pathsOnly = pathsOnly_;
+        dreq.searchType = searchType_;
+        dreq.jsonOutput = jsonOutput_;
+        dreq.showHash = showHash_;
+        dreq.verbose = verbose_;
+        dreq.showLineNumbers = showLineNumbers_;
+        // Engine-level filters
+        dreq.pathPattern = pathFilter_;
+        if (!filterTags_.empty()) {
+            std::stringstream ss(filterTags_);
+            std::string tag;
+            while (std::getline(ss, tag, ',')) {
+                auto s = trim(tag);
+                if (!s.empty())
+                    dreq.tags.push_back(s);
+            }
+            dreq.matchAllTags = matchAllTags_;
+        }
+        dreq.extension = extension_;
+        dreq.mimeType = mimeType_;
+        dreq.fileType = fileType_;
+        dreq.textOnly = textOnly_;
+        dreq.binaryOnly = binaryOnly_;
+        dreq.createdAfter = createdAfter_;
+        dreq.createdBefore = createdBefore_;
+        dreq.modifiedAfter = modifiedAfter_;
+        dreq.modifiedBefore = modifiedBefore_;
+        dreq.indexedAfter = indexedAfter_;
+        dreq.indexedBefore = indexedBefore_;
+
+        auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
+            std::vector<yams::daemon::SearchResult> items;
+            items.reserve(resp.results.size());
+            if (!includeGlobsExpanded.empty()) {
+                for (const auto& r : resp.results) {
+                    std::string path =
+                        !r.path.empty()
+                            ? r.path
+                            : (r.metadata.count("path") ? r.metadata.at("path") : std::string{});
+                    if (matchAnyGlob(path, includeGlobsExpanded))
+                        items.push_back(r);
+                }
+            } else {
+                items = resp.results;
+            }
+            if (pathsOnly_) {
+                if (items.empty()) {
+                    std::cout << "(no results)" << std::endl;
+                } else {
+                    for (const auto& r : items) {
+                        if (!r.path.empty())
+                            std::cout << r.path << std::endl;
+                        else if (auto it = r.metadata.find("path"); it != r.metadata.end())
+                            std::cout << it->second << std::endl;
+                        else
+                            std::cout << r.id << std::endl;
+                    }
+                }
+                return Result<void>();
+            }
+            if (jsonOutput_ || verbose_) {
+                nlohmann::json output;
+                output["query"] = query_;
+                output["method"] = std::string("search");
+                output["total_results"] = resp.totalCount;
+                output["execution_time_ms"] = resp.elapsed.count();
+                nlohmann::json results = nlohmann::json::array();
+                for (const auto& it : items) {
+                    nlohmann::json doc;
+                    doc["id"] = it.id;
+                    if (!it.title.empty())
+                        doc["title"] = it.title;
+                    if (!it.path.empty())
+                        doc["path"] = it.path;
+                    if (!it.snippet.empty())
+                        doc["snippet"] = truncateSnippet(it.snippet, 200);
+                    results.push_back(std::move(doc));
+                }
+                output["results"] = std::move(results);
+                std::cout << output.dump(2) << std::endl;
+                return Result<void>();
+            }
+            if (items.empty()) {
+                std::cout << "(no results)" << std::endl;
+                return Result<void>();
+            }
+            for (const auto& r : items) {
+                if (!r.path.empty())
+                    std::cout << r.path;
+                else if (!r.title.empty())
+                    std::cout << r.title;
+                else
+                    std::cout << r.id;
+                if (!r.snippet.empty())
+                    std::cout << "\n    " << truncateSnippet(r.snippet, 200);
+                std::cout << "\n";
+            }
+            std::cout << "Found " << resp.totalCount << " results in " << resp.elapsed.count()
+                      << "ms" << std::endl;
+            return Result<void>();
+        };
+
+        // Async daemon request with retries
+        auto callOnce = [&](const yams::daemon::SearchRequest& rq)
+            -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+            if (clientConfig.enableChunkedResponses)
+                co_return co_await client.streamingSearch(rq);
+            co_return co_await client.call(rq);
+        };
+
+        // Prefer streaming by default with a guard: if no results arrive quickly,
+        // race a unary call and use whichever finishes first. Skipped when --cold.
+        Result<yams::daemon::SearchResponse> result_stream_or_unary(
+            Error{ErrorCode::Unknown, "uninitialized"});
+        if (clientConfig.enableChunkedResponses) {
+            // Race: streaming vs delayed unary (2s). Whichever sets first wins.
+            std::shared_ptr<std::atomic_bool> decided = std::make_shared<std::atomic_bool>(false);
+            std::shared_ptr<std::promise<Result<yams::daemon::SearchResponse>>> prom =
+                std::make_shared<std::promise<Result<yams::daemon::SearchResponse>>>();
+            auto fut = prom->get_future();
+
+            // Launch streaming
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&, decided, prom]() -> boost::asio::awaitable<void> {
+                    auto sr = co_await client.streamingSearch(dreq);
+                    if (!decided->exchange(true))
+                        prom->set_value(std::move(sr));
+                    co_return;
+                },
+                boost::asio::detached);
+
+            // Launch delayed unary fallback (2 seconds after start)
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&, decided, prom]() -> boost::asio::awaitable<void> {
+                    boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
+                    t.expires_after(std::chrono::seconds(2));
+                    co_await t.async_wait(boost::asio::use_awaitable);
+                    if (!decided->load()) {
+                        auto ur = co_await client.call(dreq);
+                        if (!decided->exchange(true))
+                            prom->set_value(std::move(ur));
+                    }
+                    co_return;
+                },
+                boost::asio::detached);
+
+            // Wait up to body timeout for one of the paths to complete
+            auto wait_ms = static_cast<int>(bodyTimeoutMs_ > 0 ? bodyTimeoutMs_ : 60000);
+            if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
+                result_stream_or_unary = fut.get();
+            } else {
+                result_stream_or_unary = Error{ErrorCode::Timeout, "Search timed out"};
+            }
+        } else {
+            // Non-streaming path (cold): unary only
+            result_stream_or_unary = co_await client.call(dreq);
+        }
+
+        auto r = result_stream_or_unary;
+        if (!r && clientConfig.enableChunkedResponses) {
+            const auto& err = r.error();
+            if (err.code == ErrorCode::Timeout &&
+                err.message.find("Read timeout") != std::string::npos) {
+                // Silent retry with unary path and extended header timeout
+                client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs_));
+                auto ur = co_await client.call(dreq);
+                if (ur)
+                    co_return render(ur.value());
+                // If unary retry also failed, fallback to local
+                if (!ur) {
+                    if (auto appContext = cli_->getAppContext()) {
+                        auto searchService = app::services::makeSearchService(*appContext);
+                        if (searchService) {
+                            app::services::SearchRequest sreq;
+                            sreq.query = query_;
+                            sreq.limit = limit_;
+                            sreq.fuzzy = fuzzySearch_;
+                            sreq.similarity = minSimilarity_;
+                            sreq.hash = hashQuery_;
+                            sreq.type = searchType_;
+                            sreq.verbose = verbose_;
+                            sreq.literalText = literalText_;
+                            sreq.showHash = showHash_;
+                            sreq.pathsOnly = pathsOnly_;
+                            sreq.showLineNumbers = showLineNumbers_;
+                            sreq.beforeContext = static_cast<int>(beforeContext_);
+                            sreq.afterContext = static_cast<int>(afterContext_);
+                            sreq.context = static_cast<int>(context_);
+                            sreq.pathPattern = pathFilter_;
+                            sreq.extension = extension_;
+                            sreq.mimeType = mimeType_;
+                            sreq.fileType = fileType_;
+                            sreq.textOnly = textOnly_;
+                            sreq.binaryOnly = binaryOnly_;
+                            sreq.createdAfter = createdAfter_;
+                            sreq.createdBefore = createdBefore_;
+                            sreq.modifiedAfter = modifiedAfter_;
+                            sreq.modifiedBefore = modifiedBefore_;
+                            sreq.indexedAfter = indexedAfter_;
+                            sreq.indexedBefore = indexedBefore_;
+                            auto local = co_await searchService->search(sreq);
+                            if (local) {
+                                yams::daemon::SearchResponse out;
+                                for (const auto& it : local.value().results) {
+                                    yams::daemon::SearchResult sr;
+                                    sr.id = it.id;
+                                    sr.title = it.title;
+                                    sr.path = it.path;
+                                    sr.score = it.score;
+                                    sr.snippet = it.snippet;
+                                    out.results.push_back(std::move(sr));
+                                }
+                                out.totalCount = out.results.size();
+                                co_return render(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (r) {
+            auto resp = r.value();
+            bool noResults = resp.results.empty() || resp.totalCount == 0;
+            if (noResults && !fuzzySearch_) {
+                auto retryReq = dreq;
+                retryReq.fuzzy = true;
+                auto fr = co_await callOnce(retryReq);
+                if (fr)
+                    co_return render(fr.value());
+            }
+            co_return render(resp);
+        }
+        // Parse-like retry
+        const auto& derr = r.error();
+        bool parseLike = derr.code == ErrorCode::InvalidArgument ||
+                         derr.message.find("syntax") != std::string::npos ||
+                         derr.message.find("FTS5") != std::string::npos ||
+                         derr.message.find("unbalanced") != std::string::npos ||
+                         derr.message.find("near") != std::string::npos ||
+                         derr.message.find("tokenize") != std::string::npos;
+        if (!literalText_ && parseLike) {
+            // Silent retry with literal-text for better ergonomics
+            auto retryReq = dreq;
+            retryReq.literalText = true;
+            auto rr = co_await callOnce(retryReq);
+            if (rr)
+                co_return render(rr.value());
+        }
+
+        // Fallback to local services via co_await
+        if (auto appContext = cli_->getAppContext()) {
+            auto searchService = app::services::makeSearchService(*appContext);
+            if (searchService) {
+                app::services::SearchRequest sreq;
+                sreq.query = query_;
+                sreq.limit = limit_;
+                sreq.fuzzy = fuzzySearch_;
+                sreq.similarity = minSimilarity_;
+                sreq.hash = hashQuery_;
+                sreq.type = searchType_;
+                sreq.verbose = verbose_;
+                sreq.literalText = literalText_;
+                sreq.showHash = showHash_;
+                sreq.pathsOnly = pathsOnly_;
+                sreq.showLineNumbers = showLineNumbers_;
+                sreq.beforeContext = static_cast<int>(beforeContext_);
+                sreq.afterContext = static_cast<int>(afterContext_);
+                sreq.context = static_cast<int>(context_);
+                sreq.pathPattern = pathFilter_;
+                sreq.extension = extension_;
+                sreq.mimeType = mimeType_;
+                sreq.fileType = fileType_;
+                sreq.textOnly = textOnly_;
+                sreq.binaryOnly = binaryOnly_;
+                sreq.createdAfter = createdAfter_;
+                sreq.createdBefore = createdBefore_;
+                sreq.modifiedAfter = modifiedAfter_;
+                sreq.modifiedBefore = modifiedBefore_;
+                sreq.indexedAfter = indexedAfter_;
+                sreq.indexedBefore = indexedBefore_;
+                if (!filterTags_.empty()) {
+                    std::stringstream ss(filterTags_);
+                    std::string tag;
+                    while (std::getline(ss, tag, ',')) {
+                        tag.erase(0, tag.find_first_not_of(" \t"));
+                        tag.erase(tag.find_last_not_of(" \t") + 1);
+                        if (!tag.empty())
+                            sreq.tags.push_back(tag);
+                    }
+                    sreq.matchAllTags = matchAllTags_;
+                }
+                auto local = co_await searchService->search(sreq);
+                if (!local)
+                    co_return local.error();
+                auto resp = local.value();
+                if (!includeGlobsExpanded.empty()) {
+                    if (pathsOnly_) {
+                        std::vector<std::string> filtered;
+                        for (const auto& p : resp.paths)
+                            if (matchAnyGlob(p, includeGlobsExpanded))
+                                filtered.push_back(p);
+                        resp.paths.swap(filtered);
+                    } else {
+                        std::vector<app::services::SearchItem> filtered;
+                        for (const auto& it : resp.results)
+                            if (matchAnyGlob(it.path, includeGlobsExpanded))
+                                filtered.push_back(it);
+                        resp.results.swap(filtered);
+                    }
+                }
+                if (pathsOnly_) {
+                    for (const auto& p : resp.paths)
+                        std::cout << p << std::endl;
+                    co_return Result<void>();
+                }
+                if (jsonOutput_ || verbose_) {
+                    nlohmann::json output;
+                    output["query"] = query_;
+                    output["method"] = resp.type;
+                    output["total_results"] = resp.total;
+                    output["execution_time_ms"] = resp.executionTimeMs;
+                    nlohmann::json results = nlohmann::json::array();
+                    for (const auto& item : resp.results) {
+                        nlohmann::json doc;
+                        doc["id"] = item.id;
+                        if (!item.title.empty())
+                            doc["title"] = item.title;
+                        if (!item.path.empty())
+                            doc["path"] = item.path;
+                        results.push_back(std::move(doc));
+                    }
+                    output["results"] = std::move(results);
+                    std::cout << output.dump(2) << std::endl;
+                    co_return Result<void>();
+                }
+                for (const auto& item : resp.results) {
+                    if (!item.path.empty())
+                        std::cout << item.path;
+                    else if (!item.title.empty())
+                        std::cout << item.title;
+                    else
+                        std::cout << item.id;
+                    std::cout << "\n";
+                }
+                co_return Result<void>();
+            }
+        }
+        co_return Error{ErrorCode::Unknown, derr.message};
     }
 };
 

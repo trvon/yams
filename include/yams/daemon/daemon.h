@@ -21,6 +21,7 @@ namespace yams::daemon {
 class LifecycleComponent;
 class ServiceManager;
 class RequestDispatcher;
+class DaemonMetrics;
 class RepairCoordinator;
 class SocketServer;
 // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
@@ -99,6 +100,7 @@ public:
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::unique_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
+    std::unique_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
     std::unique_ptr<RepairCoordinator> repairCoordinator_;
@@ -112,6 +114,19 @@ public:
     yams::compat::jthread daemonThread_;
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
+    // Deferred repair startup control
+    std::atomic<bool> repairStarted_{false};
+    std::chrono::steady_clock::time_point repairIdleSince_{};
+    // Hysteresis + rate limit tracking for repair
+    std::chrono::steady_clock::time_point repairBusySince_{};
+    std::chrono::steady_clock::time_point repairReadySince_{};
+    std::chrono::steady_clock::time_point repairRateWindowStart_{};
+    uint64_t repairBatchesAtWindowStart_{0};
+
+public:
+    // On-demand plugin autoload bridge
+    Result<size_t> autoloadPluginsNow();
+    ServiceManager* getServiceManager() const { return serviceManager_.get(); }
 };
 
 } // namespace yams::daemon

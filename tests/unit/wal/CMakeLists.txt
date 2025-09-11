@@ -1,6 +1,7 @@
 add_executable(wal_manager_unit_tests
     wal_manager_test.cpp
     wal_manager_comprehensive_test.cpp
+    wal_dual_read_test.cpp
 )
 
 target_link_libraries(wal_manager_unit_tests

@@ -181,3 +181,21 @@ See: Operations → [Monitoring](../operations/monitoring.md)
 - Operations → [Deployment](../operations/deployment.md)
 - Operations → [Monitoring](../operations/monitoring.md)
 - Operations → [Backup](../operations/backup.md)
+
+## Appendix: Vector DB Schema and Sentinel
+
+YAMS stores semantic embeddings in `vectors.db` using a fixed embedding dimension. When you switch models (e.g., 384‑dim MiniLM to 768‑dim MPNet), you must align the vector schema to the new dimension.
+
+Convergence mechanism (in order of precedence):
+- Config (`~/.config/yams/config.toml`): `embeddings.embedding_dim` (preferred), then `vector_database.embedding_dim`, then `vector_index.dimension`.
+- Sentinel (`$YAMS_STORAGE/vectors_sentinel.json`): written by `yams doctor` after a schema recreation and used by the daemon to acknowledge the chosen dimension.
+- Generator/Model: model‑reported dims are used only when neither config nor sentinel are available.
+
+Recommended workflow to change dimensions:
+- `yams model download <name> --apply-config` — updates config dims and recreates `vectors.db` schema to the detected model dim.
+- or: `yams doctor` → accept “Recreate vectors.db” → accept “Restart daemon now.” The doctor updates config dims and writes the sentinel.
+- Then: `yams repair --embeddings` to regenerate vectors.
+
+Notes:
+- The daemon reads the sentinel at startup to avoid transient “stored vs configured” warnings and adopts the DB’s stored dim for the session.
+- Repair paths avoid dropping tables; destructive changes are handled explicitly by `yams doctor` or `--apply-config` on model download.

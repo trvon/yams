@@ -322,148 +322,71 @@ private:
     }
 
     void printHumanReadable(const Stats& stats) {
-        const int termWidth = detectTerminalWidth();
-        std::cout << "\n"
-                  << titleBanner("YAMS Command Center - Storage Statistics", termWidth) << "\n\n";
+        std::cout << "\n=== YAMS Storage Statistics ===\n\n";
 
         // Storage Overview
-        std::cout << sectionHeader("Storage Overview", termWidth) << "\n";
-        struct Row {
-            std::string label;
-            std::string value;
-        };
-        std::vector<Row> overview = {
-            {"Total blocks", std::to_string(stats.totalBlocks)},
-            {"Unique blocks", std::to_string(stats.uniqueBlocks)},
-            {"Total size", formatSize(stats.totalSize)},
-            {"Unreferenced blocks", std::to_string(stats.unreferencedBlocks) + " (" +
-                                        formatSize(stats.unreferencedSize) + ")"},
-        };
-
-        size_t labelWidth = 0;
-        for (const auto& r : overview)
-            labelWidth = std::max(labelWidth, r.label.size());
-        size_t valueWidth =
-            static_cast<size_t>(std::max(20, termWidth - static_cast<int>(labelWidth) - 6));
-
-        for (const auto& r : overview) {
-            std::string label = padRight("  " + r.label, labelWidth + 2);
-            std::string value = padLeft(r.value, std::min(valueWidth, r.value.size() + 0));
-            std::cout << colorize(label, Ansi::BOLD) << colorize(value, Ansi::WHITE) << "\n";
-        }
+        std::cout << "Storage Overview:\n";
+        std::cout << "  Total blocks:       " << std::to_string(stats.totalBlocks) << "\n";
+        std::cout << "  Unique blocks:      " << std::to_string(stats.uniqueBlocks) << "\n";
+        std::cout << "  Total size:         " << formatSize(stats.totalSize) << "\n";
+        std::cout << "  Unreferenced:       " << std::to_string(stats.unreferencedBlocks)
+                  << " blocks (" << formatSize(stats.unreferencedSize) << ")\n";
         std::cout << "\n";
 
         // Deduplication Metrics
-        std::cout << sectionHeader("Deduplication Metrics", termWidth) << "\n";
-        {
-            std::ostringstream ratio;
-            ratio << std::fixed << std::setprecision(2) << stats.deduplicationRatio << ":1";
-            std::ostringstream avg;
-            avg << std::fixed << std::setprecision(2) << stats.averageReferences;
-            std::string logical = formatSize(stats.deduplicatedSize);
+        std::cout << "Deduplication Metrics:\n";
+        std::cout << "  Dedup ratio:        " << std::fixed << std::setprecision(2)
+                  << stats.deduplicationRatio << ":1\n";
 
-            // Space savings bar
-            double savings = stats.spacesSavings;
-            if (savings < 0.0)
-                savings = 0.0;
-            if (savings > 0.999999)
-                savings = 0.999999;
-            size_t barWidth = static_cast<size_t>(std::max(10, termWidth - 30));
-            std::ostringstream savingsText;
-            savingsText << std::fixed << std::setprecision(1) << (savings * 100.0) << "%";
-            std::string bar = progressBar(savings, barWidth);
+        double savings = stats.spacesSavings;
+        if (savings < 0.0)
+            savings = 0.0;
+        if (savings > 0.999999)
+            savings = 0.999999;
+        std::cout << "  Space savings:      " << std::fixed << std::setprecision(1)
+                  << (savings * 100.0) << "%\n";
 
-            std::vector<Row> rows = {
-                {"Deduplication ratio", ratio.str()},
-                {"Space savings", savingsText.str()},
-                {"Logical size", logical},
-                {"Average references", avg.str()},
-                {"Max references", std::to_string(stats.maxReferences)},
-            };
-
-            labelWidth = 0;
-            for (const auto& r : rows)
-                labelWidth = std::max(labelWidth, r.label.size());
-            for (const auto& r : rows) {
-                std::string label = padRight("  " + r.label, labelWidth + 2);
-                std::cout << colorize(label, Ansi::BOLD) << colorize(r.value, Ansi::GREEN) << "\n";
-                if (r.label == "Space savings") {
-                    std::cout << "    " << bar << "\n";
-                }
-            }
-        }
+        std::cout << "  Logical size:       " << formatSize(stats.deduplicatedSize) << "\n";
+        std::cout << "  Avg references:     " << std::fixed << std::setprecision(2)
+                  << stats.averageReferences << "\n";
+        std::cout << "  Max references:     " << stats.maxReferences << "\n";
         std::cout << "\n";
 
         if (detailed_) {
-            // Block Size Distribution with bars
+            // Block Size Distribution
             if (!stats.blockSizeDistribution.empty()) {
-                std::cout << sectionHeader("Block Size Distribution", termWidth) << "\n";
-                uint64_t maxCount = 0;
-                for (const auto& [_, c] : stats.blockSizeDistribution)
-                    maxCount = std::max(maxCount, c);
-                size_t barWidth = static_cast<size_t>(std::max(10, termWidth - 36));
-
+                std::cout << "Block Size Distribution:\n";
                 for (const auto& [range, count] : stats.blockSizeDistribution) {
-                    double frac = maxCount > 0
-                                      ? static_cast<double>(count) / static_cast<double>(maxCount)
-                                      : 0.0;
-                    std::ostringstream right;
-                    right << count << " blocks";
-                    std::string label = padRight("  " + range, 24);
-                    std::string bar =
-                        progressBar(frac, barWidth, Ansi::CYAN, Ansi::YELLOW, Ansi::RED);
-                    std::cout << colorize(label, Ansi::DIM) << bar << " "
-                              << colorize(right.str(), Ansi::WHITE) << "\n";
+                    std::cout << "  " << std::left << std::setw(20) << range << std::right
+                              << std::setw(10) << count << " blocks\n";
                 }
                 std::cout << "\n";
             }
 
-            // Top Referenced Blocks table
+            // Top Referenced Blocks
             if (!stats.topReferencedBlocks.empty()) {
-                std::cout << sectionHeader("Top Referenced Blocks", termWidth) << "\n";
-                size_t hashCol = 16; // show 16 chars of hash
-                size_t refsCol = 8;
-                size_t barWidth = static_cast<size_t>(
-                    std::max(10, termWidth - static_cast<int>(hashCol + refsCol + 12)));
-
-                uint64_t maxRefs = 0;
-                for (const auto& p : stats.topReferencedBlocks)
-                    maxRefs = std::max(maxRefs, p.second);
-
+                std::cout << "Top Referenced Blocks:\n";
                 for (const auto& [hash, refs] : stats.topReferencedBlocks) {
-                    std::string h = hash.size() > hashCol ? hash.substr(0, hashCol) + "..."
-                                                          : padRight(hash, hashCol);
-                    double frac = maxRefs > 0
-                                      ? static_cast<double>(refs) / static_cast<double>(maxRefs)
-                                      : 0.0;
-                    std::string bar =
-                        progressBar(frac, barWidth, Ansi::BLUE, Ansi::YELLOW, Ansi::RED);
-                    std::ostringstream r;
-                    r << refs;
-                    std::cout << "  " << colorize(padRight(h, hashCol + 2), Ansi::BOLD) << bar
-                              << "  " << colorize(padLeft(r.str(), refsCol), Ansi::WHITE) << "\n";
+                    std::string h = hash.size() > 16 ? hash.substr(0, 16) + "..." : hash;
+                    std::cout << "  " << std::left << std::setw(20) << h << std::right
+                              << std::setw(8) << refs << " refs\n";
                 }
                 std::cout << "\n";
             }
         }
 
         // Storage Health
-        std::cout << sectionHeader("Storage Health", termWidth) << "\n";
+        std::cout << "Storage Health:\n";
         double unrefPct = stats.uniqueBlocks > 0
                               ? (static_cast<double>(stats.unreferencedBlocks) / stats.uniqueBlocks)
                               : 0.0;
-        std::ostringstream pctStr;
-        pctStr << std::fixed << std::setprecision(1) << (unrefPct * 100.0) << "%";
-        size_t barWidth = static_cast<size_t>(std::max(10, termWidth - 28));
-        std::cout << colorize("  Unreferenced %   ", Ansi::BOLD) << pctStr.str() << "\n";
-        std::cout << "    " << progressBar(unrefPct, barWidth) << "\n";
+        std::cout << "  Unreferenced:       " << std::fixed << std::setprecision(1)
+                  << (unrefPct * 100.0) << "%\n";
 
         if (unrefPct > 0.10) {
-            std::cout << colorize("  Status           ", Ansi::BOLD)
-                      << colorize("Consider running garbage collection", Ansi::YELLOW) << "\n";
+            std::cout << "  Status:             Consider running garbage collection\n";
         } else {
-            std::cout << colorize("  Status           ", Ansi::BOLD)
-                      << colorize("Healthy", Ansi::GREEN) << "\n";
+            std::cout << "  Status:             Healthy\n";
         }
     }
 

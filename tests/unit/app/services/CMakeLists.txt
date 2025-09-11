@@ -58,6 +58,7 @@ target_link_libraries(search_service_test
         test_utils
         gtest_main
         yams_app_services
+        yams::daemon
         yams::metadata
         yams::api
         yams::search

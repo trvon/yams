@@ -1,420 +1,325 @@
-Developer: # Integrated Knowledge Management Policy for AI Coding Agents & Human Contributors: YAMS-Driven Workflows
+# YAMS‑First Agent Protocol for AI Coding Agents & Human Contributors
 
-This document establishes a unified, machine-readable, and authoritative policy for both AI agents and human collaborators in project development. Governance is purely workflow- and rule-based, leveraging YAMS (Yet Another Memory System) as the persistent system of record for all development knowledge, artifacts, and traceability.
+**Version:** 2025‑09‑10
 
----
+### 0) Scope & Tooling
 
-## Quick Usage Guidance (For AI Agents)
-- Before starting any multi-step process, begin with a concise checklist (3-7 bullets) of intended steps.
-- After each YAMS command, validate the outcome in 1-2 lines and proceed or self-correct if validation fails.
-- Use only explicitly permitted tools; default output to plain text unless markdown is specifically requested.
-- Pre-watch default: update and search code via YAMS. After editing files, re-index with YAMS (no external grep/find/rg).
-- All codebase search must use YAMS (search/grep subcommands). Do not use system utilities like grep/find/rg for project queries.
- - Use `yams session` to manage an interactive session: pin frequently used paths/tags/metadata and warm them for faster retrieval.
- - Do not run `yams init`; just use `yams add` to index files. The daemon/storage auto-initializes as needed.
- - Prefer a single compound `yams search` query (multiple terms and/or quoted phrases) over multiple sequential searches; avoid `yams grep` unless explicitly available.
+* **Authoritative knowledge system:** **YAMS** (Yet Another Memory System).
+* **Allowed tools:** YAMS CLI only for search/index/retrieval/grep/list/rm/session.
+  External web search allowed **only after** a YAMS search shows no relevant results, and results **must** be cached back into YAMS.
+* **Default output:** plain text. Use Markdown only when explicitly requested by the User.
 
 ---
 
-## 1. Introduction
-### 1.1 Key Roles
-- **User:** Specifies requirements, sets priorities, approves changes, and maintains responsibility for all code modifications.
-- **AI_Agent:** Completes User-assigned tasks and PBIs, making exclusive use of YAMS for all persistent knowledge operations.
+## 1) Roles
 
-### 1.2 Knowledge Management with YAMS
-#### Overview:
-- YAMS is a Bash CLI utility—a knowledge versioning and discovery tool with built-in full-text, fuzzy, and semantic search, plus content-addressed storage and fast retrieval.
-- Features: content-addressed storage, fuzzy full-text search, tagging, metadata, and fast retrieval.
-- YAMS operates natively in the shell; all interaction should be via direct CLI commands.
-
-#### Required YAMS Workflows
-- **Prior to any web/external search (use one compound query):**
-  ```bash
-  # Prefer a single compound query (multiple terms/phrases)
-  yams search "term1 term2 \"important phrase\"" --limit 50
-  # Optionally broaden with fuzzy matching in the same request
-  # yams search "term1 term2 \"important phrase\"" --fuzzy --similarity 0.7 --limit 50
-  # Only search the web if no relevant results in YAMS
-
-  # Queries that start with '-' (option-looking) — use one of:
-  yams search -q "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
-  yams search -- "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
-
-  # Or read query from stdin/file:
-  printf '%s\n' "--start-group --whole-archive --end-group -force_load Darwin" | yams search --stdin --paths-only
-  yams search --query-file /tmp/query.txt --paths-only
-  yams search --query-file - --paths-only < /tmp/query.txt
-  ```
-- **After every web/external result:**
-  ```bash
-  echo "$WEB_SEARCH_RESULT" | yams add - --name "topic-$(date +%Y%m%d)" --tags "web,cache,topic" --metadata "url=$SOURCE_URL"
-  ```
-- **Replacing generic file commands (always prefer YAMS):**
-  ```bash
-  yams list --recent 20
-  yams add myfile.txt --tags "code,working"
-  yams get <hash>
-  yams rm -rf ./build
-  yams rm '*.log'
-  yams delete fileA fileB fileC
-  yams delete -r ./dist
-  ```
-- **Pre-Watch Code Update Workflow (until folder track/watch is available):**
-  ```bash
-  # After editing code, re-index changed files or directories
-  # TIP: You can add multiple paths in one command
-  # e.g., index source and headers together with a single invocation
-  yams add src/ include/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source,headers"
-
-  # Or run targeted adds in smaller chunks to avoid long operations
-  yams add src/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source"
-  yams add include/ --recursive --include="*.hpp,*.h" --tags "code,headers"
-
-  # Add a single updated file
-  yams add path/to/file.cpp --tags "code,source"
-
-  # Update metadata for an existing document (when needed)
-  yams update --name path/to/file.cpp --metadata "updated=$(date -Iseconds)"
-  ```
-
-#### Command Reference - Best Practices
-- Always search YAMS first before using external resources.
-- All new information should be immediately added/tagged into YAMS.
-- Retrievals in workflows/documents reference content by YAMS hash.
-- All codebase search must be performed with YAMS:
-  - Use `yams search` for keyword/fuzzy/semantic queries.
-  - Use `yams grep` for regex across indexed content.
-  - Do not use system grep/find/rg for repository search.
-
-- **Codebase Indexing (initial import and after edits):**
-  ```bash
-  # Index entire codebase with proper file type detection (multi-path is supported)
-  yams add src/ include/ docs/ --recursive --include="*.cpp,*.hpp,*.h,*.md" --tags="code,source,headers,docs"
-
-  # Alternatively, index in separate calls if you prefer shorter runs
-  yams add src/ --recursive --include="*.cpp,*.h" --tags="code,source"
-  yams add include/ --recursive --include="*.h,*.hpp" --tags="code,headers"
-
-  # Re-index after local edits (pre-watch)
-  yams add . --recursive --include="*.cpp,*.hpp,*.h,*.md" --tags "code,working"
-  ```
-- **LLM-Friendly Search (YAMS only):**
-  ```bash
-  # Get only file paths for context efficiency
-  yams search "SearchCommand" --paths-only
-  yams search "#include" --paths-only | head -10
-  yams list --recent 10 --paths-only
-  yams list --type text --paths-only
-
-  # Use fuzzy search for broader discovery
-  yams search "vector database" --fuzzy --similarity 0.7 --paths-only
-
-  # Regex matches across indexed code (prefer YAMS grep over system grep)
-  yams grep "class\\s+IndexingPipeline" --include="**/*.hpp,**/*.cpp"
-  ```
-- **Session + Hot Data (Phase 1):**
-   ```bash
-   # Pin items by path pattern; adds a `pinned` tag to matching docs and stores a local pin list
-   # Notes:
-   # - Pins are tracked locally in: $XDG_STATE_HOME/yams/pinned.json (or ~/.local/state/yams/pinned.json)
-   # - The repository is also updated: matching docs receive tag "pinned" and optional tags/metadata you provide
-   # - When updating metadata, prefer hash-based updates when available to avoid name collisions; otherwise ensure names are unique or filter your pattern to the intended scope.
-   # - Planned flags: `yams session warm --limit N --parallel P` to control scope and concurrency for warming large pin sets.
-   # - Planned output: `yams session list --json` to print the local pins registry for scripting pipelines.
-   # - Quote glob patterns to avoid your shell expanding them before YAMS sees them
-
-   # Basic pin of markdown docs with an extra tag and metadata
-   yams session pin --path "docs/**/*.md" --tag notes --meta owner=team
-
-   # Pin code files with multiple --tag and multiple --meta entries
-   yams session pin --path "src/**/*.{cpp,hpp,h}" --tag pinned --tag hot --meta purpose=index --meta sprint=Q1
-
-   # List locally pinned patterns/entries (client-side pin registry)
-   yams session list
-
-   # Unpin items (removes 'pinned' tag and sets pinned=false metadata on matching docs)
-   yams session unpin --path "docs/**/*.md"
-
-   # Warm pinned items:
-   # - Hydrates snippets/metadata and exercises extraction paths for faster follow-up queries
-   # - Uses the local pin list to find and read matching documents
-   yams session warm
-
-   # Examples to prevent accidental shell expansion — always quote patterns:
-   yams session pin --path "*.md" --tag quick
-   yams session unpin --path "src/**/experimental/*"
-   ```
-- **Daemon Keepalive (PBI‑008):**
-   - Configure keepalive interval via env: `YAMS_KEEPALIVE_MS=500`.
-   - Streaming search now finalizes properly on empty results (no hangs).
- - **Hot/Cold Modes (PBI‑008):**
-   - List: `YAMS_LIST_MODE=hot_only|cold_only|auto` (paths-only implies hot).
-   - Grep: `YAMS_GREP_MODE=hot_only|cold_only|auto` (hot uses extracted text; cold scans CAS bytes).
-   - Retrieval (cat/get): `YAMS_RETRIEVAL_MODE=hot_only|cold_only|auto` (hot uses extracted text cache when present).
-   - Force-cold per document: set tag `force_cold` or metadata `force_cold=true` to always prefer cold path regardless of global mode.
-- **Codebase Restore (from YAMS)**
-  ```bash
-  # Restore a file/doc by name or hash
-  yams get --name src/indexing/indexing_pipeline.cpp -o ./restored/indexing_pipeline.cpp
-  # Or restore collections/snapshots (when available)
-  yams restore --help
-  ```
-- **Enhanced File Detection:** YAMS automatically detects code files (C++, Python, JavaScript, Rust, Go, etc.) using magic number patterns.
-- **Comma-Separated Patterns:** Use `--include="*.cpp,*.h,*.md"` for multiple file types.
-
-## 2. Fundamental Policies
-1. **Knowledge-First Development:** Always check YAMS before any external research; project knowledge is built up incrementally.
-2. **Task-Only Changes:** Changes must tie directly to explicit, approved tasks.
-3. **1:1 Task–PBI Mapping:** Each task links to an approved PBI.
-4. **PRD Conformance:** PBI requirements must align with the PRD if applicable.
-5. **User Authority:** Only Users approve changes and bear associated risk.
-6. **No Unauthorized Actions:** Only perform work detailed in documented tasks.
-7. **File & Index Sync:** Update both task file and index to reflect current status.
-8. **Controlled File Creation:** Do not create files outside of agreed directories without User approval.
-9. **External Packages:**
-   - Search YAMS first.
-   - Cache/store all external results in YAMS immediately.
-   - Store relevant docs in designated markdown, tagged accordingly.
-10. **Granular Tasks:** Define atomic, testable tasks.
-11. **DRY Principle:** Maintain single sources of knowledge, with references.
-12. **Consistent Constants:** Use named constants for repeated values.
-13. **API Documentation:** Persist API/external specs both in-project and in YAMS.
+* **User** — sets priorities, approves changes, bears risk.
+* **AI\_Agent** — executes User‑approved tasks/PBIs, using **only YAMS** for persistent knowledge operations.
 
 ---
 
-## 3. Product Backlog Item (PBI) Management
-### 3.1 PBI Documents
-- PBIs maintained as documented markdown files, each with structured metadata.
-- **Standard Directory:** `docs/pbi/` (create if not exists)
-- **Naming:** `pbi-XXX-feature-name.md` where `XXX` is zero-padded (001, 002, etc.)
-- **Initial Indexing:**
-  ```bash
-  # Index all PBIs when starting work
-  yams add docs/pbi/ --recursive --include="*.md" --tags "pbi,backlog"
-  ```
-- **Metadata Example:**
-  ```bash
-  yams add docs/pbi/pbi-001-enhanced-search.md \
-    --tags "pbi,backlog,feature" \
-    --metadata "status=draft|active|completed|cancelled" \
-    --metadata "priority=high|medium|low" \
-    --metadata "sprint=2024-Q1" \
-    --metadata "epic=search-improvements" \
-    --metadata "created=$(date -Iseconds)"
-  ```
+## 2) Agent Operating Loop (Mandatory)
 
-### 3.2 PBI Retrieval Patterns
-**Critical for finding and working with PBIs:**
-```bash
-# Find specific PBI by ID (most reliable method)
-yams get --name "docs/pbi/pbi-001-universal-content-handlers.md"
+Before any multi‑step task:
 
-# Search PBIs by content keywords (prefer YAMS grep)
-yams grep "universal content handler" --include="docs/pbi/*.md"
+1. **PLAN**: produce a concise 3–7 bullet checklist of intended steps.
+2. **SEARCH (YAMS‑first)**: run one compound `yams search` (keywords + quoted phrases). Only if zero relevant hits → do web search and immediately **yams add** the findings.
+3. **EXECUTE**: after **each** YAMS command or code change:
 
-# List all PBIs in the system
-yams list --name "docs/pbi/*.md" --recent 50
+   * `VALIDATE:` 1–2 lines (PASS/FAIL + reason).
+   * If FAIL → self‑correct or roll back; re‑validate.
+4. **INDEX SYNC**: after editing files, re‑index with `yams add …` (no system grep/find/rg).
+5. **TRACE**: record decisions, references, and hashes in the PBI docs and/or YAMS metadata.
+6. **SUMMARY**: end with a brief status, next steps, and YAMS artifacts (names/hashes).
 
-# Get PBI by partial name match
-yams get --name "*pbi-001*" | head -200
+**Response format template (use literally):**
 
-# Search for PBIs by status
-for pbi in docs/pbi/pbi-*.md; do
-  echo "=== $(basename $pbi) ==="
-  cat "$pbi" | grep -A 1 "Status:"
-done
+```
+PLAN:
+- ...
 
-# Find active PBIs (prefer YAMS grep)
-yams grep "Status: active" --include="docs/pbi/*.md"
+CMD:
+<the exact YAMS or other allowed command>
+
+VALIDATE:
+PASS|FAIL — <1–2 lines why> → Next: <action>
+
+SUMMARY:
+- Status: <pending|in_progress|completed|blocked>
+- Artifacts: <paths|names|hashes>
+- Next: <1–2 bullets>
 ```
 
-#### Quick PBI Lookup
+---
+
+## 3) YAMS Usage Contract
+
+### 3.1 Search & Retrieval (Always first)
+
+* Prefer **one** compound query (multiple terms and quoted phrases):
+
 ```bash
-# Get PBI by canonical path (fastest, when you know the file)
-yams get --name "docs/pbi/pbi-002-daemon-architecture.md"
-
-# Fuzzy by ID in content
-yams grep "PBI ID:\s*002" --include="docs/pbi/*.md"
-
-# Fuzzy by filename
-yams search "pbi-002" --paths-only
+yams search "term1 term2 \"important phrase\"" --limit 50
+# Optional broader match in same call:
+# yams search "term1 term2 \"important phrase\"" --fuzzy --similarity 0.7 --limit 50
 ```
 
-#### Metadata-driven Search (recommended)
-Add machine-readable metadata when adding/updating PBIs so you can query by fields:
-```bash
-# Initial add (example)
-yams add docs/pbi/pbi-002-daemon-architecture.md \
-  --tags "pbi,backlog,feature" \
-  --metadata "pbi=002" \
-  --metadata "status=in_progress" \
-  --metadata "priority=high" \
-  --metadata "sprint=2025-Q1"
+* Queries that **start with '-'** (look like options) — quote or use `--`:
 
-# Update status
-yams update --name "docs/pbi/pbi-002-daemon-architecture.md" \
-  --metadata "status=in_progress" \
-  --metadata "updated=$(date -Iseconds)"
+```bash
+yams search -q "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+yams search -- "--start-group --whole-archive --end-group -force_load Darwin" --paths-only
+printf '%s\n' "--start-group ..." | yams search --stdin --paths-only
+yams search --query-file /tmp/query.txt --paths-only
 ```
 
-Querying by metadata:
-```bash
-# All active PBIs (prefer YAMS grep)
-yams grep "status=in_progress" --include="docs/pbi/*.md"
+* Regex across **indexed** content:
+  `yams grep "class\\s+IndexingPipeline" --include="**/*.hpp,**/*.cpp"`
 
-# By sprint (prefer YAMS grep)
-yams grep "sprint=2025-Q1" --include="docs/pbi/*.md"
+Note on session scoping:
+- Grep and list respect active session include patterns by default. If expected files (e.g., docs) are not returned, add `--no-session` to widen scope or update session pins to include those paths.
+  - Example: `yams grep -e "Changelog" --include="**/*.md" --no-session`
+
+### 3.2 Indexing & Updates
+
+* **Do not run** `yams init`; the daemon/storage auto‑initializes.
+* Re‑index after **any** edit:
+
+```bash
+# Whole repo (common source & docs)
+yams add . --recursive --include="*.cpp,*.hpp,*.h,*.py,*.rs,*.go,*.js,*.ts,*.md" --tags "code,working"
+
+# Targeted adds (faster when iterating)
+yams add src/ include/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source,headers"
+
+# Single file
+yams add path/to/file.cpp --tags "code,source"
+
+# Update metadata (e.g., touched timestamp)
+yams update --name path/to/file.cpp --metadata "updated=$(date -Iseconds)"
 ```
 
-### 3.3 PBI Lifecycle & Updates
-- **Before new PBI work:** Use YAMS to find similar/related PBIs or decisions.
-  ```bash
-  # Search for related PBIs before creating new ones
-  yams search "content handler OR file type" --fuzzy --similarity 0.7
-  ```
-- **Traceability:** All findings & research are stored/tagged for provenance.
-- **Status Updates:** Any PBI state change must be reflected in both file and YAMS:
-  ```bash
-  # After updating PBI status in file
-  yams update --name "docs/pbi/pbi-001-*.md" \
-    --metadata "status=active" \
-    --metadata "updated=$(date -Iseconds)"
-  ```
+Direct file reads (context):
+- It is acceptable to read files explicitly provided in the task context without going through YAMS (e.g., `sed -n '1,200p' CHANGELOG.md`). YAMS remains the system of record for persistence, search, and indexing.
 
-### 3.4 PBI Progress Tracking
-**Track implementation phases and checklist items:**
+### 3.3 Session & Hot Data
+
 ```bash
-# Check Phase 1 completion status
-yams get --name "docs/pbi/pbi-001-*.md" | grep -A 30 "Phase 1"
+# Pin & warm frequently used paths
+yams session pin --path "src/**/*.{cpp,hpp,h}" --tag pinned --tag hot --meta sprint=Q1
+yams session warm
+yams session list
+yams session unpin --path "src/**/experimental/*"
+```
 
-# Count completed vs pending items
-yams get --name "docs/pbi/pbi-001-*.md" | grep -c "\[x\]"  # Completed
-yams get --name "docs/pbi/pbi-001-*.md" | grep -c "\[ \]"  # Pending
+### 3.4 Modes & Keepalive
 
-# Calculate progress percentage (example for 7 total commands)
-COMPLETED=$(yams get --name "docs/pbi/pbi-001-*.md" | grep -c "✅")
-TOTAL=7
-PERCENT=$((COMPLETED * 100 / TOTAL))
+* `YAMS_KEEPALIVE_MS=500`
+* Hot/Cold:
+
+  * List: `YAMS_LIST_MODE=hot_only|cold_only|auto` (paths‑only ⇒ hot)
+  * Grep: `YAMS_GREP_MODE=hot_only|cold_only|auto`
+  * Retrieval: `YAMS_RETRIEVAL_MODE=hot_only|cold_only|auto`
+  * Force cold per doc: tag `force_cold` or meta `force_cold=true`
+
+### 3.5 Replace Generic File Ops
+
+```bash
+yams list --recent 20
+yams add myfile.txt --tags "code,working"
+yams get <hash>
+yams rm -rf ./build
+yams rm '*.log'
+yams delete fileA fileB
+yams delete -r ./dist
+```
+
+Patterns beginning with `-`:
+- When a pattern starts with `-`, either terminate options with `--` or use the explicit pattern flag:
+  - `yams grep -- "--tags|knowledge graph|kg" --include="docs/**/*.md"`
+  - `yams grep -e "--tags|knowledge graph|kg" --include="docs/**/*.md"`
+
+Knowledge Graph tagging (recommended conventions):
+- Use `--tags` to scope documents for graph extraction and traversal; keep tags short and composable.
+  - Core: `kg` (participates in the knowledge graph), plus a node type tag: `kg:node:doc`, `kg:node:code`, `kg:node:test`, `kg:node:api`.
+  - Domain/topic: `topic:<slug>` (e.g., `topic:prompt-eng`, `topic:release-notes`).
+  - System/component: `system:<name>`, `component:<name>`.
+  - Lifecycle: `status:draft|ready|archived`, `release:v0.6.x`.
+- Examples:
+  - `yams add docs/PROMPT-eng.md --tags "docs,kg,kg:node:doc,topic:prompt-eng,system:yams"`
+  - `yams add src/cli/commands/graph_command.cpp --tags "code,kg,kg:node:code,component:cli,topic:graph"`
+  - `yams add docs/changelogs/v0.6.md --tags "docs,kg,kg:node:doc,topic:release-notes,release:v0.6.x"`
+
+Notes:
+- Prefer `--metadata` for structured fields and stable identifiers (e.g., `--metadata "kg.id=doc:prompt-protocol"`). Use tags for filtering and graph scoping.
+
+### 3.6 External/Web Research (last resort)
+
+If and only if YAMS search yields nothing relevant:
+
+```bash
+# After retrieving external content:
+echo "$WEB_SEARCH_RESULT" | yams add - --name "topic-$(date +%Y%m%d)" --tags "web,cache,topic" --metadata "url=$SOURCE_URL"
+```
+
+---
+
+## 4) Product Backlog Item (PBI) Management
+
+### 4.1 Canonical Structure (resolved)
+
+* **Per‑PBI directory:** `docs/delivery/<PBIID>/`
+
+  * Must contain: `prd.md` (goals/spec/acceptance), `tasks.md` (task table with IDs & statuses)
+* **Master backlog:** `docs/delivery/backlog.md`
+
+### 4.2 Conventions
+
+* Task IDs: `<PBIID>-<nn>` (e.g., `001-1`). Use `-E2E` for end‑to‑end validations.
+* Keep PRDs concise; mirror scope changes immediately.
+
+### 4.3 Lifecycle Flow
+
+1. **Plan** — update `prd.md` (goals & acceptance), list granular tasks in `tasks.md`.
+2. **Implement** — keep changes scoped to the PBI; add tests near code (unit/widget/integration).
+3. **Validate** — run targeted then broader tests; update `tasks.md` and `backlog.md` status/history.
+4. **Document** — update READMEs/migrations; record acceptance status.
+
+### 4.4 Consolidation
+
+* When consolidating into a new PBI:
+
+  * Add **“Consolidated into: \<new‑PBI>”** at top of each original `prd.md`.
+  * Append history in `backlog.md` (e.g., `consolidate_to: 002`).
+  * Move execution/tasks to the new PBI’s `tasks.md`.
+
+### 4.5 YAMS‑First PBI Ops
+
+```bash
+# Index all PBIs
+yams add docs/delivery/ --recursive --include="*.md" --tags "pbi,backlog"
+
+# Find a PBI by canonical path
+yams get --name "docs/delivery/001/prd.md"
+
+# Search PBIs by content (regex)
+yams grep "universal content handler" --include="docs/delivery/*/*.md"
+
+# List recent PBI docs
+yams list --name "docs/delivery/*/*.md" --recent 50
+
+# Metadata-driven (recommended)
+yams update --name "docs/delivery/002/prd.md" --metadata "pbi=002" --metadata "status=in_progress" --metadata "priority=high" --metadata "sprint=2025-Q1"
+yams grep "status=in_progress" --include="docs/delivery/*/*.md"
+yams grep "sprint=2025-Q1" --include="docs/delivery/*/*.md"
+```
+
+### 4.6 Progress Tracking (examples)
+
+```bash
+# Count checklist status within a PBI docs set
+COMPLETED=$(yams grep "\[x\]" --include="docs/delivery/001/*.md" | wc -l)
+PENDING=$(yams grep "\[ \]" --include="docs/delivery/001/*.md" | wc -l)
+TOTAL=$((COMPLETED + PENDING))
+PERCENT=$((TOTAL>0 ? COMPLETED*100/TOTAL : 0))
 echo "Progress: ${COMPLETED}/${TOTAL} (${PERCENT}%)"
 
-# Update PBI after phase completion
-yams update --name "docs/pbi/pbi-001-*.md" \
-  --metadata "phase1_complete=true" \
-  --metadata "phase1_date=$(date -Iseconds)" \
-  --metadata "progress=${PERCENT}"
-
-# Track acceptance criteria progress
-yams get --name "docs/pbi/pbi-001-*.md" | sed -n '/## Acceptance Criteria/,/## /p'
-
-# Find specific phase status
-yams get --name "docs/pbi/pbi-001-*.md" | grep -E "Phase [0-9]:|✅|⏳|❌"
+# Extract Acceptance Criteria block
+yams grep -A 50 -B 2 "## Acceptance Criteria" --include="docs/delivery/001/*.md"
 ```
 
-#### Single-PBI Progress Snapshot
+---
+
+## 5) Task Management
+
+### 5.1 Standards
+
+* One markdown per task: `task-XXX-short-description.md` (`XXX` zero‑padded).
+* Required metadata: `status`, `pbi`, `priority`, `assignee`, `created`, `updated`.
+* Optional: `due_date`, `blocked_by`, `estimated_hours`, `actual_hours`, `tags`.
+
+### 5.2 States & Transitions
+
+| State        | Meaning                          |
+| ------------ | -------------------------------- |
+| pending      | Created, not started             |
+| in\_progress | **Only one active task per PBI** |
+| completed    | Finished                         |
+| blocked      | Waiting on dependency            |
+| cancelled    | Abandoned                        |
+
+Transitions must be explicit and tracked in YAMS (`yams update … --metadata "status=…"`) and reflected in `tasks.md`.
+
+### 5.3 PBI–Task Linking
+
 ```bash
-PBI="docs/pbi/pbi-002-daemon-architecture.md"
-echo "Completed: $(yams get --name "$PBI" | grep -c "\[x\]")"
-echo "Pending:   $(yams get --name "$PBI" | grep -c "\[ \]")"
+# Create task linked to a PBI
+yams add docs/delivery/001/task-001-implement-handler.md \
+  --tags "task,pbi-001" \
+  --metadata "pbi=001" \
+  --metadata "status=in_progress"
 
-# Extract Implementation Phases
-yams get --name "$PBI" | sed -n '/## Implementation Phases/,/## /p'
-
-# Extract Acceptance Criteria
-yams get --name "$PBI" | sed -n '/## Acceptance Criteria/,/## /p'
+# Find tasks by PBI
+yams search "pbi=001" --paths-only
 ```
 
-### 3.5 PBI Status Reporting
-**Generate status summaries and reports:**
+---
+
+## 6) Testing Strategy
+
+* Research test strategies via **YAMS first**; archive new insights back into YAMS.
+* Prefer deterministic, fast tests. Isolate slow/benchmarks with clear marks.
+
+---
+
+## 7) Governance Rules (Fundamentals)
+
+1. **Knowledge‑First:** YAMS before any external research.
+2. **Task‑Only Changes:** All changes map to explicit, approved tasks.
+3. **1:1 Task↔PBI:** Each task links to a single PBI.
+4. **PRD Conformance:** PBIs align with PRD requirements.
+5. **User Authority:** Only the User approves changes.
+6. **No Unauthorized Actions:** Work only within documented tasks.
+7. **File & Index Sync:** Keep files and YAMS index consistent.
+8. **Controlled Creation:** Don’t create files outside agreed dirs without approval.
+9. **External Packages:** Search YAMS first; cache/store all external docs in YAMS (tagged).
+10. **Granular Tasks:** Atomic, testable units.
+11. **DRY:** Single sources with references/hashes.
+12. **Constants:** Use named constants for repeated values.
+13. **API Docs:** Persist external specs in‑repo and in YAMS.
+14. **Forbidden:** Using system `grep/find/rg` for repository queries.
+
+---
+
+## 8) Safety & Destructive Ops
+
+* Destructive commands (`yams rm`, `yams delete`) require a preceding `PLAN` bullet justifying necessity and a `VALIDATE` line confirming scope/path.
+
+---
+
+## 9) Daily Quick Reference (Agent)
+
+* Check high‑priority PBIs/tasks → `yams list`/`yams grep`.
+* **PLAN** → **SEARCH (YAMS)** → **EXECUTE** → **VALIDATE** → **INDEX SYNC** → **SUMMARY**.
+* Persist everything in YAMS (hashes, tags, metadata).
+
+---
+
+### Appendix: Handy Snippets
+
+**LLM‑friendly path listing**
+
 ```bash
-# Quick PBI status summary
-for pbi in docs/pbi/pbi-*.md; do
-  if [ -f "$pbi" ]; then
-    echo "=== $(basename $pbi) ==="
-    grep -E "^- \*\*Status\*\*:|^- \*\*Priority\*\*:|^- \*\*Sprint\*\*:" "$pbi"
-    echo "Checklist Progress:"
-    echo "  Completed: $(grep -c "\[x\]" "$pbi")"
-    echo "  Pending: $(grep -c "\[ \]" "$pbi")"
-    echo ""
-  fi
-done
-
-# Export PBI for review
-yams get --name "docs/pbi/pbi-001-*.md" > /tmp/pbi-review.md
-
-# Find PBIs by sprint
-yams search "sprint=2024-Q1" --paths-only
+yams search "#include" --paths-only | head -10
+yams list --type text --paths-only
 ```
 
-### 3.6 PBI-Task Integration
-- Track PBI progress through associated tasks.
-- Link tasks to PBIs using metadata:
-  ```bash
-  # Create task linked to PBI
-  yams add task-001-implement-handler.md \
-    --tags "task,pbi-001" \
-    --metadata "pbi=001" \
-    --metadata "status=in_progress"
+**Restore from YAMS**
 
-  # Find all tasks for a PBI
-  yams search "pbi=001" --paths-only | grep "task-"
-  ```
-- Example: count tasks by status for PBI readiness:
-  ```bash
-  # Check if all tasks for PBI-001 are complete
-  yams search "pbi=001" --paths-only | while read task; do
-    yams get --name "$task" | grep "status="
-  done
-  ```
+```bash
+yams get --name src/indexing/indexing_pipeline.cpp -o ./restored/indexing_pipeline.cpp
+# Collections/snapshots when available:
+# yams restore --help
+```
 
 ---
-
-## 4. Task Management
-### 4.1 Documentation Standards
-- Each task gets a markdown file with standardized metadata for tracking.
-- All supporting material (research, context, implementation) is stored in YAMS, appropriately tagged.
-- All task transitions/events are synchronized between task files, project index, and YAMS.
-- **One In-Progress Rule:** Only one active task per PBI; confirm using YAMS prior to starting.
-
-### 4.2 YAMS-Based Patterns
-- **Task naming:** `task-XXX-short-description.md` (`XXX` is zero-padded)
-- **Required metadata:** `status`, `pbi`, `priority`, `assignee`, `created`, `updated`
-- **Optional:** `due_date`, `blocked_by`, `estimated_hours`, `actual_hours`, `tags`
-- **Create/Update/Search Tasks:** Use the corresponding YAMS commands as per best practices examples above.
-
-#### Task Lifecycle States & Transitions
-| State         | Description                        |
-|---------------|------------------------------------|
-| pending       | Created, not started               |
-| in_progress   | Active; only one per PBI allowed   |
-| completed     | Finished                           |
-| blocked       | Cannot proceed (dependency)        |
-| cancelled     | Abandoned                          |
-
-- Explicit allowed transitions are enforced and tracked in YAMS.
-
----
-
-## 5. Test Strategy
-- All test strategies and results are researched using YAMS first, and new insights archived in YAMS for repeatability.
-
----
-
-## 6. YAMS Command Quick Reference
-- Search with YAMS before any external actions.
-- Capture and store new information in YAMS immediately.
-- Reference all YAMS hashes and artifacts in documentation.
-
----
-
-## 7. Workflow Overview
-### 7.1 Workflow Principles
-- START: Search YAMS for knowledge & precedents.
-- RESEARCH: Use external sources only as a last resort.
-- CACHE: Store all discoveries in YAMS.
-- DOCUMENT: Reference by YAMS hashes/artifacts.
-- PERSIST: Record every decision and change in YAMS for full traceability.
-
-### 7.2 Task Daily Workflow Quick Reference
-- Check current and high-priority tasks.
-- Start, work, document, and complete via YAMS commands.
-- Update and validate all changes and references in YAMS.

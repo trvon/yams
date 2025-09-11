@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <yams/app/services/services.hpp>
+#include <yams/daemon/components/PoolManager.h>
 
 namespace yams::app::services {
 
@@ -71,6 +72,20 @@ public:
                 if (ctx_.hybridEngine) {
                     // Could add vector database stats here
                     response.additionalStats["vector_embeddings"] = 0; // placeholder
+                }
+                // PoolManager stats (IPC component)
+                try {
+                    auto stats = yams::daemon::PoolManager::instance().stats("ipc");
+                    response.additionalStats["pool_ipc_size"] =
+                        static_cast<std::uint64_t>(stats.current_size);
+                    response.additionalStats["pool_ipc_resizes"] =
+                        static_cast<std::uint64_t>(stats.resize_events);
+                    response.additionalStats["pool_ipc_rejected_on_cap"] =
+                        static_cast<std::uint64_t>(stats.rejected_on_cap);
+                    response.additionalStats["pool_ipc_throttled_on_cooldown"] =
+                        static_cast<std::uint64_t>(stats.throttled_on_cooldown);
+                } catch (...) {
+                    // ignore if PoolManager not available
                 }
             }
 
