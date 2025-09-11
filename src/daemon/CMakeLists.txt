@@ -350,7 +350,7 @@ target_link_libraries(yams_daemon
         yams::daemon_ipc
         yams_daemon_client
     PRIVATE
-        $<$<VERSION_GREATER_EQUAL:${CMAKE_VERSION},3.24>:$<LINK_GROUP:RESCAN,yams_wal>>
+        $<$<AND:$<VERSION_GREATER_EQUAL:${CMAKE_VERSION},3.24>,$<PLATFORM_ID:Linux>>:$<LINK_GROUP:RESCAN,yams_wal>>
         spdlog::spdlog
         pthread
         ${CMAKE_DL_LIBS}  # For dlopen/dlsym
@@ -358,7 +358,7 @@ target_link_libraries(yams_daemon
 )
 
 # Ensure WAL symbols are retained when linking with lld and section GC
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if(NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_link_options(yams_daemon PRIVATE -Wl,--no-gc-sections)
     # Additionally, force-resolve yams_wal to avoid missing symbols under some link orders
     target_link_libraries(yams_daemon PRIVATE $<$<LINK_LANGUAGE:CXX>:-Wl,--whole-archive> yams_wal $<$<LINK_LANGUAGE:CXX>:-Wl,--no-whole-archive>)
@@ -456,6 +456,7 @@ if(APPLE)
     )
     target_link_options(yams-daemon PRIVATE
         "-Wl,-force_load,$<TARGET_FILE:yams_compression>"
+        "-Wl,-force_load,$<TARGET_FILE:yams_wal>"
     )
     # Defensive: strip any lingering GNU ld group/whole-archive flags if injected elsewhere
     get_target_property(_yamsd_libs yams-daemon LINK_LIBRARIES)
@@ -591,7 +592,7 @@ if(onnxruntime_FOUND AND NOT YAMS_DISABLE_ONNX AND OFF)
 
     # Optional: fail link if there are unresolved symbols (Linux/ELF)
     if(UNIX AND NOT APPLE)
-    target_link_options(yams_onnx_plugin PRIVATE "-Wl,-z,defs")
+        target_link_options(yams_onnx_plugin PRIVATE "-Wl,-z,defs")
     endif()
 
     # Install ONNX plugin to plugins directory

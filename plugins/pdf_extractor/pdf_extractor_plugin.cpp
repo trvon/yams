@@ -2,7 +2,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <yams/extraction/pdf_extractor.h>
+#include "pdf_extractor.h"
 #include <yams/plugins/abi.h>
 #include <yams/plugins/content_extractor_v1.h>
 

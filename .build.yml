@@ -101,6 +101,17 @@ tasks:
         hash -r
       fi
 
+      # Persist Conan PATH and CPU count for subsequent tasks and fail fast if missing
+      if command -v conan >/dev/null 2>&1; then
+        CONAN_DIR="$(dirname "$(command -v conan)")"
+        echo "PATH=${CONAN_DIR}:\$PATH" >> ~/.buildenv
+      else
+        echo "Conan is not available after installation attempts" >&2
+        exit 1
+      fi
+      CONAN_CPU_COUNT="${CONAN_CPU_COUNT:-$(nproc || getconf _NPROCESSORS_ONLN || echo 2)}"
+      echo "CONAN_CPU_COUNT=${CONAN_CPU_COUNT}" >> ~/.buildenv
+
       # Move into repository directory (SourceHut clones into ./yams)
       cd yams
 
@@ -129,6 +140,12 @@ tasks:
       python3 scripts/ci/check_yams_semver.py
 
   - build: |
+      set -e
+      export PATH="${HOME}/.local/bin:/opt/conan/bin:${PATH}"
+      if ! command -v conan >/dev/null 2>&1; then
+        echo "conan not found in PATH; aborting build" >&2
+        exit 1
+      fi
       cd yams
       export YAMS_DISABLE_MODEL_PRELOAD=1
       CLEAN_VERSION="${YAMS_VERSION}"

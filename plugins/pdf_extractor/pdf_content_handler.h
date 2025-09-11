@@ -1,8 +1,8 @@
 #pragma once
 
 #include <memory>
+#include "pdf_extractor.h"
 #include <yams/content/content_handler.h>
-#include <yams/extraction/pdf_extractor.h>
 
 namespace yams::content {
 

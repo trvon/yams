@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.6.12] - 2025-09-06
+## [v0.6.12] - 2025-09-11
 
 ### Known Issues
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Startup hints: daemon logs a hint to run `yams repair --embeddings` on new/migrated data dirs and a hint to use `yams stats --verbose` for monitoring.
 
 ### Changed
+- Documentation: general improvements and clarifications.
+- CI: improved build reliability and semantic version enforcement.
 - `yams doctor` summary now includes a Knowledge Graph section; when the graph is empty
   it recommends: `yams doctor repair --graph`.
 - **PDF Extraction**: The built-in PDF text extraction logic has been refactored into a standalone plugin (`pdf_extractor`) that implements the new `content_extractor_v1` and `search_provider_v1` interfaces.
@@ -90,6 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Link `nlohmann_json::nlohmann_json` into `yams_ipc_proto` (proto serializer uses JSON).
   - Link `-ldl` for CLI doctor on Linux (dlopen in `doctor plugin`).
   - Fixed unterminated string literals in plugin CLI output.
+  - macOS: CMake configuration and linking fixes for Darwin toolchain (guard LINK_GROUP to Linux; use -force_load where appropriate).
 - External plugin host
   - Corrected trust file newline writes, regex escapes, and Result usage in load(); ensured proper namespace scoping to fix build.
 

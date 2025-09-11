@@ -10,8 +10,15 @@
 #ifndef _WIN32
 #include <pthread.h> // For setting thread priority
 #endif
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#elif defined(__linux__)
+#include <sched.h>
+#endif
 #include <nlohmann/json.hpp>
+#include <cerrno>
 #include <fstream>
+#include <sys/resource.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/integrity/repair_utils.h>
@@ -126,12 +133,27 @@ bool EmbeddingService::startRepairAsync() {
     // Launch stop-aware background worker with std::jthread
     repairThread_ = yams::compat::jthread([this](yams::compat::stop_token stoken) {
 #ifndef _WIN32
-        // Lower thread priority to avoid starving main threads
+#if defined(__APPLE__)
+        // Lower thread priority on macOS using QoS background class
+        if (pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) != 0) {
+            spdlog::warn("Failed to set repair thread QoS to background");
+        }
+#else
+#if defined(SCHED_IDLE)
+        // Lower thread priority on Linux using SCHED_IDLE
         struct sched_param sp{};
         sp.sched_priority = 0;
         if (pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp) != 0) {
-            spdlog::warn("Failed to set repair thread to idle priority");
+            spdlog::warn("Failed to set repair thread to idle priority (SCHED_IDLE)");
         }
+#else
+        // Fallback: lower niceness when SCHED_IDLE is unavailable
+        if (setpriority(PRIO_PROCESS, 0, 19) != 0) {
+            spdlog::warn("Failed to lower repair thread priority via setpriority (errno={})",
+                         errno);
+        }
+#endif
+#endif
 #endif
         // Ensure running flag is reset when the thread exits
         struct Reset {

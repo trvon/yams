@@ -1,5 +1,5 @@
+#include "pdf_extractor.h"
 #include <spdlog/spdlog.h>
-#include <yams/extraction/pdf_extractor.h>
 #include <yams/extraction/text_extractor.h>
 
 // PDFium headers
