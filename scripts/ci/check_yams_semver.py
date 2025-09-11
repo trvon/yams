@@ -125,13 +125,9 @@ def main() -> int:
     # Accept if either (a) versions bumped or (b) changelog/stability doc touched
     changelog_touched = any(p in changed for p in CHANGE_TOKENS) or (VERSION_FILE in changed)
     if expected_bumps and not version_bumped and not changelog_touched:
-        print(
-            "[yams-semver] ERROR: interface changed without version bump or changelog update.
-"
-            f"  Missing bumps for: {', '.join(missing)}
-"
-            f"  Touch either {VERSION_FILE} with version increments and/or CHANGELOG.md
-",
+        print("[yams-semver] ERROR: interface changed without version bump or changelog update"
+            f"  Missing bumps for: {', '.join(missing)}"
+            f"  Touch either {VERSION_FILE} with version increments and/or CHANGELOG.md",
             file=sys.stderr,
         )
         return 1
@@ -140,13 +136,9 @@ def main() -> int:
         print("[yams-semver] version bump/changelog present — OK")
         return 0
 
-    print(
-        "[yams-semver] ERROR: public YAMS surfaces changed without changelog/version update.
-"
-        "  Please bump interface versions and update CHANGELOG.md or stability PBI.
-"
-        f"  Base ref: {base}
-",
+    print("[yams-semver] ERROR: public YAMS surfaces changed without changelog/version update."
+        "  Please bump interface versions and update CHANGELOG.md or stability PBI."
+        f"  Base ref: {base}",
         file=sys.stderr,
     )
     return 1
