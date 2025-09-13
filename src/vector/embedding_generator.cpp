@@ -23,6 +23,7 @@
 
 #ifdef YAMS_USE_ONNX_RUNTIME
 #include <onnxruntime_cxx_api.h>
+#include <yams/vector/onnx_genai_adapter.h>
 #endif
 
 // Include daemon client for DaemonBackend
@@ -836,6 +837,34 @@ public:
         }
 
         try {
+            // Optionally prefer GenAI adapter when requested via config/env
+            if (config_.use_genai) {
+                try {
+                    spdlog::info("[GenAI] Attempting GenAI adapter initialization for model '{}'",
+                                 config_.model_name);
+                    genai_ = std::make_unique<OnnxGenAIAdapter>();
+                    OnnxGenAIAdapter::Options opt;
+                    opt.intra_op_threads = config_.num_threads > 0 ? config_.num_threads : 4;
+                    opt.normalize = config_.normalize_embeddings;
+                    const std::string id_or_path =
+                        !config_.model_path.empty() ? config_.model_path : config_.model_name;
+                    if (genai_->init(id_or_path, opt)) {
+                        auto d = genai_->embedding_dim();
+                        if (d > 0)
+                            config_.embedding_dim = d;
+                        initialized_ = true;
+                        spdlog::info("LocalOnnxBackend (GenAI) initialized with model: {}",
+                                     config_.model_name);
+                        return true;
+                    } else {
+                        spdlog::warn("GenAI adapter unavailable; falling back to raw ORT path");
+                        genai_.reset();
+                    }
+                } catch (...) {
+                    genai_.reset();
+                }
+            }
+
             if (!model_manager_.loadModel(config_.model_name, config_.model_path)) {
                 spdlog::error("Failed to load ONNX model: {}", config_.model_name);
                 return false;
@@ -878,6 +907,20 @@ public:
             size_t model_seq_length = model_manager_.getModelMaxLength(config_.model_name);
             if (model_seq_length == 0) {
                 model_seq_length = config_.max_sequence_length;
+            }
+
+            // If GenAI adapter is active, bypass local tokenization and use adapter
+            if (genai_ && genai_->available()) {
+                auto v = genai_->embed(text);
+                if (v.empty())
+                    return Error{ErrorCode::InternalError, "GenAI embed failed"};
+                if (config_.normalize_embeddings) {
+                    v = embedding_utils::normalizeEmbedding(v);
+                }
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+                updateStats(1, text.size() / 4, duration);
+                return v;
             }
 
             // Tokenize and preprocess
@@ -936,6 +979,19 @@ public:
             for (size_t i = 0; i < texts.size(); i += config_.batch_size) {
                 size_t batch_end = std::min(i + config_.batch_size, texts.size());
                 auto batch_span = texts.subspan(i, batch_end - i);
+
+                // If GenAI adapter is active, use it for the entire sub-batch
+                if (genai_ && genai_->available()) {
+                    std::vector<std::string> subtexts(batch_span.begin(), batch_span.end());
+                    auto mat = genai_->embed_batch(subtexts);
+                    if (mat.empty())
+                        return Error{ErrorCode::InternalError, "GenAI batch embed failed"};
+                    if (config_.normalize_embeddings) {
+                        mat = embedding_utils::normalizeEmbeddings(mat);
+                    }
+                    all_embeddings.insert(all_embeddings.end(), mat.begin(), mat.end());
+                    continue;
+                }
 
                 // Tokenize batch
                 std::vector<std::vector<int32_t>> batch_tokens;
@@ -1025,6 +1081,7 @@ private:
 
     EmbeddingConfig config_;
     TextPreprocessor preprocessor_;
+    std::unique_ptr<OnnxGenAIAdapter> genai_;
     ModelManager model_manager_;
     bool initialized_;
     GenerationStats stats_;

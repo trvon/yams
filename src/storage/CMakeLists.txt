@@ -1,5 +1,30 @@
-# Find SQLite3
+# Find SQLite3 (Conan or system). Prefer imported targets that propagate include dirs.
 find_package(SQLite3 REQUIRED)
+
+# Resolve an appropriate sqlite3 target that ensures include directories are usage requirements.
+set(YAMS_SQLITE3_TARGET "")
+if(TARGET sqlite3::sqlite3)
+    set(YAMS_SQLITE3_TARGET sqlite3::sqlite3)
+elseif(TARGET SQLite::SQLite3) # Some distributions use this namespace
+    set(YAMS_SQLITE3_TARGET SQLite::SQLite3)
+elseif(TARGET sqlite3) # Fallback imported target
+    set(YAMS_SQLITE3_TARGET sqlite3)
+endif()
+
+if(NOT YAMS_SQLITE3_TARGET)
+    # Fallback to variables (older FindSQLite3) — add include dir manually
+    if(SQLite3_INCLUDE_DIRS)
+        add_library(yams_sqlite3 INTERFACE)
+        target_include_directories(yams_sqlite3 INTERFACE ${SQLite3_INCLUDE_DIRS})
+        if(SQLite3_LIBRARIES)
+            target_link_libraries(yams_sqlite3 INTERFACE ${SQLite3_LIBRARIES})
+        endif()
+        set(YAMS_SQLITE3_TARGET yams_sqlite3)
+        message(STATUS "Created interface target yams_sqlite3 from SQLite3 variables")
+    else()
+        message(FATAL_ERROR "Could not locate an sqlite3 CMake target or variables; ensure Conan/system sqlite3 package is available")
+    endif()
+endif()
 
 # Platform-specific sources
 if(UNIX)
@@ -64,8 +89,8 @@ target_link_libraries(yams_reference_counter
     PUBLIC
         yams::core
         yams::storage_engine
+        ${YAMS_SQLITE3_TARGET}
     PRIVATE
-        sqlite3
         spdlog::spdlog
         Threads::Threads
 )

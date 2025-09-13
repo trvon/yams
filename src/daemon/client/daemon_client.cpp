@@ -26,6 +26,7 @@
 #include <thread>
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #endif
@@ -1435,6 +1436,15 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 
     if (pid == 0) {
         // Child process - exec yams-daemon
+        // Detach stdio from parent (MCP/CLI) to avoid corrupting parent's stdout framing
+        int devnull = ::open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            (void)::dup2(devnull, STDIN_FILENO);
+            (void)::dup2(devnull, STDOUT_FILENO);
+            (void)::dup2(devnull, STDERR_FILENO);
+            if (devnull > 2)
+                ::close(devnull);
+        }
         // If a dataDir is provided, export it and pass as explicit CLI arg
         if (!dataDir.empty()) {
             setenv("YAMS_STORAGE", dataDir.c_str(), 1);

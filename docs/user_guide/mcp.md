@@ -28,6 +28,12 @@ docker run -i ghcr.io/trvon/yams:latest serve
 
 The stdio transport uses standard input/output for JSON-RPC communication. This is the standard for local MCP integrations.
 
+Framing compatibility:
+- The server auto-detects the client's framing on first request and mirrors it in responses:
+  - If the client sends raw JSON (ndjson), responses are newline-delimited JSON.
+  - If the client sends LSP-style headers (Content-Length), responses use headers + payload (+ CRLF).
+This keeps YAMS compatible with multiple MCP clients (Inspector, Goose/Jan, LM Studio).
+
 **When to use:**
 - Claude Desktop integration
 - Local AI assistants
@@ -110,6 +116,25 @@ Add YAMS to your Claude Desktop configuration file:
 ```
 
 After updating the configuration, restart Claude Desktop to load the MCP server.
+
+## Prompt Templates
+
+YAMS exposes basic prompt templates via `prompts/list` and `prompts/get`. In addition to built-ins (e.g., `search_codebase`, `summarize_document`, `rag/*`), you can add file-backed templates:
+
+- Create a directory for prompts (Markdown files):
+  - Default search path order:
+    1) `YAMS_MCP_PROMPTS_DIR` (env override)
+    2) `[mcp_server].prompts_dir` in `config.toml`
+    3) `$XDG_DATA_HOME/yams/prompts` or `~/.local/share/yams/prompts`
+    4) `./docs/prompts` (when running from repo)
+- File naming: `PROMPT-*.md` → name exposed as `*` with dashes converted to underscores.
+  - Example: `PROMPT-research-mcp.md` → name `research_mcp`
+- prompts/list merges built-ins with any file-backed templates.
+- prompts/get returns the template content as a single assistant text message.
+
+Tips:
+- To seed prompts, copy examples from the repo's `docs/prompts` into your prompts dir or provide a gist/raw URL for users to download.^
+- Future: `yams init prompts` can be wired to fetch/populate a starter set.
 
 ## Readiness and Initialization
 
@@ -547,6 +572,5 @@ For more information:
 - [CLI Reference](cli.md) - Complete command-line documentation
 - [API Documentation](../api/mcp_tools.md) - Detailed tool schemas
 - [GitHub Issues](https://github.com/trvon/yams/issues) - Report problems or request features
-
 
 

@@ -388,6 +388,13 @@ enable_ping_pong = true
 # Ping interval (seconds)
 ping_interval_s = 30
 
+# Optional: directory for file-backed prompt templates (Markdown).
+# Files named PROMPT-*.md will be exposed via `prompts/list` and `prompts/get`.
+# Examples: PROMPT-search-codebase.md -> name: "search_codebase"
+# If not set, defaults to XDG_DATA_HOME/yams/prompts or ~/.local/share/yams/prompts,
+# and as a last resort uses ./docs/prompts when running from the repo root.
+# prompts_dir = "/home/user/.local/share/yams/prompts"
+
 [daemon]
 # Enable daemon for background embedding generation
 # This eliminates ONNX model loading overhead on every command

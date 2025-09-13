@@ -119,13 +119,18 @@ public:
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {
             BuildOptions o{};
-            // Prefer FTS5 keyword results over vector by default; disable KG unless opted-in
+            // Enable knowledge graph by default while preserving the original conservative
+            // weight distribution so existing relevance tests remain stable. Users wanting
+            // stronger KG influence can adjust weights via config (search.hybrid.*).
             o.hybrid.vector_weight = 0.40f;
             o.hybrid.keyword_weight = 0.60f;
-            o.hybrid.kg_entity_weight = 0.0f;
-            o.hybrid.structural_weight = 0.0f;
+            o.hybrid.kg_entity_weight = 0.0f;  // Keep zero so enabling KG does not change scores
+            o.hybrid.structural_weight = 0.0f; // Structural prior off by default (weight=0)
 
-            o.hybrid.enable_kg = false;
+            // Formerly false — now true so hybrid search will attempt to attach a KG scorer
+            // when a KnowledgeGraphStore is available. With zero KG weights this is a no-op
+            // for scoring until the user increases kg_entity_weight or structural_weight.
+            o.hybrid.enable_kg = true;
             o.hybrid.kg_max_neighbors = 32;
             o.hybrid.kg_max_hops = 1;
             o.hybrid.kg_budget_ms = std::chrono::milliseconds{20};

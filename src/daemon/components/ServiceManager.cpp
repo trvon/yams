@@ -1327,19 +1327,45 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
     try {
         if (abiHost_) {
             auto loaded = abiHost_->listLoaded();
+
+            auto path_for = [&](const std::string& name) -> std::string {
+                for (const auto& d : loaded) {
+                    if (d.name == name)
+                        return d.path.string();
+                    try {
+                        auto stem = std::filesystem::path(d.path).stem().string();
+                        if (stem == name)
+                            return d.path.string();
+                    } catch (...) {
+                    }
+                }
+                return std::string{};
+            };
+
             auto try_adopt = [&](const std::string& pluginName) -> bool {
                 auto ifaceRes = abiHost_->getInterface(pluginName, "model_provider_v1", 1);
                 if (!ifaceRes) {
-                    spdlog::debug("Model provider iface not found for plugin '{}' : {}", pluginName,
-                                  ifaceRes.error().message);
+                    spdlog::debug("Model provider iface not found for plugin '{}' (path='{}') : {}",
+                                  pluginName, path_for(pluginName), ifaceRes.error().message);
                     return false;
                 }
                 auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
-                if (!table || table->abi_version != YAMS_IFACE_MODEL_PROVIDER_V1_VERSION)
+                if (!table) {
+                    spdlog::debug("Null model provider table for plugin '{}' (path='{}')",
+                                  pluginName, path_for(pluginName));
                     return false;
+                }
+                if (table->abi_version != YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) {
+                    spdlog::debug(
+                        "ABI mismatch for '{}' (path='{}'): got v{}, expected v{} — skipping",
+                        pluginName, path_for(pluginName), table->abi_version,
+                        (int)YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
+                    return false;
+                }
                 modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
                 state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
-                spdlog::info("Adopted model provider from plugin: {}", pluginName);
+                spdlog::info("Adopted model provider from plugin: {} (path='{}', abi={})",
+                             pluginName, path_for(pluginName), (int)table->abi_version);
                 adoptedProviderPluginName_ = pluginName;
                 clearModelProviderError();
                 // Embedding generator initialization happens in the caller after all plugins are
@@ -1444,15 +1470,17 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                     }
                 if (!hasIface)
                     continue;
-                spdlog::debug("Trying model provider adoption from loaded plugin {}", d.name);
+                spdlog::debug("Trying model provider adoption from loaded plugin {} (path='{}')",
+                              d.name, d.path.string());
                 if (try_adopt(d.name))
                     return Result<bool>(true);
                 // Try stem of path as alternate plugin name
                 try {
                     std::string alt = std::filesystem::path(d.path).stem().string();
                     if (!alt.empty() && alt != d.name) {
-                        spdlog::debug("Trying model provider adoption from plugin path stem {}",
-                                      alt);
+                        spdlog::debug(
+                            "Trying model provider adoption from plugin path stem {} (path='{}')",
+                            alt, d.path.string());
                         if (try_adopt(alt))
                             return Result<bool>(true);
                     }
@@ -1463,17 +1491,20 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                     try {
                         auto ifaceAlt = abiHost_->getInterface(d.name, "model_provider_v1", vv);
                         if (!ifaceAlt) {
-                            spdlog::debug("getInterface(model_provider_v1,{}) failed for {}", vv,
-                                          d.name);
+                            spdlog::debug(
+                                "getInterface(model_provider_v1,{}) failed for {} (path='{}')", vv,
+                                d.name, d.path.string());
                             continue;
                         }
                         auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceAlt.value());
                         if (!table) {
-                            spdlog::debug("Null provider table for {}", d.name);
+                            spdlog::debug("Null provider table for {} (path='{}')", d.name,
+                                          d.path.string());
                             continue;
                         }
-                        spdlog::info("Adopted model provider (alt ABI v{}) from plugin: {}", vv,
-                                     d.name);
+                        spdlog::info(
+                            "Adopted model provider (alt ABI v{}) from plugin: {} (path='{}')", vv,
+                            d.name, d.path.string());
                         modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
                         state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
                         adoptedProviderPluginName_ = d.name;
@@ -1554,17 +1585,18 @@ Result<size_t> ServiceManager::autoloadPluginsNow() {
             for (const auto& p : wasmHost_->trustList())
                 roots.push_back(p);
         }
-        try {
-            for (const auto& d : PluginLoader::getDefaultPluginDirectories())
-                roots.push_back(d);
-        } catch (...) {
-        }
+        // Prefer explicit env override before default directories to avoid stale system plugins
         try {
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 std::filesystem::path penv(env);
                 if (!penv.empty())
                     roots.push_back(penv);
             }
+        } catch (...) {
+        }
+        try {
+            for (const auto& d : PluginLoader::getDefaultPluginDirectories())
+                roots.push_back(d);
         } catch (...) {
         }
 

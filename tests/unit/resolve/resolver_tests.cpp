@@ -222,6 +222,9 @@ public:
     Result<int64_t> getIndexedDocumentCount() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<int64_t> getContentExtractedDocumentCount() override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }

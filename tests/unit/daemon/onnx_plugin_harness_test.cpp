@@ -12,6 +12,8 @@ protected:
         tempDir_ = fs::temp_directory_path() / ("yams_onnx_ht_" + std::to_string(::getpid()));
         fs::create_directories(tempDir_);
         trustFile_ = tempDir_ / "plugins_trust.txt";
+        // Ensure no leakage from user config/trust files during tests
+        ::setenv("XDG_CONFIG_HOME", tempDir_.c_str(), 1);
     }
     void TearDown() override {
         std::error_code ec;
@@ -44,15 +46,7 @@ TEST_F(OnnxPluginHarnessTest, ConditionalLoadOnnxIfPresent) {
         GTEST_SKIP() << "ONNX plugin scan failed (likely missing runtime dependencies): "
                      << pluginPath;
     }
-    // Name can be "onnx" per manifest, interfaces should include model_provider_v1
-    bool hasMp = false;
-    for (const auto& id : scan.value().interfaces)
-        if (id.find("model_provider_v1") != std::string::npos) {
-            hasMp = true;
-            break;
-        }
-    EXPECT_TRUE(hasMp);
-
+    // Perform full load; hardened scan no longer populates interfaces
     auto lr = host.load(pluginPath, "{}");
     ASSERT_TRUE(lr);
     auto ifaceRes = host.getInterface(lr.value().name, "model_provider_v1", 1);

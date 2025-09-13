@@ -9,6 +9,8 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 
 #include <future>
 #include <mutex>
@@ -108,7 +110,11 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
 
     // Prefer immediate synchronous flush for stdio transport; fallback to queue
     if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-        stdio->send(message); // sends one JSON object per line
+        if (stdio->peerPrefersNdjson()) {
+            stdio->sendNdjson(message);
+        } else {
+            stdio->send(message);
+        }
         return;
     }
 
@@ -154,8 +160,8 @@ boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
         }
 
         if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-            // Synchronous path; still ordered by drain loop (framed output)
-            stdio->send(next);
+            // Synchronous path; next is a serialized JSON string. Use framed string sender
+            stdio->sendFramedSerialized(next);
         } else {
             // No supported transport for raw framed write; drop with error
             spdlog::error("outboundDrainAsync: unsupported transport type for framed write; "
@@ -233,12 +239,11 @@ void StdioTransport::send(const json& message) {
             if (outbuf_) {
                 (void)std::cout.rdbuf(outbuf_);
             }
-            // Minimal LSP/MCP framing, always including Content-Type and trailing CRLF
+            // Minimal LSP/MCP framing, always including Content-Type
             std::cout << "Content-Length: " << payload.size() << "\r\n";
             std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
             std::cout << "\r\n";
             std::cout << payload;
-            std::cout << "\r\n";
             std::cout.flush();
             if (saved) {
                 (void)std::cout.rdbuf(saved);
@@ -248,6 +253,55 @@ void StdioTransport::send(const json& message) {
         } catch (...) {
             spdlog::error("StdioTransport::send unknown exception");
         }
+    }
+}
+
+void StdioTransport::sendNdjson(const json& message) {
+    if (state_.load() != TransportState::Connected) {
+        return;
+    }
+    try {
+        std::lock_guard<std::mutex> lock(out_mutex_);
+        const std::string payload = message.dump();
+        std::streambuf* saved = std::cout.rdbuf();
+        if (outbuf_) {
+            (void)std::cout.rdbuf(outbuf_);
+        }
+        std::cout << payload << "\n";
+        std::cout.flush();
+        if (saved) {
+            (void)std::cout.rdbuf(saved);
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("StdioTransport::sendNdjson exception: {}", e.what());
+    } catch (...) {
+        spdlog::error("StdioTransport::sendNdjson unknown exception");
+    }
+}
+
+// Framed send helper for pre-serialized JSON payloads
+void StdioTransport::sendFramedSerialized(const std::string& payload) {
+    if (state_.load() != TransportState::Connected) {
+        return;
+    }
+    try {
+        std::lock_guard<std::mutex> lock(out_mutex_);
+        std::streambuf* saved = std::cout.rdbuf();
+        if (outbuf_) {
+            (void)std::cout.rdbuf(outbuf_);
+        }
+        std::cout << "Content-Length: " << payload.size() << "\r\n";
+        std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+        std::cout << "\r\n";
+        std::cout << payload;
+        std::cout.flush();
+        if (saved) {
+            (void)std::cout.rdbuf(saved);
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("StdioTransport::sendFramedSerialized exception: {}", e.what());
+    } catch (...) {
+        spdlog::error("StdioTransport::sendFramedSerialized unknown exception");
     }
 }
 
@@ -317,6 +371,17 @@ MessageResult StdioTransport::receive() {
     std::istream in(std::cin.rdbuf());
 
     while (state_.load() != TransportState::Closing) {
+        // In test builds, allow cin rdbuf-based availability checks to
+        // support StringStream-driven unit tests without polling STDIN.
+#ifdef YAMS_TESTING
+        if (std::cin.rdbuf()->in_avail() <= 0) {
+            if (externalShutdown_ && *externalShutdown_) {
+                state_.store(TransportState::Closing);
+                return Error{ErrorCode::NetworkError, "External shutdown requested"};
+            }
+            continue;
+        }
+#else
         if (!isInputAvailable(recvTimeoutMs_)) {
             if (externalShutdown_ && *externalShutdown_) {
                 state_.store(TransportState::Closing);
@@ -324,6 +389,7 @@ MessageResult StdioTransport::receive() {
             }
             continue;
         }
+#endif
 
         // Attempt to read framed headers; fallback to single-line JSON (non-seekable safe)
         std::size_t contentLength = 0;
@@ -352,6 +418,7 @@ MessageResult StdioTransport::receive() {
                     state_.store(TransportState::Error);
                 return parsed.error();
             }
+            preferNdjson_.store(true);
             resetErrorCount();
             return parsed.value();
         }
@@ -427,6 +494,8 @@ MessageResult StdioTransport::receive() {
                 state_.store(TransportState::Error);
             return parsed.error();
         }
+        // We parsed a framed message; prefer header framing for outbound
+        preferNdjson_.store(false);
         resetErrorCount();
         return parsed.value();
     }
@@ -572,6 +641,67 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
         outboundStrand_ =
             std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(io.get_executor());
+    }
+
+    // Resolve prompts directory (file-backed templates)
+    try {
+        // Highest priority: explicit env override
+        if (const char* env = std::getenv("YAMS_MCP_PROMPTS_DIR"); env && *env) {
+            promptsDir_ = std::filesystem::path(env);
+        }
+        // Next: config.toml [mcp_server].prompts_dir
+        if (promptsDir_.empty()) {
+            std::map<std::string, std::map<std::string, std::string>> toml;
+            std::filesystem::path configPath;
+            if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
+                configPath = std::filesystem::path(xdgConfigHome) / "yams" / "config.toml";
+            } else if (const char* homeEnv = std::getenv("HOME")) {
+                configPath = std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
+            }
+            if (!configPath.empty() && std::filesystem::exists(configPath)) {
+                yams::config::ConfigMigrator migrator;
+                if (auto parsed = migrator.parseTomlConfig(configPath)) {
+                    toml = std::move(parsed.value());
+                }
+            }
+            if (auto it = toml.find("mcp_server"); it != toml.end()) {
+                const auto& mcp = it->second;
+                if (auto f = mcp.find("prompts_dir"); f != mcp.end() && !f->second.empty()) {
+                    std::string p = f->second;
+                    if (!p.empty() && p.front() == '~') {
+                        if (const char* home = std::getenv("HOME")) {
+                            p = std::string(home) + p.substr(1);
+                        }
+                    }
+                    promptsDir_ = std::filesystem::path(p);
+                }
+            }
+        }
+        // Next: XDG_DATA_HOME/yams/prompts or ~/.local/share/yams/prompts
+        if (promptsDir_.empty()) {
+            std::filesystem::path base;
+            if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
+                base = std::filesystem::path(xdgData);
+            } else if (const char* home = std::getenv("HOME")) {
+                base = std::filesystem::path(home) / ".local" / "share";
+            }
+            if (!base.empty()) {
+                auto p = base / "yams" / "prompts";
+                promptsDir_ = p;
+            }
+        }
+        // Last: local docs/prompts (useful for dev runs from the repo root)
+        if (!std::filesystem::exists(promptsDir_)) {
+            auto localDocs = std::filesystem::current_path() / "docs" / "prompts";
+            if (std::filesystem::exists(localDocs)) {
+                promptsDir_ = localDocs;
+            }
+        }
+        if (!promptsDir_.empty()) {
+            spdlog::info("MCP prompts directory resolved to: {}", promptsDir_.string());
+        }
+    } catch (...) {
+        // Ignore prompt dir resolution errors; built-ins remain available
     }
     // Proactively connect to the daemon (auto-start if configured) so first tool call
     // doesn’t fail with a transport error when the socket isn’t up yet.
@@ -730,7 +860,7 @@ MessageResult MCPServer::handleRequest(const json& request) {
         // Extract method and params
         std::string method = request.value("method", "");
         json params = request.value("params", json::object());
-        auto id = request.value("id", json{});
+        auto id2 = request.value("id", json{});
 
         spdlog::debug("MCP server handling method: '{}' with id: {}", method, id.dump());
 
@@ -748,7 +878,7 @@ MessageResult MCPServer::handleRequest(const json& request) {
             }
             spdlog::debug("MCP initialize successful, protocol version: {}",
                           initResult.value("protocolVersion", "unknown"));
-            return createResponse(id, initResult);
+            return createResponse(id2, initResult);
         } else if (method == "notifications/cancelled") {
             // MCP cancellation notification; tolerate either 'id' or 'requestId'
             nlohmann::json cancelId;
@@ -768,13 +898,13 @@ MessageResult MCPServer::handleRequest(const json& request) {
             markClientInitialized();
             return Error{ErrorCode::Success, "notification"};
         } else if (method == "ping") {
-            return createResponse(id, json::object());
+            return createResponse(id2, json::object());
         } else if (method == "shutdown") {
             // Per LSP spec: prepare for exit but don't actually exit yet
             // Just acknowledge the shutdown request
             spdlog::debug("Shutdown request received, preparing for exit");
             shutdownRequested_ = true;
-            return createResponse(id, json::object());
+            return createResponse(id2, json::object());
         } else if (method == "exit") {
             // Per LSP spec: exit only after shutdown was requested
             spdlog::debug("Exit request received");
@@ -785,16 +915,23 @@ MessageResult MCPServer::handleRequest(const json& request) {
             return Error{ErrorCode::Success, "notification"};
         } else if (method == "tools/list") {
             recordEarlyFeatureUse();
-            return createResponse(id, listTools());
+            return createResponse(id2, listTools());
         } else if (method == "tools/call") {
             recordEarlyFeatureUse();
             const auto toolName = params.value("name", "");
             const auto toolArgs = params.value("arguments", json::object());
             spdlog::debug("MCP tool call: '{}' with args: {}", toolName, toolArgs.dump());
+            // Emit a coarse progress notification for visibility
+            sendProgress("tool", 0.0, std::string("calling ") + toolName);
             json raw = callTool(toolName, toolArgs);
 
-            // The tool already returns a properly wrapped result from wrapToolResult
-            // Just return it wrapped in the response envelope
+            // If the tool returned a JSON-RPC style error object, propagate as error response
+            if (raw.is_object() && raw.contains("error")) {
+                json err = raw["error"];
+                return json{{"jsonrpc", protocol::JSONRPC_VERSION}, {"error", err}, {"id", id}};
+            }
+            // Otherwise, treat as successful tool result (typically content array)
+            sendProgress("tool", 100.0, std::string("completed ") + toolName);
             return createResponse(id, raw);
         } else if (method == "resources/list") {
             return createResponse(id, listResources());
@@ -807,14 +944,14 @@ MessageResult MCPServer::handleRequest(const json& request) {
             std::string name = params.value("name", "");
             json args = params.value("arguments", json::object());
 
-            auto textPart = [](const std::string& t) {
+            auto textContent = [](const std::string& t) {
                 return json{{"type", "text"}, {"text", t}};
             };
-            auto sysMsg = [&](const std::string& t) {
-                return json{{"role", "system"}, {"content", json::array({textPart(t)})}};
+            auto assistantMsg = [&](const std::string& t) {
+                return json{{"role", "assistant"}, {"content", textContent(t)}};
             };
             auto userMsg = [&](const std::string& t) {
-                return json{{"role", "user"}, {"content", json::array({textPart(t)})}};
+                return json{{"role", "user"}, {"content", textContent(t)}};
             };
 
             auto makeResponse = [&](std::vector<json> messages) {
@@ -837,10 +974,10 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 if (!fileType.empty()) {
                     u += "File type filter hint: " + fileType + "\n";
                 }
-                return makeResponse({
-                    sysMsg("You are a code navigator that selects between grep and hybrid search."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg(
+                         "You are a code navigator that selects between grep and hybrid search."),
+                     userMsg(u)});
             }
 
             if (name == "summarize_document") {
@@ -858,10 +995,9 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 if (!docName.empty()) {
                     u += "\nDocument name: " + docName + "\n";
                 }
-                return makeResponse({
-                    sysMsg("You are a precise summarizer. Cite sources by name/hash."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg("You are a precise summarizer. Cite sources by name/hash."),
+                     userMsg(u)});
             }
 
             if (name == "rag/rewrite_query") {
@@ -880,10 +1016,9 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 if (!intent.empty()) {
                     u += "Intent hint: " + intent + "\n";
                 }
-                return makeResponse({
-                    sysMsg("You are a retrieval query rewriter for hybrid search."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg("You are a retrieval query rewriter for hybrid search."),
+                     userMsg(u)});
             }
 
             if (name == "rag/retrieve") {
@@ -904,10 +1039,10 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 if (!session.empty()) {
                     u += "Scope session: " + session + "\n";
                 }
-                return makeResponse({
-                    sysMsg("You are a retrieval runner that returns compact, citeable candidates."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg(
+                         "You are a retrieval runner that returns compact, citeable candidates."),
+                     userMsg(u)});
             }
 
             if (name == "rag/retrieve_summarize") {
@@ -929,10 +1064,10 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 if (!query.empty()) {
                     u += "\nQuery: " + query + "\n";
                 }
-                return makeResponse({
-                    sysMsg("You orchestrate retrieval and grounded summarization with citations."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg(
+                         "You orchestrate retrieval and grounded summarization with citations."),
+                     userMsg(u)});
             }
 
             if (name == "rag/extract_citations") {
@@ -943,10 +1078,9 @@ MessageResult MCPServer::handleRequest(const json& request) {
                     " citations in style '" + style +
                     "'.\n"
                     "Include: name, hash (short), path (if available), and date/labels if known.\n";
-                return makeResponse({
-                    sysMsg("You format high-quality citations for retrieved artifacts."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg("You format high-quality citations for retrieved artifacts."),
+                     userMsg(u)});
             }
 
             if (name == "rag/code_navigation") {
@@ -964,18 +1098,38 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 if (!lang.empty()) {
                     u += "Language hint: " + lang + "\n";
                 }
-                return makeResponse({
-                    sysMsg("You guide symbol discovery and code navigation."),
-                    userMsg(u),
-                });
+                return makeResponse(
+                    {assistantMsg("You guide symbol discovery and code navigation."), userMsg(u)});
+            }
+
+            // File-backed prompt fallback: if name matches a file-based template, return its
+            // content
+            if (!name.empty() && !promptsDir_.empty()) {
+                auto fileFromName =
+                    [&](const std::string& n) -> std::optional<std::filesystem::path> {
+                    std::string stem = n;
+                    std::replace(stem.begin(), stem.end(), '_', '-');
+                    auto candidate = promptsDir_ / (std::string("PROMPT-") + stem + ".md");
+                    if (std::filesystem::exists(candidate))
+                        return candidate;
+                    return std::nullopt;
+                };
+                if (auto p = fileFromName(name)) {
+                    try {
+                        std::ifstream in(*p);
+                        std::stringstream buf;
+                        buf << in.rdbuf();
+                        std::string content = buf.str();
+                        return makeResponse({assistantMsg(content)});
+                    } catch (...) {
+                        // fall through to default
+                    }
+                }
             }
 
             // Default fallback
-            return makeResponse({
-                sysMsg("You provide retrieval-augmented workflows over YAMS via MCP tools."),
-                userMsg(
-                    "No specific prompt name matched; outline a sensible RAG plan for the task."),
-            });
+            return makeResponse({assistantMsg(
+                "You provide retrieval-augmented workflows over YAMS via MCP tools.")});
         } else if (method == "logging/setLevel") {
             if (!areYamsExtensionsEnabled()) {
                 // logging/setLevel is a YAMS extension, and extensions are disabled
@@ -1711,82 +1865,136 @@ json MCPServer::listTools() {
 }
 
 json yams::mcp::MCPServer::listPrompts() {
-    return {
-        {"prompts",
-         json::array(
-             {{{"name", "search_codebase"},
-               {"description", "Search for code patterns in the codebase"},
-               {"arguments",
-                json::array({{{"name", "pattern"},
-                              {"description", "Code pattern to search for"},
-                              {"required", true}},
-                             {{"name", "file_type"},
-                              {"description", "Filter by file type (e.g., cpp, py, js)"},
-                              {"required", false}}})}},
-              {{"name", "summarize_document"},
-               {"description", "Generate a summary of a document"},
-               {"arguments", json::array({{{"name", "document_name"},
-                                           {"description", "Name of the document to summarize"},
-                                           {"required", true}},
-                                          {{"name", "max_length"},
-                                           {"description", "Maximum summary length in words"},
-                                           {"required", false}}})}},
-              {{"name", "rag/rewrite_query"},
-               {"description", "Rewrite a query to optimize hybrid retrieval"},
-               {"arguments",
-                json::array({{{"name", "query"},
-                              {"description", "Original user query text"},
-                              {"required", true}},
-                             {{"name", "intent"},
-                              {"description", "Optional intent hint to guide rewriting"},
-                              {"required", false}}})}},
-              {{"name", "rag/retrieve"},
-               {"description", "Retrieve top-k candidates via hybrid search"},
-               {"arguments",
-                json::array({{{"name", "query"},
-                              {"description", "Search query for retrieval"},
-                              {"required", true}},
-                             {{"name", "k"},
-                              {"description", "Number of candidates to return"},
-                              {"required", false}},
-                             {{"name", "session"},
-                              {"description", "Session name to scope retrieval (optional)"},
-                              {"required", false}},
-                             {{"name", "tags"},
-                              {"description", "Optional tag filters (comma-separated or array)"},
-                              {"required", false}}})}},
-              {{"name", "rag/retrieve_summarize"},
-               {"description", "RAG pipeline: retrieve then summarize with citations"},
-               {"arguments",
-                json::array({{{"name", "query"},
-                              {"description", "Search query for retrieval"},
-                              {"required", true}},
-                             {{"name", "k"},
-                              {"description", "Number of items to retrieve before summarization"},
-                              {"required", false}},
-                             {{"name", "max_words"},
-                              {"description", "Maximum words for the synthesized summary"},
-                              {"required", false}}})}},
-              {{"name", "rag/extract_citations"},
-               {"description", "Format citations from retrieved artifacts"},
-               {"arguments",
-                json::array({{{"name", "style"},
-                              {"description", "Citation style (e.g., inline, list)"},
-                              {"required", false}},
-                             {{"name", "k"},
-                              {"description", "Number of citations to produce"},
-                              {"required", false}},
-                             {{"name", "include_hashes"},
-                              {"description", "Whether to include content hashes in citations"},
-                              {"required", false}}})}},
-              {{"name", "rag/code_navigation"},
-               {"description", "Suggest grep and hybrid search strategies for symbol discovery"},
-               {"arguments", json::array({{{"name", "symbol"},
-                                           {"description", "Target symbol or identifier to locate"},
-                                           {"required", true}},
-                                          {{"name", "language"},
-                                           {"description", "Language hint (e.g., cpp, py, js)"},
-                                           {"required", false}}})}}})}};
+    auto builtins = json::array(
+        {{{"name", "search_codebase"},
+          {"description", "Search for code patterns in the codebase"},
+          {"arguments", json::array({{{"name", "pattern"},
+                                      {"description", "Code pattern to search for"},
+                                      {"required", true}},
+                                     {{"name", "file_type"},
+                                      {"description", "Filter by file type (e.g., cpp, py, js)"},
+                                      {"required", false}}})}},
+         {{"name", "summarize_document"},
+          {"description", "Generate a summary of a document"},
+          {"arguments", json::array({{{"name", "document_name"},
+                                      {"description", "Name of the document to summarize"},
+                                      {"required", true}},
+                                     {{"name", "max_length"},
+                                      {"description", "Maximum summary length in words"},
+                                      {"required", false}}})}},
+         {{"name", "rag/rewrite_query"},
+          {"description", "Rewrite a query to optimize hybrid retrieval"},
+          {"arguments", json::array({{{"name", "query"},
+                                      {"description", "Original user query text"},
+                                      {"required", true}},
+                                     {{"name", "intent"},
+                                      {"description", "Optional intent hint to guide rewriting"},
+                                      {"required", false}}})}},
+         {{"name", "rag/retrieve"},
+          {"description", "Retrieve top-k candidates via hybrid search"},
+          {"arguments",
+           json::array({{{"name", "query"},
+                         {"description", "Search query for retrieval"},
+                         {"required", true}},
+                        {{"name", "k"},
+                         {"description", "Number of candidates to return"},
+                         {"required", false}},
+                        {{"name", "session"},
+                         {"description", "Session name to scope retrieval (optional)"},
+                         {"required", false}},
+                        {{"name", "tags"},
+                         {"description", "Optional tag filters (comma-separated or array)"},
+                         {"required", false}}})}},
+         {{"name", "rag/retrieve_summarize"},
+          {"description", "RAG pipeline: retrieve then summarize with citations"},
+          {"arguments",
+           json::array({{{"name", "query"},
+                         {"description", "Search query for retrieval"},
+                         {"required", true}},
+                        {{"name", "k"},
+                         {"description", "Number of items to retrieve before summarization"},
+                         {"required", false}},
+                        {{"name", "max_words"},
+                         {"description", "Maximum words for the synthesized summary"},
+                         {"required", false}}})}},
+         {{"name", "rag/extract_citations"},
+          {"description", "Format citations from retrieved artifacts"},
+          {"arguments",
+           json::array({{{"name", "style"},
+                         {"description", "Citation style (e.g., inline, list)"},
+                         {"required", false}},
+                        {{"name", "k"},
+                         {"description", "Number of citations to produce"},
+                         {"required", false}},
+                        {{"name", "include_hashes"},
+                         {"description", "Whether to include content hashes in citations"},
+                         {"required", false}}})}},
+         {{"name", "rag/code_navigation"},
+          {"description", "Suggest grep and hybrid search strategies for symbol discovery"},
+          {"arguments", json::array({{{"name", "symbol"},
+                                      {"description", "Target symbol or identifier to locate"},
+                                      {"required", true}},
+                                     {{"name", "language"},
+                                      {"description", "Language hint (e.g., cpp, py, js)"},
+                                      {"required", false}}})}}});
+
+    // Merge file-backed prompts
+    std::unordered_set<std::string> seen;
+    for (const auto& t : builtins) {
+        if (t.is_object() && t.contains("name")) {
+            seen.insert(t.at("name").get<std::string>());
+        }
+    }
+
+    auto sanitize = [](std::string s) {
+        // PROMPT-foo-bar.md -> foo_bar
+        if (s.rfind("PROMPT-", 0) == 0)
+            s = s.substr(7);
+        auto pos = s.rfind('.');
+        if (pos != std::string::npos)
+            s = s.substr(0, pos);
+        std::replace(s.begin(), s.end(), '-', '_');
+        return s;
+    };
+
+    if (!promptsDir_.empty() && std::filesystem::exists(promptsDir_)) {
+        try {
+            for (const auto& de : std::filesystem::directory_iterator(promptsDir_)) {
+                if (!de.is_regular_file())
+                    continue;
+                auto fname = de.path().filename().string();
+                if (fname.rfind("PROMPT-", 0) != 0)
+                    continue;
+                if (de.path().extension() != ".md")
+                    continue;
+                auto name = sanitize(fname);
+                if (seen.count(name))
+                    continue;
+                // Description from first line if present
+                std::ifstream in(de.path());
+                std::string firstLine;
+                if (in) {
+                    std::getline(in, firstLine);
+                }
+                if (!firstLine.empty() && firstLine[0] == '#') {
+                    // trim leading # and spaces
+                    while (!firstLine.empty() && (firstLine[0] == '#' || firstLine[0] == ' '))
+                        firstLine.erase(firstLine.begin());
+                }
+                json t = {{"name", name},
+                          {"description", !firstLine.empty() ? firstLine
+                                                             : std::string{"Template from "} +
+                                                                   de.path().filename().string()},
+                          {"arguments", json::array()}};
+                builtins.push_back(std::move(t));
+                seen.insert(name);
+            }
+        } catch (...) {
+            // best effort
+        }
+    }
+
+    return {{"prompts", builtins}};
 }
 
 json MCPServer::callTool(const std::string& name, const json& arguments) {
@@ -1819,9 +2027,31 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
 
         spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
 
-        // Tools already return properly wrapped content via wrapToolResult
-        // Just return the result as-is without double-wrapping
-        return result;
+        // Normalize errors: if registry returned content-based error, map to JSON-RPC error
+        if (result.is_object() && result.value("isError", false)) {
+            std::string msg;
+            try {
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const auto& item = result["content"][0];
+                    msg = item.value("text", std::string{"Tool error"});
+                }
+            } catch (...) {
+                msg = "Tool error";
+            }
+            int code = -32602; // Invalid params by default
+            if (msg.rfind("Unknown tool:", 0) == 0) {
+                code = -32601; // Method not found
+            }
+            return json{{"error", json{{"code", code}, {"message", msg}}}};
+        }
+
+        // Ensure result is tool-result shaped (content array) when not error
+        if (result.is_object() && result.contains("content")) {
+            return result; // already wrapped
+        }
+        // Legacy/plain result: wrap into content per MCP spec
+        return yams::mcp::wrapToolResult(result, /*isError=*/false);
 
     } catch (const std::exception& e) {
         spdlog::error("MCP tool '{}' threw exception: {}", name, e.what());
@@ -1834,38 +2064,74 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
 boost::asio::awaitable<Result<MCPSearchResponse>>
 MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::daemon::SearchRequest dreq;
-    // Build query with optional path qualifier so daemon-side path filters work via qualifiers.
-    std::string _query = req.query;
-    if (!req.pathPattern.empty()) {
-        if (!_query.empty())
-            _query += " ";
-        _query += "name:" + req.pathPattern;
-    } else if (req.useSession) {
-        // Scope search to session include patterns when no explicit path pattern is provided
-        auto sess = app::services::makeSessionService(nullptr);
-        auto pats = sess->activeIncludePatterns(req.sessionName.empty()
-                                                    ? std::optional<std::string>{}
-                                                    : std::optional<std::string>{req.sessionName});
-        if (!pats.empty()) {
-            if (!_query.empty())
-                _query += " ";
-            _query += "name:" + pats.front();
+    // Preserve the user's query as-is; rely on dedicated fields for filters
+    dreq.query = req.query;
+    // Heuristic: enable literal-text for code-like queries to avoid FTS parse issues
+    {
+        const std::string& q = dreq.query;
+        bool punct = false;
+        for (char c : q) {
+            if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '"' ||
+                c == '\'' || c == '\\' || c == '`' || c == ';') {
+                punct = true;
+                break;
+            }
+        }
+        if (punct || q.find("::") != std::string::npos || q.find("->") != std::string::npos ||
+            q.find("#include") != std::string::npos || q.find("std::") != std::string::npos) {
+            dreq.literalText = true;
         }
     }
-    dreq.query = _query;
+    // Pass through engine-level filters directly instead of injecting into the query
+    dreq.pathPattern = req.pathPattern;
+    dreq.tags = req.tags;
+    dreq.matchAllTags = req.matchAllTags;
     dreq.limit = req.limit;
-    // Default to fuzzy + hybrid to be resilient to clients that cannot set options
+    // Mirror CLI default: enable fuzzy matching by default
     dreq.fuzzy = true;
     dreq.similarity = (req.similarity > 0.0f) ? static_cast<double>(req.similarity) : 0.7;
     // Pass-through hash when present to enable hash-first search
     dreq.hashQuery = req.hash;
-    dreq.searchType = "hybrid";
+    dreq.searchType = req.type.empty() ? std::string("hybrid") : req.type;
     dreq.verbose = req.verbose;
     dreq.pathsOnly = req.pathsOnly;
     dreq.showLineNumbers = req.lineNumbers;
     dreq.beforeContext = req.beforeContext;
     dreq.afterContext = req.afterContext;
     dreq.context = req.context;
+
+    // Send early progress notification
+    sendProgress("search", 0.0, "search started");
+
+    // If keyword search was explicitly requested, skip vector scoring entirely
+    if (dreq.searchType == "keyword") {
+        dreq.similarity = 0.0; // disable vector path
+    } else {
+        // Optional: degrade to keyword if provider/index unavailable
+        try {
+            auto st = co_await daemon_client_->status();
+            if (st) {
+                const auto& s = st.value();
+                bool provider_ready = false;
+                for (const auto& p : s.providers) {
+                    if (p.isProvider && p.ready && !p.degraded) {
+                        provider_ready = true;
+                        break;
+                    }
+                }
+                bool vector_ready = true;
+                if (auto it = s.readinessStates.find("vector_index"); it != s.readinessStates.end())
+                    vector_ready = it->second;
+                if (!provider_ready || !vector_ready) {
+                    sendProgress("search", 10.0, "degraded to keyword");
+                    dreq.searchType = "keyword";
+                    dreq.similarity = 0.0;
+                }
+            }
+        } catch (...) {
+            // Best-effort: on status failure keep requested type
+        }
+    }
 
     MCPSearchResponse out;
     // Propagate session to services/daemon via environment for this handler
@@ -1880,13 +2146,124 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         ::setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
         spdlog::debug("[MCP] search: using session '{}'", __session);
     }
-    auto res = co_await daemon_client_->streamingSearch(dreq);
+
+    // Optional fast-first strategy: quick keyword preview before full hybrid
+    if (dreq.searchType == "hybrid") {
+        if (const char* ff = std::getenv("YAMS_MCP_SEARCH_FAST_FIRST"); ff && *ff && ff[0] != '0') {
+            yams::daemon::SearchRequest kreq = dreq;
+            kreq.searchType = "keyword";
+            kreq.fuzzy = false;    // keep preview snappy
+            kreq.similarity = 0.0; // skip vector
+            kreq.limit = std::min<size_t>(dreq.limit > 0 ? dreq.limit : 10, 10);
+            auto kres = co_await daemon_client_->streamingSearch(kreq);
+            if (kres) {
+                const auto& kr = kres.value();
+                // Notify clients about quick keyword candidates
+                json partial;
+                partial["jsonrpc"] = "2.0";
+                partial["method"] = "notifications/search_partial"; // YAMS extension
+                json params;
+                params["query"] = dreq.query;
+                params["type"] = "keyword";
+                params["total"] = kr.totalCount;
+                if (dreq.pathsOnly) {
+                    json paths = json::array();
+                    for (const auto& item : kr.results) {
+                        std::string path = !item.path.empty() ? item.path
+                                                              : (item.metadata.count("path")
+                                                                     ? item.metadata.at("path")
+                                                                     : std::string());
+                        if (path.empty())
+                            path = item.id;
+                        paths.push_back(path);
+                    }
+                    params["paths"] = std::move(paths);
+                }
+                partial["params"] = std::move(params);
+                sendResponse(partial);
+                sendProgress("search", 25.0, "keyword candidates ready");
+            }
+        }
+    }
+
+    // Parity with CLI: race streaming vs delayed unary and use whichever returns first.
+    // Body timeout may be overridden via env YAMS_MCP_SEARCH_BODY_TIMEOUT_MS (default 60000).
+    auto callOnce = [&](const yams::daemon::SearchRequest& rq)
+        -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+        co_return co_await daemon_client_->streamingSearch(rq);
+    };
+
+    Result<yams::daemon::SearchResponse> res(Error{ErrorCode::Unknown, "uninitialized"});
+    {
+        std::shared_ptr<std::atomic_bool> decided = std::make_shared<std::atomic_bool>(false);
+        std::shared_ptr<std::promise<Result<yams::daemon::SearchResponse>>> prom =
+            std::make_shared<std::promise<Result<yams::daemon::SearchResponse>>>();
+        auto fut = prom->get_future();
+
+        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+        // Launch streaming
+        boost::asio::co_spawn(
+            io,
+            [&, decided, prom]() -> boost::asio::awaitable<void> {
+                auto sr = co_await daemon_client_->streamingSearch(dreq);
+                if (!decided->exchange(true))
+                    prom->set_value(std::move(sr));
+                co_return;
+            },
+            boost::asio::detached);
+
+        // Launch delayed unary fallback (2 seconds)
+        boost::asio::co_spawn(
+            io,
+            [&, decided, prom]() -> boost::asio::awaitable<void> {
+                boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
+                t.expires_after(std::chrono::seconds(2));
+                co_await t.async_wait(boost::asio::use_awaitable);
+                if (!decided->load()) {
+                    auto ur = co_await daemon_client_->call(dreq);
+                    if (!decided->exchange(true))
+                        prom->set_value(std::move(ur));
+                }
+                co_return;
+            },
+            boost::asio::detached);
+
+        int wait_ms = 60000;
+        if (const char* env = std::getenv("YAMS_MCP_SEARCH_BODY_TIMEOUT_MS")) {
+            try {
+                int v = std::stoi(env);
+                if (v > 100)
+                    wait_ms = v;
+            } catch (...) {
+            }
+        }
+        if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
+            res = fut.get();
+        } else {
+            res = Error{ErrorCode::Timeout, "Search timed out"};
+        }
+    }
     // Clear after call
     if (!__session.empty()) {
         ::setenv("YAMS_SESSION_CURRENT", "", 1);
     }
-    if (!res)
-        co_return res.error();
+    if (!res) {
+        // Retry unary on streaming read timeout like CLI
+        const auto& err = res.error();
+        if (err.code == ErrorCode::Timeout &&
+            err.message.find("Read timeout") != std::string::npos) {
+            try {
+                daemon_client_->setHeaderTimeout(std::chrono::milliseconds(60000));
+            } catch (...) {
+            }
+            auto ur = co_await daemon_client_->call(dreq);
+            if (!ur)
+                co_return ur.error();
+            res = ur;
+        } else {
+            co_return res.error();
+        }
+    }
     const auto& r = res.value();
     out.total = r.totalCount;
     out.type = "daemon";
@@ -1904,6 +2281,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 path = item.id; // last-resort fallback
             out.paths.push_back(std::move(path));
         }
+        sendProgress("search", 100.0, "done");
         co_return out;
     }
     // Full result objects (with robust path fallback)
@@ -1920,6 +2298,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         m.snippet = item.snippet;
         out.results.push_back(std::move(m));
     }
+    sendProgress("search", 100.0, "done");
     co_return out;
 }
 
@@ -2567,15 +2946,45 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             }
         }
     }
+    // Try daemon-first add with streaming; on failure, fall back to local service store.
     auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
-    if (!dres)
+    if (dres) {
+        MCPStoreDocumentResponse out;
+        const auto& add = dres.value();
+        out.hash = add.hash;
+        out.bytesStored = 0;
+        out.bytesDeduped = 0;
+        co_return out;
+    }
+
+    // Daemon path failed (timeout/not ready/unavailable). Fallback to DocumentService.
+    spdlog::warn("[MCP] add: daemon path failed ({}). Falling back to local DocumentService.",
+                 dres.error().message);
+    try {
+        auto docService = app::services::makeDocumentService(appContext_);
+        if (!docService) {
+            co_return dres.error();
+        }
+        app::services::StoreDocumentRequest sreq;
+        sreq.path = daemon_req.path;
+        sreq.content = daemon_req.content;
+        sreq.name = daemon_req.name;
+        sreq.mimeType = daemon_req.mimeType;
+        sreq.tags = daemon_req.tags;
+        for (const auto& [k, v] : daemon_req.metadata) {
+            sreq.metadata[k] = v;
+        }
+        auto sres = docService->store(sreq);
+        if (!sres)
+            co_return sres.error();
+        MCPStoreDocumentResponse out;
+        out.hash = sres.value().hash;
+        out.bytesStored = sres.value().bytesStored;
+        out.bytesDeduped = sres.value().bytesDeduped;
+        co_return out;
+    } catch (...) {
         co_return dres.error();
-    MCPStoreDocumentResponse out;
-    const auto& add = dres.value();
-    out.hash = add.hash;
-    out.bytesStored = 0;
-    out.bytesDeduped = 0;
-    co_return out;
+    }
 }
 
 boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>

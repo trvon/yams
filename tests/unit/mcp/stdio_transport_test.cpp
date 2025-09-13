@@ -10,13 +10,20 @@
 using namespace yams::mcp;
 using test_json = nlohmann::json;
 
-// MCP stdio protocol uses newline-delimited JSON, not HTTP framing
-static std::string formatMessage(const test_json& j) {
-    return j.dump() + "\n";
+// MCP stdio over JSON-RPC uses Content-Length framing (LSP-compatible)
+static std::string frameMessage(const test_json& j) {
+    std::string payload = j.dump();
+    std::ostringstream oss;
+    oss << "Content-Length: " << payload.size() << "\r\n"
+        << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n"
+        << payload;
+    return oss.str();
 }
 
-static std::string formatRaw(const std::string& raw) {
-    return raw + "\n";
+static std::string frameRaw(const std::string& raw) {
+    std::ostringstream oss;
+    oss << "Content-Length: " << raw.size() << "\r\n\r\n" << raw;
+    return oss.str();
 }
 
 class StdioTransportTest : public ::testing::Test {
@@ -72,17 +79,22 @@ TEST_F(StdioTransportTest, SendMessage) {
     std::string output = getOutput();
     EXPECT_FALSE(output.empty());
 
-    // Should contain the JSON message
+    // Should contain the JSON message and framing headers (no trailing CRLF after payload)
+    EXPECT_NE(output.find("Content-Length:"), std::string::npos);
+    EXPECT_NE(output.find("\r\n\r\n"), std::string::npos);
     EXPECT_NE(output.find("\"jsonrpc\""), std::string::npos);
     EXPECT_NE(output.find("\"method\""), std::string::npos);
     EXPECT_NE(output.find("\"test\""), std::string::npos);
     EXPECT_NE(output.find("\"id\""), std::string::npos);
+    // The last characters of output should be the closing brace or bracket of the JSON payload
+    // and not an extra CRLF. Weak check: ensure it does not end with CRLF.
+    ASSERT_FALSE(output.size() >= 2 && output.substr(output.size() - 2) == "\r\n");
 }
 
 TEST_F(StdioTransportTest, ReceiveValidJson) {
     json testMessage = {{"jsonrpc", "2.0"}, {"method", "initialize"}, {"id", 1}};
 
-    setInput(formatMessage(testMessage));
+    setInput(frameMessage(testMessage));
 
     auto result = transport->receive();
 
@@ -96,7 +108,7 @@ TEST_F(StdioTransportTest, ReceiveValidJson) {
 }
 
 TEST_F(StdioTransportTest, ReceiveInvalidJson) {
-    setInput(formatRaw("invalid json"));
+    setInput(frameRaw("invalid json"));
 
     auto result = transport->receive();
 
@@ -110,7 +122,7 @@ TEST_F(StdioTransportTest, ReceiveInvalidJson) {
 }
 
 TEST_F(StdioTransportTest, ReceiveEmptyLine) {
-    setInput("\n"); // Just a newline, no JSON
+    setInput("\n"); // Just a newline, no framed message
 
     auto result = transport->receive();
 
@@ -123,10 +135,10 @@ TEST_F(StdioTransportTest, ReceiveEmptyLine) {
 }
 
 TEST_F(StdioTransportTest, ReceiveMultipleMessages) {
-    json message1 = {{"id", 1}, {"method", "test1"}};
-    json message2 = {{"id", 2}, {"method", "test2"}};
+    json message1 = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "test1"}};
+    json message2 = {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "test2"}};
 
-    setInput(formatMessage(message1) + formatMessage(message2));
+    setInput(frameMessage(message1) + frameMessage(message2));
 
     auto result1 = transport->receive();
     EXPECT_TRUE(result1.has_value());
@@ -152,15 +164,13 @@ TEST_F(StdioTransportTest, SendMultipleMessages) {
 
     std::string output = getOutput();
 
-    // Both messages should be in output
+    // Both messages should be in output and each with framing
     EXPECT_NE(output.find("test1"), std::string::npos);
     EXPECT_NE(output.find("test2"), std::string::npos);
-
-    // Should have two separate lines
-    size_t firstNewline = output.find('\n');
-    size_t secondNewline = output.find('\n', firstNewline + 1);
-    EXPECT_NE(firstNewline, std::string::npos);
-    EXPECT_NE(secondNewline, std::string::npos);
+    size_t firstHdr = output.find("Content-Length:");
+    size_t secondHdr = output.find("Content-Length:", firstHdr + 1);
+    EXPECT_NE(firstHdr, std::string::npos);
+    EXPECT_NE(secondHdr, std::string::npos);
 }
 
 TEST_F(StdioTransportTest, CloseTransport) {
@@ -221,7 +231,7 @@ TEST_F(StdioTransportTest, ComplexJsonMessage) {
     clearOutput();
 
     // Test receiving complex message
-    setInput(formatMessage(complexMessage));
+    setInput(frameMessage(complexMessage));
     auto result = transport->receive();
 
     EXPECT_TRUE(result);
@@ -252,7 +262,7 @@ TEST_F(StdioTransportTest, JsonWithSpecialCharacters) {
     std::string output = getOutput();
     EXPECT_FALSE(output.empty());
 
-    setInput(formatMessage(messageWithSpecialChars));
+    setInput(frameMessage(messageWithSpecialChars));
     auto result = transport->receive();
 
     EXPECT_TRUE(result);
@@ -295,7 +305,7 @@ TEST_F(StdioTransportTest, LargeMessage) {
     EXPECT_GT(output.length(), 10000);
 
     // Test receiving large message
-    setInput(formatMessage(largeMessage));
+    setInput(frameMessage(largeMessage));
     auto result = transport->receive();
 
     EXPECT_TRUE(result);

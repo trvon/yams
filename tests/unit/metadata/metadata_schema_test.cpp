@@ -511,10 +511,15 @@ TEST_F(MetadataSchemaTest, Statistics) {
         repo_->updateDocument(docInfo);
     }
 
-    // Get indexed count
-    auto indexedResult = repo_->getIndexedDocumentCount();
-    ASSERT_TRUE(indexedResult.has_value());
-    EXPECT_EQ(indexedResult.value(), 3);
+    // Get indexed count (embeddings-based, expected 0 in this test)
+    auto embeddingIndexedResult = repo_->getIndexedDocumentCount();
+    ASSERT_TRUE(embeddingIndexedResult.has_value());
+    EXPECT_EQ(embeddingIndexedResult.value(), 0);
+
+    // Get content-extracted count (new metric)
+    auto extractedCount = repo_->getContentExtractedDocumentCount();
+    ASSERT_TRUE(extractedCount.has_value());
+    EXPECT_EQ(extractedCount.value(), 3);
 
     // Get counts by extension
     auto extCountResult = repo_->getDocumentCountsByExtension();

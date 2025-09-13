@@ -4,6 +4,9 @@
 
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
+#ifdef YAMS_ENABLE_ONNX_GENAI
+#include <yams/daemon/resource/onnx_genai_adapter.h>
+#endif
 #include <spdlog/spdlog.h>
 
 // Check if we should skip model loading for tests
@@ -48,6 +51,17 @@ public:
             spdlog::warn("[ONNX] Mock provider mode enabled via env; skipping ONNX init");
             return;
         }
+
+        // Optional: initialize GenAI adapter when enabled at build + requested at runtime
+#ifdef YAMS_ENABLE_ONNX_GENAI
+        // Always attempt to allocate GenAI adapter (unified policy: ONNX present => try GenAI)
+        try {
+            genai_ = std::make_unique<OnnxGenAIAdapter>();
+            spdlog::info("[GenAI] (plugin) attempting adapter init for '{}'", modelName);
+        } catch (...) {
+            genai_.reset();
+        }
+#endif
 
         // Initialize ONNX Runtime environment
         env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, modelName.c_str());
@@ -149,6 +163,24 @@ public:
         }
 
         try {
+#ifdef YAMS_ENABLE_ONNX_GENAI
+            if (genai_) {
+                OnnxGenAIAdapter::Options o;
+                o.intra_op_threads = config_.num_threads > 0 ? config_.num_threads : 4;
+                o.normalize = config_.normalize_embeddings;
+                const std::string id_or_path = (!modelPath_.empty() ? modelPath_ : modelName_);
+                if (genai_->init(id_or_path, o)) {
+                    auto d = genai_->embedding_dim();
+                    if (d > 0)
+                        embeddingDim_ = d;
+                    spdlog::info("[ONNX] Using GenAI adapter for '{}'", modelName_);
+                    isLoaded_ = true;
+                    return Result<void>();
+                } else {
+                    spdlog::warn("[ONNX] GenAI init failed; falling back to raw ORT");
+                }
+            }
+#endif
             spdlog::info("[ONNX] Creating Ort::Session for model '{}' at {}", modelName_.c_str(),
                          modelPath_.c_str());
 
@@ -325,12 +357,19 @@ public:
             }
         }
 
-        // Try real ONNX path first
+        // Try real ONNX path first (preferred)
         if (auto r = runOnnx(text); r) {
             return r.value();
         }
 
         try {
+#ifdef YAMS_ENABLE_ONNX_GENAI
+            if (genai_ && genai_->available()) {
+                auto v = genai_->embed(text);
+                if (!v.empty())
+                    return v;
+            }
+#endif
             // TODO: Implement tokenization and actual embedding generation
             // For now, return a dummy embedding
             std::vector<float> embedding(embeddingDim_, 0.0f);
@@ -378,6 +417,10 @@ public:
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
 
 private:
+    // GenAI adapter (optional)
+#ifdef YAMS_ENABLE_ONNX_GENAI
+    std::unique_ptr<OnnxGenAIAdapter> genai_;
+#endif
     // Helper that performs tokenization + ONNX run + pooling for single input
     Result<std::vector<float>> runOnnx(const std::string& t) {
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;

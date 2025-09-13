@@ -13,6 +13,8 @@ protected:
         tempDir_ = fs::temp_directory_path() / ("yams_ph_" + std::to_string(::getpid()));
         fs::create_directories(tempDir_);
         trustFile_ = tempDir_ / "plugins_trust.txt";
+        // Isolate config for this test process to avoid reading a real trust/config file
+        ::setenv("XDG_CONFIG_HOME", tempDir_.c_str(), 1);
     }
     void TearDown() override {
         std::error_code ec;
@@ -104,21 +106,7 @@ TEST_F(PluginHostTest, AbiHostLoadMockModelPluginAndGetInterface) {
     auto dir = pluginPath.parent_path();
     ASSERT_TRUE(host.trustAdd(dir));
 
-    // Dry scan
-    auto scan = host.scanTarget(pluginPath);
-    ASSERT_TRUE(scan);
-    auto sdesc = scan.value();
-    EXPECT_EQ(sdesc.name, "mock_model");
-    ASSERT_FALSE(sdesc.interfaces.empty());
-    bool hasMp = false;
-    for (const auto& id : sdesc.interfaces)
-        if (id.find("model_provider_v1") != std::string::npos) {
-            hasMp = true;
-            break;
-        }
-    EXPECT_TRUE(hasMp);
-
-    // Load
+    // Load (full load populates name and interfaces under hardened scanning policy)
     auto lr = host.load(pluginPath, "{}");
     ASSERT_TRUE(lr);
     auto ldesc = lr.value();

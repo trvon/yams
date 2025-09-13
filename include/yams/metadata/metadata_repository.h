@@ -98,7 +98,8 @@ public:
 
     // Statistics
     virtual Result<int64_t> getDocumentCount() = 0;
-    virtual Result<int64_t> getIndexedDocumentCount() = 0;
+    virtual Result<int64_t> getIndexedDocumentCount() = 0;          // Embeddings-based
+    virtual Result<int64_t> getContentExtractedDocumentCount() = 0; // New: content_extracted flag
     virtual Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() = 0;
     // Count documents by extraction status
     virtual Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) = 0;
@@ -196,7 +197,8 @@ public:
 
     // Statistics
     Result<int64_t> getDocumentCount() override;
-    Result<int64_t> getIndexedDocumentCount() override;
+    Result<int64_t> getIndexedDocumentCount() override;          // Embeddings-based
+    Result<int64_t> getContentExtractedDocumentCount() override; // New
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
     Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
 

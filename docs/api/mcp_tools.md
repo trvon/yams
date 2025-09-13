@@ -13,6 +13,49 @@ yams serve
 
 ## Available Tools
 
+### prompts/list
+
+List available prompt templates (built-ins and file-backed). File-backed templates are Markdown files named `PROMPT-*.md` in the configured prompts directory (see user guide). Names are derived by stripping `PROMPT-` and extension and converting dashes to underscores.
+
+**Response:**
+```json
+{
+  "prompts": [
+    {"name": "search_codebase", "description": "Search for code patterns in the codebase", "arguments": [...]},
+    {"name": "research_mcp", "description": "Research workflow for MCP (from PROMPT-research-mcp.md)"}
+  ]
+}
+```
+
+### prompts/get
+
+Get a prompt template by name.
+
+When the prompt is file-backed, the entire Markdown content is returned as a single assistant message content.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "prompts/get",
+  "params": {"name": "research_mcp"}
+}
+```
+
+**Response (example):**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "messages": [
+      {"role": "assistant", "content": {"type": "text", "text": "...markdown content..."}}
+    ]
+  }
+}
+```
+
 ### search_documents
 
 Search for documents using keyword search, fuzzy matching, or hash lookup with enhanced LLM ergonomics.

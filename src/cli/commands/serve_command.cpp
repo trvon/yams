@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <thread>
@@ -20,6 +21,11 @@
 #include <yams/mcp/mcp_server.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 namespace yams::cli {
 
@@ -67,6 +73,32 @@ public:
             auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
             auto logger = std::make_shared<spdlog::logger>("stderr", stderr_sink);
             spdlog::set_default_logger(logger);
+
+            // Prevent abrupt termination on broken pipe when client disconnects early
+#ifndef _WIN32
+            std::signal(SIGPIPE, SIG_IGN);
+#endif
+            // Install terminate handler to log uncaught exceptions instead of silent aborts
+            std::set_terminate([]() noexcept {
+                try {
+                    if (auto ep = std::current_exception()) {
+                        try {
+                            std::rethrow_exception(ep);
+                        } catch (const std::exception& e) {
+                            spdlog::critical("std::terminate: uncaught exception: {}", e.what());
+                        } catch (...) {
+                            spdlog::critical("std::terminate: unknown uncaught exception");
+                        }
+                    } else {
+                        spdlog::critical("std::terminate called without active exception");
+                    }
+                } catch (...) {
+                }
+                std::_Exit(1);
+            });
+
+            // Allow multiple instances. For HTTP mode, binding conflicts will be reported by the
+            // OS (EADDRINUSE). For stdio, instances are independent per client.
 
             const bool interactive = isatty(STDIN_FILENO);
 
@@ -131,11 +163,8 @@ public:
             if (sigaction(SIGTERM, &sa, nullptr) == -1)
                 spdlog::warn("Failed to install SIGTERM handler");
 
-            // Ensure storage ready
-            auto ensured = cli_->ensureStorageInitialized();
-            if (!ensured) {
-                return ensured;
-            }
+            // Do not enforce storage initialization here. MCPServer resolves dataDir and connects
+            // to the daemon on its own, and many tools don't require a pre-initialized store.
 
             effectiveQuiet_ = quiet; // store for server methods
 

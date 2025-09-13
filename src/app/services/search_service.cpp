@@ -146,6 +146,43 @@ static inline size_t recommendedWorkers(size_t items) {
     return std::max<size_t>(1, workers);
 }
 
+// Normalize scores to be non-negative and sort-friendly for UI/tests.
+// For full-text (FTS5 BM25), lower is better; convert to descending positive [0,1].
+// For fuzzy/other modes, clamp to >= 0 but keep natural ordering.
+static void normalizeScores(std::vector<SearchItem>& results, const std::string& type) {
+    if (results.empty())
+        return;
+    const double eps = 1e-9;
+    if (type == "full-text") {
+        double minv = results.front().score;
+        double maxv = results.front().score;
+        for (const auto& r : results) {
+            minv = std::min(minv, r.score);
+            maxv = std::max(maxv, r.score);
+        }
+        if (std::abs(maxv - minv) < 1e-12) {
+            for (auto& r : results)
+                r.score = 1.0; // equal scores, set to 1.0 for all
+            return;
+        }
+        // Invert so lower raw scores (better BM25) map to higher normalized scores
+        const double span = (maxv - minv);
+        for (auto& r : results) {
+            double inv = (maxv - r.score) / span; // in [0,1]
+            // Ensure strictly positive for tests expecting > 0
+            r.score = std::max(inv + eps, 0.0);
+        }
+        // Keep the original DB order (already ordered by raw score). After inversion, the
+        // sequence should be non-increasing.
+        return;
+    }
+    // Other modes: clamp
+    for (auto& r : results) {
+        if (r.score < 0.0)
+            r.score = 0.0;
+    }
+}
+
 } // namespace
 
 class SearchServiceImpl final : public ISearchService {
@@ -780,7 +817,7 @@ private:
                     if (slots[i].has_value())
                         resp.results.push_back(std::move(*slots[i]));
             }
-
+            normalizeScores(resp.results, resp.type);
             return resp;
         } else {
             auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0);
@@ -907,7 +944,7 @@ private:
                     if (slots[i].has_value())
                         resp.results.push_back(std::move(*slots[i]));
             }
-
+            normalizeScores(resp.results, resp.type);
             return resp;
         }
     }

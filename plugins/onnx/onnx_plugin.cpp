@@ -17,6 +17,12 @@ static const char* kManifestJson = R"JSON({
   ]
 })JSON";
 
+// Lightweight runtime flags
+static bool g_plugin_disabled = false; // set by env at init
+
+// Forward-declared helper exposed by model_provider.cpp
+extern "C" const char* yams_onnx_get_health_json_cstr();
+
 extern "C" {
 
 int yams_plugin_get_abi_version(void) {
@@ -36,15 +42,21 @@ const char* yams_plugin_get_manifest_json(void) {
 }
 
 int yams_plugin_init(const char* /*config_json*/, const void* /*host_context*/) {
+    // Allow disabling the plugin without removing it from disk
+    if (const char* d = std::getenv("YAMS_ONNX_PLUGIN_DISABLE"); d && *d) {
+        g_plugin_disabled = true;
+    }
     return YAMS_PLUGIN_OK;
 }
 
-void yams_plugin_shutdown(void) {}
+void yams_plugin_shutdown(void) { /* nothing to do */ }
 
 int yams_plugin_get_interface(const char* id, uint32_t version, void** out_iface) {
     if (!id || !out_iface)
         return YAMS_PLUGIN_ERR_INVALID;
     *out_iface = nullptr;
+    if (g_plugin_disabled)
+        return YAMS_PLUGIN_ERR_NOT_FOUND;
     if (version == YAMS_IFACE_MODEL_PROVIDER_V1_VERSION &&
         std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
         *out_iface = static_cast<void*>(yams_onnx_get_model_provider());
@@ -56,12 +68,14 @@ int yams_plugin_get_interface(const char* id, uint32_t version, void** out_iface
 int yams_plugin_get_health_json(char** out_json) {
     if (!out_json)
         return YAMS_PLUGIN_ERR_INVALID;
-    static const char* kHealth = "{\"status\":\"ok\"}";
-    size_t n = std::strlen(kHealth);
+    const char* src = yams_onnx_get_health_json_cstr();
+    if (!src)
+        src = "{\"status\":\"unknown\"}";
+    size_t n = std::strlen(src);
     char* buf = static_cast<char*>(std::malloc(n + 1));
     if (!buf)
         return YAMS_PLUGIN_ERR_INVALID;
-    std::memcpy(buf, kHealth, n + 1);
+    std::memcpy(buf, src, n + 1);
     *out_json = buf;
     return YAMS_PLUGIN_OK;
 }

@@ -19,10 +19,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+## [v0.6.19]
+
+### Fixed
+- MCP stdio framing correctness and async send:
+  - Fixed double-encoding on outbound async path: `outboundDrainAsync` now uses a framed string sender instead of passing a serialized JSON string to `send(const json&)`.
+  - Removed extra CRLF after framed payload; framed responses now send exactly `Content-Length` bytes after the blank line (LSP/MCP compliant).
+  - Added `StdioTransport::sendFramedSerialized(const std::string&)` for pre-serialized payloads used by the outbound drain.
+- MCP prompts/get schema correctness for MCP Inspector:
+  - Roles now use only `assistant` and `user` (removed `system`).
+  - `content` is a single object `{ "type": "text", "text": ... }`, not an array.
+- macOS/Linux build/link improvements:
+  - Resolved yams-daemon undefined symbols on Linux by including IPC OBJECT files in the daemon static lib and linking `yams_ipc_proto`.
+  - Fixed yams-mcp-server linking on macOS by avoiding IPC OBJECTs that pull daemon-only symbols; explicitly link IPC/client/proto libs instead.
+
+### Changed
+- StdioTransport testability: in test builds (`YAMS_TESTING`), receive() uses `cin.rdbuf()->in_avail()` to support reliable stringstream-driven tests.
+- Default server send now includes `Content-Type: application/vscode-jsonrpc; charset=utf-8` and a trailing CRLF when using header framing to maximize client compatibility.
+- ONNX plugin dependency hygiene: Removed unintended PDFium bundling logic from the ONNX plugin CMake (it never linked or required PDFium). Added a configure-time guard warning if `pdfium::pdfium` becomes linked accidentally to keep plugin responsibilities isolated. PDF extraction remains solely in the `pdf_extractor` plugin.
+
+### Added
+- ONNX/GenAI path (vector library):
+  - Scaffolded a minimal GenAI adapter in the vector layer and made GenAI the default when ONNX is enabled; falls back to raw ONNX Runtime when GenAI is unavailable.
+
+### Daemon & Plugins
+- Plugin autoload diagnostics: adoption logs now include the plugin file path; environment `YAMS_PLUGIN_DIR` is prioritized over system directories to avoid stale installs.
+
 ## [v0.6.18]
 
 ### Hot fix
-- CI Bump : CMake and conan update for CI
+- CI Bump : CMake and conan update for 
 
 ## [v0.6.17]
 

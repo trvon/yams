@@ -40,6 +40,28 @@ project(YAMS
     LANGUAGES C CXX
  )
 
+# ----------------------------------------------------------------------------
+# Optional build accelerator: ccache
+# If ccache is available, enable it; if a user/exported environment forces use
+# (via CCACHE=1 or YAMS_FORCE_CCACHE) but it's missing, emit a warning instead
+# of letting build commands fail with "ccache: not found" (as seen in CI logs).
+# ----------------------------------------------------------------------------
+option(YAMS_ENABLE_CCACHE "Enable ccache compiler launcher when available" ON)
+if(YAMS_ENABLE_CCACHE)
+    find_program(CCACHE_PROGRAM ccache)
+    if(CCACHE_PROGRAM)
+        message(STATUS "ccache found: ${CCACHE_PROGRAM} (compiler launcher enabled)")
+        set(CMAKE_C_COMPILER_LAUNCHER   ${CCACHE_PROGRAM})
+        set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+    else()
+        if(DEFINED ENV{YAMS_FORCE_CCACHE} OR DEFINED ENV{CCACHE})
+            message(WARNING "ccache requested (YAMS_FORCE_CCACHE/CCACHE set) but not found in PATH; continuing without it")
+        else()
+            message(STATUS "ccache not found; proceeding without compiler launcher")
+        endif()
+    endif()
+endif()
+
 # CMake module path and portable toolchain/sanitizers (no-op unless supported)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(ToolchainDetect)
@@ -181,6 +203,8 @@ option(YAMS_ENABLE_NATIVE_OPTIMIZATIONS "Enable -march=native on supported platf
 option(YAMS_ENABLE_APPLE_SILICON_OPTIMIZATIONS "Enable Apple Silicon optimizations (auto-enabled on ARM64 Macs)" ON)
 option(YAMS_CLANG_USE_LIBCXX "Use libc++ with Clang (Linux requires libc++ dev packages)" OFF)
 option(YAMS_BUILD_API_DOCS "Build Doxygen API documentation" OFF)
+# Build a bundled ONNX Runtime from source if Conan/on-system package lacks required GenAI headers
+option(YAMS_BUILD_INTERNAL_ONNXRUNTIME "Fetch and build an internal ONNX Runtime (fallback when external package lacks GenAI headers)" OFF)
 
 # ------------------------------------------------------------------------------
 # Docs build (Pandoc) and embedded CLI help assets

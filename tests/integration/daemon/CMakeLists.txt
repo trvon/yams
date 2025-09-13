@@ -254,6 +254,22 @@ endif()
 add_test(NAME daemon_plugins_autoload_dlopen_test COMMAND daemon_plugins_autoload_dlopen_test)
 set_tests_properties(daemon_plugins_autoload_dlopen_test PROPERTIES LABELS "daemon;integration;plugins" TIMEOUT 60)
 
+# Adoption logging check (dlopen env-gated)
+add_executable(daemon_plugin_adoption_logging_test
+    daemon_plugin_adoption_logging_test.cpp
+)
+target_link_libraries(daemon_plugin_adoption_logging_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+)
+if(TARGET yams_onnx_plugin)
+    add_dependencies(daemon_plugin_adoption_logging_test yams_onnx_plugin)
+    target_compile_definitions(daemon_plugin_adoption_logging_test PRIVATE yams_onnx_plugin_BUILT="$<TARGET_FILE:yams_onnx_plugin>")
+endif()
+add_test(NAME daemon_plugin_adoption_logging_test COMMAND daemon_plugin_adoption_logging_test)
+set_tests_properties(daemon_plugin_adoption_logging_test PROPERTIES LABELS "daemon;integration;plugins" TIMEOUT 60)
+
 # Components management (env toggles)
 add_executable(daemon_components_management_test
     daemon_components_management_test.cpp

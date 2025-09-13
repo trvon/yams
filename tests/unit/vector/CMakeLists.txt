@@ -3,6 +3,7 @@
 add_executable(vector_database_tests
     vector_database_test.cpp
     embedding_generator_test.cpp
+    embedding_genai_selection_test.cpp
     document_chunker_test.cpp
     vector_index_manager_test.cpp
     model_management_test.cpp

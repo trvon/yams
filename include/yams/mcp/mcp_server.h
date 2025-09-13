@@ -19,6 +19,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <iosfwd>
 #include <memory>
@@ -60,6 +61,8 @@ public:
     StdioTransport();
     ~StdioTransport(); // Ensures writer thread is joined/flushed for clean shutdown
     void send(const json& message) override;
+    // NDJSON (JSON-per-line) send helper for clients that don't use headers
+    void sendNdjson(const json& message);
     // Enqueue a message for the writer thread (non-blocking for request handlers); always framed
     void sendAsync(json message);
     // Framed (LSP/MCP) send helper (sole output path)
@@ -72,6 +75,9 @@ public:
     // Set external shutdown flag for non-blocking checks
     void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
 
+    // Peer framing preference auto-detected from inbound (true => ndjson, false => headers)
+    bool peerPrefersNdjson() const noexcept { return preferNdjson_.load(); }
+
 private:
     // Unified non-blocking sender for all transports. Uses async send when available
     // and falls back to a best-effort synchronous send otherwise.
@@ -79,6 +85,7 @@ private:
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
+    std::atomic<bool> preferNdjson_{false};
 
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};
@@ -246,6 +253,13 @@ private:
     // Telemetry counters (FSM-integrated)
     std::atomic<uint64_t> telemetrySentBytes_{0};
     std::atomic<uint64_t> telemetryIntegrityFailures_{0};
+
+    // File-backed prompts directory (configurable)
+    std::filesystem::path promptsDir_;
+#ifdef YAMS_TESTING
+public:
+    void testSetPromptsDir(const std::filesystem::path& p) { promptsDir_ = p; }
+#endif
 
 #ifdef YAMS_TESTING
 public:

@@ -1056,12 +1056,23 @@ Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
         )");
         if (!stmtResult)
             return stmtResult.error();
-
         Statement stmt = std::move(stmtResult).value();
         auto stepResult = stmt.step();
         if (!stepResult)
             return stepResult.error();
+        return stmt.getInt64(0);
+    });
+}
 
+Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents WHERE content_extracted = 1");
+        if (!stmtResult)
+            return stmtResult.error();
+        Statement stmt = std::move(stmtResult).value();
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
         return stmt.getInt64(0);
     });
 }

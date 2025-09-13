@@ -211,6 +211,7 @@ protected:
 
 TEST_F(SearchServiceTest, BasicTextSearch) {
     auto request = createBasicSearchRequest("programming");
+    request.showHash = true; // hashes are hidden by default in results
 
     auto result = runAwait(searchService_->search(request));
 

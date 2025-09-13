@@ -25,6 +25,7 @@ add_library(yams_vector
     sqlite_vec_backend.cpp  # SQLite-vec backend implementation
     mock_embedding_provider.cpp  # Mock provider for testing
     dim_resolver.cpp
+    ../genai/onnx_genai_adapter.cpp
     # Compile sqlite-vec directly into the library
     ${SQLITE_VEC_SOURCE_DIR}/sqlite-vec.c
 )
@@ -75,9 +76,22 @@ target_include_directories(yams_vector
 option(YAMS_ENABLE_ONNX "Enable ONNX Runtime support in vector library" ON)
 
 if(YAMS_ENABLE_ONNX)
-    # When ONNX is enabled, require the package instead of silently disabling
+    include(${CMAKE_SOURCE_DIR}/cmake/modules/OnnxRuntimeProvider.cmake)
+    include(${CMAKE_SOURCE_DIR}/cmake/modules/DetectOnnxGenAI.cmake)
     if(NOT TARGET onnxruntime::onnxruntime)
-        find_package(onnxruntime REQUIRED)
+        message(WARNING "[ORT] ONNX Runtime still unavailable after provider step; vector ONNX features disabled")
+    endif()
+    if(YAMS_GENAI_RUNTIME_PRESENT)
+        target_compile_definitions(yams_vector PRIVATE YAMS_USE_ONNX_GENAI_HEADER_PRESENT YAMS_GENAI_RUNTIME_PRESENT)
+        message(STATUS "[GenAI] Vector library: GenAI runtime present (headers usable)")
+    else()
+        # Keep building stub; do not define runtime-present macro.
+        target_compile_definitions(yams_vector PRIVATE YAMS_USE_ONNX_GENAI_HEADER_PRESENT)
+        if(YAMS_BUILD_INTERNAL_ONNXRUNTIME)
+            message(STATUS "[GenAI] Vector library: GenAI headers not usable (stub mode) — internal ORT build scaffolding present but not implemented")
+        else()
+            message(STATUS "[GenAI] Vector library: GenAI headers not usable (stub mode). Enable YAMS_BUILD_INTERNAL_ONNXRUNTIME for future bundled ORT support if needed.")
+        endif()
     endif()
     message(STATUS "ONNX Runtime found - enabling local embedding generation")
 else()

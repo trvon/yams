@@ -15,8 +15,17 @@ struct ProviderCtx {
     yams_model_load_progress_cb progress_cb = nullptr;
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
+    bool ready = false;
+    bool disabled = false;
+    std::string last_error;
 
     ProviderCtx() {
+        // Allow disabling via env for diagnostics or platform constraints
+        if (const char* d = std::getenv("YAMS_ONNX_PLUGIN_DISABLE"); d && *d) {
+            disabled = true;
+            last_error = "disabled_by_env";
+            return;
+        }
         yams::daemon::ModelPoolConfig cfg;
         // Defaults: prefer lazy loading to avoid blocking startup
         cfg.lazyLoading = true;
@@ -100,7 +109,14 @@ struct ProviderCtx {
             // ignore config parse errors
         }
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
-        (void)pool->initialize();
+        if (auto r = pool->initialize()) {
+            ready = true;
+            last_error.clear();
+        } else {
+            ready = false;
+            last_error = r.error().message;
+            spdlog::warn("[ONNX-Plugin] Pool initialize failed: {}", last_error);
+        }
     }
 };
 
@@ -138,6 +154,10 @@ struct ProviderSingleton {
             if (!self || !model_id)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
+            if (c->disabled)
+                return YAMS_ERR_UNSUPPORTED;
+            if (!c->ready || !c->pool)
+                return YAMS_ERR_INTERNAL;
             // Parse per-load options (hf.revision, offline)
             try {
                 yams::daemon::OnnxModelPool::ResolutionHints hints;
@@ -177,6 +197,10 @@ struct ProviderSingleton {
             if (!self || !model_id)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
+            if (c->disabled)
+                return YAMS_ERR_UNSUPPORTED;
+            if (!c->ready || !c->pool)
+                return YAMS_ERR_INTERNAL;
             auto r = c->pool->unloadModel(model_id);
             return r ? YAMS_OK : YAMS_ERR_NOT_FOUND;
         };
@@ -186,6 +210,14 @@ struct ProviderSingleton {
             if (!self || !model_id || !out_loaded)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
+            if (c->disabled) {
+                *out_loaded = false;
+                return YAMS_ERR_UNSUPPORTED;
+            }
+            if (!c->ready || !c->pool) {
+                *out_loaded = false;
+                return YAMS_ERR_INTERNAL;
+            }
             *out_loaded = c->pool->isModelLoaded(model_id);
             return YAMS_OK;
         };
@@ -195,6 +227,13 @@ struct ProviderSingleton {
             if (!self || !out_ids || !out_count)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
+            if (c->disabled)
+                return YAMS_ERR_UNSUPPORTED;
+            if (!c->ready || !c->pool) {
+                *out_ids = nullptr;
+                *out_count = 0;
+                return YAMS_ERR_INTERNAL;
+            }
             auto v = c->pool->getLoadedModels();
             const size_t n = v.size();
             const char** ids = nullptr;
@@ -234,6 +273,10 @@ struct ProviderSingleton {
             if (!self || !model_id || !input || !out_vec || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
+            if (c->disabled)
+                return YAMS_ERR_UNSUPPORTED;
+            if (!c->ready || !c->pool)
+                return YAMS_ERR_INTERNAL;
             std::string text(reinterpret_cast<const char*>(input), input_len);
             auto h = c->pool->acquireModel(model_id, std::chrono::seconds(10));
             if (!h)
@@ -265,6 +308,14 @@ struct ProviderSingleton {
             if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
+            if (c->disabled)
+                return YAMS_ERR_UNSUPPORTED;
+            if (!c->ready || !c->pool) {
+                *out_vecs = nullptr;
+                *out_batch = 0;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            }
             std::vector<std::string> texts;
             texts.reserve(batch_size);
             for (size_t i = 0; i < batch_size; ++i) {
@@ -316,4 +367,30 @@ static ProviderSingleton& singleton() {
 
 extern "C" yams_model_provider_v1* yams_onnx_get_model_provider() {
     return &singleton().vtable;
+}
+
+// Provide a small JSON health snapshot for the ABI host
+extern "C" const char* yams_onnx_get_health_json_cstr() {
+    static thread_local std::string json;
+    const auto& c = singleton().ctx;
+    // Build a minimal JSON reflecting readiness/disabled and last error
+    nlohmann::json j;
+    if (c.disabled) {
+        j["status"] = "disabled";
+        j["reason"] = c.last_error.empty() ? "disabled_by_env" : c.last_error;
+    } else if (!c.pool) {
+        j["status"] = "unavailable";
+        j["reason"] = "no_pool";
+    } else if (!c.ready) {
+        j["status"] = "degraded";
+        j["reason"] = c.last_error.empty() ? "init_failed" : c.last_error;
+    } else {
+        j["status"] = "ok";
+    }
+    try {
+        json = j.dump();
+    } catch (...) {
+        json = "{\"status\":\"unknown\"}";
+    }
+    return json.c_str();
 }
