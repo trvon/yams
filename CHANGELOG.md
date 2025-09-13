@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+## [v0.6.18]
+
+### Hot fix
+- CI Bump : CMake and conan update for CI
+
 ## [v0.6.17]
 
 ### Hot fix
@@ -26,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Build: Removed legacy `-fcoroutines-ts` flag for modern Clang toolchains (C++20 coroutines are enabled by default). Prevents build failures on distributions where the flag is rejected.
+- Build: Fixed macOS Conan host profile parsing error by removing unsupported `[env]` section; libc++ enforcement now handled via workflow sanitization.
+- Build: Added defensive scrub in `CMakeLists.txt` to strip any externally injected `-fcoroutines-ts` occurrences from cached flags.
 
 ## [v0.6.16] - 2025-09-13
 

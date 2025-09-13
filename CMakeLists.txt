@@ -512,14 +512,36 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         add_compile_options(-fcoroutines)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # libc++ selection:
+        #  * Apple toolchains default to libc++ (no flag needed, but harmless if passed)
+        #  * On Linux we only switch to libc++ when the user explicitly opts in via
+        #    YAMS_CLANG_USE_LIBCXX=ON because many dependency recipes are built
+        #    against libstdc++ by default. Forcing -stdlib=libc++ unconditionally
+        #    can cause ABI / link mismatches when mixing dependency stdlibs.
         if(APPLE OR YAMS_CLANG_USE_LIBCXX)
             add_compile_options(-stdlib=libc++)
             add_link_options(-stdlib=libc++)
         endif()
-        # Apple Clang has coroutines enabled by default in C++20
-        if(NOT APPLE)
-            add_compile_options(-fcoroutines-ts)
-        endif()
+        # Modern Clang (including Apple Clang 14+/LLVM 12+) implements C++20 coroutines
+        # without requiring the legacy experimental switch (-fcoroutines-ts). Using the
+        # flag now produces warnings or errors on some distributions. We rely on the
+        # C++20 standard mode and a probe below to warn if <coroutine> is unavailable.
+        # Defensive scrub: If an external toolchain file, cached build dir, or
+        # environment variable re-injects the legacy -fcoroutines-ts flag into
+        # the global CMake cache variables, remove it. CMake does not support
+        # calling commands inline inside an if() expression, so we perform the
+        # find + conditional replacement in two steps per variable.
+        foreach(_var CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_DEBUG)
+            if(DEFINED ${_var})
+                string(FIND "${${_var}}" "-fcoroutines-ts" _yams_flag_pos)
+                if(_yams_flag_pos GREATER -1)
+                    string(REPLACE "-fcoroutines-ts" "" ${_var} "${${_var}}")
+                    # Optional: collapse any duplicate spaces introduced
+                    string(REGEX REPLACE "  +" " " ${_var} "${${_var}}")
+                    message(STATUS "Removed legacy -fcoroutines-ts from ${_var}")
+                endif()
+            endif()
+        endforeach()
     endif()
 
     # Optional coroutine capability probe (warn-only, runs after flags above)
