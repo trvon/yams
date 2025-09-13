@@ -154,8 +154,9 @@ public:
     // Write data atomically using rename
     template <typename T>
     [[nodiscard]] Result<void> write(const std::filesystem::path& path, const T& data) {
-        auto span = std::as_bytes(std::span{data});
-        return writeImpl(path, span);
+        using Elem = std::remove_reference_t<decltype(*data.data())>;
+        auto rawSpan = std::span<const Elem>(data.data(), data.size());
+        return writeImpl(path, std::as_bytes(rawSpan));
     }
 
     // Batch atomic writes

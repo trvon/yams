@@ -29,10 +29,11 @@ public:
         if constexpr (std::is_same_v<T, std::filesystem::path>) {
             return hashFile(data);
         } else {
-            // Use std::as_bytes directly with explicit span construction for compatibility
-            // This works because ByteSpanConvertible ensures data can be converted to byte span
-            auto span = std::as_bytes(std::span(data));
-            update(span);
+            // Construct span explicitly (CTAD for std::span<T> from arbitrary container
+            // was improved only in later standards; be explicit for portability).
+            using Elem = std::remove_reference_t<decltype(*data.data())>;
+            auto rawSpan = std::span<const Elem>(data.data(), data.size());
+            update(std::as_bytes(rawSpan));
             return finalize();
         }
     }

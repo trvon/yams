@@ -71,6 +71,31 @@ jobs:
           # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
 
+      - name: Install optional system dependencies (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev
+          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev"
+
+      - name: Sanitize stdlib flags (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Remove any accidentally injected libstdc++ selections and force libc++
+          for var in CXXFLAGS CFLAGS LDFLAGS; do
+            current="${!var:-}"
+            sanitized="$(echo "$current" | sed -E 's/-stdlib=libstdc\+\+//g') -stdlib=libc++"
+            # Collapse whitespace
+            sanitized="$(echo "$sanitized" | tr -s ' ')"
+            echo "$var=$sanitized" >> "$GITHUB_ENV"
+            printf '%s\n' "$var=$sanitized"
+          done
+          echo "Stdlib flags sanitized for macOS (forcing -stdlib=libc++)."
+
       - name: Determine release channel and version/tag
         id: meta
         shell: bash

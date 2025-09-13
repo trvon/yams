@@ -21,6 +21,15 @@ jobs:
         with:
           fetch-depth: 0 # Ensure tags are available for version derivation if needed
 
+      - name: Install optional system dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev || true
+          echo "Optional packages installed (best-effort)."
+
       - name: Install Conan
         shell: bash
         run: |

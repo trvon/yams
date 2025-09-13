@@ -48,6 +48,10 @@ packages:
   - libncurses-dev
   - libtinfo-dev
   - pkg-config
+  # Optional feature dependencies (enable async I/O, archive extraction, media metadata)
+  - liburing-dev      # enables io_uring async path instead of fallback
+  - libarchive-dev    # enables archive extraction features
+  - libtag1-dev       # enables taglib (audio metadata) detection
 
 tasks:
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.

@@ -13,10 +13,13 @@ namespace yams {
 
 // Core concepts used throughout the project
 
-// Concept for data that can be converted to byte spans
+// Concept for data that exposes contiguous storage (data()+size()) so we can
+// safely construct a byte span in C++20 (std::span does NOT yet provide CTAD
+// from arbitrary containers before C++23).
 template <typename T>
-concept ByteSpanConvertible = requires(T t) {
-    { std::as_bytes(std::span{t}) } -> std::convertible_to<std::span<const std::byte>>;
+concept ByteSpanConvertible = requires(const T& t) {
+    { t.data() } -> std::convertible_to<const void*>; // contiguous base pointer
+    { t.size() } -> std::convertible_to<std::size_t>; // element count
 };
 
 // Concept for hashable data types
