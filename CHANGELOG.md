@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+## [v0.6.15] - 2025-09-13
+
+### Hot fix
+- CI Bump : Updating clang version in host.ninja for builds
+
 ## [v0.6.14] - 2025-09-12
 
 ### Added
