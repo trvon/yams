@@ -1,36 +1,19 @@
 include(default)
 
-# Unified host profile (Jinja) ensuring an explicit compiler.version and
-# consistent Ninja + clang toolchain across platforms.
-#
-# Behavior:
-#  - macOS: apple-clang (version from APPLE_CLANG_VERSION env or fallback 14)
-#  - others: clang (version from CLANG_VERSION env or fallback 19)
-#  - Forces libc++ on macOS, libstdc++11 elsewhere
-#  - Forces Ninja generator and explicit compiler executables to avoid the
-#    mixed GNU/clang situation that produced '-stdlib' flag errors.
-#
-# To override versions locally without editing this file:
-#   export APPLE_CLANG_VERSION=15   (on macOS)
-#   export CLANG_VERSION=19         (on Linux/other)
-#
-# NOTE: Conan's Jinja environment exposes 'env.VAR'. If the env var is absent
-# the provided default() is used.
-
 [settings]
 compiler.cppstd=20
 {% if os == "Macos" %}
+# Conan Jinja execution context does not expose a generic 'env' mapping reliably; we pin a default.
+# Override at CI by post-edit (sed) if a different apple-clang major is required.
 compiler=apple-clang
-# Minimum supported Apple clang is 17 (Xcode 15). Override via APPLE_CLANG_VERSION env.
-compiler.version={{ env.APPLE_CLANG_VERSION | default("17") }}
+compiler.version=17
 compiler.libcxx=libc++
 {% else %}
 compiler=clang
-compiler.version={{ env.CLANG_VERSION | default("19") }}
+compiler.version=19
 compiler.libcxx=libstdc++11
 {% endif %}
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
 tools.build:compiler_executables={"c":"clang","cpp":"clang++"}
-

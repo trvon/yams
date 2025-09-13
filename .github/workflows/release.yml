@@ -232,7 +232,25 @@ jobs:
         run: |
           set -e
           conan profile detect --force
-          echo "Conan detected default profile. Will use host profile conan/profiles/host.jinja at install time."
+          echo "Conan detected default profile. A platform-specific profile (host-macos-apple-clang or host-linux-clang) will be applied explicitly later."
+
+      - name: Detect clang version (log only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Prefer clang++, fallback to clang
+            if command -v clang++ >/dev/null 2>&1; then
+              RAW_VER=$(clang++ --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+            elif command -v clang >/dev/null 2>&1; then
+              RAW_VER=$(clang --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+            else
+              RAW_VER=""
+            fi
+            if [ -z "$RAW_VER" ]; then
+              echo "Could not auto-detect clang version; using profile defaults" >&2
+            else
+              echo "Detected clang major: $RAW_VER"
+            fi
 
       - name: Check Conan (self-hosted sanity)
         if: ${{ !matrix.hosted }}
@@ -259,8 +277,23 @@ jobs:
           # Clean any existing build directory and presets to avoid duplicate preset issues
           rm -rf build/yams-release
           rm -f CMakeUserPresets.json
-          # Use Conan 2 profiles: default build profile + host profile forcing C++20 and libc++ on macOS
-          HOST_PROFILE="./conan/profiles/host.jinja"
+          # Select explicit platform profile (no mutation-in-place)
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
+            # Adjust architecture dynamically for universal runner matrix
+            case "${{ matrix.suffix }}" in
+              macos-arm64)
+                sed -i '' -E 's/^arch=.*/arch=armv8/' "$HOST_PROFILE"
+                ;;
+              macos-x86_64)
+                cp "$HOST_PROFILE" "$HOST_PROFILE.x86_64"
+                sed -i '' -E 's/^arch=.*/arch=x86_64/' "$HOST_PROFILE.x86_64"
+                HOST_PROFILE="$HOST_PROFILE.x86_64"
+                ;;
+            esac
+          else
+            HOST_PROFILE="./conan/profiles/host-linux-clang"
+          fi
           BUILD_PROFILE="default"
           CONAN_ARGS="-of build/yams-release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing"
           if [ "$RUNNER_OS" = "macOS" ]; then
@@ -270,6 +303,8 @@ jobs:
             esac
           fi
           conan install . $CONAN_ARGS
+          echo "--- Toolchain sanity (first toolchain file if present) ---"
+          find build/yams-release -maxdepth 5 -name conan_toolchain.cmake -print -exec grep -E 'CMAKE_CXX_COMPILER' {} \; | head -20 || true
           cmake --preset yams-release \
             -DYAMS_BUILD_PROFILE=release \
             -DYAMS_VERSION="${{ steps.meta.outputs.version }}" \

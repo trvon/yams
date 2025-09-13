@@ -37,6 +37,23 @@ jobs:
           echo "Conan profile configured:" >&2
           conan profile show >&2
 
+      - name: Detect clang version (log only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v clang++ >/dev/null 2>&1; then
+            RAW_VER=$(clang++ --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+          elif command -v clang >/dev/null 2>&1; then
+            RAW_VER=$(clang --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+          else
+            RAW_VER=""
+          fi
+          if [ -n "$RAW_VER" ]; then
+            echo "Detected clang major: $RAW_VER"
+          else
+            echo "WARNING: clang not found; default profile may resolve gcc instead" >&2
+          fi
+
       - name: Clean corrupted Conan cache if needed
         shell: bash
         run: |
@@ -52,7 +69,14 @@ jobs:
         run: |
           rm -rf ${{ env.BUILD_DIR }}
           rm -f CMakeUserPresets.json
-          conan install . --output-folder=${{ env.BUILD_DIR }} -s build_type=Debug --build=missing
+          conan install . \
+            --output-folder=${{ env.BUILD_DIR }} \
+            -pr:h=conan/profiles/host-linux-clang \
+            -pr:b=default \
+            -s build_type=Debug \
+            --build=missing
+          echo "--- Toolchain sanity (first toolchain file if present) ---"
+          find ${{ env.BUILD_DIR }} -maxdepth 5 -name conan_toolchain.cmake -print -exec grep -E 'CMAKE_CXX_COMPILER' {} \; | head -20 || true
           cmake --preset yams-debug \
             -DYAMS_BUILD_PROFILE=dev \
             -DYAMS_BUILD_TESTS=ON \

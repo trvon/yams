@@ -155,7 +155,7 @@ tasks:
       # Use clang toolchain to avoid GCC 15 onnxruntime 1.18 build issues.
       conan install . \
         -of "${BUILD_DIR}" \
-        -pr:h=./conan/profiles/host.jinja \
+        -pr:h=./conan/profiles/host-linux-clang \
         -s build_type=Release \
         -c tools.build:jobs="${CONAN_CPU_COUNT}" \
         --build=missing
