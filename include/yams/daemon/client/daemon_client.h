@@ -4,7 +4,6 @@
 #include <fstream>
 #include <iostream>
 #include <ostream>
-#include <yams/core/task.h>
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
@@ -47,9 +46,9 @@ public:
     DaemonClient& operator=(DaemonClient&&) noexcept;
 
     // Connection management
-    Task<Result<void>> connect();
+    boost::asio::awaitable<Result<void>> connect();
     // Compatibility alias for codepaths expecting connectAsync()
-    Task<Result<void>> connectAsync() { co_return co_await connect(); }
+    boost::asio::awaitable<Result<void>> connectAsync() { co_return co_await connect(); }
     void disconnect();
     bool isConnected() const;
 
@@ -59,30 +58,33 @@ public:
     void setBodyTimeout(std::chrono::milliseconds timeout);
 
     // High-level request methods
-    Task<Result<SearchResponse>> search(const SearchRequest& req);
-    Task<Result<AddResponse>> add(const AddRequest& req);
-    Task<Result<GetResponse>> get(const GetRequest& req);
-    Task<Result<GetInitResponse>> getInit(const GetInitRequest& req) {
+    boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req);
+    boost::asio::awaitable<Result<AddResponse>> add(const AddRequest& req);
+    boost::asio::awaitable<Result<GetResponse>> get(const GetRequest& req);
+    boost::asio::awaitable<Result<GetInitResponse>> getInit(const GetInitRequest& req) {
         return call<GetInitRequest>(req);
     }
-    Task<Result<GetChunkResponse>> getChunk(const GetChunkRequest& req) {
+    boost::asio::awaitable<Result<GetChunkResponse>> getChunk(const GetChunkRequest& req) {
         return call<GetChunkRequest>(req);
     }
-    Task<Result<SuccessResponse>> getEnd(const GetEndRequest& req) {
+    boost::asio::awaitable<Result<SuccessResponse>> getEnd(const GetEndRequest& req) {
         return call<GetEndRequest>(req);
     }
-    Task<Result<ListResponse>> list(const ListRequest& req);
-    Task<Result<GrepResponse>> grep(const GrepRequest& req);
+    boost::asio::awaitable<Result<ListResponse>> list(const ListRequest& req);
+    boost::asio::awaitable<Result<GrepResponse>> grep(const GrepRequest& req);
     // Streaming path for AddDocument (header-first, final-only chunk)
-    Task<Result<AddDocumentResponse>> streamingAddDocument(const AddDocumentRequest& req);
-    Task<Result<GetStatsResponse>> getStats(const GetStatsRequest& req);
-    Task<Result<UpdateDocumentResponse>> updateDocument(const UpdateDocumentRequest& req);
-    Task<Result<PrepareSessionResponse>> prepareSession(const PrepareSessionRequest& req) {
+    boost::asio::awaitable<Result<AddDocumentResponse>>
+    streamingAddDocument(const AddDocumentRequest& req);
+    boost::asio::awaitable<Result<GetStatsResponse>> getStats(const GetStatsRequest& req);
+    boost::asio::awaitable<Result<UpdateDocumentResponse>>
+    updateDocument(const UpdateDocumentRequest& req);
+    boost::asio::awaitable<Result<PrepareSessionResponse>>
+    prepareSession(const PrepareSessionRequest& req) {
         return call<PrepareSessionRequest>(req);
     }
 
     // High-level streaming helpers
-    Task<Result<void>> getToStdout(const GetInitRequest& req) {
+    boost::asio::awaitable<Result<void>> getToStdout(const GetInitRequest& req) {
         if (auto c = co_await connectAsync(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
@@ -129,17 +131,19 @@ public:
     }
 
     // Streaming grep helper method
-    Task<Result<GrepResponse>> streamingGrep(const GrepRequest& req);
+    boost::asio::awaitable<Result<GrepResponse>> streamingGrep(const GrepRequest& req);
 
     // Streaming get helpers (init/header-only + chunk loop)
-    Task<Result<void>> streamingGetToStdout(const GetInitRequest& req) { return getToStdout(req); }
-    Task<Result<void>> streamingGetToFile(const GetInitRequest& req,
-                                          const std::filesystem::path& outputPath) {
+    boost::asio::awaitable<Result<void>> streamingGetToStdout(const GetInitRequest& req) {
+        return getToStdout(req);
+    }
+    boost::asio::awaitable<Result<void>>
+    streamingGetToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
         return getToFile(req, outputPath);
     }
 
-    Task<Result<void>> getToFile(const GetInitRequest& req,
-                                 const std::filesystem::path& outputPath) {
+    boost::asio::awaitable<Result<void>> getToFile(const GetInitRequest& req,
+                                                   const std::filesystem::path& outputPath) {
         if (auto c = co_await connectAsync(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
@@ -188,27 +192,33 @@ public:
         }
         co_return Result<void>();
     }
-    Task<Result<SuccessResponse>> remove(const DeleteRequest& req);
-    Task<Result<StatusResponse>> status();
-    Task<Result<void>> shutdown(bool graceful = true);
-    Task<Result<void>> ping();
+    boost::asio::awaitable<Result<SuccessResponse>> remove(const DeleteRequest& req);
+    boost::asio::awaitable<Result<StatusResponse>> status();
+    boost::asio::awaitable<Result<void>> shutdown(bool graceful = true);
+    boost::asio::awaitable<Result<void>> ping();
 
     // Embedding request methods
-    Task<Result<EmbeddingResponse>> generateEmbedding(const GenerateEmbeddingRequest& req);
-    Task<Result<BatchEmbeddingResponse>> generateBatchEmbeddings(const BatchEmbeddingRequest& req);
+    boost::asio::awaitable<Result<EmbeddingResponse>>
+    generateEmbedding(const GenerateEmbeddingRequest& req);
+    boost::asio::awaitable<Result<BatchEmbeddingResponse>>
+    generateBatchEmbeddings(const BatchEmbeddingRequest& req);
     // Streaming progress variants (emit EmbeddingEvent progress, return final response)
-    Task<Result<BatchEmbeddingResponse>> streamingBatchEmbeddings(const BatchEmbeddingRequest& req);
-    Task<Result<EmbedDocumentsResponse>> streamingEmbedDocuments(const EmbedDocumentsRequest& req);
+    boost::asio::awaitable<Result<BatchEmbeddingResponse>>
+    streamingBatchEmbeddings(const BatchEmbeddingRequest& req);
+    boost::asio::awaitable<Result<EmbedDocumentsResponse>>
+    streamingEmbedDocuments(const EmbedDocumentsRequest& req);
     // Unified call overload for embeddings: uses streaming under the hood
-    Task<Result<EmbedDocumentsResponse>> call(const EmbedDocumentsRequest& req) {
+    boost::asio::awaitable<Result<EmbedDocumentsResponse>> call(const EmbedDocumentsRequest& req) {
         co_return co_await streamingEmbedDocuments(req);
     }
 
     // Collect progress events for embeddings (no stdout printing)
-    Task<Result<std::vector<EmbeddingEvent>>> callEvents(const EmbedDocumentsRequest& req);
-    Task<Result<ModelLoadResponse>> loadModel(const LoadModelRequest& req);
-    Task<Result<SuccessResponse>> unloadModel(const UnloadModelRequest& req);
-    Task<Result<ModelStatusResponse>> getModelStatus(const ModelStatusRequest& req);
+    boost::asio::awaitable<Result<std::vector<EmbeddingEvent>>>
+    callEvents(const EmbedDocumentsRequest& req);
+    boost::asio::awaitable<Result<ModelLoadResponse>> loadModel(const LoadModelRequest& req);
+    boost::asio::awaitable<Result<SuccessResponse>> unloadModel(const UnloadModelRequest& req);
+    boost::asio::awaitable<Result<ModelStatusResponse>>
+    getModelStatus(const ModelStatusRequest& req);
 
     // Chunked response handling
     struct ChunkedResponseHandler {
@@ -299,16 +309,16 @@ public:
     };
 
     // Streaming search helper method
-    Task<Result<SearchResponse>> streamingSearch(const SearchRequest& req);
+    boost::asio::awaitable<Result<SearchResponse>> streamingSearch(const SearchRequest& req);
 
     // Streaming list helper method
-    Task<Result<ListResponse>> streamingList(const ListRequest& req);
+    boost::asio::awaitable<Result<ListResponse>> streamingList(const ListRequest& req);
 
     // Public method to allow generic request sending by helpers
-    Task<Result<Response>> executeRequest(const Request& req);
+    boost::asio::awaitable<Result<Response>> executeRequest(const Request& req);
 
     // Generic typed call (templated) – returns ResponseOfT<Req>
-    template <class Req> Task<Result<ResponseOfT<Req>>> call(const Req& req);
+    template <class Req> boost::asio::awaitable<Result<ResponseOfT<Req>>> call(const Req& req);
 
     // Check if daemon is running (without connecting)
     static bool isDaemonRunning(const std::filesystem::path& socketPath = {});
@@ -335,11 +345,11 @@ private:
     ClientConfig config_;
 
     // Generic request sending
-    Task<Result<Response>> sendRequest(const Request& req);
+    boost::asio::awaitable<Result<Response>> sendRequest(const Request& req);
 
     // Send request with chunked response handling
-    Task<Result<void>> sendRequestStreaming(const Request& req,
-                                            std::shared_ptr<ChunkedResponseHandler> handler);
+    boost::asio::awaitable<Result<void>>
+    sendRequestStreaming(const Request& req, std::shared_ptr<ChunkedResponseHandler> handler);
 
     // Auto-start daemon if configured and not running
     Result<void> autoStartDaemonIfNeeded();
@@ -348,7 +358,8 @@ private:
 };
 
 // Generic typed call helper using ResponseOf trait
-template <class Req> Task<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& req) {
+template <class Req>
+boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& req) {
     static_assert(
         std::disjunction_v<
             std::is_same<Req, SearchRequest>, std::is_same<Req, AddRequest>,

@@ -4,10 +4,42 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <variant>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/ipc/proto_serializer.h>
+
+namespace {
+using yams::daemon::MessageType;
+
+inline yams::daemon::EmbeddingEvent make_embedding_start_event(const yams::daemon::Request& req) {
+    using namespace yams::daemon;
+    EmbeddingEvent ev{};
+    if (auto* r = std::get_if<BatchEmbeddingRequest>(&req)) {
+        ev.modelName = r->modelName;
+        ev.total = r->texts.size();
+    } else if (auto* r = std::get_if<EmbedDocumentsRequest>(&req)) {
+        ev.modelName = r->modelName;
+        ev.total = r->documentHashes.size();
+    } else if (auto* r = std::get_if<GenerateEmbeddingRequest>(&req)) {
+        ev.modelName = r->modelName;
+        ev.total = 1;
+    } else {
+        ev.total = 1;
+    }
+    ev.phase = "started";
+    ev.message = "embedding started";
+    return ev;
+}
+
+inline std::pair<std::size_t, std::size_t> page_bounds(std::size_t pos, std::size_t total,
+                                                       std::size_t page) {
+    const auto end = std::min(pos + page, total);
+    return {pos, end};
+}
+} // namespace
 
 namespace yams::daemon {
 
@@ -54,69 +86,162 @@ StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per
 
 // -------------------- process (non-streaming immediate) --------------------
 boost::asio::awaitable<Response> StreamingRequestProcessor::process(const Request& request) {
-    co_return co_await delegate_->process(request);
+    Request req_copy = request; // ensure stable lifetime in coroutine frame
+    co_return co_await delegate_->process(req_copy);
 }
 
 // -------------------- process_streaming (decide whether to defer) ----------
 boost::asio::awaitable<std::optional<Response>>
-StreamingRequestProcessor::process_streaming(const Request& request) {
+StreamingRequestProcessor::process_streaming_impl(Request request) {
+    Request& req_copy = request; // owned request in coroutine frame
     try {
+// Unconditional debug: trace message type at entry
+#ifdef YAMS_TESTING
+        try {
+            spdlog::debug("[SRP] process_streaming enter mt={}",
+                          static_cast<int>(getMessageType(req_copy)));
+        } catch (...) {
+        }
+#endif
         // Use MessageType classification first to avoid variant-dependent ambiguity.
-        switch (getMessageType(request)) {
-            case MessageType::BatchEmbeddingRequest:
-                spdlog::debug("StreamingRequestProcessor: defer BatchEmbedding (deterministic)");
+        switch (getMessageType(req_copy)) {
+            case MessageType::BatchEmbeddingRequest: {
+                spdlog::debug("StreamingRequestProcessor: eager compute BatchEmbedding (no copy)");
                 mode_ = Mode::BatchEmbed;
-                pending_request_ = request;
+#ifdef YAMS_TESTING
+                spdlog::debug("[SRP] defer BatchEmbedding -> streaming");
+#endif
+// Observe original then normalize via protobuf round-trip to avoid cross-TU surprises
+#ifdef YAMS_TESTING
+                if (auto* be0 = std::get_if<BatchEmbeddingRequest>(&req_copy)) {
+                    spdlog::debug("[SRP] original BE texts.size={}", be0->texts.size());
+                }
+#endif
+                // Normalize the Request via protobuf round-trip to avoid any cross-TU surprises
+                Request normalized = req_copy;
+                try {
+                    Message m;
+                    m.version = PROTOCOL_VERSION;
+                    m.requestId = 0;
+                    m.payload = req_copy;
+                    if (auto enc = ProtoSerializer::encode_payload(m)) {
+                        if (auto dec = ProtoSerializer::decode_payload(enc.value())) {
+                            if (std::holds_alternative<Request>(dec.value().payload))
+                                normalized = std::get<Request>(dec.value().payload);
+                        }
+                    }
+                } catch (...) {
+                }
+#ifdef YAMS_TESTING
+                if (auto* be = std::get_if<BatchEmbeddingRequest>(&normalized)) {
+                    spdlog::debug("[SRP] pre-delegate BE texts.size={}", be->texts.size());
+                }
+#endif
+                auto final = co_await delegate_->process(normalized);
+                if (auto* r = std::get_if<BatchEmbeddingResponse>(&final)) {
+                    pending_total_ = r->successCount;
+                }
+                pending_final_ = std::move(final);
                 co_return std::nullopt;
-            case MessageType::EmbedDocumentsRequest:
-                spdlog::debug("StreamingRequestProcessor: defer EmbedDocuments (deterministic)");
+            }
+            case MessageType::EmbedDocumentsRequest: {
+                spdlog::debug("StreamingRequestProcessor: eager compute EmbedDocuments (no copy)");
                 mode_ = Mode::EmbedDocs;
-                pending_request_ = request;
+#ifdef YAMS_TESTING
+                spdlog::debug("[SRP] defer EmbedDocuments -> streaming");
+#endif
+#ifdef YAMS_TESTING
+                if (auto* ed0 = std::get_if<EmbedDocumentsRequest>(&req_copy)) {
+                    spdlog::debug("[SRP] original ED docs.size={}", ed0->documentHashes.size());
+                }
+#endif
+                Request normalized = req_copy;
+                try {
+                    Message m;
+                    m.version = PROTOCOL_VERSION;
+                    m.requestId = 0;
+                    m.payload = req_copy;
+                    if (auto enc = ProtoSerializer::encode_payload(m)) {
+                        if (auto dec = ProtoSerializer::decode_payload(enc.value())) {
+                            if (std::holds_alternative<Request>(dec.value().payload))
+                                normalized = std::get<Request>(dec.value().payload);
+                        }
+                    }
+                } catch (...) {
+                }
+#ifdef YAMS_TESTING
+                if (auto* ed = std::get_if<EmbedDocumentsRequest>(&normalized)) {
+                    spdlog::debug("[SRP] pre-delegate ED docs.size={}", ed->documentHashes.size());
+                }
+#endif
+                auto final = co_await delegate_->process(normalized);
+                if (auto* r = std::get_if<EmbedDocumentsResponse>(&final)) {
+                    pending_total_ = r->requested;
+                }
+                pending_final_ = std::move(final);
                 co_return std::nullopt;
+            }
             default:
                 break;
         }
 
-        if (std::holds_alternative<SearchRequest>(request)) {
+        if (std::holds_alternative<SearchRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer Search for deterministic paging");
             mode_ = Mode::Search;
-            pending_request_ = request;
+            pending_request_ = req_copy;
+            std::fprintf(stdout, "[DEBUG] SRP defer Search -> streaming\n");
             co_return std::nullopt;
         }
-        if (std::holds_alternative<ListRequest>(request)) {
+        if (std::holds_alternative<ListRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer List for deterministic paging");
             mode_ = Mode::List;
-            pending_request_ = request;
+            pending_request_ = req_copy;
+            std::fprintf(stdout, "[DEBUG] SRP defer List -> streaming\n");
             co_return std::nullopt;
         }
-        if (std::holds_alternative<GrepRequest>(request)) {
+        if (std::holds_alternative<GrepRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer Grep for deterministic paging");
             mode_ = Mode::Grep;
-            pending_request_ = request;
+            pending_request_ = req_copy;
+            std::fprintf(stdout, "[DEBUG] SRP defer Grep -> streaming\n");
             co_return std::nullopt;
         }
-        if (std::holds_alternative<AddDocumentRequest>(request)) {
+        if (std::holds_alternative<AddDocumentRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer AddDocument for header-first");
             // Mode None: single final chunk after heartbeat
-            pending_request_ = request;
+            pending_request_ = req_copy;
+            std::fprintf(stdout, "[DEBUG] SRP defer AddDocument -> streaming\n");
             co_return std::nullopt;
         }
         // Fallback: defer GenerateEmbedding / LoadModel to provide typed start events.
-        if (std::holds_alternative<GenerateEmbeddingRequest>(request) ||
-            std::holds_alternative<LoadModelRequest>(request)) {
+        if (std::holds_alternative<GenerateEmbeddingRequest>(req_copy) ||
+            std::holds_alternative<LoadModelRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer single-step embedding/model load");
-            pending_request_ = request;
+            pending_request_ = req_copy;
+            std::fprintf(stdout, "[DEBUG] SRP defer SingleStep -> streaming\n");
             co_return std::nullopt;
         }
 
         // Not a streaming-recognized request: delegate immediately.
-        co_return co_await delegate_->process(request);
+        co_return co_await delegate_->process(req_copy);
     } catch (...) {
         // On unexpected failure; choose streaming path so caller can still progress.
-        pending_request_ = request;
+        pending_request_ = req_copy;
         co_return std::nullopt;
     }
 }
+
+boost::asio::awaitable<std::optional<Response>>
+StreamingRequestProcessor::process_streaming(const Request& request) {
+    co_return co_await process_streaming_impl(Request{request});
+}
+
+boost::asio::awaitable<std::optional<Response>>
+StreamingRequestProcessor::process_streaming(Request&& request) {
+    co_return co_await process_streaming_impl(std::move(request));
+}
+
+// removed by-value overload to avoid ambiguity
 
 // -------------------- supports_streaming -----------------------------------
 bool StreamingRequestProcessor::supports_streaming(const Request& request) const {
@@ -136,11 +261,26 @@ bool StreamingRequestProcessor::supports_streaming(const Request& request) const
 // -------------------- next_chunk (deterministic) ---------------------------
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
     try {
+        // Unconditional debug: trace next_chunk entry and internal flags
+        try {
+#ifdef YAMS_TESTING
+            bool has_req = pending_request_.has_value();
+            spdlog::debug("[SRP] next_chunk enter has_pending={} heartbeat_sent={}",
+                          has_req ? 1 : 0, heartbeat_sent_ ? 1 : 0);
+#endif
+        } catch (...) {
+        }
         // 1) If we have a pending request and have not yet sent the initial heartbeat,
         //    synthesize a typed starter frame (never last).
-        if (pending_request_.has_value() && !heartbeat_sent_) {
+        if ((pending_request_.has_value() || pending_final_.has_value()) && !heartbeat_sent_) {
             heartbeat_sent_ = true;
-            auto mt = getMessageType(*pending_request_);
+            MessageType mt =
+                pending_request_.has_value()
+                    ? getMessageType(*pending_request_)
+                    : (mode_ == Mode::BatchEmbed
+                           ? MessageType::BatchEmbeddingRequest
+                           : (mode_ == Mode::EmbedDocs ? MessageType::EmbedDocumentsRequest
+                                                       : MessageType::SuccessResponse));
 
             switch (mt) {
                 case MessageType::SearchRequest: {
@@ -163,24 +303,13 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 case MessageType::BatchEmbeddingRequest:
                 case MessageType::EmbedDocumentsRequest:
                 case MessageType::GenerateEmbeddingRequest: {
-                    EmbeddingEvent ev{};
-                    if (auto* r = std::get_if<BatchEmbeddingRequest>(&*pending_request_))
-                        ev.modelName = r->modelName;
-                    if (auto* r = std::get_if<EmbedDocumentsRequest>(&*pending_request_))
-                        ev.modelName = r->modelName;
-                    if (auto* r = std::get_if<GenerateEmbeddingRequest>(&*pending_request_))
-                        ev.modelName = r->modelName;
-                    if (mt == MessageType::EmbedDocumentsRequest) {
-                        ev.total = std::get<EmbedDocumentsRequest>(*pending_request_)
-                                       .documentHashes.size();
-                    } else if (mt == MessageType::BatchEmbeddingRequest) {
-                        ev.total = std::get<BatchEmbeddingRequest>(*pending_request_).texts.size();
-                    } else {
-                        ev.total = 1;
-                    }
-                    ev.phase = "started";
-                    ev.message = "embedding started";
-                    co_return ResponseChunk{.data = Response{std::move(ev)},
+                    // Keep heartbeat simple to avoid reading cross-TU request fields
+                    SuccessResponse ok{"embedding started"};
+#ifdef YAMS_TESTING
+                    spdlog::debug("[SRP] heartbeat mt={} total={}", static_cast<int>(mt),
+                                  pending_total_);
+#endif
+                    co_return ResponseChunk{.data = Response{std::move(ok)},
                                             .is_last_chunk = false};
                 }
                 case MessageType::LoadModelRequest: {
@@ -200,17 +329,54 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         }
 
         // 2) After the heartbeat has been sent, act based on mode_ or message type.
-        if (pending_request_.has_value()) {
-            auto mt = getMessageType(*pending_request_);
+        if (pending_request_.has_value() || pending_final_.has_value()) {
+            auto mt = pending_request_.has_value()
+                          ? getMessageType(*pending_request_)
+                          : (mode_ == Mode::BatchEmbed
+                                 ? MessageType::BatchEmbeddingRequest
+                                 : (mode_ == Mode::EmbedDocs ? MessageType::EmbedDocumentsRequest
+                                                             : MessageType::SuccessResponse));
 
             // Embedding & model load types: compute once now and finish.
             if (mt == MessageType::BatchEmbeddingRequest ||
                 mt == MessageType::EmbedDocumentsRequest ||
                 mt == MessageType::GenerateEmbeddingRequest ||
                 mt == MessageType::LoadModelRequest) {
-                auto final = co_await delegate_->process(*pending_request_);
-                pending_request_.reset();
-                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+                // For embedding requests, route through delegate to avoid cross-TU/ODR
+                // surprises when reading variant fields in SRP. Delegate constructs the correct
+                // response using its local view of the request.
+                if (mt == MessageType::BatchEmbeddingRequest ||
+                    mt == MessageType::EmbedDocumentsRequest) {
+                    // Emit precomputed final to avoid copying cross-TU Request
+                    if (pending_final_.has_value()) {
+                        auto final = std::move(pending_final_.value());
+                        pending_final_.reset();
+                        pending_request_.reset();
+                        // Log counters for visibility
+                        if (std::holds_alternative<BatchEmbeddingResponse>(final)) {
+                            const auto& r = std::get<BatchEmbeddingResponse>(final);
+#ifdef YAMS_TESTING
+                            spdlog::debug(
+                                "[SRP] delegate final BatchEmbeddingResponse succ={} fail={}",
+                                r.successCount, r.failureCount);
+#endif
+                        } else if (std::holds_alternative<EmbedDocumentsResponse>(final)) {
+                            const auto& r = std::get<EmbedDocumentsResponse>(final);
+#ifdef YAMS_TESTING
+                            spdlog::debug(
+                                "[SRP] delegate final EmbedDocumentsResponse req={} emb={}",
+                                r.requested, r.embedded);
+#endif
+                        }
+                        co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+                    }
+                }
+                // For GenerateEmbedding/LoadModel, call delegate once and finish.
+                {
+                    auto final = co_await delegate_->process(*pending_request_);
+                    pending_request_.reset();
+                    co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+                }
             }
 
             // AddDocumentRequest: single final response after heartbeat.
@@ -271,9 +437,9 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
             auto& st = *search_;
             const std::size_t total = st.results.size();
-            const std::size_t n = compute_item_chunk_count(512);
             const std::size_t start = st.pos;
-            const std::size_t end = std::min(start + n, total);
+            const auto [s, e] = page_bounds(start, total, compute_item_chunk_count(512));
+            const std::size_t end = e;
 
             SearchResponse chunk;
             chunk.totalCount = st.totalCount;
@@ -300,9 +466,9 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
             auto& st = *list_;
             const std::size_t total = st.items.size();
-            const std::size_t n = compute_item_chunk_count(2048);
             const std::size_t start = st.pos;
-            const std::size_t end = std::min(start + n, total);
+            const auto [s, e] = page_bounds(start, total, compute_item_chunk_count(2048));
+            const std::size_t end = e;
 
             ListResponse chunk;
             chunk.totalCount = st.totalCount;
@@ -327,9 +493,9 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
             auto& st = *grep_;
             const std::size_t total = st.matches.size();
-            std::size_t n = compute_item_chunk_count(1024);
             const std::size_t start = st.pos;
-            const std::size_t end = std::min(start + n, total);
+            const auto [s, e] = page_bounds(start, total, compute_item_chunk_count(1024));
+            const std::size_t end = e;
 
             GrepResponse chunk;
             chunk.totalMatches = st.totalMatches;

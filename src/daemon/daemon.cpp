@@ -170,6 +170,19 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
 #endif
         spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
     }
+
+    // Ensure configured pluginDir is honored even when constructing daemon directly (tests) and
+    // not via daemon_main path which already sets configured plugin directories.
+    try {
+        if (!config_.pluginDir.empty()) {
+            PluginLoader::setConfiguredPluginDirectories({config_.pluginDir});
+            spdlog::info("Configured plugin directory set to: {}", config_.pluginDir.string());
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to set configured plugin directories: {}", e.what());
+    } catch (...) {
+        spdlog::warn("Unknown error while setting configured plugin directories");
+    }
 }
 
 YamsDaemon::~YamsDaemon() {

@@ -4,5 +4,8 @@ include(default)
 compiler.cppstd=20
 {% if os == "Macos" %}
 compiler.libcxx=libc++
+{% else %}
+compiler=clang
+compiler.libcxx=libstdc++11
 {% endif %}
 

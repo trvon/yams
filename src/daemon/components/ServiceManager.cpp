@@ -3,10 +3,13 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <ctime>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <optional>
 #include <thread>
+#include <unistd.h>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -19,180 +22,203 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/core/types.h>
+#include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkerPool.h>
-#include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
-#include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/plugin_loader.h>
-#include <yams/metadata/connection_pool.h>
-#include <yams/metadata/database.h>
-#include <yams/metadata/knowledge_graph_store.h>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
-#include <yams/plugins/content_extractor_v1.h>
-#include <yams/plugins/model_provider_v1.h>
-#include <yams/repair/embedding_repair_util.h>
-#include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/search/search_executor.h>
-#include <yams/vector/embedding_generator.h>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
-
-namespace yams::daemon {
 
 namespace {
-using nlohmann::json;
-
-static std::filesystem::path sentinel_path_for(const std::filesystem::path& dataDir) {
-    return dataDir / "vectors_sentinel.json";
-}
-
-static void write_vector_sentinel(const std::filesystem::path& dataDir, std::size_t embedding_dim,
-                                  const std::string& schema = "vec0",
-                                  std::uint32_t schema_version = 1) {
+std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
     try {
-        json j;
-        j["embedding_dim"] = embedding_dim;
-        j["schema"] = schema;
-        j["schema_version"] = schema_version;
-        j["updated"] = static_cast<std::int64_t>(std::time(nullptr));
-        auto p = sentinel_path_for(dataDir);
-        std::ofstream out(p);
-        out << j.dump(2);
-        out.close();
-        spdlog::debug("VECTOR_DB_SENTINEL write dim={} schema={} path={}", embedding_dim, schema,
-                      p.string());
-    } catch (...) {
-        // best-effort only
-    }
-}
-
-static std::optional<std::size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
-    try {
-        auto p = sentinel_path_for(dataDir);
-        if (!std::filesystem::exists(p))
+        namespace fs = std::filesystem;
+        if (dbPath.empty() || !fs::exists(dbPath))
             return std::nullopt;
-        std::ifstream in(p);
-        json j;
-        in >> j;
-        if (j.contains("embedding_dim"))
-            return j["embedding_dim"].get<std::size_t>();
+        yams::vector::SqliteVecBackend backend;
+        auto r = backend.initialize(dbPath.string());
+        if (!r)
+            return std::nullopt;
+        auto dimOpt = backend.getStoredEmbeddingDimension();
+        backend.close();
+        if (dimOpt && *dimOpt > 0)
+            return dimOpt;
     } catch (...) {
     }
     return std::nullopt;
 }
-
-// Inspect sqlite_master DDL to infer vec0 embedding dimension, if vectors.db exists
-static std::optional<std::size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
-    sqlite3* db = nullptr;
-    if (sqlite3_open(dbPath.string().c_str(), &db) != SQLITE_OK) {
-        if (db)
-            sqlite3_close(db);
-        return std::nullopt;
+void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
+                           const std::string& /*tableName*/, int schemaVersion) {
+    try {
+        namespace fs = std::filesystem;
+        fs::create_directories(dataDir);
+        nlohmann::json j;
+        j["embedding_dim"] = dim;
+        j["schema_version"] = schemaVersion;
+        j["written_at"] = std::time(nullptr);
+        std::ofstream out(dataDir / "vectors_sentinel.json");
+        if (out)
+            out << j.dump(2);
+    } catch (...) {
     }
-    const char* sql = "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
-    sqlite3_stmt* stmt = nullptr;
-    std::optional<std::size_t> out{};
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const unsigned char* txt = sqlite3_column_text(stmt, 0);
-            if (txt) {
-                std::string ddl(reinterpret_cast<const char*>(txt));
-                auto pos = ddl.find("float[");
-                if (pos != std::string::npos) {
-                    auto end = ddl.find(']', pos);
-                    if (end != std::string::npos && end > pos + 6) {
-                        std::string num = ddl.substr(pos + 6, end - (pos + 6));
-                        try {
-                            out = static_cast<std::size_t>(std::stoul(num));
-                        } catch (...) {
-                        }
-                    }
-                }
-            }
-        }
-        sqlite3_finalize(stmt);
-    }
-    sqlite3_close(db);
-    return out;
 }
-} // end anonymous namespace
+std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
+    try {
+        namespace fs = std::filesystem;
+        auto p = dataDir / "vectors_sentinel.json";
+        if (!fs::exists(p))
+            return std::nullopt;
+        std::ifstream in(p);
+        if (!in)
+            return std::nullopt;
+        nlohmann::json j;
+        in >> j;
+        if (j.contains("embedding_dim"))
+            return j["embedding_dim"].get<size_t>();
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+} // namespace
+
+// Open the daemon namespace for all following member definitions.
+namespace yams::daemon {
+using yams::Error;
+using yams::ErrorCode;
+using yams::Result;
+namespace search = yams::search;
 
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state)
     : config_(config), state_(state) {
-    // Initialize WAL metrics provider (may remain unattached until WAL subsystem is wired)
-    walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
-    // Initialize ABI plugin loader and trust policy file (~/.config/yams/plugins_trust.txt)
-    abiPluginLoader_ = std::make_unique<AbiPluginLoader>();
-    abiHost_ = std::make_unique<AbiPluginHost>(this);
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgHome;
-        if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-            cfgHome = fs::path(xdg);
-        else if (const char* home = std::getenv("HOME"))
-            cfgHome = fs::path(home) / ".config";
-        else
-            cfgHome = fs::path("~/.config");
-        auto trustFile = cfgHome / "yams" / "plugins_trust.txt";
-        abiPluginLoader_->setTrustFile(trustFile);
-        abiHost_->setTrustFile(trustFile);
-        wasmHost_ = std::make_unique<WasmPluginHost>(trustFile);
-        // Default-trust system plugin directories so installed plugins auto-load
+        spdlog::debug("ServiceManager constructor start");
+        // In test builds, prefer mock embedding provider unless explicitly disabled.
+        // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
+#ifdef YAMS_TESTING
         try {
-            for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
-                auto trustRes = abiHost_->trustAdd(dir);
-                if (!trustRes) {
-                    spdlog::warn("Failed to auto-trust plugin dir {}: {}", dir.string(),
-                                 trustRes.error().message);
-                } else {
-                    spdlog::debug("Auto-trusted plugin directory: {}", dir.string());
+            if (const char* mm = std::getenv("YAMS_USE_MOCK_PROVIDER"); !mm || !*mm) {
+                setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);
+                spdlog::debug("YAMS_TESTING: defaulting YAMS_USE_MOCK_PROVIDER=1");
+            }
+        } catch (...) {
+        }
+        // Default to auto-embed on AddDocument in tests unless explicitly turned off
+        try {
+            auto falsy = [](const char* s) {
+                if (!s)
+                    return false;
+                std::string v(s);
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                return v == "0" || v == "false" || v == "off" || v == "no";
+            };
+            if (!falsy(std::getenv("YAMS_EMBED_ON_ADD"))) {
+                embeddingsAutoOnAdd_ = true;
+                spdlog::debug("YAMS_TESTING: defaulting embeddingsAutoOnAdd_=true");
+            }
+        } catch (...) {
+        }
+#endif
+        // Initialize plugin hosts early so that environment-driven trust (YAMS_PLUGIN_DIR)
+        // can be applied before autoload attempts. Previously abiHost_ was never constructed,
+        // causing autoloadPluginsNow() to scan zero ABI roots and load 0 plugins.
+        try {
+            if (!abiHost_) {
+                // Use dataDir (may be empty here) for trust file persistence; it will be
+                // created later during initialize(). If empty, omit trust file persistence.
+                std::filesystem::path trustFile;
+                if (!config_.dataDir.empty()) {
+                    trustFile = config_.dataDir / "plugins.trust";
                 }
-
-                auto trustRes2 = abiPluginLoader_->trustAdd(dir);
-                if (!trustRes2) {
-                    spdlog::warn("Failed to auto-trust plugin dir {} for loader: {}", dir.string(),
-                                 trustRes2.error().message);
+                abiHost_ = std::make_unique<AbiPluginHost>(this, trustFile);
+                spdlog::debug("ServiceManager: AbiPluginHost initialized (trustFile='{}')",
+                              trustFile.string());
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("ServiceManager: failed to initialize AbiPluginHost: {}", e.what());
+        } catch (...) {
+            spdlog::warn("ServiceManager: unknown error initializing AbiPluginHost");
+        }
+        // Perform single-attempt guarded vector DB initialization early so dimension is known.
+        {
+            spdlog::debug("[Startup] invoking initializeVectorDatabaseOnce guard");
+            auto vres = initializeVectorDatabaseOnce(config_.dataDir);
+            if (!vres) {
+                spdlog::warn(
+                    "[Startup] vector database unavailable ({}). Continuing without vectors.",
+                    vres.error().message);
+            } else {
+                if (vres.value()) {
+                    spdlog::debug("[Startup] vector database initialized (dim={})",
+                                  state_.readiness.vectorDbDim.load());
                 } else {
-                    spdlog::debug("Auto-trusted plugin directory for loader: {}", dir.string());
+                    spdlog::debug("[Startup] vector database init skipped (already attempted)");
                 }
             }
-
-            // Also trust environment override if set
+        }
+        // Auto-trust plugin directory from env if provided.
+        try {
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 std::filesystem::path penv(env);
                 if (!penv.empty()) {
-                    auto tr1 = abiHost_->trustAdd(penv);
-                    if (!tr1) {
-                        spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}", penv.string(),
-                                     tr1.error().message);
-                    } else {
-                        spdlog::debug("Auto-trusted YAMS_PLUGIN_DIR: {}", penv.string());
+                    if (abiHost_) {
+                        if (auto tr1 = abiHost_->trustAdd(penv); !tr1) {
+                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}",
+                                         penv.string(), tr1.error().message);
+                        }
                     }
-                    auto tr2 = abiPluginLoader_->trustAdd(penv);
-                    if (!tr2) {
-                        spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR for loader {}: {}",
-                                     penv.string(), tr2.error().message);
-                    } else {
-                        spdlog::debug("Auto-trusted YAMS_PLUGIN_DIR for loader: {}", penv.string());
+                    if (abiPluginLoader_) {
+                        if (auto tr2 = abiPluginLoader_->trustAdd(penv); !tr2) {
+                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR for loader {}: {}",
+                                         penv.string(), tr2.error().message);
+                        }
                     }
                 }
             }
         } catch (const std::exception& e) {
             spdlog::warn("Exception during auto-trust setup: {}", e.what());
-        } catch (...) {
-            spdlog::warn("Unknown exception during auto-trust setup");
+        }
+
+        // Auto-trust configured plugin directory (config_.pluginDir) so that specifying
+        // pluginDir in DaemonConfig is sufficient without relying on YAMS_PLUGIN_DIR env.
+        try {
+            if (!config_.pluginDir.empty()) {
+                std::filesystem::path pconf = config_.pluginDir;
+                if (abiHost_) {
+                    if (auto trc = abiHost_->trustAdd(pconf); !trc) {
+                        spdlog::warn("Failed to trust configured pluginDir {}: {}", pconf.string(),
+                                     trc.error().message);
+                    } else {
+                        spdlog::debug("Trusted configured pluginDir {} for ABI host",
+                                      pconf.string());
+                    }
+                }
+                if (abiPluginLoader_) {
+                    if (auto trc2 = abiPluginLoader_->trustAdd(pconf); !trc2) {
+                        spdlog::warn(
+                            "Failed to trust configured pluginDir for legacy loader {}: {}",
+                            pconf.string(), trc2.error().message);
+                    } else {
+                        spdlog::debug("Trusted configured pluginDir {} for legacy plugin loader",
+                                      pconf.string());
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Exception trusting configured pluginDir: {}", e.what());
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception during ServiceManager constructor setup: {}", e.what());
-    } catch (...) {
-        spdlog::warn("Unknown exception during ServiceManager constructor setup");
     }
 }
 
@@ -200,7 +226,7 @@ ServiceManager::~ServiceManager() {
     shutdown();
 }
 
-Result<void> ServiceManager::initialize() {
+yams::Result<void> ServiceManager::initialize() {
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
     fs::path dataDir = config_.dataDir;
@@ -382,6 +408,249 @@ void ServiceManager::shutdown() {
     spdlog::info("ServiceManager: All services have been shut down.");
 }
 
+// Single-attempt vector database initialization. Safe to call multiple times; only
+// the first invocation performs work. Subsequent calls are cheap no-ops.
+yams::Result<bool>
+ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDir) {
+    // In-process guard
+    if (vectorDbInitAttempted_.exchange(true, std::memory_order_acq_rel)) {
+        spdlog::debug("[VectorInit] skipped (already attempted in this process)");
+        try {
+            state_.readiness.vectorDbInitAttempted = true;
+        } catch (...) {
+        }
+        return Result<bool>(false);
+    }
+    try {
+        state_.readiness.vectorDbInitAttempted = true;
+    } catch (...) {
+    }
+
+    // Honor global disable flags
+    auto is_on = [](const char* v) {
+        if (!v)
+            return false;
+        std::string s(v);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return s == "1" || s == "true" || s == "yes" || s == "on";
+    };
+    if (is_on(std::getenv("YAMS_DISABLE_VECTORS")) ||
+        is_on(std::getenv("YAMS_DISABLE_VECTOR_DB"))) {
+        spdlog::warn("[VectorInit] disabled via env flag");
+        return Result<bool>(false);
+    }
+
+    if (vectorDatabase_) {
+        spdlog::debug("[VectorInit] vectorDatabase_ already present; nothing to do");
+        return Result<bool>(false);
+    }
+
+    namespace fs = std::filesystem;
+    vector::VectorDatabaseConfig cfg;
+    cfg.database_path = (dataDir / "vectors.db").string();
+    bool exists = fs::exists(cfg.database_path);
+    cfg.create_if_missing = !exists; // permit creation on first run
+
+    // Resolve embedding dimension with precedence:
+    // 1. Existing DB DDL (if present)
+    // 2. Config file ~/.config/yams/config.toml
+    // 3. Env YAMS_EMBED_DIM
+    // 4. Embedding generator (if already available)
+    // 5. Fallback heuristic (384)
+    size_t dim = 0;
+    if (exists) {
+        try {
+            auto ddlDim = read_db_embedding_dim(cfg.database_path);
+            if (ddlDim && *ddlDim > 0)
+                dim = *ddlDim;
+        } catch (...) {
+        }
+    }
+    // Config file
+    if (dim == 0) {
+        try {
+            fs::path cfgHome;
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
+                cfgHome = fs::path(xdg);
+            else if (const char* home = std::getenv("HOME"))
+                cfgHome = fs::path(home) / ".config";
+            fs::path cpath = cfgHome / "yams" / "config.toml";
+            if (!cpath.empty() && fs::exists(cpath)) {
+                std::ifstream in(cpath);
+                std::string line;
+                auto trim = [](std::string& t) {
+                    if (t.empty())
+                        return;
+                    t.erase(0, t.find_first_not_of(" \t"));
+                    auto p = t.find_last_not_of(" \t");
+                    if (p != std::string::npos)
+                        t.erase(p + 1);
+                };
+                while (std::getline(in, line)) {
+                    std::string l = line;
+                    trim(l);
+                    if (l.empty() || l[0] == '#')
+                        continue;
+                    if (l.find("embeddings.embedding_dim") != std::string::npos) {
+                        auto eq = l.find('=');
+                        if (eq != std::string::npos) {
+                            std::string v = l.substr(eq + 1);
+                            trim(v);
+                            if (!v.empty() && v.front() == '"' && v.back() == '"')
+                                v = v.substr(1, v.size() - 2);
+                            try {
+                                dim = static_cast<size_t>(std::stoul(v));
+                            } catch (...) {
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+    // Env
+    if (dim == 0) {
+        try {
+            if (const char* envd = std::getenv("YAMS_EMBED_DIM"))
+                dim = static_cast<size_t>(std::stoul(envd));
+        } catch (...) {
+        }
+    }
+    // Generator
+    if (dim == 0) {
+        try {
+            if (embeddingGenerator_)
+                dim = embeddingGenerator_->getEmbeddingDimension();
+        } catch (...) {
+        }
+    }
+    if (dim == 0)
+        dim = 384;
+    cfg.embedding_dim = dim;
+
+    // Log start with PID/TID
+    auto tid = std::this_thread::get_id();
+    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={}",
+                 static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
+                 exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no", cfg.embedding_dim);
+
+    // Cross-process advisory lock to avoid concurrent init/extension loads
+    int lock_fd = -1;
+    std::filesystem::path lockPath =
+        std::filesystem::path(cfg.database_path).replace_extension(".lock");
+    try {
+        lock_fd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+        if (lock_fd >= 0) {
+            struct flock fl{};
+            fl.l_type = F_WRLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_start = 0;
+            fl.l_len = 0;
+            if (fcntl(lock_fd, F_SETLK, &fl) == -1) {
+                spdlog::info("[VectorInit] skipped (lock busy by another process)");
+                ::close(lock_fd);
+                lock_fd = -1;
+                return Result<bool>(false);
+            } else {
+                // Stamp pid for diagnostics
+                try {
+                    (void)ftruncate(lock_fd, 0);
+                    std::string stamp = std::to_string(static_cast<long long>(::getpid())) + "\n";
+                    (void)::write(lock_fd, stamp.data(), stamp.size());
+                    (void)lseek(lock_fd, 0, SEEK_SET);
+                } catch (...) {
+                }
+            }
+        } else {
+            spdlog::debug("[VectorInit] could not open lock file (continuing without lock)");
+        }
+    } catch (...) {
+        spdlog::debug("[VectorInit] lock setup error (continuing without lock)");
+    }
+
+    const int maxAttempts = 3;
+    int attempt = 0;
+    for (; attempt < maxAttempts; ++attempt) {
+        if (attempt > 0) {
+            // Exponential-ish backoff: 100ms, 300ms
+            int backoff_ms = (attempt == 1 ? 100 : 300);
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            spdlog::info("[VectorInit] retrying attempt {} of {}", attempt + 1, maxAttempts);
+        }
+        try {
+            auto vdb = std::make_shared<vector::VectorDatabase>(cfg);
+            if (!vdb->initialize()) {
+                auto err = vdb->getLastError();
+                spdlog::warn("[VectorInit] initialization attempt {} failed: {}", attempt + 1, err);
+                // Heuristic: retry on lock/busy/timeout errors; otherwise abort early
+                std::string el = err;
+                std::transform(el.begin(), el.end(), el.begin(), ::tolower);
+                bool transient = (el.find("busy") != std::string::npos) ||
+                                 (el.find("lock") != std::string::npos) ||
+                                 (el.find("locked") != std::string::npos) ||
+                                 (el.find("timeout") != std::string::npos);
+                if (!transient && attempt + 1 < maxAttempts) {
+                    // Non-transient: break out without further retries
+                    attempt = maxAttempts - 1; // signal final
+                }
+            } else {
+                vectorDatabase_ = std::move(vdb);
+                spdlog::info("[VectorInit] end pid={} tid={} path={} dim={} attempts={}",
+                             static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
+                             cfg.embedding_dim, attempt + 1);
+                try {
+                    state_.readiness.vectorDbReady = true;
+                    state_.readiness.vectorDbDim = static_cast<uint32_t>(cfg.embedding_dim);
+                } catch (...) {
+                }
+                // Sentinel write & quick health probes (best-effort)
+                try {
+                    write_vector_sentinel(dataDir, cfg.embedding_dim, "vec0", 1);
+                } catch (...) {
+                }
+                try {
+                    std::size_t rows = vectorDatabase_->getVectorCount();
+                    spdlog::debug("[VectorInit] current row count={} (initial)", rows);
+                } catch (...) {
+                }
+                try {
+                    auto sdim = read_vector_sentinel_dim(dataDir);
+                    if (sdim && *sdim != cfg.embedding_dim) {
+                        spdlog::warn("[VectorInit] sentinel dimension mismatch sentinel={} "
+                                     "actual={} — run 'yams doctor' if needed",
+                                     *sdim, cfg.embedding_dim);
+                    }
+                } catch (...) {
+                }
+                break; // success
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[VectorInit] exception attempt {}: {}", attempt + 1, e.what());
+        } catch (...) {
+            spdlog::warn("[VectorInit] unknown exception attempt {}", attempt + 1);
+        }
+    }
+    // Release advisory lock if held
+    if (lock_fd >= 0) {
+        struct flock fl{};
+        fl.l_type = F_UNLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start = 0;
+        fl.l_len = 0;
+        (void)fcntl(lock_fd, F_SETLK, &fl);
+        ::close(lock_fd);
+        lock_fd = -1;
+    }
+    if (!vectorDatabase_) {
+        spdlog::error("[VectorInit] all {} attempt(s) failed; continuing without vector DB",
+                      maxAttempts);
+        return Error{ErrorCode::DatabaseError, "vector database init failed after retries"};
+    }
+    return Result<bool>(true);
+}
+
 // Best-effort: write bootstrap status JSON so CLI can show progress before IPC is ready
 static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                                      const yams::daemon::StateComponent& state) {
@@ -404,18 +673,19 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         rd["model_provider"] = state.readiness.modelProviderReady.load();
         rd["vector_index"] = state.readiness.vectorIndexReady.load();
         rd["plugins"] = state.readiness.pluginsReady.load();
+        // Extended vector DB readiness fields
+        rd["vector_db_init_attempted"] = state.readiness.vectorDbInitAttempted.load();
+        rd["vector_db_ready"] = state.readiness.vectorDbReady.load();
+        rd["vector_db_dim"] = state.readiness.vectorDbDim.load();
         j["readiness"] = rd;
         nlohmann::json pr;
         pr["search_engine"] = state.readiness.searchProgress.load();
         pr["vector_index"] = state.readiness.vectorIndexProgress.load();
         pr["model_provider"] = state.readiness.modelLoadProgress.load();
         j["progress"] = pr;
-        // Naive ETA estimation per stage using defaults and coarse progress
-        // Defaults (seconds) used when no historical durations are available
         auto sec_since_start = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - state.stats.startTime)
                                    .count();
-        // Default expected durations per stage (tunable via env later if needed)
         std::map<std::string, int> expected_s{
             {"plugins", 1},      {"content_store", 2}, {"database", 2},       {"metadata_repo", 2},
             {"vector_index", 3}, {"search_engine", 4}, {"model_provider", 20}};
@@ -424,7 +694,6 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             if (ready)
                 return;
             int exp = expected_s.count(key) ? expected_s[key] : 5;
-            // Prefer observed durations from previous runs if present
             try {
                 if (state.initDurationsMs.count(key)) {
                     int hist = static_cast<int>((state.initDurationsMs.at(key) + 999) / 1000);
@@ -433,8 +702,6 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                 }
             } catch (...) {
             }
-            // Rough remaining estimate: exp * (1 - p) or exp - elapsed, whichever is more
-            // conservative
             int remain_by_pct = std::max(0, exp - (exp * progress) / 100);
             int remain_by_elapsed = std::max(0, exp - static_cast<int>(sec_since_start));
             int remain = std::max(remain_by_pct, remain_by_elapsed);
@@ -451,14 +718,12 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         add_eta("model_provider", state.readiness.modelProviderReady.load(),
                 state.readiness.modelLoadProgress.load());
         j["eta_seconds"] = eta;
-        // Include per-component init durations when available
         if (!state.initDurationsMs.empty()) {
             nlohmann::json dur;
             for (const auto& [k, v] : state.initDurationsMs) {
                 dur[k] = v;
             }
             j["durations_ms"] = dur;
-            // Also compute top 3 slowest that have finished
             std::vector<std::pair<std::string, uint64_t>> items(state.initDurationsMs.begin(),
                                                                 state.initDurationsMs.end());
             std::sort(items.begin(), items.end(),
@@ -485,1060 +750,11 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
     }
 }
 
-// Removed legacy initializeAsync() — all initialization uses coroutine path.
-#if 0
-                    auto trim = [](std::string& s) {
-                        if (s.empty())
-                            return;
-                        s.erase(0, s.find_first_not_of(" \t"));
-                        auto pos = s.find_last_not_of(" \t");
-                        if (pos != std::string::npos)
-                            s.erase(pos + 1);
-                    };
-
-                    while (std::getline(file, line)) {
-                        if (line.empty() || line[0] == '#')
-                            continue;
-
-                        if (!line.empty() && line[0] == '[') {
-                            size_t end = line.find(']');
-                            if (end != std::string::npos) {
-                                currentSection = line.substr(1, end - 1);
-                            } else {
-                                currentSection.clear();
-                            }
-                            continue;
-                        }
-
-                        size_t eq = line.find('=');
-                        if (eq == std::string::npos)
-                            continue;
-
-                        std::string key = line.substr(0, eq);
-                        std::string value = line.substr(eq + 1);
-                        trim(key);
-                        trim(value);
-
-                        // Strip inline comments
-                        size_t hashPos = value.find('#');
-                        if (hashPos != std::string::npos) {
-                            value = value.substr(0, hashPos);
-                            trim(value);
-                        }
-
-                        // Remove quotes if present
-                        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-                            value = value.substr(1, value.size() - 2);
-                        }
-
-                        if (currentSection == "embeddings") {
-                            if (key == "preferred_model" && prefModel.empty()) {
-                                prefModel = value;
-                            } else if (key == "model_path" && modelsRoot.empty()) {
-                                modelsRoot = value;
-                            } else if (key == "keep_model_hot") {
-                                std::string v = value;
-                                for (auto& c : v)
-                                    c = static_cast<char>(std::tolower(c));
-                                embeddingsKeepHot =
-                                    !(v == "false" || v == "0" || v == "no" || v == "off");
-                            } else if (key == "preload_on_startup") {
-                                std::string v = value;
-                                for (auto& c : v)
-                                    c = static_cast<char>(std::tolower(c));
-                                embeddingsPreloadOnStartup =
-                                    !(v == "false" || v == "0" || v == "no" || v == "off");
-                            } else if (key == "auto_on_add") {
-                                std::string v = value;
-                                for (auto& c : v)
-                                    c = static_cast<char>(std::tolower(c));
-                                embeddingsAutoOnAdd_ =
-                                    !(v == "false" || v == "0" || v == "no" || v == "off");
-                            }
-                        }
-                    }
-
-                    if (!modelsRoot.empty()) {
-                        poolCfg.modelsRoot = modelsRoot;
-                        spdlog::info("Embeddings models root set from config: {}", modelsRoot);
-                    }
-
-                    if (!prefModel.empty()) {
-                        auto& preloads = poolCfg.preloadModels;
-                        bool found = false;
-                        for (auto it = preloads.begin(); it != preloads.end(); ++it) {
-                            if (*it == prefModel) {
-                                if (it != preloads.begin()) {
-                                    preloads.erase(it);
-                                    preloads.insert(preloads.begin(), prefModel);
-                                }
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            preloads.insert(preloads.begin(), prefModel);
-                        }
-                        spdlog::info("Preferred embedding model set from config: {}", prefModel);
-                    }
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Failed to read embeddings config from {}: {}", cfgPath.string(),
-                             e.what());
-            }
-        }
-    }
-
-    // Map embeddings.keep_model_hot -> pool lazy loading
-    // keep_model_hot=false => lazyLoading=true; keep_model_hot=true => lazyLoading=false
-    poolCfg.lazyLoading = !embeddingsKeepHot;
-    // Startup banner for embedding-related decisions
-    try {
-        spdlog::info("Embeddings startup: keep_model_hot={}, preload_on_startup={}, lazyLoading={}",
-                     embeddingsKeepHot ? "true" : "false",
-                     embeddingsPreloadOnStartup ? "true" : "false",
-                     poolCfg.lazyLoading ? "true" : "false");
-    } catch (...) {
-    }
-
-    // Initialize model provider based on configuration
-    if (config_.enableModelProvider) {
-        try {
-            // Prefer host-backed model_provider_v1 via AbiPluginHost when trusted plugin is present
-            bool hostBacked = false;
-            if (abiHost_) {
-                try {
-                    for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
-                        auto scan = abiHost_->scanDirectory(dir);
-                        if (!scan)
-                            continue;
-                        for (const auto& d : scan.value()) {
-                            bool hasIface = false;
-                            for (const auto& id : d.interfaces) {
-                                if (id == std::string("model_provider_v1")) {
-                                    hasIface = true;
-                                    break;
-                                }
-                            }
-                            if (!hasIface)
-                                continue;
-                            // Attempt to load; trust policy enforced inside load()
-                            auto lr = abiHost_->load(d.path, "");
-                            if (!lr)
-                                continue;
-                            auto ifaceRes = abiHost_->getInterface(d.name, "model_provider_v1", 1);
-                            if (!ifaceRes)
-                                continue;
-                            auto* table =
-                                reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
-                            if (!table ||
-                                table->abi_version != YAMS_IFACE_MODEL_PROVIDER_V1_VERSION)
-                                continue;
-                            // Wrap vtable in ABI adapter
-                            modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
-                            hostBacked = (modelProvider_ != nullptr);
-                            break;
-                        }
-                        if (hostBacked)
-                            break;
-                    }
-                } catch (...) {
-                    // ignore and fallback
-                }
-            }
-            if (!hostBacked) {
-                modelProvider_ = createModelProvider(poolCfg);
-            }
-            if (modelProvider_) {
-                spdlog::info("Initialized {} model provider", modelProvider_->getProviderName());
-
-                // Embedding generator will be initialized later after all dependencies are ready
-                spdlog::debug("Model provider initialized, embedding generator initialization deferred");
-                state_.readiness.modelProviderReady = true;
-                try {
-                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - state_.stats.startTime)
-                                  .count();
-                    state_.initDurationsMs.emplace("model_provider", static_cast<uint64_t>(ms));
-                } catch (...) {
-                }
-                // Attempt preferred model preload in parallel with the rest of init
-                try {
-                    const char* disable = std::getenv("YAMS_DISABLE_MODEL_PRELOAD");
-                    bool skipPreload = false;
-                    if (disable && *disable) {
-                        std::string v(disable);
-                        for (auto& c : v)
-                            c = static_cast<char>(std::tolower(c));
-                        skipPreload = (v == "1" || v == "true" || v == "yes" || v == "on");
-                    }
-                    if (poolCfg.lazyLoading || !embeddingsKeepHot || !embeddingsPreloadOnStartup) {
-                        spdlog::info("Skipping model preload (lazy/loading config)");
-                        skipPreload = true;
-                    }
-                    spdlog::info("Embeddings preload decision: {}",
-                                 skipPreload ? "skipped" : "attempted");
-                    if (!skipPreload) {
-                        auto loaded = modelProvider_->getLoadedModels();
-                        if (loaded.empty()) {
-                            std::string preferred;
-                            if (!poolCfg.preloadModels.empty())
-                                preferred = poolCfg.preloadModels.front();
-                            if (preferred.empty())
-                                preferred = "all-MiniLM-L6-v2";
-                            spdlog::info("Preloading preferred embedding model (async): {}",
-                                         preferred);
-
-                            // Non-blocking preload with provider-driven progress; continue
-                            // initializing
-                            state_.readiness.modelLoadProgress.store(5, std::memory_order_relaxed);
-                            // Wire provider progress callback to readiness progress
-                            try {
-                                modelProvider_->setProgressCallback(
-                                    [this](const ModelLoadEvent& ev) {
-                                        int p = 0;
-                                        // Map phases to coarse progress if bytes not available
-                                        if (ev.bytesTotal > 0) {
-                                            p = static_cast<int>((ev.bytesLoaded * 100) /
-                                                                 ev.bytesTotal);
-                                        } else {
-                                            if (ev.phase == "started")
-                                                p = 5;
-                                            else if (ev.phase == "downloading")
-                                                p = 25;
-                                            else if (ev.phase == "initializing")
-                                                p = 50;
-                                            else if (ev.phase == "warming")
-                                                p = 80;
-                                            else if (ev.phase == "completed")
-                                                p = 100;
-                                            else if (ev.phase == "error")
-                                                p = 0;
-                                        }
-                                        p = std::clamp(p, 0, 100);
-                                        state_.readiness.modelLoadProgress.store(
-                                            p, std::memory_order_relaxed);
-                                        // Reflect into bootstrap file for early UI consumers
-                                        writeBootstrapStatusFile(config_, state_);
-                                    });
-                            } catch (...) {
-                            }
-
-                            // Launch on a detached thread to avoid blocking init path
-                            // Capture 'preferred' by value to avoid dangling reference
-                            std::thread([this, preferred]() {
-                                try {
-                                    // Soft timeout for model preload to avoid indefinite blocking
-                                    // Default 30s; override via YAMS_MODEL_LOAD_TIMEOUT_MS
-                                    int timeout_ms = 30000;
-                                    if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
-                                        try {
-                                            timeout_ms = std::stoi(env);
-                                            if (timeout_ms < 1000) timeout_ms = 1000;
-                                        } catch (...) {
-                                        }
-                                    }
-                                    auto fut = std::async(std::launch::async, [this, preferred]() {
-                                        return modelProvider_->loadModel(preferred);
-                                    });
-                                    if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
-                                        std::future_status::timeout) {
-                                        spdlog::warn(
-                                            "Preferred model preload timed out after {} ms (model='{}')",
-                                            timeout_ms, preferred);
-                                        state_.readiness.modelLoadProgress.store(
-                                            0, std::memory_order_relaxed);
-                                        // Mark provider degraded and try to unload any partial state
-                                        modelProviderDegraded_.store(true, std::memory_order_relaxed);
-                                        lastModelError_ = "preload timeout";
-                                        try { if (modelProvider_) (void)modelProvider_->unloadModel(preferred); } catch (...) {}
-                                        return; // Leave provider to complete in background if it can
-                                    }
-                                    auto lr = fut.get();
-                                    if (!lr) {
-                                        spdlog::warn("Preferred model preload failed: {}",
-                                                     lr.error().message);
-                                        state_.readiness.modelLoadProgress.store(
-                                            0, std::memory_order_relaxed);
-                                        modelProviderDegraded_.store(true, std::memory_order_relaxed);
-                                        lastModelError_ = std::string("preload failed: ") + lr.error().message;
-                                        try { if (modelProvider_) (void)modelProvider_->unloadModel(preferred); } catch (...) {}
-                                    } else {
-                                        state_.readiness.modelLoadProgress.store(
-                                            100, std::memory_order_relaxed);
-                                        spdlog::info("Preferred model '{}' preloaded", preferred);
-                                        clearModelProviderError();
-                                    }
-                                } catch (const std::exception& ex) {
-                                    spdlog::warn("Model preload exception: {}", ex.what());
-                                    state_.readiness.modelLoadProgress.store(
-                                        0, std::memory_order_relaxed);
-                                    modelProviderDegraded_.store(true, std::memory_order_relaxed);
-                                    lastModelError_ = std::string("preload exception: ") + ex.what();
-                                    try { if (modelProvider_) (void)modelProvider_->unloadModel(preferred); } catch (...) {}
-                                }
-                            }).detach();
-                        }
-                    } else {
-                        state_.readiness.modelLoadProgress.store(0, std::memory_order_relaxed);
-                        spdlog::info("Skipping model preload");
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Model preload attempt failed: {}", e.what());
-                    state_.readiness.modelLoadProgress.store(0, std::memory_order_relaxed);
-                }
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("Model provider initialization failed: {} - features disabled", e.what());
-        }
-    }
-
-    if (token.stop_requested())
-        return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
-
-    // Start worker pool for CPU-heavy tasks (embedding/model load)
-    try {
-        // Resolve worker thread count with precedence: env > config > conservative default
-        std::size_t threads = 0;
-        if (const char* wtenv = std::getenv("YAMS_WORKER_THREADS"); wtenv && *wtenv) {
-            try {
-                auto v = static_cast<std::size_t>(std::stoul(wtenv));
-                if (v > 0) threads = v;
-            } catch (...) {
-            }
-        }
-        if (threads == 0) {
-            if (config_.workerThreads > 0) {
-                threads = static_cast<std::size_t>(config_.workerThreads);
-            } else {
-                auto hw = std::thread::hardware_concurrency();
-                // Lower floor for idle footprint: quarter of hw, clamped to [1, 4]
-                unsigned base = hw > 0 ? (hw / 4u) : 1u;
-                base = std::clamp(base, 1u, 4u);
-                threads = static_cast<std::size_t>(base);
-            }
-        }
-
-        spdlog::info("WorkerPool threads resolved: chosen={} (env YAMS_WORKER_THREADS, config={}, hwc={})",
-                     threads, config_.workerThreads,
-                     std::max(1u, std::thread::hardware_concurrency()));
-        workerPool_ = std::make_shared<WorkerPool>(threads);
-        poolThreads_ = threads;
-
-        // Phase 6: initialize PoolManager config for IPC (CPU) and IPC IO components and start recon thread
-        try {
-            auto& pm = PoolManager::instance();
-            PoolManager::Config cfg;
-            // Lower the floor: keep at least 1 worker; scale up under load
-            cfg.min_size = 1;
-            // Allow the CPU worker pool to scale well beyond initial threads under backpressure
-            cfg.max_size = static_cast<std::uint32_t>(std::min<std::size_t>(std::max<std::size_t>(threads * 4, 8), 64));
-            cfg.cooldown_ms = 500;
-            cfg.low_watermark = 25;
-            cfg.high_watermark = 85;
-            pm.configure("ipc", cfg);
-            spdlog::info("PoolManager configured for 'ipc': min={}, max={}, cooldown_ms={}",
-                         cfg.min_size, cfg.max_size, cfg.cooldown_ms);
-
-            // Configure a separate pool for IPC IO workers; keep conservative limits
-            PoolManager::Config ioCfg;
-            ioCfg.min_size = 1;
-            // Max IO workers: up to 3/4 of hardware threads (fallback 4), at least 2
-            {
-                unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-                unsigned max_io = hw ? std::max(2u, (hw * 3u) / 4u) : 4u;
-                // Do not exceed total hardware threads
-                if (max_io > hw) max_io = hw;
-                ioCfg.max_size = static_cast<std::uint32_t>(max_io);
-            }
-            ioCfg.cooldown_ms = 500;
-            ioCfg.low_watermark = 25;
-            ioCfg.high_watermark = 85;
-            pm.configure("ipc_io", ioCfg);
-            spdlog::info("PoolManager configured for 'ipc_io': min={}, max={}, cooldown_ms={}",
-                         ioCfg.min_size, ioCfg.max_size, ioCfg.cooldown_ms);
-
-            poolReconThread_ = yams::compat::jthread([this](yams::compat::stop_token st) {
-                using namespace std::chrono_literals;
-                while (!st.stop_requested()) {
-                    auto stats = PoolManager::instance().stats("ipc");
-                    spdlog::trace(
-                        "Pool 'ipc': size={} resizes={} rejected_on_cap={} throttled_on_cooldown={}",
-                        stats.current_size, stats.resize_events, stats.rejected_on_cap,
-                        stats.throttled_on_cooldown);
-                    try {
-                        if (workerPool_) {
-                            // Align WorkerPool threads to PoolManager's current size
-                            workerPool_->resize(stats.current_size);
-                        }
-                    } catch (...) {
-                        // best-effort; continue
-                    }
-                    std::this_thread::sleep_for(1000ms);
-                }
-            });
-        } catch (...) {
-            spdlog::debug("PoolManager configuration skipped (not available)");
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("WorkerPool init failed: {}", e.what());
-    }
-
-    // Initialize database/storage and search primitives
-    try {
-        namespace fs = std::filesystem;
-        fs::path dataDir = config_.dataDir;
-        if (dataDir.empty()) {
-            if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
-                dataDir = fs::path(storageEnv);
-            } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
-                dataDir = fs::path(dataEnv);
-            } else if (const char* homeEnv = std::getenv("HOME")) {
-                dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-            } else {
-                dataDir = fs::path(".") / "yams_data";
-            }
-        }
-        std::error_code ec;
-        fs::create_directories(dataDir, ec);
-        spdlog::info("ServiceManager[async]: using data directory: {}", dataDir.string());
-
-        // Persist again here in case initialize() was bypassed in some flows
-        resolvedDataDir_ = dataDir;
-
-        auto storeRoot = dataDir / "storage";
-        spdlog::info("ContentStore root: {}", storeRoot.string());
-        auto storeRes = yams::api::ContentStoreBuilder::createDefault(storeRoot);
-        if (storeRes) {
-            // Convert unique_ptr to shared_ptr
-            auto& uniqueStore =
-                const_cast<std::unique_ptr<yams::api::IContentStore>&>(storeRes.value());
-            contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
-            state_.readiness.contentStoreReady = true;
-            try {
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - state_.stats.startTime)
-                              .count();
-                state_.initDurationsMs.emplace("content_store", static_cast<uint64_t>(ms));
-            } catch (...) {
-            }
-            spdlog::info("Content store initialized successfully");
-            writeBootstrapStatusFile(config_, state_);
-        }
-
-        if (token.stop_requested())
-            return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
-
-        auto dbPath = dataDir / "yams.db";
-        spdlog::info("Opening metadata database: {}", dbPath.string());
-        database_ = std::make_shared<metadata::Database>();
-        bool db_ok = false;
-        {
-            int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 5000, 250);
-            auto [completed, dbRes] = run_with_deadline(
-                [this, dbPath]() { return database_->open(dbPath.string(), metadata::ConnectionMode::Create); },
-                std::chrono::milliseconds(open_timeout));
-            if (!completed) {
-                spdlog::warn("Database open timed out after {} ms; continuing in degraded mode",
-                             open_timeout);
-            } else if (!dbRes) {
-                spdlog::warn("Database open failed: {} — continuing in degraded mode", dbRes.error().message);
-            } else {
-                db_ok = true;
-            }
-        }
-        if (db_ok) {
-            state_.readiness.databaseReady = true;
-        }
-        try {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - state_.stats.startTime)
-                          .count();
-            state_.initDurationsMs.emplace("database", static_cast<uint64_t>(ms));
-        } catch (...) {
-        }
-        if (db_ok) spdlog::info("Database opened successfully");
-        writeBootstrapStatusFile(config_, state_);
-
-        if (db_ok) {
-            metadata::MigrationManager mm(*database_);
-            mm.initialize();
-            mm.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
-            bool migrated = false;
-            {
-                int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 7000, 250);
-                auto [completed, r] = run_with_deadline([&mm]() { return mm.migrate(); },
-                                                        std::chrono::milliseconds(mig_timeout));
-                if (!completed) {
-                    spdlog::warn("Database migration timed out after {} ms; proceeding", mig_timeout);
-                } else if (!r) {
-                    spdlog::warn("Database migration failed: {} — proceeding", r.error().message);
-                } else {
-                    migrated = true;
-                }
-            }
-            (void)migrated;
-        }
-
-        if (db_ok) {
-            metadata::ConnectionPoolConfig dbPoolCfg;
-            // Aggressive defaults for read-heavy workloads
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(4, hw / 2), 16);
-            dbPoolCfg.maxConnections = 64;
-            // Env overrides for tuning
-            if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
-                try {
-                    auto v = static_cast<size_t>(std::stoul(envMax));
-                    if (v >= dbPoolCfg.minConnections)
-                        dbPoolCfg.maxConnections = v;
-                } catch (...) {
-                }
-            }
-            if (const char* envMin = std::getenv("YAMS_DB_POOL_MIN"); envMin && *envMin) {
-                try {
-                    auto v = static_cast<size_t>(std::stoul(envMin));
-                    if (v > 0)
-                        dbPoolCfg.minConnections = v;
-                } catch (...) {
-                }
-            }
-            connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
-            if (auto poolInit = connectionPool_->initialize(); !poolInit) {
-                spdlog::warn("Connection pool init failed: {} — continuing degraded", poolInit.error().message);
-            } else {
-                metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
-                state_.readiness.metadataRepoReady = true;
-            }
-        }
-        try {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - state_.stats.startTime)
-                          .count();
-            state_.initDurationsMs.emplace("metadata_repo", static_cast<uint64_t>(ms));
-        } catch (...) {
-        }
-        if (state_.readiness.metadataRepoReady.load())
-            spdlog::info("Metadata repository initialized successfully");
-        writeBootstrapStatusFile(config_, state_);
-
-        // Signal daemon ready as soon as core metadata/search executor infra is available.
-        // This avoids lifecycle being gated by optional model provider or vector index extras.
-        try {
-            if (initCompleteCallback_) {
-                initCompleteCallback_(true, "");
-                spdlog::info("Lifecycle Ready signal fired (source=metadata_repo)");
-                // Clear to avoid duplicate signals later
-                initCompleteCallback_ = nullptr;
-                // Schedule plugin autoload now that core is ready
-                try {
-                    bool enableAutoload = true;
-                    if (const char* env = std::getenv("YAMS_AUTOLOAD_PLUGINS")) {
-                        std::string v(env);
-                        for (auto& c : v)
-                            c = static_cast<char>(std::tolower(c));
-                        if (v == "0" || v == "false" || v == "off")
-                            enableAutoload = false;
-                    }
-                    if (enableAutoload && !pluginsAutoloadScheduled_.exchange(true)) {
-                        std::thread([this]() {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                            try {
-                                spdlog::info("Plugin autoload: scanning trusted roots and default directories");
-                                std::vector<std::filesystem::path> roots;
-                                if (abiHost_) {
-                                    for (const auto& p : abiHost_->trustList())
-                                        roots.push_back(p);
-                                }
-                                if (wasmHost_) {
-                                    for (const auto& p : wasmHost_->trustList())
-                                        roots.push_back(p);
-                                }
-                                try {
-                                    for (const auto& d :
-                                         PluginLoader::getDefaultPluginDirectories())
-                                        roots.push_back(d);
-                                } catch (...) {
-                                }
-                                try {
-                                    if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
-                                        std::filesystem::path penv(env);
-                                        if (!penv.empty())
-                                            roots.push_back(penv);
-                                    }
-                                } catch (...) {
-                                }
-                                std::sort(roots.begin(), roots.end());
-                                roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-                                spdlog::info("Plugin autoload: {} roots to scan", roots.size());
-                                size_t loaded_count = 0;
-                                for (const auto& r : roots) {
-                                    try {
-                                        if (abiHost_) {
-                                            if (auto sr = abiHost_->scanDirectory(r)) {
-                                                for (const auto& d : sr.value())
-                                                    if (abiHost_->load(d.path, "")) { ++loaded_count; }
-                                            }
-                                        }
-                                        if (wasmHost_) {
-                                            if (auto sr = wasmHost_->scanDirectory(r)) {
-                                                for (const auto& d : sr.value())
-                                                    if (wasmHost_->load(d.path, "")) { ++loaded_count; }
-                                            }
-                                        }
-                                    } catch (...) {
-                                    }
-                                }
-                                spdlog::info("Plugin autoload: loaded {} plugin(s)", loaded_count);
-                                auto mp = adoptModelProviderFromHosts();
-                                if (mp && mp.value()) {
-                                    spdlog::info("Plugin autoload: model provider adopted");
-                                } else {
-                                    spdlog::info("Plugin autoload: no model provider adopted");
-                                }
-                                auto ce = adoptContentExtractorsFromHosts();
-                                if (ce) {
-                                    spdlog::info("Plugin autoload: adopted {} content extractor(s)", ce.value());
-                                }
-                            } catch (...) {
-                            }
-                            writeBootstrapStatusFile(config_, state_);
-                        }).detach();
-                    }
-                } catch (...) {
-                }
-            }
-        } catch (...) {
-            // best-effort
-        }
-
-        if (database_ && metadataRepo_)
-            searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
-        retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
-
-        // Initialize Vector Database and Index Manager
-        // Note: VectorIndexManager is for in-memory indexes, but we need VectorDatabase for
-        // persistent storage For now, just create a basic VectorIndexManager for compatibility
-        try {
-            // Optional: allow disabling vector database via env for troubleshooting
-            bool disableVectors = false;
-            if (const char* env = std::getenv("YAMS_DISABLE_VECTORS")) {
-                std::string v(env);
-                for (auto& c : v) c = static_cast<char>(std::tolower(c));
-                disableVectors = (v == "1" || v == "true" || v == "yes" || v == "on");
-            }
-            if (disableVectors) {
-                spdlog::warn("Vector database initialization disabled by YAMS_DISABLE_VECTORS");
-            } else {
-                // Persistent VectorDatabase (SQLite) initialization
-                if (vectorDatabase_) { spdlog::debug("Skipping late VectorDB init (already initialized)"); } else
-            // Optional: allow disabling vector database initialization via env (e.g., for CI/CPUs
-            // without required instruction sets). Search will operate in keyword/metadata mode.
-            const bool disable_vecdb = [](){ if(const char* s=getenv("YAMS_DISABLE_VECTOR_DB")){ std::string v(s); std::transform(v.begin(),v.end(),v.begin(),::tolower); return v=="1"||v=="true"||v=="yes"||v=="on"; } return false; }();
-            try {
-                if (disable_vecdb) {
-                    spdlog::warn("Vector database initialization disabled by YAMS_DISABLE_VECTOR_DB");
-                }
-                vector::VectorDatabaseConfig vdbCfg;
-                vdbCfg.database_path = (dataDir / "vectors.db").string();
-
-                    // Decide create/open based on file existence
-                    namespace fs = std::filesystem;
-                    fs::path __vdbPath = dataDir / "vectors.db";
-                    bool __create = !fs::exists(__vdbPath);
-                    vdbCfg.create_if_missing = __create;
-                    std::string __vdim_src;
-                    size_t vdim = 0;
-                    if (__create) {
-                        // Resolve vector DB embedding dimension: config > env > generator > model > heuristic
-                        try {
-                            // Config first
-                            fs::path cfgHome;
-                            if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) cfgHome = fs::path(xdg);
-                            else if (const char* home = std::getenv("HOME")) cfgHome = fs::path(home) / ".config";
-                            fs::path cfgPath = cfgHome / "yams" / "config.toml";
-                            if (!cfgPath.empty() && fs::exists(cfgPath)) {
-                                std::ifstream in(cfgPath);
-                                std::string line;
-                                auto trim=[&](std::string& t){ if(t.empty()) return; t.erase(0,t.find_first_not_of(" 	")); auto p=t.find_last_not_of(" 	"); if(p!=std::string::npos) t.erase(p+1); };
-                                while (std::getline(in, line)) {
-                                    std::string l=line; trim(l); if(l.empty()||l[0]=='#') continue;
-                                    if (l.find("embeddings.embedding_dim")!=std::string::npos) {
-                                        auto eq=l.find('='); if(eq!=std::string::npos){ std::string v=l.substr(eq+1); trim(v); if(!v.empty()&&v.front()=='"'&&v.back()=='"') v=v.substr(1,v.size()-2); try{ vdim=static_cast<size_t>(std::stoul(v)); __vdim_src="config"; }catch(...){} }
-                                        if (vdim>0) break;
-                                    }
-                                }
-                            }
-                        } catch (...) {}
-                        if (vdim==0) { try { if (const char* envd = std::getenv("YAMS_EMBED_DIM")) { vdim = static_cast<size_t>(std::stoul(envd)); __vdim_src="env"; } } catch(...){} }
-                        if (vdim==0) { try { if (embeddingGenerator_) { vdim = embeddingGenerator_->getEmbeddingDimension(); if (vdim>0) __vdim_src="generator"; } } catch(...){} }
-                        if (vdim==0) { __vdim_src="heuristic"; vdim = 384; }
-                        spdlog::info("VECTOR_DB_CREATE dim={} source={} path={}", vdim, __vdim_src, vdbCfg.database_path);
-                    } else {
-                        spdlog::info("VECTOR_DB_OPEN path={}", vdbCfg.database_path);
-                    }
-
-                    vdbCfg.create_if_missing = false; // do not auto-create; doctor handles creation/migration
-                    // Resolve vector DB embedding dimension: config > env > generator > heuristic
-                    size_t vdim = 0;
-                    try {
-                        // Config first (embeddings.embedding_dim only)
-                        namespace fs = std::filesystem;
-                        fs::path cfgHome;
-                        if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) cfgHome = fs::path(xdg);
-                        else if (const char* home = std::getenv("HOME")) cfgHome = fs::path(home) / ".config";
-                        fs::path cfgPath = cfgHome / "yams" / "config.toml";
-                        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-                            std::ifstream in(cfgPath);
-                            std::string line;
-                            auto trim=[&](std::string& t){ if(t.empty()) return; t.erase(0,t.find_first_not_of(" \t")); auto p=t.find_last_not_of(" \t"); if(p!=std::string::npos) t.erase(p+1); };
-                            while (std::getline(in, line)) {
-                                std::string l=line; trim(l); if(l.empty()||l[0]=='#') continue;
-                                if (l.find("embeddings.embedding_dim")!=std::string::npos) {
-                                    auto eq=l.find('='); if(eq!=std::string::npos){ std::string v=l.substr(eq+1); trim(v); if(!v.empty()&&v.front()=='"'&&v.back()=='"') v=v.substr(1,v.size()-2); try{ vdim=static_cast<size_t>(std::stoul(v)); }catch(...){} }
-                                    break;
-                                }
-                            }
-                        }
-                    } catch (...) {}
-                    // Env next
-                    if (vdim == 0) { try { if (const char* envd = std::getenv("YAMS_EMBED_DIM")) vdim = static_cast<size_t>(std::stoul(envd)); } catch (...) {} }
-                    // Generator
-                    try { if (vdim == 0 && embeddingGenerator_) vdim = embeddingGenerator_->getEmbeddingDimension(); } catch (...) {}
-                    // Heuristic fallback
-                    if (vdim == 0) vdim = 384;
-                    vdbCfg.embedding_dim = vdim;
-                    if (!disable_vecdb) {
-                        auto vdb = std::make_shared<vector::VectorDatabase>(vdbCfg);
-                        if (vdb->initialize()) {
-                            vectorDatabase_ = std::move(vdb);
-                            spdlog::info("Vector database initialized at {}", vdbCfg.database_path);
-                        } else {
-                            spdlog::warn("Vector database not ready ({}). Use 'yams doctor --dim <N>' to create or migrate.", vdb->getLastError());
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Vector database init exception: {}", e.what());
-                }
-            }
-
-            vector::IndexConfig indexConfig;
-            // Derive index dimension from the same resolved dimension used for Vector DB
-            indexConfig.dimension = vdbCfg.embedding_dim;
-            indexConfig.type = vector::IndexType::FLAT; // Simple flat index for now
-
-            if (!disable_vecdb) {
-                vectorIndexManager_ = std::make_shared<vector::VectorIndexManager>(indexConfig);
-                if (auto initRes = vectorIndexManager_->initialize(); !initRes) {
-                    spdlog::warn("Failed to initialize VectorIndexManager: {}",
-                                 initRes.error().message);
-                    // Don't fail - vector search is optional
-                    vectorIndexManager_.reset();
-                } else {
-                    // Vector index subsystem is ready once the manager is initialized,
-                    // regardless of whether a persisted index exists yet.
-                    state_.readiness.vectorIndexReady = true;
-                try {
-                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - state_.stats.startTime)
-                                  .count();
-                    state_.initDurationsMs.emplace("vector_index", static_cast<uint64_t>(ms));
-                } catch (...) {
-                }
-                writeBootstrapStatusFile(config_, state_);
-
-                // Check if vectors.db exists and log informationally
-                auto vectorDbPath = dataDir / "vectors.db";
-                if (std::filesystem::exists(vectorDbPath)) {
-                    // TODO: Get actual count from vectors.db
-                    spdlog::info("VectorIndexManager initialized (vectors.db found at {})",
-                                 vectorDbPath.string());
-                } else {
-                    spdlog::info("VectorIndexManager initialized (no vectors.db yet)");
-                }
-                }
-            } else {
-                spdlog::warn("Vector index initialization disabled by YAMS_DISABLE_VECTOR_DB");
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception initializing VectorIndexManager: {}", e.what());
-            // Continue without vector support
-        }
-
-        // Initialize Embedding Generator.
-        // Prefer model provider; if unavailable, fall back to direct ONNX model discovery
-        // Embedding generator initialization is deferred until after plugins are loaded
-        // This ensures we can adopt model providers from plugins if available
-        spdlog::debug("Deferring embedding generator initialization until plugin loading phase");
-        } else {
-            // Fallback: try to initialize from ~/.yams/models
-            try {
-                namespace fs = std::filesystem;
-                std::string selected;
-                if (const char* home = std::getenv("HOME")) {
-                    fs::path models = fs::path(home) / ".yams" / "models";
-                    if (fs::exists(models) && fs::is_directory(models)) {
-                        for (const auto& entry : fs::directory_iterator(models)) {
-                            if (entry.is_directory() && fs::exists(entry.path() / "model.onnx")) {
-                                selected = entry.path().filename().string();
-                                break;
-                            }
-                        }
-                        if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
-                            std::string p(pref);
-                            if (fs::exists(models / p / "model.onnx")) selected = p;
-                        }
-                    }
-                }
-                if (!selected.empty()) {
-                    vector::EmbeddingConfig ecfg;
-                    if (const char* home = std::getenv("HOME")) {
-                        ecfg.model_path = (std::filesystem::path(home) / ".yams" / "models" / selected / "model.onnx").string();
-                    }
-                    ecfg.model_name = selected;
-                    if (selected == "all-MiniLM-L6-v2") ecfg.embedding_dim = 384; else ecfg.embedding_dim = 768;
-                    auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
-                    if (eg->initialize()) {
-                        embeddingGenerator_ = eg;
-                        spdlog::info("EmbeddingGenerator initialized from local model: {}", selected);
-
-                        // Align VectorIndexManager dimension to generator dimension if needed
-                        try {
-                            if (vectorIndexManager_) {
-                                size_t d = embeddingGenerator_->getEmbeddingDimension();
-                                if (d == 0) d = 768;
-                                if (vectorIndexManager_->getConfig().dimension != d) {
-                                    auto cfg = vectorIndexManager_->getConfig();
-                                    cfg.dimension = d;
-                                    vectorIndexManager_->setConfig(cfg);
-                                    auto rr = vectorIndexManager_->rebuildIndex();
-                                    if (!rr) {
-                                        spdlog::warn("VectorIndexManager rebuild with dim {} failed: {}", d, rr.error().message);
-                                    } else {
-                                        spdlog::info("VectorIndexManager dimension aligned to {}", d);
-                                    }
-                                }
-                            }
-                        } catch (...) { spdlog::debug("VectorIndexManager align skipped"); }
-                        state_.readiness.modelProviderReady = true; // generator available
-                        writeBootstrapStatusFile(config_, state_);
-                    } else {
-                        spdlog::warn("Local model present but EmbeddingGenerator init failed for {}", selected);
-                    }
-                } else {
-                    spdlog::info("No model provider and no local models detected; embeddings disabled");
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("EmbeddingGenerator local fallback failed: {}", e.what());
-            }
-        }
-
-        // Build and publish HybridSearchEngine when dependencies are available
-        try {
-            state_.readiness.searchProgress = 10; // starting
-            spdlog::debug("Search init progress: {}%", state_.readiness.searchProgress.load());
-            writeBootstrapStatusFile(config_, state_);
-            if (metadataRepo_) {
-                state_.readiness.searchProgress = 40; // repo ready
-                spdlog::debug("Search init progress: {}% (metadata ready)", state_.readiness.searchProgress.load());
-                writeBootstrapStatusFile(config_, state_);
-            }
-            if (vectorIndexManager_) {
-                state_.readiness.searchProgress = 70; // vector index ready (or optional)
-                spdlog::debug("Search init progress: {}% (vector index ready)", state_.readiness.searchProgress.load());
-                writeBootstrapStatusFile(config_, state_);
-            }
-
-            // Compose builder (KG store optional; embedding generator optional)
-            searchBuilder_ = std::make_shared<search::SearchEngineBuilder>();
-            spdlog::debug(
-                "Search builder preconditions: metadataRepo={} vectorIndexManager={} embeddingGenerator={}",
-                metadataRepo_ ? "yes" : "no", vectorIndexManager_ ? "yes" : "no",
-                embeddingGenerator_ ? "yes" : "no");
-            searchBuilder_->withMetadataRepo(metadataRepo_);
-            if (vectorIndexManager_) {
-                searchBuilder_->withVectorIndex(vectorIndexManager_);
-            }
-            if (embeddingGenerator_) {
-                searchBuilder_->withEmbeddingGenerator(embeddingGenerator_);
-            }
-
-            auto opts = search::SearchEngineBuilder::BuildOptions::makeDefault();
-            // Time-bound engine build to avoid blocking init
-            std::shared_ptr<search::HybridSearchEngine> built;
-            {
-                int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
-                auto [completed, engRes] = run_with_deadline(
-                    [this, opts]() { return searchBuilder_->buildEmbedded(opts); },
-                    std::chrono::milliseconds(build_timeout));
-                if (!completed) {
-                    spdlog::warn("HybridSearchEngine build timed out after {} ms; continuing degraded",
-                                 build_timeout);
-                } else if (engRes) {
-                    built = engRes.value();
-                } else {
-                    spdlog::warn("HybridSearchEngine build failed: {}", engRes.error().message);
-                }
-            }
-            if (built) {
-                {
-                    std::lock_guard<std::mutex> lk(searchEngineMutex_);
-                    searchEngine_ = built;
-                }
-                state_.readiness.searchEngineReady = true;
-                state_.readiness.searchProgress = 100;
-                spdlog::debug("Search init progress: {}% (engine ready)", state_.readiness.searchProgress.load());
-                writeBootstrapStatusFile(config_, state_);
-                try {
-                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - state_.stats.startTime)
-                                  .count();
-                    state_.initDurationsMs.emplace("search_engine", static_cast<uint64_t>(ms));
-                } catch (...) {
-                }
-                spdlog::info("HybridSearchEngine initialized and published to AppContext");
-                writeBootstrapStatusFile(config_, state_);
-
-                // Early-signal daemon readiness once core search is available.
-                // Optional subsystems (models, vector index persistence) continue initializing.
-                try {
-                    if (initCompleteCallback_) {
-                        initCompleteCallback_(true, "");
-                        spdlog::info("Lifecycle Ready signal fired (source=search_engine)");
-                        // Clear to avoid duplicate signals
-                        initCompleteCallback_ = nullptr;
-                    }
-                } catch (...) {
-                    // best-effort
-                }
-
-                // Schedule plugin autoload after core is ready to avoid blocking startup
-                try {
-                    bool enableAutoload = true;
-                    if (const char* env = std::getenv("YAMS_AUTOLOAD_PLUGINS")) {
-                        std::string v(env);
-                        for (auto& c : v)
-                            c = static_cast<char>(std::tolower(c));
-                        if (v == "0" || v == "false" || v == "off")
-                            enableAutoload = false;
-                    }
-                    if (enableAutoload && !pluginsAutoloadScheduled_.exchange(true)) {
-                        std::thread([this]() {
-                            // Small delay to ensure listeners are fully up
-                            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                            try {
-                                std::vector<std::filesystem::path> roots;
-                                if (abiHost_) {
-                                    for (const auto& p : abiHost_->trustList())
-                                        roots.push_back(p);
-                                }
-                                if (wasmHost_) {
-                                    for (const auto& p : wasmHost_->trustList())
-                                        roots.push_back(p);
-                                }
-                                try {
-                                    for (const auto& d :
-                                         PluginLoader::getDefaultPluginDirectories())
-                                        roots.push_back(d);
-                                } catch (...) {
-                                }
-                                try {
-                                    if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
-                                        std::filesystem::path penv(env);
-                                        if (!penv.empty())
-                                            roots.push_back(penv);
-                                    }
-                                } catch (...) {
-                                }
-                                std::sort(roots.begin(), roots.end());
-                                roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-                                for (const auto& r : roots) {
-                                    try {
-                                        if (abiHost_) {
-                                            if (auto sr = abiHost_->scanDirectory(r)) {
-                                                for (const auto& d : sr.value())
-                                                    (void)abiHost_->load(d.path, "");
-                                            }
-                                        }
-                                        if (wasmHost_) {
-                                            if (auto sr = wasmHost_->scanDirectory(r)) {
-                                                for (const auto& d : sr.value())
-                                                    (void)wasmHost_->load(d.path, "");
-                                            }
-                                        }
-                                    } catch (...) {
-                                    }
-                                }
-                                (void)adoptModelProviderFromHosts();
-                                (void)adoptContentExtractorsFromHosts();
-                            } catch (...) {
-                            }
-                            writeBootstrapStatusFile(config_, state_);
-                        }).detach();
-                    }
-                } catch (...) {
-                }
-            } else {
-                // Leave searchEngineReady=false; service layer will fallback to metadata search
-                writeBootstrapStatusFile(config_, state_);
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception wiring HybridSearchEngine: {}", e.what());
-        }
-
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError,
-                     std::string("Fatal error during service initialization: ") + e.what()};
-    }
-
-    // Initialize HybridSearchEngine so daemon services and MCP can use hybrid search
-    try {
-        if (!searchEngine_ && metadataRepo_ && vectorIndexManager_) {
-            search::SearchEngineBuilder builder;
-            builder.withVectorIndex(vectorIndexManager_).withMetadataRepo(metadataRepo_);
-            if (embeddingGenerator_) {
-                builder.withEmbeddingGenerator(embeddingGenerator_);
-            }
-
-            auto opts = search::SearchEngineBuilder::BuildOptions::makeDefault();
-            auto engRes = builder.buildEmbedded(opts);
-            if (engRes) {
-                std::lock_guard<std::mutex> lk(searchEngineMutex_);
-                searchEngine_ = engRes.value();
-                spdlog::info("HybridSearchEngine initialized (embedded, KG {}abled)",
-                             searchEngine_->getConfig().enable_kg ? "en" : "dis");
-            } else {
-                spdlog::warn("HybridSearchEngine build failed: {}", engRes.error().message);
-            }
-        } else {
-            spdlog::warn(
-                "HybridSearchEngine not initialized: missing vector index or metadata repo");
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("HybridSearchEngine bring-up error (ignored): {}", e.what());
-    }
-
-    // Watchdog: if core infra is ready but FSM did not flip, promote once after a short delay
-    try {
-        std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-            if (initCompleteCallback_ && state_.readiness.databaseReady.load() &&
-                state_.readiness.metadataRepoReady.load()) {
-                spdlog::info("Lifecycle Ready watchdog: promoting state based on core readiness");
-                try {
-                    initCompleteCallback_(true, "");
-                } catch (...) {
-                }
-                initCompleteCallback_ = nullptr;
-            }
-        }).detach();
-    } catch (...) {
-    }
-
-#endif
-
 boost::asio::awaitable<Result<void>>
 ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
+    // Vector DB initialization (single guarded attempt invoked earlier in constructor)
+    // Idempotent: safe if already attempted.
+    (void)initializeVectorDatabaseOnce(config_.dataDir);
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
     writeBootstrapStatusFile(config_, state_);
 
@@ -1558,13 +774,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     using namespace std::chrono_literals;
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Plugins ready immediately (host-driven); schedule autoload later
+    // Plugins step: mark ready (host scaffolding) and record duration uniformly
     try {
-        state_.readiness.pluginsReady = true;
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - state_.stats.startTime)
-                      .count();
-        state_.initDurationsMs.emplace("plugins", static_cast<uint64_t>(ms));
+        (void)init::record_duration(
+            "plugins",
+            [&]() -> yams::Result<void> {
+                state_.readiness.pluginsReady = true;
+                return yams::Result<void>();
+            },
+            state_.initDurationsMs);
     } catch (...) {
         state_.readiness.pluginsReady = true;
     }
@@ -1593,46 +811,51 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
 
-    // Content store (synchronous, quick)
+    // Content store (synchronous, quick) using init helpers
     auto storeRoot = dataDir / "storage";
     spdlog::info("ContentStore root: {}", storeRoot.string());
-    auto storeRes = yams::api::ContentStoreBuilder::createDefault(storeRoot);
-    if (storeRes) {
-        auto& uniqueStore =
-            const_cast<std::unique_ptr<yams::api::IContentStore>&>(storeRes.value());
-        contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
-        state_.readiness.contentStoreReady = true;
-        try {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - state_.stats.startTime)
-                          .count();
-            state_.initDurationsMs.emplace("content_store", static_cast<uint64_t>(ms));
-        } catch (...) {
+    {
+        using T = std::unique_ptr<yams::api::IContentStore>;
+        auto storeRes = init::record_duration(
+            "content_store",
+            [&]() -> yams::Result<T> {
+                return yams::api::ContentStoreBuilder::createDefault(storeRoot);
+            },
+            state_.initDurationsMs);
+        if (storeRes) {
+            auto& uniqueStore = const_cast<T&>(storeRes.value());
+            contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
+            state_.readiness.contentStoreReady = true;
+            writeBootstrapStatusFile(config_, state_);
+        } else {
+            spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
         }
-        writeBootstrapStatusFile(config_, state_);
     }
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
-    // Phase: Open metadata DB with timeout
+    // Phase: Open metadata DB with timeout (awaitable helper)
     auto dbPath = dataDir / "yams.db";
     database_ = std::make_shared<metadata::Database>();
     int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 5000, 250);
-    bool db_ok = co_await co_openDatabase(dbPath, open_timeout, token);
-    try {
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - state_.stats.startTime)
-                      .count();
-        state_.initDurationsMs.emplace("database", static_cast<uint64_t>(ms));
-    } catch (...) {
-    }
+    bool db_ok = co_await init::await_record_duration(
+        "database",
+        [&]() -> boost::asio::awaitable<bool> {
+            co_return co_await co_openDatabase(dbPath, open_timeout, token);
+        },
+        state_.initDurationsMs);
     writeBootstrapStatusFile(config_, state_);
 
     // Phase: Migrations (if DB ok)
     if (db_ok) {
         int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 7000, 250);
-        (void)co_await co_migrateDatabase(mig_timeout, token);
+        (void)co_await init::await_record_duration(
+            "migrations",
+            [&]() -> boost::asio::awaitable<bool> {
+                co_return co_await co_migrateDatabase(mig_timeout, token);
+            },
+            state_.initDurationsMs);
     }
 
     // Phase: Connection pool + repo
@@ -1658,20 +881,25 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
         connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
-        if (auto poolInit = connectionPool_->initialize(); !poolInit) {
+        auto poolInit = init::record_duration(
+            "db_pool", [&]() { return connectionPool_->initialize(); }, state_.initDurationsMs);
+        if (!poolInit) {
             spdlog::warn("Connection pool init failed: {} — continuing degraded",
                          poolInit.error().message);
         } else {
-            metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
-            state_.readiness.metadataRepoReady = true;
-            spdlog::info("Metadata repository initialized successfully");
-        }
-        try {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - state_.stats.startTime)
-                          .count();
-            state_.initDurationsMs.emplace("metadata_repo", static_cast<uint64_t>(ms));
-        } catch (...) {
+            auto repoRes = init::record_duration(
+                "metadata_repo",
+                [&]() -> yams::Result<void> {
+                    metadataRepo_ =
+                        std::make_shared<metadata::MetadataRepository>(*connectionPool_);
+                    state_.readiness.metadataRepoReady = true;
+                    spdlog::info("Metadata repository initialized successfully");
+                    return yams::Result<void>();
+                },
+                state_.initDurationsMs);
+            if (!repoRes) {
+                spdlog::warn("Metadata repository init failed: {}", repoRes.error().message);
+            }
         }
         writeBootstrapStatusFile(config_, state_);
     }
@@ -1681,164 +909,25 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
 
-    // Vector DB init (uses internal timeout in backend)
-    const bool __disable_vecdb = []() {
-        if (const char* s = getenv("YAMS_DISABLE_VECTOR_DB")) {
-            std::string v(s);
-            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-            return v == "1" || v == "true" || v == "yes" || v == "on";
-        }
-        return false;
-    }();
-    try {
-        vector::VectorDatabaseConfig vdbCfg;
-        vdbCfg.database_path = (dataDir / "vectors.db").string();
-        vdbCfg.create_if_missing = false;
-        // Resolve DB embedding dimension from config/env/generator
-        size_t vdim = 0;
-        std::optional<size_t> __storedDim{};
-        // If DB already exists, prefer its stored dimension to avoid mismatches
-        try {
-            namespace fs = std::filesystem;
-            auto vectorDbPath = dataDir / "vectors.db";
-            if (fs::exists(vectorDbPath)) {
-                auto d = read_db_embedding_dim(vectorDbPath);
-                if (d && *d > 0) {
-                    __storedDim = *d;
-                    vdim = *d;
-                    spdlog::info("VECTOR_DB_OPEN detected existing dim={} from DDL", vdim);
-                }
-            }
-        } catch (...) {
-        }
-        // 1) Environment override
-        try {
-            if (const char* envd = std::getenv("YAMS_EMBED_DIM"))
-                vdim = static_cast<size_t>(std::stoul(envd));
-        } catch (...) {
-        }
-        // 2) Config file
-        try {
-            if (true) {
-                namespace fs = std::filesystem;
-                fs::path cfgHome;
-                if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                    cfgHome = fs::path(xdg);
-                else if (const char* home = std::getenv("HOME"))
-                    cfgHome = fs::path(home) / ".config";
-                fs::path cfgPath = cfgHome / "yams" / "config.toml";
-                if (!cfgPath.empty() && fs::exists(cfgPath)) {
-                    std::ifstream in(cfgPath);
-                    std::string line;
-                    auto trim = [&](std::string& t) {
-                        if (t.empty())
-                            return;
-                        t.erase(0, t.find_first_not_of(" 	"));
-                        auto p = t.find_last_not_of(" 	");
-                        if (p != std::string::npos)
-                            t.erase(p + 1);
-                    };
-                    while (std::getline(in, line)) {
-                        std::string l = line;
-                        trim(l);
-                        if (l.empty() || l[0] == '#')
-                            continue;
-                        if (l.find("embeddings.embedding_dim") != std::string::npos) {
-                            auto eq = l.find('=');
-                            if (eq != std::string::npos) {
-                                std::string v = l.substr(eq + 1);
-                                trim(v);
-                                if (!v.empty() && v.front() == '"' && v.back() == '"')
-                                    v = v.substr(1, v.size() - 2);
-                                try {
-                                    vdim = static_cast<size_t>(std::stoul(v));
-                                } catch (...) {
-                                }
-                            }
-                            if (vdim > 0)
-                                break;
-                        }
-                    }
-                }
-            }
-        } catch (...) {
-        }
-        // 3) Generator (if already present)
-        try {
-            if (vdim == 0 && embeddingGenerator_)
-                vdim = embeddingGenerator_->getEmbeddingDimension();
-        } catch (...) {
-        }
-        // 4) Model heuristic removed; fallback applied below
-        if (vdim == 0)
-            vdim = 384;
-        vdbCfg.embedding_dim = vdim;
-        if (__disable_vecdb) {
-            spdlog::warn("Vector database initialization disabled by YAMS_DISABLE_VECTOR_DB");
-        }
-        if (!__disable_vecdb) {
-            auto vdb = std::make_shared<vector::VectorDatabase>(vdbCfg);
-            if (vdb->initialize()) {
-                vectorDatabase_ = std::move(vdb);
-                spdlog::info("Vector database initialized at {}", vdbCfg.database_path);
-                // Persist sentinel and perform quick health probes
-                try {
-                    write_vector_sentinel(resolvedDataDir_, vdim, "vec0", 1);
-                } catch (...) {
-                }
-                try {
-                    std::size_t rows = vectorDatabase_->getVectorCount();
-                    std::size_t docs = 0;
-                    if (metadataRepo_) {
-                        auto dc = metadataRepo_->getDocumentCount();
-                        if (dc)
-                            docs = static_cast<std::size_t>(dc.value());
-                    }
-                    if (docs > 0 && rows == 0) {
-                        spdlog::info("Vector DB is empty but {} documents exist — repair will "
-                                     "enqueue backlog after Ready.",
-                                     docs);
-                        // Auto-kick a bootstrap repair immediately (non-blocking).
-                        // RepairCoordinator will also run.
-                        try {
-                            // Ensure generator ready
-                            (void)ensureEmbeddingGeneratorReady();
-                            auto embedGen = getEmbeddingGenerator();
-                            auto store = getContentStore();
-                            auto meta = getMetadataRepo();
-                            auto extractors = getContentExtractors();
-                            if (embedGen && store && meta) {
-                                // Defer all embedding repairs to the RepairCoordinator once the
-                                // daemon is Ready.
-                                spdlog::info(
-                                    "Bootstrap repair: deferred to RepairCoordinator after Ready");
-                            }
-                        } catch (...) {
-                        }
-                    }
-                } catch (...) {
-                }
-                try {
-                    auto sdim = read_vector_sentinel_dim(resolvedDataDir_);
-                    if (sdim && *sdim != vdim) {
-                        spdlog::warn("VECTOR_DB_SENTINEL dimension mismatch: sentinel={} "
-                                     "expected={} — run 'yams doctor' if searches look off.",
-                                     *sdim, vdim);
-                    }
-                } catch (...) {
-                }
-            } else {
-                spdlog::warn("Vector database init failed ({}). Vector persistence disabled",
-                             vdb->getLastError());
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("Vector database init exception: {}", e.what());
-    }
+    // Vector DB initialization (single guarded attempt invoked earlier in constructor)
+    // Idempotent: safe if already attempted.
+    (void)initializeVectorDatabaseOnce(dataDir);
 
-    // Vector index manager
+    // Vector index manager (using init helpers)
     try {
-        const bool __disable_vecindex = __disable_vecdb;
+        // Determine if vector index should be disabled (environment flags)
+        const bool disableVecIndex = []() {
+            auto is_on = [](const char* v) {
+                if (!v)
+                    return false;
+                std::string s(v);
+                std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                return s == "1" || s == "true" || s == "yes" || s == "on";
+            };
+            return is_on(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                   is_on(std::getenv("YAMS_DISABLE_VECTOR_INDEX")) ||
+                   is_on(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+        }();
         vector::IndexConfig indexConfig;
         // Derive index dimension from Vector DB config if available; else fallback to
         // generator/heuristic
@@ -1859,21 +948,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             derivedIdxDim = 384;
         indexConfig.dimension = derivedIdxDim;
         indexConfig.type = vector::IndexType::FLAT;
-        if (!__disable_vecindex) {
+        if (!disableVecIndex) {
             vectorIndexManager_ = std::make_shared<vector::VectorIndexManager>(indexConfig);
-            if (auto initRes = vectorIndexManager_->initialize(); !initRes) {
+            auto initRes = init::record_duration(
+                "vector_index", [&]() { return vectorIndexManager_->initialize(); },
+                state_.initDurationsMs);
+            if (!initRes) {
                 spdlog::warn("Failed to initialize VectorIndexManager: {}",
                              initRes.error().message);
                 vectorIndexManager_.reset();
             } else {
                 state_.readiness.vectorIndexReady = true;
-                try {
-                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - state_.stats.startTime)
-                                  .count();
-                    state_.initDurationsMs.emplace("vector_index", static_cast<uint64_t>(ms));
-                } catch (...) {
-                }
                 writeBootstrapStatusFile(config_, state_);
             }
         } else {
@@ -1897,14 +982,26 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 enableAutoload = false;
         }
         if (enableAutoload) {
-            if (auto loadResult = autoloadPluginsNow(); loadResult) {
+            auto loadResult =
+                init::step<size_t>("plugin_autoload_now", [&]() { return autoloadPluginsNow(); });
+            if (loadResult) {
                 spdlog::info("ServiceManager: Autoloaded {} plugins.", loadResult.value());
-            } else {
-                spdlog::warn("ServiceManager: Plugin autoload failed: {}",
-                             loadResult.error().message);
             }
-            if (auto adoptResult = adoptModelProviderFromHosts();
-                adoptResult && adoptResult.value()) {
+            auto adoptResult = co_await init::await_with_retry<bool>(
+                [&]() -> boost::asio::awaitable<yams::Result<bool>> {
+                    // Wrap synchronous adoption in an awaitable
+                    co_return adoptModelProviderFromHosts();
+                },
+                /*attempts=*/3,
+                /*backoff*/ [](int n) { return n == 1 ? 100 : 300; });
+            // Log result uniformly
+            if (adoptResult) {
+                spdlog::info("[InitStep] adopt_model_provider: ok");
+            } else {
+                spdlog::warn("[InitStep] adopt_model_provider: failed: {}",
+                             adoptResult.error().message);
+            }
+            if (adoptResult && adoptResult.value()) {
                 spdlog::info("ServiceManager: Adopted model provider from plugins, starting "
                              "background initialization.");
                 // Non-blocking initialization of embedding generator and search engine rebuild
@@ -1937,9 +1034,37 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } else {
                 spdlog::info("ServiceManager: No model provider adopted from plugins.");
             }
-            if (auto extractorResult = adoptContentExtractorsFromHosts(); extractorResult) {
+            auto extractorResult = init::step<size_t>(
+                "adopt_extractors", [&]() { return adoptContentExtractorsFromHosts(); });
+            if (extractorResult) {
                 spdlog::info("ServiceManager: Adopted {} content extractors.",
                              extractorResult.value());
+            }
+        }
+        // If autoload is disabled but model provider is enabled, initialize a provider/generator
+        // now so embedding requests and LoadModel work under mocks/local.
+        if (!enableAutoload && config_.enableModelProvider) {
+            spdlog::info(
+                "Model provider enabled with autoload disabled; initializing provider now");
+            auto initRes = ensureEmbeddingGeneratorReady();
+            if (!initRes) {
+                spdlog::warn("Provider/generator init (no-autoload) failed: {}",
+                             initRes.error().message);
+            } else {
+                spdlog::info("Provider/generator ready (no-autoload)");
+                // Rebuild search engine to enable vector search now that embeddings are ready
+                try {
+                    auto executor = getWorkerExecutor();
+                    auto self = shared_from_this();
+                    boost::asio::co_spawn(
+                        executor,
+                        [self]() -> boost::asio::awaitable<void> {
+                            co_await self->co_enableEmbeddingsAndRebuild();
+                        },
+                        boost::asio::detached);
+                } catch (const std::exception& e) {
+                    spdlog::debug("Deferred rebuild scheduling failed: {}", e.what());
+                }
             }
         }
     } catch (const std::exception& e) {
@@ -1959,6 +1084,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             writeBootstrapStatusFile(config_, state_);
         }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
+        spdlog::info("[SearchBuild] scheduling initial build (vector_enabled hint={})",
+                     (embeddingGenerator_ && embeddingGenerator_->isInitialized()) ? "true"
+                                                                                   : "false");
+        // Nudge progress to indicate we're in the final build step
+        try {
+            state_.readiness.searchProgress =
+                std::max<int>(state_.readiness.searchProgress.load(), 90);
+        } catch (...) {
+        }
         auto built = co_await co_buildEngine(build_timeout, token, false);
         if (built) {
             std::lock_guard<std::mutex> lk(searchEngineMutex_);
@@ -1967,6 +1101,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.readiness.searchProgress = 100;
             writeBootstrapStatusFile(config_, state_);
             spdlog::info("HybridSearchEngine initialized and published to AppContext");
+        } else {
+            // Do not leave UI stuck below 100% when we are running degraded.
+            try {
+                state_.readiness.searchProgress = 100;
+            } catch (...) {
+            }
+            writeBootstrapStatusFile(config_, state_);
+            spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded");
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception wiring HybridSearchEngine: {}", e.what());
@@ -2100,6 +1242,20 @@ ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token,
                                bool includeEmbeddingGenerator) {
     using namespace boost::asio::experimental::awaitable_operators;
     auto ex = co_await boost::asio::this_coro::executor;
+    bool vector_enabled = false;
+    try {
+        vector_enabled = includeEmbeddingGenerator && embeddingGenerator_ &&
+                         embeddingGenerator_->isInitialized();
+    } catch (...) {
+    }
+    // Record intended reason: initial when not including embeddings; rebuild otherwise.
+    try {
+        this->lastSearchBuildReason_ = includeEmbeddingGenerator ? "rebuild" : "initial";
+    } catch (...) {
+    }
+    spdlog::info("[SearchBuild] start include_embeddings={} vector_enabled={} timeout_ms={}",
+                 includeEmbeddingGenerator ? "true" : "false", vector_enabled ? "true" : "false",
+                 timeout_ms);
     searchBuilder_ = std::make_shared<search::SearchEngineBuilder>();
     searchBuilder_->withMetadataRepo(metadataRepo_);
     if (vectorIndexManager_)
@@ -2124,8 +1280,12 @@ ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token,
         });
     } catch (...) {
         auto r = searchBuilder_->buildEmbedded(opts);
-        if (r)
+        if (r) {
+            spdlog::info("[SearchBuild] completed synchronously (fallback) ok vector_enabled={}",
+                         vector_enabled ? "true" : "false");
             co_return r.value();
+        }
+        spdlog::warn("[SearchBuild] failed synchronously (fallback)");
         co_return nullptr;
     }
 
@@ -2134,8 +1294,11 @@ ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token,
     auto which = co_await (ch.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
                            timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
     if (which.index() == 1 || token.stop_requested()) {
-        spdlog::warn("HybridSearchEngine build timed out after {} ms; continuing degraded",
-                     timeout_ms);
+        spdlog::warn("[SearchBuild] timeout after {} ms; continuing degraded", timeout_ms);
+        try {
+            this->lastSearchBuildReason_ = "degraded";
+        } catch (...) {
+        }
         co_return nullptr;
     }
     auto tup2 = std::move(std::get<0>(which));
@@ -2143,8 +1306,19 @@ ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token,
     auto pres2 = std::get<1>(tup2);
     if (ec2 || !pres2 || !(*pres2)) {
         if (pres2 && (*pres2))
-            spdlog::warn("HybridSearchEngine build failed: {}", pres2->error().message);
+            spdlog::warn("[SearchBuild] failed: {}", pres2->error().message);
+        else
+            spdlog::warn("[SearchBuild] failed: unknown error");
+        try {
+            this->lastSearchBuildReason_ = "degraded";
+        } catch (...) {
+        }
         co_return nullptr;
+    }
+    spdlog::info("[SearchBuild] end ok vector_enabled={}", vector_enabled ? "true" : "false");
+    try {
+        this->lastVectorEnabled_ = vector_enabled;
+    } catch (...) {
     }
     co_return pres2->value();
 }
@@ -2360,6 +1534,17 @@ boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
 
 Result<size_t> ServiceManager::autoloadPluginsNow() {
     try {
+        // In mock/test mode, skip scanning/loading ABI plugins entirely to avoid
+        // platform-specific crashes from dlopen or missing runtimes. The embedding
+        // stack will use the mock provider instead.
+        if (const char* m = std::getenv("YAMS_USE_MOCK_PROVIDER"); m && *m) {
+            spdlog::info("Plugin autoload skipped (YAMS_USE_MOCK_PROVIDER set)");
+            return Result<size_t>(0);
+        }
+        if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
+            spdlog::info("Plugin autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
+            return Result<size_t>(0);
+        }
         std::vector<std::filesystem::path> roots;
         if (abiHost_) {
             for (const auto& p : abiHost_->trustList())
@@ -2387,14 +1572,46 @@ Result<size_t> ServiceManager::autoloadPluginsNow() {
         roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
 
         spdlog::info("Plugin autoload(now): {} roots to scan", roots.size());
+        for (const auto& r : roots) {
+            spdlog::debug("Plugin autoload(now): root {}", r.string());
+        }
         size_t loaded_count = 0;
         for (const auto& r : roots) {
             try {
                 if (abiHost_) {
                     if (auto sr = abiHost_->scanDirectory(r)) {
+                        if (sr.value().empty()) {
+                            spdlog::debug("Plugin autoload(now): no candidates in {}", r.string());
+                        }
                         for (const auto& d : sr.value()) {
-                            if (abiHost_->load(d.path, ""))
+                            spdlog::debug(
+                                "Plugin autoload(now): candidate '{}' path='{}' ifaces=[{}]",
+                                d.name, d.path.string(), [&]() {
+                                    std::string s;
+                                    for (size_t i = 0; i < d.interfaces.size(); ++i) {
+                                        if (i)
+                                            s += ",";
+                                        s += d.interfaces[i];
+                                    }
+                                    return s;
+                                }());
+                            auto lr = abiHost_->load(d.path, "");
+                            if (lr) {
                                 ++loaded_count;
+                                spdlog::info("Plugin autoload(now): loaded '{}' (ifaces=[{}])",
+                                             d.name, [&]() {
+                                                 std::string s;
+                                                 for (size_t i = 0; i < d.interfaces.size(); ++i) {
+                                                     if (i)
+                                                         s += ",";
+                                                     s += d.interfaces[i];
+                                                 }
+                                                 return s;
+                                             }());
+                            } else {
+                                spdlog::warn("Plugin autoload(now): load failed '{}' : {}", d.name,
+                                             lr.error().message);
+                            }
                         }
                     }
                 }
@@ -2438,6 +1655,10 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
     }
 
     try {
+        (void)init::step<void>("schedule_model_preload", [&]() -> yams::Result<void> {
+            spdlog::info("Scheduling preferred model preload (async)");
+            return yams::Result<void>();
+        });
         // Skip if embedding generator is already initialized
         if (embeddingGenerator_ && embeddingGenerator_->isInitialized()) {
             spdlog::debug("preloadPreferredModelIfConfigured: embedding generator already "
@@ -2579,13 +1800,15 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
 
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     if (embedInitStarted_.exchange(true)) {
+        spdlog::debug("[Rebuild] skip: embedding init already started");
         co_return; // Already started
     }
 
     try {
+        spdlog::info("[Rebuild] start reason=embeddings_ready");
         auto res = ensureEmbeddingGeneratorReady();
         if (!res) {
-            spdlog::warn("Embedding init failed (deferred): {}", res.error().message);
+            spdlog::warn("[Rebuild] embedding init failed: {}", res.error().message);
             co_return;
         }
 
@@ -2594,8 +1817,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         // Protect against concurrent rebuilds
         if (!rebuildInProgress_.exchange(true)) {
-            spdlog::info(
-                "Embedding generator ready, rebuilding search engine to enable vector search.");
+            spdlog::info("[Rebuild] search engine rebuild begin (enable vector scoring)");
             int build_timeout = 15000; // Generous timeout for rebuild
             auto rebuilt = co_await co_buildEngine(build_timeout, {}, true);
 
@@ -2611,18 +1833,17 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
                 state_.readiness.vectorIndexReady = true;
                 writeBootstrapStatusFile(config_, state_);
 
-                spdlog::info("HybridSearchEngine rebuilt with embedding generator. Vector search "
-                             "is now active.");
+                spdlog::info("[Rebuild] done ok: vector scoring enabled");
             } else {
-                spdlog::warn("Failed to rebuild HybridSearchEngine with embedding generator.");
+                spdlog::warn("[Rebuild] failed: engine rebuild unsuccessful");
             }
 
             rebuildInProgress_ = false;
         } else {
-            spdlog::debug("Search engine rebuild already in progress, skipping duplicate request.");
+            spdlog::debug("[Rebuild] skip: rebuild already in progress");
         }
     } catch (const std::exception& e) {
-        spdlog::warn("co_enableEmbeddingsAndRebuild error: {}", e.what());
+        spdlog::warn("[Rebuild] error: {}", e.what());
         rebuildInProgress_ = false;
     }
 }
@@ -2643,7 +1864,7 @@ std::shared_ptr<search::HybridSearchEngine> ServiceManager::getSearchEngineSnaps
     return searchEngine_;
 }
 
-app::services::AppContext ServiceManager::getAppContext() const {
+yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = contentStore_;
@@ -2711,9 +1932,7 @@ size_t ServiceManager::getWorkerQueueDepth() const {
     return 0;
 }
 
-} // namespace yams::daemon
-
-namespace yams::daemon {
+// (Namespace yams::daemon remains open for subsequent member definitions)
 
 Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
     try {
@@ -2731,61 +1950,76 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
 
         // Try to get or create a model provider
         if (!modelProvider_ || !modelProvider_->isAvailable()) {
-            spdlog::debug("Model provider not available, attempting to load plugins");
-            (void)autoloadPluginsNow();
-            auto adopted = adoptModelProviderFromHosts();
-            if (!adopted || !adopted.value()) {
-                spdlog::debug("No model provider adopted from plugins, trying local fallback");
-                // Fallback to local model generator when provider not available
+            // In mock/test mode, prefer an in-process mock provider and skip plugin loading
+            if (const char* m = std::getenv("YAMS_USE_MOCK_PROVIDER"); m && *m) {
+                spdlog::info("Using mock model provider (env)");
                 try {
-                    std::string preferred_local;
-                    if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
-                        preferred_local = envp;
-                    }
-                    if (preferred_local.empty()) {
-                        namespace fs = std::filesystem;
-                        if (const char* home = std::getenv("HOME")) {
-                            fs::path models = fs::path(home) / ".yams" / "models";
-                            std::error_code ec;
-                            if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                                for (const auto& e : fs::directory_iterator(models, ec)) {
-                                    if (e.is_directory() &&
-                                        fs::exists(e.path() / "model.onnx", ec)) {
-                                        preferred_local = e.path().filename().string();
-                                        break;
+                    modelProvider_ = std::shared_ptr<IModelProvider>(
+                        createModelProvider(/*preferredProvider=*/""));
+                    state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Failed to instantiate mock provider: {}", e.what());
+                }
+            }
+            if (modelProvider_ && modelProvider_->isAvailable()) {
+                spdlog::debug("Mock provider ready; skipping plugin adoption");
+            } else {
+                spdlog::debug("Model provider not available, attempting to load plugins");
+                (void)autoloadPluginsNow();
+                auto adopted = adoptModelProviderFromHosts();
+                if (!adopted || !adopted.value()) {
+                    spdlog::debug("No model provider adopted from plugins, trying local fallback");
+                    // Fallback to local model generator when provider not available
+                    try {
+                        std::string preferred_local;
+                        if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
+                            preferred_local = envp;
+                        }
+                        if (preferred_local.empty()) {
+                            namespace fs = std::filesystem;
+                            if (const char* home = std::getenv("HOME")) {
+                                fs::path models = fs::path(home) / ".yams" / "models";
+                                std::error_code ec;
+                                if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
+                                    for (const auto& e : fs::directory_iterator(models, ec)) {
+                                        if (e.is_directory() &&
+                                            fs::exists(e.path() / "model.onnx", ec)) {
+                                            preferred_local = e.path().filename().string();
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    if (!preferred_local.empty()) {
-                        vector::EmbeddingConfig ecfg;
-                        if (const char* home = std::getenv("HOME")) {
-                            ecfg.model_path = (std::filesystem::path(home) / ".yams" / "models" /
-                                               preferred_local / "model.onnx")
-                                                  .string();
+                        if (!preferred_local.empty()) {
+                            vector::EmbeddingConfig ecfg;
+                            if (const char* home = std::getenv("HOME")) {
+                                ecfg.model_path = (std::filesystem::path(home) / ".yams" /
+                                                   "models" / preferred_local / "model.onnx")
+                                                      .string();
+                            }
+                            ecfg.model_name = preferred_local;
+                            ecfg.backend = vector::EmbeddingConfig::Backend::Hybrid;
+                            ecfg.daemon_auto_start = false;
+                            auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
+                            if (eg->initialize()) {
+                                embeddingGenerator_ = eg;
+                                spdlog::info("EmbeddingGenerator initialized from local model: {}",
+                                             preferred_local);
+                                alignVectorComponentDimensions();
+                                return Result<void>();
+                            } else {
+                                spdlog::warn(
+                                    "Failed to initialize local EmbeddingGenerator for model: {}",
+                                    preferred_local);
+                            }
                         }
-                        ecfg.model_name = preferred_local;
-                        ecfg.backend = vector::EmbeddingConfig::Backend::Hybrid;
-                        ecfg.daemon_auto_start = false;
-                        auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
-                        if (eg->initialize()) {
-                            embeddingGenerator_ = eg;
-                            spdlog::info("EmbeddingGenerator initialized from local model: {}",
-                                         preferred_local);
-                            alignVectorComponentDimensions();
-                            return Result<void>();
-                        } else {
-                            spdlog::warn(
-                                "Failed to initialize local EmbeddingGenerator for model: {}",
-                                preferred_local);
-                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Exception during local model fallback: {}", e.what());
                     }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Exception during local model fallback: {}", e.what());
+                    return Error{ErrorCode::NotInitialized,
+                                 "Model provider not available and local fallback failed"};
                 }
-                return Error{ErrorCode::NotInitialized,
-                             "Model provider not available and local fallback failed"};
             }
         }
 
@@ -2884,6 +2118,47 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                      preferred);
         alignVectorComponentDimensions();
 
+        return Result<void>();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, e.what()};
+    }
+}
+
+Result<void> ServiceManager::ensureEmbeddingGeneratorFor(const std::string& modelName) {
+    try {
+        if (modelName.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Model name is empty"};
+        }
+        if (!modelProvider_ || !modelProvider_->isAvailable()) {
+            return Error{ErrorCode::NotInitialized, "Model provider not available"};
+        }
+        // Create and initialize embedding generator bound to the provider-loaded model via daemon
+        size_t providerDim = 0;
+        size_t providerMaxSeq = 0;
+        try {
+            providerDim = modelProvider_->getEmbeddingDim(modelName);
+            if (auto mi = modelProvider_->getModelInfo(modelName)) {
+                providerMaxSeq = mi.value().maxSequenceLength;
+            }
+        } catch (...) {
+        }
+        vector::EmbeddingConfig ecfg;
+        ecfg.backend = vector::EmbeddingConfig::Backend::Daemon;
+        ecfg.model_name = modelName;
+        if (providerDim > 0)
+            ecfg.embedding_dim = providerDim;
+        if (providerMaxSeq > 0)
+            ecfg.max_sequence_length = providerMaxSeq;
+        ecfg.daemon_auto_start = false;
+        auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
+        if (!eg->initialize()) {
+            modelProviderDegraded_.store(true, std::memory_order_relaxed);
+            lastModelError_ = "embedding_generator_init_failed";
+            return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
+        }
+        embeddingGenerator_ = std::move(eg);
+        clearModelProviderError();
+        alignVectorComponentDimensions();
         return Result<void>();
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError, e.what()};

@@ -256,61 +256,69 @@ public:
     // Request types are already in the yams::mcp namespace
 
     // Test methods for unit testing
-    yams::Task<Result<MCPSearchResponse>> testHandleSearchDocuments(const MCPSearchRequest& req) {
+    boost::asio::awaitable<Result<MCPSearchResponse>>
+    testHandleSearchDocuments(const MCPSearchRequest& req) {
         return handleSearchDocuments(req);
     }
-    yams::Task<Result<MCPGrepResponse>> testHandleGrepDocuments(const MCPGrepRequest& req) {
+    boost::asio::awaitable<Result<MCPGrepResponse>>
+    testHandleGrepDocuments(const MCPGrepRequest& req) {
         return handleGrepDocuments(req);
     }
-    yams::Task<Result<MCPRetrieveDocumentResponse>>
+    boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>
     testHandleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         return handleRetrieveDocument(req);
     }
-    yams::Task<Result<MCPListDocumentsResponse>>
+    boost::asio::awaitable<Result<MCPListDocumentsResponse>>
     testHandleListDocuments(const MCPListDocumentsRequest& req) {
         return handleListDocuments(req);
     }
-    yams::Task<Result<MCPStatsResponse>> testHandleGetStats(const MCPStatsRequest& req) {
+    boost::asio::awaitable<Result<MCPStatsResponse>>
+    testHandleGetStats(const MCPStatsRequest& req) {
         return handleGetStats(req);
     }
 #endif
 
 private:
     // Modern C++20 tool handlers (type-safe, clean)
-    yams::Task<Result<MCPSearchResponse>> handleSearchDocuments(const MCPSearchRequest& req);
-    yams::Task<Result<MCPGrepResponse>> handleGrepDocuments(const MCPGrepRequest& req);
-    yams::Task<Result<MCPDownloadResponse>> handleDownload(const MCPDownloadRequest& req);
-    yams::Task<Result<MCPStoreDocumentResponse>>
+    boost::asio::awaitable<Result<MCPSearchResponse>>
+    handleSearchDocuments(const MCPSearchRequest& req);
+    boost::asio::awaitable<Result<MCPGrepResponse>> handleGrepDocuments(const MCPGrepRequest& req);
+    boost::asio::awaitable<Result<MCPDownloadResponse>>
+    handleDownload(const MCPDownloadRequest& req);
+    boost::asio::awaitable<Result<MCPStoreDocumentResponse>>
     handleStoreDocument(const MCPStoreDocumentRequest& req);
-    yams::Task<Result<MCPRetrieveDocumentResponse>>
+    boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>
     handleRetrieveDocument(const MCPRetrieveDocumentRequest& req);
-    yams::Task<Result<MCPListDocumentsResponse>>
+    boost::asio::awaitable<Result<MCPListDocumentsResponse>>
     handleListDocuments(const MCPListDocumentsRequest& req);
-    yams::Task<Result<MCPStatsResponse>> handleGetStats(const MCPStatsRequest& req);
-    yams::Task<Result<MCPAddDirectoryResponse>>
+    boost::asio::awaitable<Result<MCPStatsResponse>> handleGetStats(const MCPStatsRequest& req);
+    boost::asio::awaitable<Result<MCPAddDirectoryResponse>>
     handleAddDirectory(const MCPAddDirectoryRequest& req);
-
-    yams::Task<Result<MCPGetByNameResponse>> handleGetByName(const MCPGetByNameRequest& req);
-    yams::Task<Result<MCPDeleteByNameResponse>>
+    boost::asio::awaitable<Result<MCPGetByNameResponse>>
+    handleGetByName(const MCPGetByNameRequest& req);
+    boost::asio::awaitable<Result<MCPDeleteByNameResponse>>
     handleDeleteByName(const MCPDeleteByNameRequest& req);
-    yams::Task<Result<MCPCatDocumentResponse>> handleCatDocument(const MCPCatDocumentRequest& req);
-    yams::Task<Result<MCPUpdateMetadataResponse>>
+    boost::asio::awaitable<Result<MCPCatDocumentResponse>>
+    handleCatDocument(const MCPCatDocumentRequest& req);
+    boost::asio::awaitable<Result<MCPUpdateMetadataResponse>>
     handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
-    yams::Task<Result<MCPRestoreCollectionResponse>>
+    boost::asio::awaitable<Result<MCPRestoreCollectionResponse>>
     handleRestoreCollection(const MCPRestoreCollectionRequest& req);
-    yams::Task<Result<MCPRestoreSnapshotResponse>>
+    boost::asio::awaitable<Result<MCPRestoreSnapshotResponse>>
     handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
-    yams::Task<Result<MCPListCollectionsResponse>>
+    boost::asio::awaitable<Result<MCPListCollectionsResponse>>
     handleListCollections(const MCPListCollectionsRequest& req);
-    yams::Task<Result<MCPListSnapshotsResponse>>
+    boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);
 
     // Session start/stop (simplified surface)
-    yams::Task<Result<MCPSessionStartResponse>>
+    boost::asio::awaitable<Result<MCPSessionStartResponse>>
     handleSessionStart(const MCPSessionStartRequest& req);
-    yams::Task<Result<MCPSessionStopResponse>> handleSessionStop(const MCPSessionStopRequest& req);
-    yams::Task<Result<MCPSessionPinResponse>> handleSessionPin(const MCPSessionPinRequest& req);
-    yams::Task<Result<MCPSessionUnpinResponse>>
+    boost::asio::awaitable<Result<MCPSessionStopResponse>>
+    handleSessionStop(const MCPSessionStopRequest& req);
+    boost::asio::awaitable<Result<MCPSessionPinResponse>>
+    handleSessionPin(const MCPSessionPinRequest& req);
+    boost::asio::awaitable<Result<MCPSessionUnpinResponse>>
     handleSessionUnpin(const MCPSessionUnpinRequest& req);
 
     // (Removed legacy JSON helper declarations – use typed async tool handlers via ToolRegistry)

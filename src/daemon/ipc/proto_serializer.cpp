@@ -1141,6 +1141,23 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key(k);
             kv->set_value(std::to_string(static_cast<uint32_t>(v)));
         }
+
+        // providers (typed)
+        for (const auto& p : r.providers) {
+            auto* po = o->add_providers();
+            po->set_name(p.name);
+            po->set_ready(p.ready);
+            po->set_degraded(p.degraded);
+            po->set_error(p.error);
+            po->set_models_loaded(p.modelsLoaded);
+            po->set_is_provider(p.isProvider);
+        }
+        // skipped plugins
+        for (const auto& s : r.skippedPlugins) {
+            auto* sp = o->add_skipped();
+            sp->set_path(s.path);
+            sp->set_reason(s.reason);
+        }
     }
     static StatusResponse get(const Envelope& env) {
         StatusResponse r{};
@@ -1192,6 +1209,24 @@ template <> struct ProtoBinding<StatusResponse> {
             } catch (...) {
                 // ignore parse errors
             }
+        }
+
+        // providers (typed)
+        for (const auto& po : i.providers()) {
+            StatusResponse::ProviderInfo p;
+            p.name = po.name();
+            p.ready = po.ready();
+            p.degraded = po.degraded();
+            p.error = po.error();
+            p.modelsLoaded = static_cast<uint32_t>(po.models_loaded());
+            p.isProvider = po.is_provider();
+            r.providers.push_back(std::move(p));
+        }
+        for (const auto& sp : i.skipped()) {
+            StatusResponse::PluginSkipInfo s;
+            s.path = sp.path();
+            s.reason = sp.reason();
+            r.skippedPlugins.push_back(std::move(s));
         }
         // If older daemon (proto v1) set only state, derive minimal booleans
         if (r.version.empty() && r.uptimeSeconds == 0 && r.memoryUsageMb == 0 &&

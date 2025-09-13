@@ -171,9 +171,9 @@ struct ConnRegistry {
 } g_conn_registry;
 } // namespace
 
-Task<std::shared_ptr<AsioTransportAdapter::Connection>>
+boost::asio::awaitable<std::shared_ptr<AsioTransportAdapter::Connection>>
 AsioTransportAdapter::get_or_create_connection(const Options& opts) {
-    std::unique_lock lock(g_conn_registry.m);
+    std::unique_lock<std::mutex> ulock(g_conn_registry.m);
     auto key = opts.socketPath.string();
     if (auto it = g_conn_registry.map.find(key); it != g_conn_registry.map.end()) {
         if (auto sp = it->second.lock()) {
@@ -182,12 +182,12 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
     }
     auto conn = std::make_shared<Connection>(opts);
     g_conn_registry.map[key] = conn;
-    lock.unlock();
+    ulock.unlock();
 
     auto sres = co_await AsioTransportAdapter(opts).async_connect_with_timeout(opts.socketPath,
                                                                                opts.requestTimeout);
     if (!sres) {
-        std::lock_guard<std::mutex> lock(g_conn_registry.m);
+        std::lock_guard<std::mutex> guard(g_conn_registry.m);
         g_conn_registry.map.erase(key);
         co_return nullptr;
     }
@@ -414,7 +414,7 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
     }
 }
 
-Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
+boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
     auto conn = co_await get_or_create_connection(opts_);
     if (!conn || !conn->alive) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
@@ -465,11 +465,10 @@ Task<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
     co_return *response_result;
 }
 
-Task<Result<void>> AsioTransportAdapter::send_request_streaming(const Request& req,
-                                                                HeaderCallback onHeader,
-                                                                ChunkCallback onChunk,
-                                                                ErrorCallback onError,
-                                                                CompleteCallback onComplete) {
+boost::asio::awaitable<Result<void>>
+AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback onHeader,
+                                             ChunkCallback onChunk, ErrorCallback onError,
+                                             CompleteCallback onComplete) {
     auto conn = co_await get_or_create_connection(opts_);
     if (!conn || !conn->alive) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};

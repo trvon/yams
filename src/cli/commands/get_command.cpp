@@ -3,17 +3,11 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <iostream>
 #include <sstream>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/cli/session_store.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -23,6 +17,7 @@
 #include <yams/extraction/text_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
+
 #ifdef _WIN32
 #include <io.h>
 #else
@@ -83,10 +78,6 @@ public:
         cmd->add_flag("--latest", getLatest_, "Get the most recently indexed matching document");
         cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document");
 
-        // Session scoping controls
-        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
-        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
-
         // Text extraction options
         cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
         cmd->add_flag("--extract", extract_, "Force text extraction even when piping to file");
@@ -98,32 +89,17 @@ public:
             ->check(CLI::Range(1, 5));
 
         cmd->callback([this]() {
-            if (!noSession_) {
-                sessionPatterns_ =
-                    yams::cli::session_store::active_include_patterns(sessionOverride_);
-            } else {
-                sessionPatterns_.clear();
+            auto result = execute();
+            if (!result) {
+                spdlog::error("Command failed: {}", result.error().message);
+                throw CLI::RuntimeError(1);
             }
-            cli_->setPendingCommand(this);
         });
     }
 
     Result<void> execute() override {
-        std::promise<Result<void>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [this, &prom]() -> boost::asio::awaitable<void> {
-                auto r = co_await this->executeAsync();
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        return fut.get();
-    }
-
-    boost::asio::awaitable<Result<void>> executeAsync() override {
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
+
         try {
             // Create enhanced daemon request with ALL CLI options mapped
             yams::daemon::GetRequest dreq;
@@ -196,8 +172,7 @@ public:
 
                     // Display knowledge graph if enabled
                     if (resp.graphEnabled && !resp.related.empty()) {
-                        std::cerr << "\nRelated documents (depth " << graphDepth_
-                                  << "):" << std::endl;
+                        std::cerr << "\nRelated documents (depth " << graphDepth_ << "):\n";
                         for (const auto& rel : resp.related) {
                             std::cerr << "  - " << rel.name << " (" << rel.relationship
                                       << ", distance=" << rel.distance << ")" << std::endl;
@@ -228,8 +203,7 @@ public:
 
                     // Display knowledge graph if enabled
                     if (resp.graphEnabled && !resp.related.empty()) {
-                        std::cerr << "\nRelated documents (depth " << graphDepth_
-                                  << "):" << std::endl;
+                        std::cerr << "\nRelated documents (depth " << graphDepth_ << "):\n";
                         for (const auto& rel : resp.related) {
                             std::cerr << "  - " << rel.name << " (" << rel.relationship
                                       << ", distance=" << rel.distance << ")" << std::endl;
@@ -362,39 +336,11 @@ public:
                 return render(daemonResp);
             };
 
-            // Best-effort: direct daemon call; fallback to services on error
-            yams::daemon::ClientConfig cfg;
-            if (cli_) {
-                auto dp = cli_->getDataPath();
-                if (!dp.empty()) {
-                    cfg.dataDir = dp;
-#ifndef _WIN32
-                    ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
-                    ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
-#endif
-                }
-            }
-            cfg.headerTimeout = std::chrono::milliseconds(30000);
-            cfg.bodyTimeout = std::chrono::milliseconds(120000);
-            yams::daemon::DaemonClient::setTimeoutEnvVars(cfg.headerTimeout, cfg.bodyTimeout);
-            cfg.enableChunkedResponses = true;
-            cfg.singleUseConnections = false;
-            cfg.requestTimeout = std::chrono::milliseconds(30000);
-            yams::daemon::DaemonClient client(cfg);
-            client.setStreamingEnabled(cfg.enableChunkedResponses);
-            auto dres = co_await client.call(dreq);
-            if (dres) {
-                auto r = render(dres.value());
-                if (!r)
-                    co_return r.error();
-                co_return Result<void>();
-            }
-
-            co_return fallback();
+            // Execute daemon request via awaitable pathway
+            return run_awaitable(daemon_request_async(dreq, fallback, render));
 
         } catch (const std::exception& e) {
-            co_return Error{ErrorCode::InternalError,
-                            std::string("GetCommand failed: ") + e.what()};
+            return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};
         }
     }
 
@@ -727,24 +673,7 @@ private:
         // First try as a path suffix (for real files)
         auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
         if (documentsResult && !documentsResult.value().empty()) {
-            auto results = documentsResult.value();
-            if (!sessionPatterns_.empty()) {
-                std::vector<metadata::DocumentInfo> filtered;
-                for (const auto& d : results) {
-                    bool match = false;
-                    for (const auto& pat : sessionPatterns_) {
-                        if (d.filePath.find(pat) != std::string::npos ||
-                            d.fileName.find(pat) != std::string::npos) {
-                            match = true;
-                            break;
-                        }
-                    }
-                    if (match)
-                        filtered.push_back(d);
-                }
-                if (!filtered.empty())
-                    results.swap(filtered);
-            }
+            const auto& results = documentsResult.value();
             if (results.size() > 1) {
                 if (hasWildcards || getLatest_ || getOldest_) {
                     // For wildcards or explicit latest/oldest flags, select automatically
@@ -779,26 +708,8 @@ private:
         // Try exact path match
         documentsResult = metadataRepo->findDocumentsByPath(name);
         if (documentsResult && !documentsResult.value().empty()) {
-            auto docs = documentsResult.value();
-            if (!sessionPatterns_.empty()) {
-                std::vector<metadata::DocumentInfo> filtered;
-                for (const auto& d : docs) {
-                    bool match = false;
-                    for (const auto& pat : sessionPatterns_) {
-                        if (d.filePath.find(pat) != std::string::npos ||
-                            d.fileName.find(pat) != std::string::npos) {
-                            match = true;
-                            break;
-                        }
-                    }
-                    if (match)
-                        filtered.push_back(d);
-                }
-                if (!filtered.empty())
-                    docs.swap(filtered);
-            }
-            if (docs.size() > 1 && (hasWildcards || getLatest_ || getOldest_)) {
-                auto sorted = docs;
+            if (documentsResult.value().size() > 1 && (hasWildcards || getLatest_ || getOldest_)) {
+                auto sorted = documentsResult.value();
                 std::sort(sorted.begin(), sorted.end(),
                           [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
                               return getOldest_ ? (a.indexedTime < b.indexedTime)
@@ -812,7 +723,7 @@ private:
                 }
                 return sorted[0].sha256Hash;
             }
-            return docs[0].sha256Hash;
+            return documentsResult.value()[0].sha256Hash;
         }
 
         // For wildcard patterns, try wildcard matching before fuzzy
@@ -946,24 +857,6 @@ private:
         }
 
         std::vector<std::pair<std::string, int>> candidatesWithScores;
-        std::vector<metadata::DocumentInfo> docs = documentsResult.value();
-        if (!sessionPatterns_.empty()) {
-            std::vector<metadata::DocumentInfo> filtered;
-            for (const auto& d : docs) {
-                bool match = false;
-                for (const auto& pat : sessionPatterns_) {
-                    if (d.filePath.find(pat) != std::string::npos ||
-                        d.fileName.find(pat) != std::string::npos) {
-                        match = true;
-                        break;
-                    }
-                }
-                if (match)
-                    filtered.push_back(d);
-            }
-            if (!filtered.empty())
-                docs.swap(filtered);
-        }
 
         // Split query into path components
         std::vector<std::string> queryComponents;
@@ -980,7 +873,7 @@ private:
         }
 
         // Score each document path
-        for (const auto& doc : docs) {
+        for (const auto& doc : documentsResult.value()) {
             std::filesystem::path docPath(doc.filePath);
 
             // Split document path into components
@@ -1248,11 +1141,6 @@ private:
     // Knowledge graph options
     bool showGraph_ = false;
     int graphDepth_ = 1;
-
-    // Session scoping
-    std::optional<std::string> sessionOverride_{};
-    bool noSession_{false};
-    std::vector<std::string> sessionPatterns_;
 
     // Daemon streaming options
     bool metadataOnly_ = false;

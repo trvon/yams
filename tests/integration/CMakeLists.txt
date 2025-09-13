@@ -3,20 +3,20 @@
 # pool_add_then_query_test removed - API changed with Boost.ASIO migration
 # Include Boost.Test shim to avoid accidental prg/exec monitor undefined refs
 include(GoogleTest)
-set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE ${YAMS_GTEST_DISCOVERY_MODE})
 include(${CMAKE_SOURCE_DIR}/cmake/boost_test_shim.cmake)
 
 add_executable(daemon_server_multiplex_integration_test daemon/daemon_server_multiplex_integration_test.cpp)
 target_link_libraries(daemon_server_multiplex_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 # Ensure compression objects aren’t GC’d by lld; also support macOS force_load in tests
 target_link_libraries(daemon_server_multiplex_integration_test PRIVATE
-    "-Wl,--start-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--start-group>
         $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
         yams::compression
-    "-Wl,--end-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--end-group>
 )
 if(NOT APPLE)
     target_link_options(daemon_server_multiplex_integration_test PRIVATE
@@ -27,18 +27,18 @@ if(NOT APPLE)
         "-Wl,-u,Lzma2Dec_Allocate" "-Wl,-u,Lzma2Dec_Init" "-Wl,-u,Lzma2Dec_DecodeToBuf"
     )
 endif()
-gtest_discover_tests(daemon_server_multiplex_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+yams_gtest_discover_tests(daemon_server_multiplex_integration_test PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
 
 add_executable(daemon_search_multiplex_integration_test daemon/daemon_search_multiplex_integration_test.cpp)
 target_link_libraries(daemon_search_multiplex_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 target_link_libraries(daemon_search_multiplex_integration_test PRIVATE
-    "-Wl,--start-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--start-group>
         $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
         yams::compression
-    "-Wl,--end-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--end-group>
 )
 if(NOT APPLE)
     target_link_options(daemon_search_multiplex_integration_test PRIVATE
@@ -49,7 +49,7 @@ if(NOT APPLE)
         "-Wl,-u,Lzma2Dec_Allocate" "-Wl,-u,Lzma2Dec_Init" "-Wl,-u,Lzma2Dec_DecodeToBuf"
     )
 endif()
-gtest_discover_tests(daemon_search_multiplex_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+yams_gtest_discover_tests(daemon_search_multiplex_integration_test PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
 
 
 
@@ -70,13 +70,13 @@ add_executable(daemon_interleaving_integration_test
     daemon/daemon_interleaving_integration_test.cpp)
 target_link_libraries(daemon_interleaving_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 target_link_libraries(daemon_interleaving_integration_test PRIVATE
-    "-Wl,--start-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--start-group>
         $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
         yams::compression
-    "-Wl,--end-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--end-group>
 )
 if(NOT APPLE)
     target_link_options(daemon_interleaving_integration_test PRIVATE
@@ -107,13 +107,13 @@ endif()
 add_executable(daemon_mux_metrics_integration_test daemon/daemon_mux_metrics_integration_test.cpp)
 target_link_libraries(daemon_mux_metrics_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 target_link_libraries(daemon_mux_metrics_integration_test PRIVATE
-    "-Wl,--start-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--start-group>
         $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
         yams::compression
-    "-Wl,--end-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--end-group>
 )
 if(NOT APPLE)
     target_link_options(daemon_mux_metrics_integration_test PRIVATE
@@ -129,13 +129,13 @@ gtest_discover_tests(daemon_mux_metrics_integration_test DISCOVERY_TIMEOUT ${YAM
 add_executable(daemon_writer_budget_integration_test daemon/daemon_writer_budget_integration_test.cpp)
 target_link_libraries(daemon_writer_budget_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 target_link_libraries(daemon_writer_budget_integration_test PRIVATE
-    "-Wl,--start-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--start-group>
         $<$<PLATFORM_ID:Darwin>:-Wl,-force_load,$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--whole-archive>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:$<TARGET_FILE:yams_compression>>
         $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-whole-archive>
         yams::compression
-    "-Wl,--end-group"
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--end-group>
 )
 if(NOT APPLE)
     target_link_options(daemon_writer_budget_integration_test PRIVATE
@@ -170,6 +170,8 @@ target_link_libraries(daemon_embeddings_integration_test PRIVATE
     Threads::Threads
     yams::boost_test_shim
 )
+# Preflight helper implementation
+target_sources(daemon_embeddings_integration_test PRIVATE ${CMAKE_SOURCE_DIR}/tests/utils/daemon_preflight.cpp)
 
 gtest_discover_tests(daemon_embeddings_integration_test
     DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
@@ -262,6 +264,8 @@ target_link_libraries(embeddings_vector_persist_integration_test PRIVATE
     Threads::Threads
     yams::boost_test_shim
 )
+# Preflight helper implementation
+target_sources(embeddings_vector_persist_integration_test PRIVATE ${CMAKE_SOURCE_DIR}/tests/utils/daemon_preflight.cpp)
 # If the ONNX plugin target exists, pass its path so the test can find it
 if(TARGET yams_onnx_plugin)
     add_dependencies(embeddings_vector_persist_integration_test yams_onnx_plugin)

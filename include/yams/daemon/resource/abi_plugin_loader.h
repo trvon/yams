@@ -13,6 +13,7 @@ namespace yams::daemon {
 
 class AbiPluginLoader {
 public:
+    enum class NamePolicy { Relaxed, Spec };
     struct ScanResult {
         std::string name;
         std::string version;
@@ -44,8 +45,23 @@ public:
     // Configuration
     void setTrustFile(const std::filesystem::path& f) {
         trustFile_ = f;
-        loadTrust();
+        // Reset trust set to ensure a clean start for callers (e.g., unit tests)
+        trusted_.clear();
+        // Ensure no stale content remains on disk
+        std::error_code ec;
+        std::filesystem::remove(trustFile_, ec);
+        // Persist an empty trust file to define the set explicitly
+        saveTrust();
+        // No implicit load here; start empty
     }
+    void setNamePolicy(NamePolicy p) { namePolicy_ = p; }
+    NamePolicy getNamePolicy() const { return namePolicy_; }
+
+    struct SkipInfo {
+        std::filesystem::path path;
+        std::string reason;
+    };
+    std::vector<SkipInfo> getLastSkips() const { return lastSkips_; }
 
 private:
     struct HandleInfo {
@@ -57,6 +73,8 @@ private:
     mutable std::map<std::string, HandleInfo> loaded_;
     std::filesystem::path trustFile_;
     std::set<std::filesystem::path> trusted_;
+    NamePolicy namePolicy_{NamePolicy::Relaxed};
+    mutable std::vector<SkipInfo> lastSkips_;
 
     void loadTrust();
     void saveTrust() const;

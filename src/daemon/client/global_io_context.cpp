@@ -4,8 +4,12 @@
 namespace yams::daemon {
 
 GlobalIOContext& GlobalIOContext::instance() {
-    static GlobalIOContext instance;
-    return instance;
+    // Intentionally allocate on the heap and never destroy to avoid
+    // destructor-order races at process shutdown (tests may end while
+    // other singletons still dispatch work). This trades a tiny leak
+    // at exit for significantly more robust teardown.
+    static GlobalIOContext* instance = new GlobalIOContext();
+    return *instance;
 }
 
 boost::asio::io_context& GlobalIOContext::get_io_context() {
@@ -17,10 +21,21 @@ GlobalIOContext::GlobalIOContext() : work_guard_(boost::asio::make_work_guard(io
 }
 
 GlobalIOContext::~GlobalIOContext() {
-    work_guard_.reset();
-    io_context_.stop();
-    if (io_thread_.joinable()) {
-        io_thread_.join();
+    // Best-effort shutdown when explicitly destroyed (not expected in
+    // normal runs due to the intentional leak above).
+    try {
+        work_guard_.reset();
+    } catch (...) {
+    }
+    try {
+        io_context_.stop();
+    } catch (...) {
+    }
+    try {
+        if (io_thread_.joinable()) {
+            io_thread_.join();
+        }
+    } catch (...) {
     }
 }
 

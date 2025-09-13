@@ -460,7 +460,8 @@ private:
     /**
      * @brief Check if format is lossless
      */
-    [[nodiscard]] static constexpr bool formatIsLossless(VideoFormat format) noexcept {
+    [[nodiscard]] static constexpr bool
+    formatIsLossless([[maybe_unused]] VideoFormat format) noexcept {
         return false; // Most video formats are lossy
     }
 

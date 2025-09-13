@@ -4,9 +4,18 @@ add_executable(yams-mcp-server
     main.cpp
 )
 
+# Linux/lld needs IPC OBJECTs for symbol resolution; avoid on macOS to prevent
+# pulling server-only objects (RequestHandler) that depend on RequestDispatcher.
+if(UNIX AND NOT APPLE)
+    target_sources(yams-mcp-server PRIVATE $<TARGET_OBJECTS:yams_daemon_ipc_obj>)
+endif()
+
 if(APPLE)
     target_link_libraries(yams-mcp-server PRIVATE
         yams_mcp
+        yams::daemon_ipc
+        yams::daemon_client
+        yams_ipc_proto
         yams::compression
         CLI11::CLI11
         spdlog::spdlog
@@ -26,6 +35,9 @@ else()
     target_link_libraries(yams-mcp-server PRIVATE
         "-Wl,--start-group"
             "-Wl,--whole-archive" yams_mcp "-Wl,--no-whole-archive"
+            yams::daemon_ipc
+            yams::daemon_client
+            yams_ipc_proto
             "-Wl,--whole-archive" $<TARGET_FILE:yams_compression> "-Wl,--no-whole-archive"
             yams::compression
         "-Wl,--end-group"

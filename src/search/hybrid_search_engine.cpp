@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <future>
 #include <mutex>
 #include <numeric>
@@ -369,6 +370,7 @@ public:
         : vector_index_(std::move(vector_index)), keyword_engine_(std::move(keyword_engine)),
           embedding_generator_(std::move(embedding_generator)), config_(config) {
         config_.normalizeWeights();
+        initThreadPool();
     }
 
     Result<void> initialize() {
@@ -409,19 +411,22 @@ public:
     }
 
     std::vector<float> generateQueryEmbedding(const std::string& query) {
-        // Generate actual embedding if generator is available
+        // Generate embedding with a tight timeout to avoid stalling queries.
         if (embedding_generator_ && embedding_generator_->isInitialized()) {
             try {
-                auto embedding = embedding_generator_->generateEmbedding(query);
-                if (!embedding.empty()) {
-                    return embedding;
+                auto fut = embedding_generator_->generateEmbeddingAsync(query);
+                if (fut.wait_for(config_.embed_timeout_ms) == std::future_status::ready) {
+                    auto embedding = fut.get();
+                    if (!embedding.empty())
+                        return embedding;
+                } else {
+                    spdlog::debug("Query embedding timed out after {} ms; skipping vector path",
+                                  config_.embed_timeout_ms.count());
                 }
             } catch (const std::exception& e) {
                 spdlog::debug("Failed to generate query embedding: {}", e.what());
             }
         }
-
-        // No embeddings available; return empty to signal vector path should be skipped
         return {};
     }
 
@@ -522,19 +527,22 @@ public:
         if (config_.parallel_search) {
             // Launch searches in parallel honoring gates
             if (vector_enabled) {
-                vector_future = std::async(std::launch::async, [this, &normalizedQuery, &filter]() {
-                    // Generate embedding for normalized query
-                    auto query_vector = generateQueryEmbedding(normalizedQuery);
+                auto nq = std::string(normalizedQuery);
+                auto flt = filter; // copy
+                vector_future = pool_.submit([this, nq, flt]() {
+                    auto query_vector = generateQueryEmbedding(nq);
                     if (query_vector.empty()) {
                         return Result<std::vector<vector::SearchResult>>(
                             std::vector<vector::SearchResult>{});
                     }
-                    return vector_index_->search(query_vector, config_.vector_top_k, filter);
+                    return vector_index_->search(query_vector, config_.vector_top_k, flt);
                 });
             }
             if (!env_disable_keyword) {
-                keyword_future = std::async(std::launch::async, [this, &expanded_query, &filter]() {
-                    return keyword_engine_->search(expanded_query, config_.keyword_top_k, &filter);
+                auto eq = std::string(expanded_query);
+                auto flt = filter; // copy
+                keyword_future = pool_.submit([this, eq, flt]() {
+                    return keyword_engine_->search(eq, config_.keyword_top_k, &flt);
                 });
             }
         }
@@ -970,6 +978,79 @@ public:
     }
 
 private:
+    // Minimal reusable thread pool to avoid oversubscription with std::async bursts
+    class ThreadPool {
+    public:
+        ThreadPool() = default;
+        ~ThreadPool() { stop(); }
+        void start(size_t threads) {
+            stop();
+            if (threads == 0)
+                return;
+            done_ = false;
+            for (size_t i = 0; i < threads; ++i) {
+                workers_.emplace_back([this]() { run(); });
+            }
+        }
+        void stop() {
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                done_ = true;
+            }
+            cv_.notify_all();
+            for (auto& t : workers_)
+                if (t.joinable())
+                    t.join();
+            workers_.clear();
+            while (!q_.empty())
+                q_.pop();
+        }
+        template <typename F, typename R = std::invoke_result_t<F&>> std::future<R> submit(F&& f) {
+            // Use shared_ptr to hold move-only packaged_task inside copyable std::function
+            auto pt = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
+            auto fut = pt->get_future();
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                q_.emplace([pt]() mutable { (*pt)(); });
+            }
+            cv_.notify_one();
+            return fut;
+        }
+
+    private:
+        void run() {
+            for (;;) {
+                std::function<void()> job;
+                {
+                    std::unique_lock<std::mutex> lk(m_);
+                    cv_.wait(lk, [this]() { return done_ || !q_.empty(); });
+                    if (done_ && q_.empty())
+                        return;
+                    job = std::move(q_.front());
+                    q_.pop();
+                }
+                try {
+                    job();
+                } catch (...) {
+                }
+            }
+        }
+        std::vector<std::thread> workers_;
+        std::queue<std::function<void()>> q_;
+        std::mutex m_;
+        std::condition_variable cv_;
+        bool done_{true};
+    };
+
+    void initThreadPool() {
+        size_t n = config_.num_threads;
+        if (n == 0) {
+            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+            n = std::clamp<size_t>(hw / 2, 2, 4);
+        }
+        pool_.start(n);
+    }
+
     std::shared_ptr<vector::VectorIndexManager> vector_index_;
     std::shared_ptr<KeywordSearchEngine> keyword_engine_;
     std::shared_ptr<vector::EmbeddingGenerator> embedding_generator_;
@@ -990,6 +1071,8 @@ private:
     // Metrics
     SearchMetrics metrics_;
     mutable std::mutex metrics_mutex_;
+
+    ThreadPool pool_;
 
     // Helper methods
     float normalizeKeywordScore(float score, const std::vector<KeywordSearchResult>& all_results) {

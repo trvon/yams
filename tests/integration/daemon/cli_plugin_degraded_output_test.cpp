@@ -3,13 +3,28 @@
 #include <thread>
 #include <gtest/gtest.h>
 
+#include <yams/daemon/components/ServiceManager.h> // For test helper methods on ServiceManager
 #include <yams/daemon/daemon.h>
 
 using namespace std::chrono_literals;
 
-// run_cmd is provided by the test utilities linked into integration tests.
-// We forward-declare it here to use the existing implementation.
-extern std::string run_cmd(const std::string& cmd);
+// Minimal local implementation of run_cmd (duplicated from external_plugin_integration_test.cpp)
+// to avoid undefined symbol at link time. If a shared test utility is later introduced,
+// this can be refactored out.
+namespace {
+std::string run_cmd(const std::string& cmd) {
+    std::string out;
+    FILE* fp = popen(cmd.c_str(), "r");
+    if (!fp)
+        return out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), fp)) {
+        out.append(buf);
+    }
+    pclose(fp);
+    return out;
+}
+} // namespace
 
 // CLI-level test to verify degraded/provider tags and error text are printed by
 // `yams plugin list` when the daemon marks the provider as degraded.

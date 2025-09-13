@@ -1,4 +1,5 @@
 #include <yams/cli/command.h>
+#include <yams/cli/prompt_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/vector/vector_database.h>
@@ -97,7 +98,8 @@ public:
             if (!nonInteractive_) {
                 dataPath = promptForDataDir(dataPath);
                 if (!noKeygen_) {
-                    noKeygen_ = !promptYesNo("Generate authentication keys? [Y/n]: ", true);
+                    noKeygen_ = !prompt_yes_no("Generate authentication keys? [Y/n]: ",
+                                               YesNoOptions{.defaultYes = true});
                 }
             }
 
@@ -147,7 +149,8 @@ public:
             std::string selectedModel;
             if (!nonInteractive_) {
                 enableVectorDB =
-                    promptYesNo("\nEnable vector database for semantic search? [Y/n]: ", true);
+                    prompt_yes_no("\nEnable vector database for semantic search? [Y/n]: ",
+                                  YesNoOptions{.defaultYes = true});
                 if (enableVectorDB) {
                     selectedModel = promptForModel(dataPath);
                 }
@@ -158,8 +161,9 @@ public:
             std::string s3Url, s3Region, s3Endpoint, s3AccessKey, s3SecretKey;
             bool s3UsePathStyle = false;
             if (!nonInteractive_) {
-                useS3 = promptYesNo(
-                    "\nConfigure S3 as the storage backend? (default: local) [y/N]: ", false);
+                useS3 =
+                    prompt_yes_no("\nConfigure S3 as the storage backend? (default: local) [y/N]: ",
+                                  YesNoOptions{.defaultYes = false});
                 if (useS3) {
                     std::cout << "Enter S3 URL (e.g., s3://my-bucket/my-prefix): ";
                     std::getline(std::cin, s3Url);
@@ -173,8 +177,8 @@ public:
                     std::getline(std::cin, s3AccessKey);
                     std::cout << "Enter S3 Secret Access Key (optional, uses env var if blank): ";
                     std::getline(std::cin, s3SecretKey);
-                    s3UsePathStyle =
-                        promptYesNo("Use path-style addressing? (for MinIO) [y/N]: ", false);
+                    s3UsePathStyle = prompt_yes_no("Use path-style addressing? (for MinIO) [y/N]: ",
+                                                   YesNoOptions{.defaultYes = false});
                 }
             }
 
@@ -182,7 +186,8 @@ public:
             bool setupPlugins = enablePlugins_;
             if (!nonInteractive_) {
                 setupPlugins =
-                    promptYesNo("Enable plugins and create a local plugins dir? [Y/n]: ", true);
+                    prompt_yes_no("Enable plugins and create a local plugins dir? [Y/n]: ",
+                                  YesNoOptions{.defaultYes = true});
             }
 
             // 7) Generate an initial API key
@@ -254,6 +259,41 @@ public:
             // Seed plugins directory and trust list if requested
             if (setupPlugins) {
                 setupUserPluginsDirAndTrust();
+                // Also set plugin_name_policy to "spec" to enforce canonical naming on this machine
+                try {
+                    std::ifstream in(configPath);
+                    std::stringstream buf;
+                    buf << in.rdbuf();
+                    in.close();
+                    std::string content = buf.str();
+                    // Ensure [daemon] section exists; if not, append one
+                    if (content.find("[daemon]") == std::string::npos) {
+                        content.append("\n[daemon]\n");
+                    }
+                    // Insert or replace plugin_name_policy
+                    auto secPos = content.find("[daemon]");
+                    if (secPos != std::string::npos) {
+                        auto nextSec = content.find("[", secPos + 1);
+                        auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+                        auto keyPos = content.find("plugin_name_policy", secPos);
+                        if (keyPos == std::string::npos || keyPos > rangeEnd) {
+                            content.insert(rangeEnd,
+                                           std::string("plugin_name_policy = \"spec\"\n"));
+                        } else {
+                            auto lineEnd = content.find("\n", keyPos);
+                            if (lineEnd == std::string::npos)
+                                lineEnd = content.size();
+                            content.replace(keyPos, lineEnd - keyPos,
+                                            "plugin_name_policy = \"spec\"");
+                        }
+                        std::ofstream outCfg(configPath, std::ios::trunc);
+                        outCfg << content;
+                        outCfg.close();
+                        spdlog::info("Configured [daemon].plugin_name_policy = spec");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("Skipping plugin_name_policy write: {}", e.what());
+                }
             }
 
             spdlog::info("YAMS initialization complete.");
@@ -295,20 +335,7 @@ private:
         return chosen;
     }
 
-    static bool promptYesNo(const std::string& prompt, bool defaultYes) {
-        std::cout << prompt;
-        std::string line;
-        std::getline(std::cin, line);
-
-        if (line.empty())
-            return defaultYes;
-        char c = static_cast<char>(std::tolower(line[0]));
-        if (c == 'y')
-            return true;
-        if (c == 'n')
-            return false;
-        return defaultYes;
-    }
+    // Removed legacy promptYesNo (replaced by prompt_yes_no in prompt_util.h)
 
     static Result<void> updateV2Config(const fs::path& configPath, const fs::path& dataDir,
                                        const fs::path& privateKeyPath,
@@ -716,6 +743,47 @@ private:
                 spdlog::debug("Plugin directory already trusted: {}", canon);
             }
 
+            // Also set [daemon].plugin_dir in config.toml to this path (best-effort)
+            try {
+                fs::path configPath = cfgHome / "yams" / "config.toml";
+                if (fs::exists(configPath)) {
+                    std::ifstream in(configPath);
+                    std::stringstream buf;
+                    buf << in.rdbuf();
+                    in.close();
+                    std::string content = buf.str();
+                    // Ensure [daemon] section exists; if not, append one
+                    if (content.find("[daemon]") == std::string::npos) {
+                        content.append("\n[daemon]\nplugin_dir = \"\"\n");
+                    }
+                    // Replace plugin_dir value within [daemon]
+                    auto secPos = content.find("[daemon]");
+                    if (secPos != std::string::npos) {
+                        auto nextSec = content.find("[", secPos + 1);
+                        auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+                        auto keyPos = content.find("plugin_dir", secPos);
+                        if (keyPos == std::string::npos || keyPos > rangeEnd) {
+                            // Insert key at end of section
+                            content.insert(rangeEnd,
+                                           std::string("plugin_dir = \"") + canon + "\"\n");
+                        } else {
+                            // Replace the value on the line
+                            auto lineEnd = content.find("\n", keyPos);
+                            if (lineEnd == std::string::npos)
+                                lineEnd = content.size();
+                            content.replace(keyPos, lineEnd - keyPos,
+                                            std::string("plugin_dir = \"") + canon + "\"");
+                        }
+                    }
+                    std::ofstream outCfg(configPath, std::ios::trunc);
+                    outCfg << content;
+                    outCfg.close();
+                    spdlog::info("Configured [daemon].plugin_dir = {}", canon);
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("Skipping plugin_dir write to config: {}", e.what());
+            }
+
             // Optional: if a system ONNX plugin exists, hint the user
             fs::path sys1 = fs::path("/usr/local/lib/yams/plugins/libyams_onnx_plugin.so");
             fs::path sys2 = fs::path("/usr/lib/yams/plugins/libyams_onnx_plugin.so");
@@ -732,52 +800,45 @@ private:
     }
 
     std::string promptForModel(const fs::path& dataPath) {
-        std::cout << "\nAvailable embedding models (recommended first):\n";
+        // Build choice items
+        std::vector<ChoiceItem> items;
+        items.reserve(EMBEDDING_MODELS.size());
+        for (const auto& m : EMBEDDING_MODELS) {
+            ChoiceItem ci;
+            ci.value = m.name;
+            ci.label = m.name + " (" + std::to_string(m.size_mb) +
+                       " MB, dim=" + std::to_string(m.dimensions) + ")";
+            ci.description = m.description;
+            items.push_back(std::move(ci));
+        }
+
+        size_t defaultIndex = 0; // first model default
+        // Prefer a nomic* model as default if present (future friendly heuristic)
         for (size_t i = 0; i < EMBEDDING_MODELS.size(); ++i) {
-            const auto& model = EMBEDDING_MODELS[i];
-            std::cout << "  " << (i + 1) << ". " << model.name << " (" << model.size_mb << " MB)\n";
-            std::cout << "     " << model.description << "\n";
-            std::cout << "     Dimensions: " << model.dimensions << "\n";
-        }
-
-        std::cout << "\nSelect a model (1-" << EMBEDDING_MODELS.size() << "): ";
-        std::string line;
-        std::getline(std::cin, line);
-
-        int choice = 0;
-        try {
-            choice = std::stoi(line);
-        } catch (...) {
-            choice = 1; // Default to first model
-        }
-
-        if (choice < 1 || choice > static_cast<int>(EMBEDDING_MODELS.size())) {
-            // Default to a sensible model (prefer nomic if present)
-            int nomicIdx = -1;
-            for (size_t i = 0; i < EMBEDDING_MODELS.size(); ++i) {
-                if (EMBEDDING_MODELS[i].name.find("nomic-embed-text") != std::string::npos) {
-                    nomicIdx = static_cast<int>(i);
-                    break;
-                }
+            if (EMBEDDING_MODELS[i].name.find("nomic-embed-text") != std::string::npos) {
+                defaultIndex = i;
+                break;
             }
-            choice = (nomicIdx >= 0) ? (nomicIdx + 1) : 1;
         }
 
-        const auto& selectedModel = EMBEDDING_MODELS[choice - 1];
+        size_t chosenIdx = prompt_choice("\nAvailable embedding models (recommended first):", items,
+                                         ChoiceOptions{.defaultIndex = defaultIndex,
+                                                       .allowEmpty = true,
+                                                       .retryOnInvalid = true});
 
-        // Download the model
+        const auto& selectedModel = EMBEDDING_MODELS[chosenIdx];
+
+        // Check if model already exists (best-effort path)
         fs::path modelDir = dataPath / "models" / selectedModel.name;
         fs::path modelPath = modelDir / "model.onnx";
-
         if (fs::exists(modelPath)) {
             std::cout << "\nModel already downloaded at: " << modelPath.string() << "\n";
         } else {
-            std::cout << "\nTo download this model via the unified downloader:\n";
-            std::cout << "  yams model download " << selectedModel.name << "\n";
-            std::cout << "  (or: yams model download --hf <org/name>)\n";
-            std::cout << "\nSkipping automatic curl/wget download during init.\n";
+            std::cout << "\nTo download this model via the unified downloader:\n"
+                      << "  yams model download " << selectedModel.name << "\n"
+                      << "  (or: yams model download --hf <org/name>)\n"
+                      << "\nSkipping automatic curl/wget download during init.\n";
         }
-
         return selectedModel.name;
     }
 

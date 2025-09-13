@@ -171,6 +171,34 @@ target_link_libraries(daemon_embeddings_integration_test PRIVATE
 add_test(NAME daemon_embeddings_integration_test COMMAND daemon_embeddings_integration_test)
 set_tests_properties(daemon_embeddings_integration_test PROPERTIES LABELS "daemon;integration")
 
+# Embeddings end-to-end with vector DB + SQL verification
+add_executable(daemon_embeddings_vdb_sql_e2e_test
+    daemon_embeddings_vdb_sql_e2e_test.cpp
+)
+target_link_libraries(daemon_embeddings_vdb_sql_e2e_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+    yams::vector
+    yams::metadata
+)
+add_test(NAME daemon_embeddings_vdb_sql_e2e_test COMMAND daemon_embeddings_vdb_sql_e2e_test)
+set_tests_properties(daemon_embeddings_vdb_sql_e2e_test PROPERTIES LABELS "daemon;integration;vector")
+
+# New smoke: startup/status/teardown with mock provider
+add_executable(daemon_lifecycle_smoke_test
+    daemon_lifecycle_smoke_test.cpp
+)
+target_link_libraries(daemon_lifecycle_smoke_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+)
+add_test(NAME daemon_lifecycle_smoke_test COMMAND daemon_lifecycle_smoke_test)
+set_tests_properties(daemon_lifecycle_smoke_test PROPERTIES LABELS "daemon;integration;startup")
+
 # Embedding progress streaming over IPC
 add_executable(daemon_embedding_streaming_progress_test
     daemon_embedding_streaming_progress_test.cpp
@@ -183,6 +211,72 @@ target_link_libraries(daemon_embedding_streaming_progress_test PRIVATE
 )
 add_test(NAME daemon_embedding_streaming_progress_test COMMAND daemon_embedding_streaming_progress_test)
 set_tests_properties(daemon_embedding_streaming_progress_test PROPERTIES LABELS "daemon;integration")
+
+# Managed services readiness with timeouts
+add_executable(daemon_services_readiness_timeout_test
+    daemon_services_readiness_timeout_test.cpp
+)
+target_link_libraries(daemon_services_readiness_timeout_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+)
+add_test(NAME daemon_services_readiness_timeout_test COMMAND daemon_services_readiness_timeout_test)
+set_tests_properties(daemon_services_readiness_timeout_test PROPERTIES LABELS "daemon;integration;startup")
+
+# Plugins scan (mock/no-dlopen)
+add_executable(daemon_plugins_scan_test
+    daemon_plugins_scan_test.cpp
+)
+target_link_libraries(daemon_plugins_scan_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+)
+add_test(NAME daemon_plugins_scan_test COMMAND daemon_plugins_scan_test)
+set_tests_properties(daemon_plugins_scan_test PROPERTIES LABELS "daemon;integration;plugins")
+
+# dlopen autoload test (runs only when YAMS_RUN_DLOPEN_TEST=1)
+add_executable(daemon_plugins_autoload_dlopen_test
+    daemon_plugins_autoload_dlopen_test.cpp
+)
+target_link_libraries(daemon_plugins_autoload_dlopen_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+)
+if(TARGET yams_onnx_plugin)
+    add_dependencies(daemon_plugins_autoload_dlopen_test yams_onnx_plugin)
+    target_compile_definitions(daemon_plugins_autoload_dlopen_test PRIVATE yams_onnx_plugin_BUILT="$<TARGET_FILE:yams_onnx_plugin>")
+endif()
+add_test(NAME daemon_plugins_autoload_dlopen_test COMMAND daemon_plugins_autoload_dlopen_test)
+set_tests_properties(daemon_plugins_autoload_dlopen_test PROPERTIES LABELS "daemon;integration;plugins" TIMEOUT 60)
+
+# Components management (env toggles)
+add_executable(daemon_components_management_test
+    daemon_components_management_test.cpp
+)
+target_link_libraries(daemon_components_management_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+)
+add_test(NAME daemon_components_management_test COMMAND daemon_components_management_test)
+set_tests_properties(daemon_components_management_test PROPERTIES LABELS "daemon;integration;components")
+
+# Tuning policy API
+add_executable(daemon_tuning_policy_test
+    daemon_tuning_policy_test.cpp
+)
+target_link_libraries(daemon_tuning_policy_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+)
+add_test(NAME daemon_tuning_policy_test COMMAND daemon_tuning_policy_test)
+set_tests_properties(daemon_tuning_policy_test PROPERTIES LABELS "daemon;integration;tuning")
 
 # ONNX plugin integration (ABI host)
 add_executable(onnx_plugin_integration_test
@@ -232,3 +326,41 @@ if(TARGET yams_onnx_plugin)
 endif()
 add_test(NAME embeddings_vector_persist_integration_test COMMAND embeddings_vector_persist_integration_test)
 set_tests_properties(embeddings_vector_persist_integration_test PROPERTIES LABELS "daemon;integration" TIMEOUT 120)
+
+# New: search progress without embeddings (vectors disabled)
+add_executable(daemon_search_no_embeddings_test
+    daemon_search_no_embeddings_test.cpp
+)
+target_link_libraries(daemon_search_no_embeddings_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+)
+add_test(NAME daemon_search_no_embeddings_test COMMAND daemon_search_no_embeddings_test)
+set_tests_properties(daemon_search_no_embeddings_test PROPERTIES LABELS "daemon;integration;search")
+
+# New: vector DB single-shot init behavior and lock-busy across processes
+add_executable(daemon_vector_db_single_shot_test
+    daemon_vector_db_single_shot_test.cpp
+)
+target_link_libraries(daemon_vector_db_single_shot_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+)
+add_test(NAME daemon_vector_db_single_shot_test COMMAND daemon_vector_db_single_shot_test)
+set_tests_properties(daemon_vector_db_single_shot_test PROPERTIES LABELS "daemon;integration;vectors")
+
+# New: rebuild non-blocking enables vector scoring later
+add_executable(daemon_vector_scoring_rebuild_test
+    daemon_vector_scoring_rebuild_test.cpp
+)
+target_link_libraries(daemon_vector_scoring_rebuild_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams::daemon_client
+)
+add_test(NAME daemon_vector_scoring_rebuild_test COMMAND daemon_vector_scoring_rebuild_test)
+set_tests_properties(daemon_vector_scoring_rebuild_test PROPERTIES LABELS "daemon;integration;search")

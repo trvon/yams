@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -58,10 +59,19 @@ public:
     // Convenience: reset to Unknown
     void reset();
 
+    // Subsystem degradation tracking (sticky until cleared)
+    void setSubsystemDegraded(const std::string& name, bool degraded,
+                              const std::string& reason = std::string());
+    bool isSubsystemDegraded(const std::string& name) const;
+    std::map<std::string, bool> degradedSubsystems() const { return degraded_; }
+    std::string degradationReason(const std::string& name) const;
+
 private:
     void transitionTo(LifecycleState next, std::optional<std::string> err = std::nullopt);
 
     LifecycleSnapshot snapshot_{};
+    std::map<std::string, bool> degraded_;
+    std::map<std::string, std::string> degradeReasons_;
 };
 
 } // namespace yams::daemon

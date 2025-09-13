@@ -28,8 +28,15 @@ target_link_libraries(streaming_processor_test
         test_utils
         gtest_main
         yams::daemon
-        yams::daemon_ipc
+        yams::core
+        spdlog::spdlog
+        ZLIB::ZLIB
 )
+
+# Link IPC object files directly for ABI parity in unit tests
+if(TARGET yams_daemon_ipc_obj)
+    target_sources(streaming_processor_test PRIVATE $<TARGET_OBJECTS:yams_daemon_ipc_obj>)
+endif()
 
 target_compile_features(streaming_processor_test PRIVATE cxx_std_20)
 

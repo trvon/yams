@@ -59,6 +59,11 @@ configure_file(
     @ONLY
 )
 
+# Compile out spdlog debug/trace in Release-like builds
+add_compile_definitions(
+    $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO>
+)
+
 # Ensure default CMake package dir uses 'Yams' casing for consumers
 include(GNUInstallDirs)
 
@@ -1192,6 +1197,16 @@ if(NOT YAMS_USE_CONAN)
             target_compile_options(sqlite3 PRIVATE /w)
         endif()
     endif()
+endif()
+
+# Ensure standard install directory variables are available early (for install() below)
+include(GNUInstallDirs)
+# Provide FULL paths if not defined yet (older CMake)
+if(NOT DEFINED CMAKE_INSTALL_FULL_LIBDIR)
+    set(CMAKE_INSTALL_FULL_LIBDIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
+endif()
+if(NOT DEFINED CMAKE_INSTALL_FULL_BINDIR)
+    set(CMAKE_INSTALL_FULL_BINDIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}")
 endif()
 
 # PDFium for PDF text extraction

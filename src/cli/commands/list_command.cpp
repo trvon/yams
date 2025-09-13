@@ -3,7 +3,6 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/cli/session_store.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -21,16 +20,11 @@ namespace yamsfmt = fmt;
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 
 namespace yams::cli {
 
@@ -61,7 +55,7 @@ public:
             ->check(CLI::IsMember({"name", "size", "date", "hash"}));
 
         cmd->add_flag("--reverse,-r", reverse_, "Reverse sort order");
-        cmd->add_option("--limit,-n", limit_, "Limit number of results")->default_val(20);
+        cmd->add_option("--limit,-n", limit_, "Limit number of results")->default_val(100);
         cmd->add_option("--offset", offset_, "Offset for pagination")->default_val(0);
         cmd->add_option("--recent", recentCount_, "Show N most recent documents");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
@@ -78,14 +72,6 @@ public:
         cmd->add_option("--snippet-length", snippetLength_, "Length of content snippets")
             ->default_val(50);
         cmd->add_flag("--no-snippets", noSnippets_, "Disable content previews");
-
-        // Streaming control
-        cmd->add_flag("--no-streaming", disableStreaming_,
-                      "Disable streaming responses from daemon");
-
-        // Session scoping controls
-        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
-        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
 
         // File type filters
         cmd->add_option("--type", fileType_,
@@ -129,14 +115,6 @@ public:
                 showSnippets_ = false;
             }
 
-            // Populate session patterns once per invocation
-            if (!noSession_) {
-                sessionPatterns_ =
-                    yams::cli::session_store::active_include_patterns(sessionOverride_);
-            } else {
-                sessionPatterns_.clear();
-            }
-
             auto result = execute();
             if (!result) {
                 spdlog::error("List failed: {}", result.error().message);
@@ -146,20 +124,6 @@ public:
     }
 
     Result<void> execute() override {
-        std::promise<Result<void>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [this, &prom]() -> boost::asio::awaitable<void> {
-                auto r = co_await this->executeAsync();
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        return fut.get();
-    }
-
-    boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             // Always try daemon-first approach with full protocol mapping for PBI-001 compliance
             yams::daemon::ListRequest dreq;
@@ -217,26 +181,8 @@ public:
             auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
                 // Handle paths-only output
                 if (pathsOnly_) {
-                    if (resp.items.empty()) {
-                        std::cout << "(no results)" << std::endl;
-                    } else {
-                        for (const auto& e : resp.items) {
-                            if (!sessionPatterns_.empty()) {
-                                bool match = false;
-                                for (const auto& pat : sessionPatterns_) {
-                                    if ((!e.path.empty() &&
-                                         e.path.find(pat) != std::string::npos) ||
-                                        (!e.fileName.empty() &&
-                                         e.fileName.find(pat) != std::string::npos)) {
-                                        match = true;
-                                        break;
-                                    }
-                                }
-                                if (!match)
-                                    continue;
-                            }
-                            std::cout << e.path << std::endl;
-                        }
+                    for (const auto& e : resp.items) {
+                        std::cout << e.path << std::endl;
                     }
                     return Result<void>();
                 }
@@ -245,19 +191,6 @@ public:
                 std::vector<EnhancedDocumentInfo> documents;
 
                 for (const auto& e : resp.items) {
-                    if (!sessionPatterns_.empty()) {
-                        bool match = false;
-                        for (const auto& pat : sessionPatterns_) {
-                            if ((!e.path.empty() && e.path.find(pat) != std::string::npos) ||
-                                (!e.fileName.empty() &&
-                                 e.fileName.find(pat) != std::string::npos)) {
-                                match = true;
-                                break;
-                            }
-                        }
-                        if (!match)
-                            continue;
-                    }
                     EnhancedDocumentInfo doc;
 
                     // Map daemon ListEntry to EnhancedDocumentInfo
@@ -316,57 +249,18 @@ public:
 
             auto fallback = [&]() -> Result<void> { return executeWithServices(); };
 
-            // Direct daemon call (no pooling) for determinism
-            yams::daemon::ClientConfig cfg;
-            // Align storage with CLI data path (parity with SearchCommand)
-            if (cli_) {
-                auto dp = cli_->getDataPath();
-                if (!dp.empty()) {
-                    cfg.dataDir = dp;
-#ifndef _WIN32
-                    ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
-                    ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
-#endif
-                }
-            }
-            // Configure conservative-but-snappy timeouts for daemon path: if the daemon is not
-            // actually accepting/processing (e.g., stale socket or zero IO workers), we want to
-            // fall back quickly rather than block the CLI. Body can remain generous for large
-            // lists.
-            cfg.headerTimeout = std::chrono::milliseconds(3000); // fast header preflight
-            cfg.bodyTimeout = std::chrono::milliseconds(60000);  // allow up to 60s for body
-            yams::daemon::DaemonClient::setTimeoutEnvVars(cfg.headerTimeout, cfg.bodyTimeout);
-            cfg.enableChunkedResponses = !disableStreaming_;
-            cfg.singleUseConnections = false;
-            cfg.requestTimeout = std::chrono::milliseconds(30000);
-            yams::daemon::DaemonClient client(cfg);
-            client.setStreamingEnabled(cfg.enableChunkedResponses);
+            if (auto d = run_awaitable(daemon_request_async(dreq, fallback, render)); d)
+                return Result<void>();
 
-            auto result = co_await (cfg.enableChunkedResponses ? client.streamingList(dreq)
-                                                               : client.call(dreq));
-            if (result) {
-                auto r = render(result.value());
-                if (!r)
-                    co_return r.error();
-                co_return Result<void>();
-            }
-            // Explicit fallback with a user-visible hint to aid debugging
-            spdlog::warn("List: daemon unavailable or timed out ({}). Falling back to local.",
-                         result.error().message);
-            co_return executeWithServices();
+            // Fallback to service-based approach
+            return executeWithServices();
 
         } catch (const std::exception& e) {
-            co_return Error{ErrorCode::Unknown, std::string(e.what())};
+            return Error{ErrorCode::Unknown, std::string(e.what())};
         }
     }
 
 private:
-    // Default to non-streaming for best-effort reliability; users can opt back in.
-    bool disableStreaming_ = false;
-    // Session scoping
-    std::optional<std::string> sessionOverride_{};
-    bool noSession_{false};
-    std::vector<std::string> sessionPatterns_;
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();
@@ -802,7 +696,7 @@ private:
             d["path"] = doc.info.filePath;
             d["extension"] = doc.info.fileExtension;
             d["size"] = doc.info.fileSize;
-            d["size_formatted"] = doc.getFormattedSize();
+            d["size-formatted"] = doc.getFormattedSize();
             d["mime_type"] = doc.info.mimeType;
             d["created"] = std::chrono::duration_cast<std::chrono::seconds>(
                                doc.info.createdTime.time_since_epoch())
@@ -846,16 +740,16 @@ private:
 
         for (const auto& doc : documents) {
             std::cout << doc.info.sha256Hash << ",";
-            std::cout << "\"" << doc.info.fileName << "\",";
+            std::cout << "" << doc.info.fileName << "";
             std::cout << doc.info.fileSize << ",";
-            std::cout << "\"" << doc.getFileType() << "\",";
+            std::cout << "" << doc.getFileType() << "";
 
             std::string snippet = doc.contentSnippet;
             std::replace(snippet.begin(), snippet.end(), '"', '\'');
             std::replace(snippet.begin(), snippet.end(), '\n', ' ');
-            std::cout << "\"" << snippet << "\",";
+            std::cout << "" << snippet << "";
 
-            std::cout << "\"" << doc.getTags() << "\",";
+            std::cout << "" << doc.getTags() << "";
             std::cout << doc.getFormattedDate() << "\n";
         }
     }
@@ -1160,7 +1054,7 @@ private:
     std::string format_;
     std::string sortBy_;
     bool reverse_ = false;
-    int limit_ = 20;
+    int limit_ = 100;
     bool verbose_ = false;
     bool pathsOnly_ = false;
     int offset_ = 0;

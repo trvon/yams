@@ -171,7 +171,7 @@ void StdioTransport::sendAsync(json message) {
         return;
     }
     // Writer thread retired; fall back to immediate framed send
-    send(message.dump());
+    send(message);
 }
 
 // Dedicated writer thread: drains queue and writes framed messages to stdout
@@ -225,21 +225,28 @@ StdioTransport::~StdioTransport() {
 void StdioTransport::send(const json& message) {
     auto currentState = state_.load();
     if (currentState == TransportState::Connected) {
-        std::lock_guard<std::mutex> lock(out_mutex_);
-        const std::string payload = message.dump();
-        // Temporarily bind std::cout to captured buffer to honor test redirections
-        std::streambuf* saved = std::cout.rdbuf();
-        if (outbuf_) {
-            (void)std::cout.rdbuf(outbuf_);
-        }
-        // Minimal LSP/MCP framing
-        std::cout << "Content-Length: " << payload.size() << "\r\n";
-        std::cout << "Content-Type: application/json\r\n\r\n";
-        std::cout << payload;
-        std::cout << "\r\n";
-        std::cout.flush();
-        if (saved) {
-            (void)std::cout.rdbuf(saved);
+        try {
+            std::lock_guard<std::mutex> lock(out_mutex_);
+            const std::string payload = message.dump();
+            // Temporarily bind std::cout to captured buffer to honor test redirections
+            std::streambuf* saved = std::cout.rdbuf();
+            if (outbuf_) {
+                (void)std::cout.rdbuf(outbuf_);
+            }
+            // Minimal LSP/MCP framing, always including Content-Type and trailing CRLF
+            std::cout << "Content-Length: " << payload.size() << "\r\n";
+            std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+            std::cout << "\r\n";
+            std::cout << payload;
+            std::cout << "\r\n";
+            std::cout.flush();
+            if (saved) {
+                (void)std::cout.rdbuf(saved);
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("StdioTransport::send exception: {}", e.what());
+        } catch (...) {
+            spdlog::error("StdioTransport::send unknown exception");
         }
     }
 }
@@ -573,9 +580,15 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         boost::asio::co_spawn(
             io,
             [cli = daemon_client_]() -> boost::asio::awaitable<void> {
-                auto r = co_await cli->connect();
-                if (!r) {
-                    spdlog::warn("Daemon connect attempt failed: {}", r.error().message);
+                try {
+                    auto r = co_await cli->connect();
+                    if (!r) {
+                        spdlog::warn("Daemon connect attempt failed: {}", r.error().message);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::error("Daemon connect coroutine threw: {}", e.what());
+                } catch (...) {
+                    spdlog::error("Daemon connect coroutine threw unknown exception");
                 }
                 co_return;
             },
@@ -614,71 +627,79 @@ void MCPServer::start() {
     spdlog::info("MCP server started");
 
     // Main message loop with modern error handling
-    while (running_ && (!externalShutdown_ || !*externalShutdown_)) {
-        auto messageResult = transport_->receive();
+    try {
+        while (running_ && (!externalShutdown_ || !*externalShutdown_)) {
+            auto messageResult = transport_->receive();
 
-        if (!messageResult) {
-            const auto& error = messageResult.error();
+            if (!messageResult) {
+                const auto& error = messageResult.error();
 
-            // Handle different error types
-            switch (error.code) {
-                case ErrorCode::NetworkError:
-                    spdlog::debug("Transport closed: {}", error.message);
-                    running_ = false;
-                    break;
+                // Handle different error types
+                switch (error.code) {
+                    case ErrorCode::NetworkError:
+                        spdlog::debug("Transport closed: {}", error.message);
+                        running_ = false;
+                        break;
 
-                case ErrorCode::InvalidData:
-                    spdlog::debug("Invalid JSON received: {}", error.message);
-                    // Per JSON-RPC 2.0, respond with Parse error and id=null
-                    sendResponse(createError(json(nullptr), protocol::PARSE_ERROR, error.message));
-                    // Continue processing - client may send valid messages
-                    continue;
+                    case ErrorCode::InvalidData:
+                        spdlog::debug("Invalid JSON received: {}", error.message);
+                        // Per JSON-RPC 2.0, respond with Parse error and id=null
+                        sendResponse(
+                            createError(json(nullptr), protocol::PARSE_ERROR, error.message));
+                        // Continue processing - client may send valid messages
+                        continue;
 
-                default:
-                    spdlog::error("Unexpected transport error: {}", error.message);
-                    continue;
+                    default:
+                        spdlog::error("Unexpected transport error: {}", error.message);
+                        continue;
+                }
+                continue;
             }
-            continue;
-        }
 
-        // Process valid message
-        auto request = messageResult.value();
-        spdlog::debug("MCP server received message: {}", request.dump());
-        if (handshakeTrace_) {
-            // handshakeTrace is a YAMS extension
-            try {
-                std::string meth = request.value("method", "");
-                std::string id = request.contains("id") ? request["id"].dump() : "null";
-                // Log to local logger instead of sending non-standard notification
-                spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
-            } catch (...) {
+            // Process valid message
+            auto request = messageResult.value();
+            spdlog::debug("MCP server received message: {}", request.dump());
+            if (handshakeTrace_) {
+                // handshakeTrace is a YAMS extension
+                try {
+                    std::string meth = request.value("method", "");
+                    std::string id = request.contains("id") ? request["id"].dump() : "null";
+                    // Log to local logger instead of sending non-standard notification
+                    spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
+                } catch (...) {
+                }
+            }
+            // Detect JSON‑RPC notification (no "id" field per spec)
+            const bool isNotification = !request.contains("id");
+
+            auto id_val = request.value("id", json{});
+            if (!isNotification && isCanceled(id_val)) {
+                spdlog::debug("Dropping response for cancelled request id={}", id_val.dump());
+                continue; // do not send a response (required by spec)
+            }
+
+            // All handling is now synchronous within this loop
+            auto response = handleRequest(request);
+            if (response) {
+                if (!isNotification) {
+                    sendResponse(response.value());
+                }
+            } else {
+                if (!isNotification) {
+                    const auto& error = response.error();
+                    json errorResponse = {
+                        {"jsonrpc", protocol::JSONRPC_VERSION},
+                        {"error",
+                         {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
+                        {"id", request.value("id", nullptr)}};
+                    sendResponse(errorResponse);
+                }
             }
         }
-        // Detect JSON‑RPC notification (no "id" field per spec)
-        const bool isNotification = !request.contains("id");
-
-        auto id_val = request.value("id", json{});
-        if (!isNotification && isCanceled(id_val)) {
-            spdlog::debug("Dropping response for cancelled request id={}", id_val.dump());
-            continue; // do not send a response (required by spec)
-        }
-
-        // All handling is now synchronous within this loop
-        auto response = handleRequest(request);
-        if (response) {
-            if (!isNotification) {
-                sendResponse(response.value());
-            }
-        } else {
-            if (!isNotification) {
-                const auto& error = response.error();
-                json errorResponse = {
-                    {"jsonrpc", protocol::JSONRPC_VERSION},
-                    {"error", {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
-                    {"id", request.value("id", nullptr)}};
-                sendResponse(errorResponse);
-            }
-        }
+    } catch (const std::exception& e) {
+        spdlog::critical("Fatal exception in MCPServer::start: {}", e.what());
+    } catch (...) {
+        spdlog::critical("Fatal unknown exception in MCPServer::start");
     }
 
     running_ = false;
@@ -1810,7 +1831,7 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
 }
 
 // Modern C++20 tool handler implementations
-yams::Task<Result<MCPSearchResponse>>
+boost::asio::awaitable<Result<MCPSearchResponse>>
 MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::daemon::SearchRequest dreq;
     // Build query with optional path qualifier so daemon-side path filters work via qualifiers.
@@ -1902,7 +1923,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
+boost::asio::awaitable<Result<MCPGrepResponse>>
+MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     yams::daemon::GrepRequest dreq;
     dreq.pattern = req.pattern;
     dreq.paths = req.paths;
@@ -2007,7 +2029,8 @@ yams::Task<Result<MCPGrepResponse>> MCPServer::handleGrepDocuments(const MCPGrep
     co_return out;
 }
 
-yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownloadRequest& req) {
+boost::asio::awaitable<Result<MCPDownloadResponse>>
+MCPServer::handleDownload(const MCPDownloadRequest& req) {
     const bool verbose =
         (std::getenv("YAMS_POOL_VERBOSE") && std::string(std::getenv("YAMS_POOL_VERBOSE")) != "0" &&
          std::string(std::getenv("YAMS_POOL_VERBOSE")) != "false");
@@ -2433,13 +2456,39 @@ yams::Task<Result<MCPDownloadResponse>> MCPServer::handleDownload(const MCPDownl
     co_return mcp_response;
 }
 
-yams::Task<Result<MCPStoreDocumentResponse>>
+boost::asio::awaitable<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
     // Normalize path: expand '~' and make absolute using PWD for relative paths
     {
         std::string _p = req.path;
+        // Sanitize control characters (CR/LF/NUL) and trim leading/trailing spaces/tabs
+        if (!_p.empty()) {
+            std::string cleaned;
+            cleaned.reserve(_p.size());
+            for (char c : _p) {
+                if (c == '\0')
+                    break; // stop at first NUL just in case
+                if (c == '\r' || c == '\n')
+                    continue; // drop CR/LF which can corrupt path resolution
+                cleaned.push_back(c);
+            }
+            // Trim leading/trailing spaces and tabs (avoid accidental copy/paste whitespace)
+            auto start = cleaned.find_first_not_of(" \t");
+            if (start == std::string::npos) {
+                cleaned.clear();
+            } else {
+                auto end = cleaned.find_last_not_of(" \t");
+                cleaned = cleaned.substr(start, end - start + 1);
+            }
+            // Remove a trailing slash (except for root) to avoid treating intended file paths as
+            // directories
+            if (cleaned.size() > 1 && cleaned.back() == '/') {
+                cleaned.pop_back();
+            }
+            _p = std::move(cleaned);
+        }
         // Strip file:// scheme if present (basic normalization)
         if (_p.rfind("file://", 0) == 0) {
             _p = _p.substr(7);
@@ -2494,7 +2543,11 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // Increase daemon timeouts for potentially long single-file adds
     daemon_client_->setHeaderTimeout(std::chrono::seconds(60));
     daemon_client_->setBodyTimeout(std::chrono::seconds(300));
-    // Validate that the target file path exists and is not a directory
+    // Validate that the target file path exists and is not a directory. However, if the user
+    // supplied inline content AND the provided path resolves to a directory, we will gracefully
+    // downgrade this to a content-only add instead of returning an error. This improves UX for
+    // MCP clients that may pass their current working directory as a path while also providing
+    // the actual document content inline.
     if (!daemon_req.path.empty()) {
         std::error_code __ec;
         if (!std::filesystem::exists(daemon_req.path, __ec)) {
@@ -2502,9 +2555,16 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
                             std::string("Path does not exist: ") + daemon_req.path};
         }
         if (std::filesystem::is_directory(daemon_req.path, __ec)) {
-            co_return Error{ErrorCode::InvalidArgument,
-                            std::string("Path is a directory (use add_directory): ") +
-                                daemon_req.path};
+            if (!daemon_req.content.empty()) {
+                spdlog::warn("[MCP] add: provided path '{}' is a directory; treating request as "
+                             "content-only add (name='{}')",
+                             daemon_req.path, daemon_req.name);
+                daemon_req.path.clear(); // Force content-mode add
+            } else {
+                co_return Error{ErrorCode::InvalidArgument,
+                                std::string("Path is a directory (use add_directory): ") +
+                                    daemon_req.path};
+            }
         }
     }
     auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
@@ -2518,7 +2578,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPRetrieveDocumentResponse>>
+boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>
 MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     // Convert MCP request to daemon request
     daemon::GetRequest daemon_req;
@@ -2587,7 +2647,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     co_return mcp_response;
 }
 
-yams::Task<Result<MCPListDocumentsResponse>>
+boost::asio::awaitable<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
@@ -2652,7 +2712,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsRequest& req) {
+boost::asio::awaitable<Result<MCPStatsResponse>>
+MCPServer::handleGetStats(const MCPStatsRequest& req) {
     daemon::GetStatsRequest daemon_req;
     daemon_req.showFileTypes = req.fileTypes;
     daemon_req.detailed = req.verbose;
@@ -2679,7 +2740,7 @@ yams::Task<Result<MCPStatsResponse>> MCPServer::handleGetStats(const MCPStatsReq
     co_return out;
 }
 
-yams::Task<Result<MCPAddDirectoryResponse>>
+boost::asio::awaitable<Result<MCPAddDirectoryResponse>>
 MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
     // Use app::services IndexingService to add directory contents
     auto indexingService = app::services::makeIndexingService(appContext_);
@@ -2749,7 +2810,7 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPUpdateMetadataResponse>>
+boost::asio::awaitable<Result<MCPUpdateMetadataResponse>>
 MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     daemon::UpdateDocumentRequest daemon_req;
     daemon_req.hash = req.hash;
@@ -2771,7 +2832,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPSessionStartResponse>>
+boost::asio::awaitable<Result<MCPSessionStartResponse>>
 MCPServer::handleSessionStart(const MCPSessionStartRequest& req) {
     // Initialize or select session using JSON-backed service
     auto sessionSvc = app::services::makeSessionService(nullptr);
@@ -2812,7 +2873,7 @@ MCPServer::handleSessionStart(const MCPSessionStartRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPSessionStopResponse>>
+boost::asio::awaitable<Result<MCPSessionStopResponse>>
 MCPServer::handleSessionStop(const MCPSessionStopRequest& req) {
     auto sessionSvc = app::services::makeSessionService(nullptr);
     if (!req.name.empty()) {
@@ -2827,7 +2888,7 @@ MCPServer::handleSessionStop(const MCPSessionStopRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPSessionPinResponse>>
+boost::asio::awaitable<Result<MCPSessionPinResponse>>
 MCPServer::handleSessionPin(const MCPSessionPinRequest& req) {
     // Validate inputs
     if (req.path.empty()) {
@@ -2884,7 +2945,7 @@ MCPServer::handleSessionPin(const MCPSessionPinRequest& req) {
     co_return out;
 }
 
-yams::Task<Result<MCPSessionUnpinResponse>>
+boost::asio::awaitable<Result<MCPSessionUnpinResponse>>
 MCPServer::handleSessionUnpin(const MCPSessionUnpinRequest& req) {
     // Validate inputs
     if (req.path.empty()) {
@@ -3328,7 +3389,7 @@ void MCPServer::recordEarlyFeatureUse() {
 
 /* Removed misplaced logging/setLevel block (should reside inside MCPServer::handleRequest) */
 
-yams::Task<Result<MCPGetByNameResponse>>
+boost::asio::awaitable<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     // Prefer fast name -> hash resolution and non-streamed get (CLI parity)
     MCPGetByNameResponse mcp_response;
@@ -3548,7 +3609,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     co_return mcp_response;
 }
 
-yams::Task<Result<MCPDeleteByNameResponse>>
+boost::asio::awaitable<Result<MCPDeleteByNameResponse>>
 MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
     daemon::DeleteRequest daemon_req;
     daemon_req.name = req.name;
@@ -3564,7 +3625,7 @@ MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
     co_return out;
 }
 
-yams::Task<yams::Result<yams::mcp::MCPCatDocumentResponse>>
+boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
 yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
     MCPCatDocumentResponse out;
     // Disambiguate by name before direct get when hash is not provided
@@ -3667,7 +3728,7 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
 }
 
 // Implementation of collection restore
-yams::Task<yams::Result<yams::mcp::MCPRestoreCollectionResponse>>
+boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreCollectionResponse>>
 yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollectionRequest& req) {
     try {
         if (!metadataRepo_) {
@@ -3853,19 +3914,19 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
     }
 }
 
-yams::Task<yams::Result<yams::mcp::MCPRestoreSnapshotResponse>>
+boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreSnapshotResponse>>
 yams::mcp::MCPServer::handleRestoreSnapshot(const yams::mcp::MCPRestoreSnapshotRequest& req) {
     co_return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
 }
 
-yams::Task<Result<MCPListCollectionsResponse>>
+boost::asio::awaitable<Result<MCPListCollectionsResponse>>
 MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
     MCPListCollectionsResponse response;
     // TODO: Implement collection listing
     co_return response;
 }
 
-yams::Task<Result<MCPListSnapshotsResponse>>
+boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
 MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
     MCPListSnapshotsResponse response;
     // TODO: Implement snapshot listing

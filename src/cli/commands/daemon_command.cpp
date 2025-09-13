@@ -1074,7 +1074,69 @@ private:
         }
 
         if (!detailed_) {
-            std::cout << "YAMS daemon is running\n";
+            // Compact, helpful summary without requiring --detailed. Use StatusResponse for
+            // lifecycle/readiness plus high-level metrics.
+            yams::daemon::DaemonClient client{};
+            auto sres = [&]() -> Result<yams::daemon::StatusResponse> {
+                std::promise<Result<yams::daemon::StatusResponse>> prom;
+                auto fut = prom.get_future();
+                boost::asio::co_spawn(
+                    boost::asio::system_executor{},
+                    [&]() -> boost::asio::awaitable<void> {
+                        auto r = co_await client.status();
+                        prom.set_value(std::move(r));
+                        co_return;
+                    },
+                    boost::asio::detached);
+                if (fut.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+                    return fut.get();
+                }
+                return Error{ErrorCode::Timeout, "status timeout"};
+            }();
+            if (!sres) {
+                std::cout << "YAMS daemon is running\n";
+                return;
+            }
+            const auto& s = sres.value();
+            const std::string state =
+                !s.lifecycleState.empty()
+                    ? s.lifecycleState
+                    : (s.ready ? std::string("Ready")
+                               : (s.overallStatus.empty() ? std::string("Initializing")
+                                                          : s.overallStatus));
+            std::cout << "YAMS Daemon\n";
+            std::cout << "- State:        " << state;
+            if (!s.version.empty())
+                std::cout << "   Version: " << s.version;
+            std::cout << "\n";
+            std::cout << "- Uptime:       " << s.uptimeSeconds
+                      << "s   Connections: " << s.activeConnections
+                      << "   CPU: " << (int)s.cpuUsagePercent << "%   Mem: " << (int)s.memoryUsageMb
+                      << " MB\n";
+            auto ok = [&](const char* k) {
+                auto it = s.readinessStates.find(k);
+                return it != s.readinessStates.end() && it->second;
+            };
+            std::cout << "- Services:     content_store=" << (ok("content_store") ? "ok" : "…")
+                      << "  metadata_repo=" << (ok("metadata_repo") ? "ok" : "…")
+                      << "  search_engine=" << (ok("search_engine") ? "ok" : "…")
+                      << "  model_provider=" << (ok("model_provider") ? "ok" : "…") << "\n";
+            // Vector DB snapshot
+            std::cout << "- Vectors:      ready=" << (s.vectorDbReady ? "yes" : "no");
+            if (s.vectorDbDim > 0)
+                std::cout << "  dim=" << s.vectorDbDim;
+            std::cout << "\n";
+            // Worker snapshot
+            std::size_t threads = 0, active = 0, queued = 0;
+            if (auto it = s.requestCounts.find("worker_threads"); it != s.requestCounts.end())
+                threads = it->second;
+            if (auto it = s.requestCounts.find("worker_active"); it != s.requestCounts.end())
+                active = it->second;
+            if (auto it = s.requestCounts.find("worker_queued"); it != s.requestCounts.end())
+                queued = it->second;
+            std::size_t util = threads ? static_cast<std::size_t>((100.0 * active) / threads) : 0;
+            std::cout << "- Workers:      threads=" << threads << "  active=" << active
+                      << "  queued=" << queued << "  util=" << util << "%\n";
             return;
         }
 

@@ -60,6 +60,9 @@ struct MetricsSnapshot {
     // Vector DB snapshot (best-effort)
     std::size_t vectorDbSizeBytes{0};
     std::size_t vectorRowsExact{0};
+    bool vectorDbInitAttempted{false};
+    bool vectorDbReady{false};
+    uint32_t vectorDbDim{0};
 
     // Service states (centralized)
     std::string serviceContentStore;   // "running"|"unavailable"

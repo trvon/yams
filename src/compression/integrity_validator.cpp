@@ -164,7 +164,6 @@ public:
 
         } catch (const std::exception& ex) {
             auto end = std::chrono::steady_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
             updateFailureStats();
 
@@ -232,7 +231,6 @@ public:
 
         } catch (const std::exception& ex) {
             auto end = std::chrono::steady_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
             updateFailureStats();
 
@@ -300,7 +298,6 @@ public:
 
         } catch (const std::exception& ex) {
             auto end = std::chrono::steady_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
             updateFailureStats();
 

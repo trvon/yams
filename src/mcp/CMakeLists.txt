@@ -29,6 +29,7 @@ target_link_libraries(yams_mcp
         OpenSSL::SSL
         OpenSSL::Crypto
         Threads::Threads
+        $<$<TARGET_EXISTS:tl::expected>:tl::expected>
 )
 
 # Boost.Asio headers are provided via yams_boost_headers

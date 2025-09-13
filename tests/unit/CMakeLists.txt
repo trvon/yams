@@ -38,9 +38,9 @@ target_link_libraries(all_unit_tests
         yams::storage_engine
 )
 
-# Discover tests
-set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
-gtest_discover_tests(all_unit_tests
+# Discover tests (honor centralized defaults)
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE ${YAMS_GTEST_DISCOVERY_MODE})
+yams_gtest_discover_tests(all_unit_tests
     DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
     PROPERTIES
         LABELS "unit"

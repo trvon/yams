@@ -732,7 +732,8 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
             impl->backpressured = false;
         }
         if (was != impl->backpressured) {
-            YAMS_PLOT("daemon_fsm_backpressure_flip", impl->backpressured ? 1 : 0);
+            YAMS_PLOT("daemon_fsm_backpressure_flip",
+                      static_cast<int64_t>(impl->backpressured ? 1 : 0));
             spdlog::debug("ConnectionFsm: backpressure {} (bytes={}, cap={}, state={})",
                           impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
                           to_string(state_));
@@ -758,7 +759,8 @@ void ConnectionFsm::on_write_flushed(std::size_t bytes) noexcept {
             impl->write_bytes = (cap * impl->low_wm_percent) / 100;
         }
         if (was != impl->backpressured) {
-            YAMS_PLOT("daemon_fsm_backpressure_flip", impl->backpressured ? 1 : 0);
+            YAMS_PLOT("daemon_fsm_backpressure_flip",
+                      static_cast<int64_t>(static_cast<int>(impl->backpressured)));
             spdlog::debug("ConnectionFsm: backpressure {} after flush (bytes={}, cap={}, state={})",
                           impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
                           to_string(state_));

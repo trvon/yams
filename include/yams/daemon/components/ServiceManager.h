@@ -8,9 +8,11 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/core/types.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/daemon.h> // For DaemonConfig
+#include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/plugin_loader.h>
@@ -76,6 +78,9 @@ public:
     }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return workerPool_; }
+    // Last search engine build metadata (for diagnostics/status)
+    std::string getLastSearchBuildReason() const { return lastSearchBuildReason_; }
+    bool getLastVectorEnabled() const { return lastVectorEnabled_; }
     boost::asio::any_io_executor getWorkerExecutor() const;
     std::function<void(bool)> getWorkerJobSignal();
     // Best-effort queue depth estimation for backpressure/telemetry
@@ -191,6 +196,11 @@ public:
     // Should be called via co_spawn with shared_from_this() for safety.
     boost::asio::awaitable<void> co_enableEmbeddingsAndRebuild();
 
+    // Ensure embedding generator is initialized for a specific model name (already loaded in
+    // provider). Returns success if generator is ready or initialized; schedules no rebuild by
+    // itself.
+    Result<void> ensureEmbeddingGeneratorFor(const std::string& modelName);
+
     // Check if embedding initialization has started
     bool isEmbeddingInitStarted() const {
         return embedInitStarted_.load(std::memory_order_acquire);
@@ -220,6 +230,12 @@ public:
     void __test_setModelProviderDegraded(bool degraded, const std::string& error = {}) {
         modelProviderDegraded_.store(degraded, std::memory_order_relaxed);
         lastModelError_ = error;
+    }
+    // Force a vector DB initialization attempt and return whether work was performed
+    // (skipped=false indicates already attempted or lock-busy/disabled). This is a thin
+    // test-only wrapper to exercise single-shot behavior deterministically.
+    Result<bool> __test_forceVectorDbInitOnce(const std::filesystem::path& dataDir) {
+        return initializeVectorDatabaseOnce(dataDir);
     }
 #endif
 
@@ -280,10 +296,22 @@ private:
     std::atomic<bool> rebuildInProgress_{false};
     std::atomic<bool> preferredPreloadStarted_{false};
 
+    // Guard to ensure vector database initialization executes at most once per daemon lifetime
+    std::atomic<bool> vectorDbInitAttempted_{false};
+
+    // Idempotent vector database initialization entry point
+    // Returns true when this call performed initialization work, false when skipped
+    // because it was already attempted elsewhere. On failure, returns Error.
+    Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
+
     // Degraded provider tracking
     std::atomic<bool> modelProviderDegraded_{false};
     std::string lastModelError_;
     std::string adoptedProviderPluginName_;
+
+    // Diagnostics: track last search build reason and vector enablement
+    std::string lastSearchBuildReason_{"unknown"};
+    bool lastVectorEnabled_{false};
 };
 
 } // namespace yams::daemon

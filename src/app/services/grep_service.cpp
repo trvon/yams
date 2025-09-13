@@ -542,11 +542,11 @@ public:
                             fr.fileName = std::filesystem::path(path).filename().string();
                             GrepMatch gm;
                             gm.matchType = "semantic";
-                            double conf = r.hybrid_score > 0 ? r.hybrid_score : r.vector_score;
-                            if (conf < 0.0)
-                                conf = 0.0;
-                            if (conf > 1.0)
-                                conf = 1.0;
+                            float conf = r.hybrid_score > 0.0f ? r.hybrid_score : r.vector_score;
+                            if (conf < 0.0f)
+                                conf = 0.0f;
+                            if (conf > 1.0f)
+                                conf = 1.0f;
                             gm.confidence = conf;
                             gm.lineNumber = 0;
                             if (!r.content.empty())

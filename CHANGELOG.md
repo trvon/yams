@@ -19,6 +19,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+## [v0.6.14] - 2025-09-12
+
+### Added
+ - CLI Doctor:
+   - `yams doctor dedupe` — detects (and optionally deletes) duplicate documents grouped by `--mode` (`path|name|hash`) with keep strategies (`--strategy keep-newest|keep-oldest|keep-largest`), dry-run by default, and safety flag
+            `--force` for hash mismatches.
+   - `yams doctor embeddings clear-degraded` — attempts to clear the embedding degraded state by loading a preferred/available model (interactive confirmation, best-effort).
+- Status + CLI plugin diagnostics:
+  - StatusResponse now carries typed `providers` and a `skippedPlugins` array (path + reason).
+  - `yams plugins list` prefers typed providers and supports `--verbose` to print a “Skipped plugins” section with clear reasons (preflight/dlopen/symbols/name-policy).
+- Config and init:
+  - New `[daemon].plugin_name_policy` with values `relaxed` (default) or `spec` (require `libyams_*_plugin.*`).
+  - `examples/config.v2.toml` documents the field; `yams init --enable-plugins` now writes `plugin_dir` and sets `plugin_name_policy = "spec"` for canonical naming by default.
+  - New `[daemon].auto_repair_batch_size` defaulted to 16; daemon applies it when starting the RepairCoordinator.
+- macOS plugin robustness:
+  - ONNX plugin CMake now bundles ONNX Runtime dylibs (existing) and PDFium dylib into local subdirs and injects `@loader_path/onnxruntime` and `@loader_path/pdfium` into rpaths. SIP‑safe, no DYLD tweaks.
+
+### Changed
+- Safer ABI plugin scanning:
+  - `scanTarget()` no longer `dlopen()`s candidates (prevents constructor crashes); macOS `dlopen_preflight()` is performed in `load()` and failures are handled gracefully.
+  - Filename filter accepts `libyams_*_plugin.*` and `yams_*_plugin.*`; strict policy can be enforced via config/env.
+- CLI `yams plugins list` auto‑starts the daemon, triggers a scan, waits briefly for readiness, and prints typed providers. Helpful guidance is printed if no info found.
+
+### Fixed
+- macOS crash on plugin scan/load:
+  - Eliminated segfaults by avoiding `dlopen()` during scan; added preflight + robust error logging in load path; fixed `dlerror()` usage (read once, avoid null concatenation).
+- Repair throttling and backpressure:
+  - RepairCoordinator honors config batch size and TuneAdvisor env knobs (`YAMS_REPAIR_MAX_BATCH`, `YAMS_REPAIR_TOKENS_IDLE/BUSY`, `YAMS_REPAIR_MAX_BATCHES_PER_SEC`, etc.) and pauses token issuance when hitting per‑second caps to keep the daemon responsive.
+- Linux build/linking:
+  - `yams-daemon` now links explicitly against `yams::daemon_ipc` and `yams::daemon_client`, resolving undefined symbol errors (ConnectionFsm/RequestHandler/ResourceTuner) on Ubuntu/ELF toolchains.
+- Test/CI stability:
+  - `run_sync` rewritten to use a promise + `co_spawn(detached)` and `co_await std::move(aw)` to avoid move/copy pitfalls with Boost.Asio awaitables.
+- Examples/config:
+  - `examples/config.v2.toml` updated with `plugin_name_policy` and daemon plugin notes; defaults align with init.
+
+### Notes
+- If your macOS ONNX plugin previously failed with `libpdfium.dylib` not found, rebuild/reinstall the plugin; the new CMake will bundle PDFium into a local `pdfium/` folder and adjust rpaths to `@loader_path/pdfium`.
+- Background repair can be tuned at runtime via environment without restarting; see the `TuneAdvisor` variables above for recommended settings during heavy foreground load.
+
 ## [v0.6.13] - 2025-09-11
 
 ### Hotfixes

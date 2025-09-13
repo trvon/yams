@@ -73,8 +73,9 @@ add_library(yams::daemon_client ALIAS yams_daemon_client)
 
 # ============================================================================
 # Daemon IPC Library (shared by daemon and MCP)
+# Build as OBJECTs for test ABI parity + a STATIC lib for production linking
 # ============================================================================
-add_library(yams_daemon_ipc STATIC
+add_library(yams_daemon_ipc_obj OBJECT
     ipc/request_handler.cpp
     ipc/streaming_processor.cpp
     ipc/connection_fsm.cpp
@@ -84,14 +85,32 @@ add_library(yams_daemon_ipc STATIC
     ipc/resource_tuner.cpp
     components/PoolManager.cpp
 )
+
+add_library(yams_daemon_ipc STATIC
+    $<TARGET_OBJECTS:yams_daemon_ipc_obj>
+)
 set_target_properties(yams_daemon_ipc PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 
-# Install daemon IPC library and export with YamsTargets so dependents are satisfied
+if(BUILD_TESTING)
+    # Build the IPC OBJECTs with YAMS_TESTING for ABI parity with unit tests,
+    # without leaking to dependents.
+    target_compile_definitions(yams_daemon_ipc_obj PRIVATE YAMS_TESTING=1)
+endif()
+
+# Install daemon IPC static library and export with YamsTargets so dependents are satisfied
 install(TARGETS yams_daemon_ipc
     EXPORT YamsTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+target_include_directories(yams_daemon_ipc_obj
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_include_directories(yams_daemon_ipc
@@ -102,10 +121,18 @@ target_include_directories(yams_daemon_ipc
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(yams_daemon_ipc
+target_link_libraries(yams_daemon_ipc_obj
     PUBLIC
         yams::core
         ZLIB::ZLIB          # For CRC32 in framing
+    PRIVATE
+        spdlog::spdlog
+)
+
+target_link_libraries(yams_daemon_ipc
+    PUBLIC
+        yams::core
+        ZLIB::ZLIB
     PRIVATE
         spdlog::spdlog
 )
@@ -114,13 +141,15 @@ target_link_libraries(yams_daemon_ipc
 
 # tl-expected is header-only; link interface target to propagate include dirs
 if(TARGET tl-expected::tl-expected)
-    target_link_libraries(yams_daemon_ipc PUBLIC tl-expected::tl-expected)
+    target_link_libraries(yams_daemon_ipc_obj PUBLIC tl-expected::tl-expected)
 elseif(TARGET tl::expected)
-    target_link_libraries(yams_daemon_ipc PUBLIC tl::expected)
+    target_link_libraries(yams_daemon_ipc_obj PUBLIC tl::expected)
 endif()
 
+target_compile_features(yams_daemon_ipc_obj PUBLIC cxx_std_20)
 target_compile_features(yams_daemon_ipc PUBLIC cxx_std_20)
 set_target_properties(yams_daemon_ipc PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(yams_daemon_ipc_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Create alias for daemon ipc
 add_library(yams::daemon_ipc ALIAS yams_daemon_ipc)
@@ -130,16 +159,16 @@ option(YAMS_USE_KQUEUE "Use kqueue backend for async IO on Apple/BSD" OFF)
 
 # Native Boost.Asio is now the only implementation
 # Add Boost headers for Boost.Asio support
-yams_add_boost_headers(yams_daemon_ipc)
+yams_add_boost_headers(yams_daemon_ipc_obj)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig)
     if(PKG_CONFIG_FOUND)
         pkg_check_modules(LIBURING liburing)
         if(LIBURING_FOUND)
-            target_compile_definitions(yams_daemon_ipc PRIVATE HAVE_IO_URING=1)
-            target_link_libraries(yams_daemon_ipc PRIVATE ${LIBURING_LIBRARIES})
-            target_include_directories(yams_daemon_ipc PRIVATE ${LIBURING_INCLUDE_DIRS})
+            target_compile_definitions(yams_daemon_ipc_obj PRIVATE HAVE_IO_URING=1)
+            target_link_libraries(yams_daemon_ipc_obj PRIVATE ${LIBURING_LIBRARIES})
+            target_include_directories(yams_daemon_ipc_obj PRIVATE ${LIBURING_INCLUDE_DIRS})
             message(STATUS "io_uring support enabled for yams_daemon_ipc")
         else()
             message(STATUS "yams_daemon_ipc: liburing not found, using select/epoll fallback")
@@ -147,7 +176,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 elseif(APPLE)
     if(YAMS_USE_KQUEUE)
-        target_compile_definitions(yams_daemon_ipc PRIVATE HAVE_KQUEUE=1)
+        target_compile_definitions(yams_daemon_ipc_obj PRIVATE HAVE_KQUEUE=1)
         message(STATUS "kqueue support enabled for async I/O (yams_daemon_ipc)")
     else()
         message(STATUS "kqueue disabled (YAMS_USE_KQUEUE=OFF); using select()-based backend for yams_daemon_ipc")
@@ -310,6 +339,13 @@ add_library(yams_daemon STATIC
     daemon.cpp
     components/DaemonMetrics.cpp
     components/RequestDispatcher.cpp
+    components/dispatcher/request_dispatcher_plugins.cpp
+    components/dispatcher/request_dispatcher_models.cpp
+    components/dispatcher/request_dispatcher_embeddings.cpp
+    components/dispatcher/request_dispatcher_documents.cpp
+    components/dispatcher/request_dispatcher_status.cpp
+    components/dispatcher/request_dispatcher_search.cpp
+    components/dispatcher/request_dispatcher_misc.cpp
     components/LifecycleComponent.cpp
     components/ServiceManager.cpp
     components/PoolManager.cpp
@@ -328,6 +364,11 @@ add_library(yams_daemon STATIC
 
 # Avoid LTO bitcode in the static daemon lib to prevent link failures when executables disable IPO
 set_target_properties(yams_daemon PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+
+# Statically include IPC OBJECT files in the daemon library itself so lld can
+# resolve RequestHandler/ConnectionFsm/ResourceTuner symbols during grouped
+# static library scans on Linux.
+target_sources(yams_daemon PRIVATE $<TARGET_OBJECTS:yams_daemon_ipc_obj>)
 
 target_include_directories(yams_daemon
     PUBLIC
@@ -429,9 +470,13 @@ set_target_properties(yams_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_executable(yams-daemon
     daemon_main.cpp
 )
+# IPC OBJECTS are linked into yams_daemon (static lib) above. No need to add to the executable.
 if(APPLE)
     target_link_libraries(yams-daemon PRIVATE
         yams::daemon
+        yams::daemon_ipc
+        yams::daemon_client
+        yams_ipc_proto
         yams_config
         yams::repair
         yams_app_services
@@ -454,6 +499,11 @@ if(APPLE)
         CLI11::CLI11
         spdlog::spdlog
     )
+    # Prefer plugin discovery under @loader_path for macOS; allow plugins/ sibling dir
+    set_target_properties(yams-daemon PROPERTIES
+        BUILD_RPATH "@loader_path;@loader_path/../plugins"
+        INSTALL_RPATH "@loader_path;@loader_path/../plugins"
+    )
     target_link_options(yams-daemon PRIVATE
         "-Wl,-force_load,$<TARGET_FILE:yams_compression>"
         "-Wl,-force_load,$<TARGET_FILE:yams_wal>"
@@ -468,6 +518,9 @@ else()
     target_link_libraries(yams-daemon PRIVATE
         "-Wl,--start-group"
             yams::daemon
+            yams::daemon_ipc
+            yams::daemon_client
+            yams_ipc_proto
             yams_config
             yams::repair
             yams_app_services

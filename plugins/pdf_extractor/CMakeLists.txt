@@ -6,7 +6,7 @@ project(YamsPdfExtractorPlugin)
 
 # Find the main YAMS project to get its targets and definitions
 # This assumes the plugin is being built as part of the main YAMS build tree.
-find_package(Yams REQUIRED)
+
 
 # Plugin sources
 set(PLUGIN_SOURCES

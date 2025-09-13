@@ -87,10 +87,20 @@ public:
     static std::vector<std::filesystem::path> getDefaultPluginDirectories();
 
     /**
+     * Provide configured plugin directories (from config / CLI).
+     * These take precedence over auto-discovered defaults but do NOT exclude them.
+     * Passing an empty vector clears previously configured directories.
+     */
+    static void setConfiguredPluginDirectories(const std::vector<std::filesystem::path>& dirs);
+
+    /**
      * Find and load plugins from default directories
      * @return Total number of plugins loaded
      */
     Result<size_t> autoLoadPlugins();
+
+    // Configured directories (shared across loader instances)
+    static std::vector<std::filesystem::path> configuredDirs_;
 
 private:
     // Map of plugin name to plugin info

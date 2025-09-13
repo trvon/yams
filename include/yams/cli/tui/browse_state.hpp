@@ -60,6 +60,9 @@ struct BrowseState {
     // Status line message
     std::string statusMessage;
 
+    // Degraded flags (for subsystems)
+    bool embeddingDegraded = false; // when true, UI should avoid offering embedding actions
+
     // Preview pane
     std::vector<std::string> previewLines;
     int previewScrollOffset = 0;

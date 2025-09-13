@@ -48,6 +48,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pdf_extractor_plugin_test.cpp")
     # Register with CTest using GoogleTest discovery
     include(GoogleTest)
     gtest_discover_tests(pdf_extractor_plugin_test
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
         PROPERTIES
             LABELS "plugins;pdf;content;integration"
             TIMEOUT 120

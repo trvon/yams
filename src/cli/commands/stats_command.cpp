@@ -12,6 +12,7 @@
 #include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/recommendation_util.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -682,6 +683,12 @@ private:
                     std::cout << "\nKnowledge Graph:\n";
                     if ((entities <= 0 && nodes <= 0) &&
                         !(nodes >= 0 || edges >= 0 || aliases >= 0 || embeddings >= 0)) {
+                        // Converted to structured recommendation (STATS_KG_EMPTY) using the
+                        // existing recommendations builder path (renderRecommendationsSection)
+                        // by storing a sentinel in additionalStats the builder can read.
+                        // Add a synthetic flag so renderRecommendationsSection can treat it.
+                        const_cast<yams::daemon::GetStatsResponse&>(resp)
+                            .additionalStats["kg_empty"] = "true";
                         std::cout << "  Graph entities: 0 — run 'yams doctor repair --graph' to "
                                      "build from tags/metadata.\n";
                     } else {
@@ -1034,83 +1041,104 @@ private:
     }
 
     void renderRecommendationsSection(const yams::daemon::GetStatsResponse& resp) {
-        std::cout << "\nRecommendations:\n";
-
-        std::vector<std::string> recommendations;
-        std::vector<std::string> warnings; // Higher priority items
-
-        // Check for orphaned blocks - HIGH PRIORITY
+        yams::cli::RecommendationBuilder builder;
+        // Knowledge graph emptiness (direct DB probe so ordering of other sections doesn't matter)
+        try {
+            auto db = cli_->getDatabase();
+            if (db && db->isOpen()) {
+                auto count = [&](const char* sql) -> long long {
+                    auto stR = db->prepare(sql);
+                    if (!stR)
+                        return -1;
+                    auto st = std::move(stR).value();
+                    auto step = st.step();
+                    if (step && step.value())
+                        return st.getInt64(0);
+                    return -1;
+                };
+                long long nodes = count("SELECT COUNT(1) FROM kg_nodes");
+                long long entities = count("SELECT COUNT(1) FROM doc_entities");
+                if ((nodes == 0 && entities == 0) || (nodes <= 0 && entities <= 0)) {
+                    builder.warning("STATS_KG_EMPTY",
+                                    "Knowledge graph is empty. Index content (yams add) or repair "
+                                    "graph to enable relationship traversal.",
+                                    "Run 'yams doctor repair --graph'");
+                }
+            }
+        } catch (...) {
+            // best-effort only
+        }
+        // Orphaned blocks
         auto orphanedBlocksIt = resp.additionalStats.find("orphaned_blocks");
         auto orphanedBytesIt = resp.additionalStats.find("orphaned_bytes");
         if (orphanedBlocksIt != resp.additionalStats.end() &&
             orphanedBytesIt != resp.additionalStats.end()) {
-            uint64_t orphanedBlocks = std::stoull(orphanedBlocksIt->second);
-            uint64_t orphanedBytes = std::stoull(orphanedBytesIt->second);
-
+            uint64_t orphanedBlocks = 0;
+            uint64_t orphanedBytes = 0;
+            try {
+                orphanedBlocks = std::stoull(orphanedBlocksIt->second);
+            } catch (...) {
+            }
+            try {
+                orphanedBytes = std::stoull(orphanedBytesIt->second);
+            } catch (...) {
+            }
             if (orphanedBlocks > 0) {
-                std::string recommendation = "Run 'yams repair --orphans' to clean " +
-                                             formatNumber(orphanedBlocks) + " orphaned blocks";
-                if (orphanedBytes > 1024 * 1024) { // Show size if > 1MB
-                    recommendation += " (~" + formatSize(orphanedBytes) + " recoverable)";
+                std::string msg = "Run 'yams repair --orphans' to clean " +
+                                  formatNumber(orphanedBlocks) + " orphaned blocks";
+                if (orphanedBytes > 1024ULL * 1024ULL) {
+                    msg += " (~" + formatSize(orphanedBytes) + " recoverable)";
                 }
-                warnings.push_back(recommendation);
+                builder.warning("STATS_ORPHANED_BLOCKS", msg, "Dead data occupies space");
             }
         }
-
-        // Check block health status
-        auto blockHealthIt = resp.additionalStats.find("block_health");
-        if (blockHealthIt != resp.additionalStats.end()) {
+        // Block health critical
+        if (auto blockHealthIt = resp.additionalStats.find("block_health");
+            blockHealthIt != resp.additionalStats.end()) {
             if (blockHealthIt->second == "critical") {
-                warnings.push_back("Storage has critical block integrity issues - repair urgently");
+                builder.warning("STATS_BLOCK_INTEGRITY_CRITICAL",
+                                "Storage has critical block integrity issues - repair urgently",
+                                "Run 'yams repair --integrity' soon");
             }
         }
-
-        // Check embedding coverage (single deduplicated recommendation)
+        // Embedding coverage
         bool needEmbeddingsRec = false;
         if (resp.totalDocuments > 0) {
-            if (resp.indexedDocuments == 0) {
+            if (resp.indexedDocuments == 0)
                 needEmbeddingsRec = true;
-            } else if (resp.totalDocuments > 1000 &&
-                       resp.indexedDocuments < (resp.totalDocuments / 2)) {
+            else if (resp.totalDocuments > 1000 &&
+                     resp.indexedDocuments < (resp.totalDocuments / 2))
                 needEmbeddingsRec = true;
-            }
         }
         if (needEmbeddingsRec) {
-            recommendations.push_back(
-                "Run 'yams repair --embeddings' to generate missing embeddings");
+            builder.warning("STATS_EMBEDDINGS_MISSING",
+                            "Run 'yams repair --embeddings' to generate missing embeddings",
+                            "Semantic search requires vector coverage");
         }
-
-        // Check space efficiency
-        auto effIt = resp.additionalStats.find("space_efficiency");
-        if (effIt != resp.additionalStats.end()) {
-            double efficiency = std::stod(effIt->second);
-            if (efficiency < 50.0) {
-                recommendations.push_back(
-                    "Consider running 'yams repair --optimize' to improve storage efficiency");
+        // Space efficiency
+        if (auto effIt = resp.additionalStats.find("space_efficiency");
+            effIt != resp.additionalStats.end()) {
+            try {
+                double efficiency = std::stod(effIt->second);
+                if (efficiency < 50.0) {
+                    builder.info(
+                        "STATS_LOW_SPACE_EFFICIENCY",
+                        "Consider running 'yams repair --optimize' to improve storage efficiency",
+                        "Current space efficiency " + effIt->second + "%");
+                }
+            } catch (...) {
             }
         }
-
-        // Check vector database
+        // Vector DB initialization hint
         if (resp.vectorIndexSize == 0 && resp.totalDocuments > 0) {
-            recommendations.push_back(
-                "Vector database will be created automatically on first search");
+            builder.info("STATS_VECTOR_DB_PENDING",
+                         "Vector database will be created automatically on first search");
         }
-
-        // Note: performance optimization rec consolidated above to avoid duplicates
-
-        // Display warnings first (with warning symbol)
-        for (const auto& warning : warnings) {
-            std::cout << "  ⚠ " << warning << "\n";
-        }
-
-        // Display regular recommendations
-        for (const auto& rec : recommendations) {
-            std::cout << "  □ " << rec << "\n";
-        }
-
-        // If no issues found
-        if (warnings.empty() && recommendations.empty()) {
-            std::cout << "  ✓ System is optimally configured\n";
+        // Output
+        if (builder.empty()) {
+            std::cout << "\nRecommendations:\n  ✓ System is optimally configured\n";
+        } else {
+            yams::cli::printRecommendationsText(builder, std::cout);
         }
     }
 

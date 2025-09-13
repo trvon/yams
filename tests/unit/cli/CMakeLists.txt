@@ -83,4 +83,12 @@ if(TARGET yams_cli)
     target_compile_features(model_command_tests PRIVATE cxx_std_20)
     target_link_libraries(model_command_tests PRIVATE test_utils gtest_main yams_cli)
     gtest_discover_tests(model_command_tests DISCOVERY_TIMEOUT 30)
+
+    # Recommendation utility tests
+    add_executable(recommendation_util_tests
+        recommendation_util_test.cpp
+    )
+    target_compile_features(recommendation_util_tests PRIVATE cxx_std_20)
+    target_link_libraries(recommendation_util_tests PRIVATE gtest_main yams_cli)
+    gtest_discover_tests(recommendation_util_tests DISCOVERY_TIMEOUT 30)
 endif()

@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 
+#include "daemon_preflight.h"
 #include "test_async_helpers.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
@@ -92,22 +93,17 @@ TEST(EmbeddingsPersistIT, VectorIndexPersistsAfterRestart) {
         cc.requestTimeout = 20s;
         cc.autoStart = false;
         yams::daemon::DaemonClient client(cc);
-        // ready
-        for (int i = 0; i < 50; ++i) {
-            auto st = yams::cli::run_sync(client.status(), 500ms);
-            if (st && (st.value().ready || st.value().overallStatus == "Ready")) {
-                break;
-            }
-            std::this_thread::sleep_for(100ms);
+        // Preflight: daemon + provider
+        if (!yams::test::wait_for_daemon_ready(client, 10s, nullptr)) {
+            GTEST_SKIP() << "Daemon not ready; skipping";
         }
-        // Trust and load plugin
-        yams::daemon::PluginTrustAddRequest tr;
-        tr.path = plugin->parent_path().string();
-        ASSERT_TRUE(yams::cli::run_sync(client.call(tr), 5s));
-        yams::daemon::PluginLoadRequest pl;
-        pl.pathOrName = plugin->string();
-        pl.dryRun = false;
-        ASSERT_TRUE(yams::cli::run_sync(client.call(pl), 10s));
+        std::string reason;
+        // Ask daemon to scan configured plugin_dir; this should adopt the provider without envs
+        yams::daemon::PluginScanRequest scan;
+        (void)yams::cli::run_sync(client.call(scan), 10s);
+        if (!yams::test::ensure_embeddings_provider(client, 5s, "all-MiniLM-L6-v2", &reason)) {
+            GTEST_SKIP() << "No usable embedding provider: " << reason;
+        }
         // Wait for model provider adoption
         bool mp_ready = false;
         for (int i = 0; i < 60; ++i) {

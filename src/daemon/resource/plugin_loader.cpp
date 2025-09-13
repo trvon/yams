@@ -143,11 +143,15 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
                          "Path is not a directory: " + directory.string()};
         }
 
-        // Determine pattern based on platform if not specified
-        std::string filePattern = pattern;
-        if (filePattern.empty()) {
-            filePattern = std::string(".*\\.") + getPlatformLibraryExtension() + "$";
-        }
+        // Determine acceptable extensions (macOS dev builds sometimes produce .so for MODULE libs)
+        std::vector<std::string> allowedExts;
+#ifdef __APPLE__
+        allowedExts = {".dylib", ".so"};
+#elif defined(_WIN32)
+        allowedExts = {".dll"};
+#else
+        allowedExts = {".so"};
+#endif
 
         size_t loadedCount = 0;
         size_t totalFiles = 0;
@@ -163,11 +167,15 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
             std::string filename = entry.path().filename().string();
 
             // Manual extension check instead of regex
-            std::string extension = getPlatformLibraryExtension();
-            if (filename.size() <= extension.size() ||
-                filename.compare(filename.size() - extension.size(), extension.size(), extension) !=
-                    0 ||
-                (filename[0] != '.' && filename.find('.') == std::string::npos)) {
+            bool matchesExt = false;
+            for (const auto& ext : allowedExts) {
+                if (filename.size() > ext.size() &&
+                    filename.compare(filename.size() - ext.size(), ext.size(), ext) == 0) {
+                    matchesExt = true;
+                    break;
+                }
+            }
+            if (!matchesExt) {
                 continue;
             }
 
@@ -255,16 +263,32 @@ bool PluginLoader::isPluginLoaded(const std::string& pluginName) const {
     return it != plugins_.end() && it->second.loaded;
 }
 
+// static storage for configured directories
+std::vector<std::filesystem::path> PluginLoader::configuredDirs_{};
+
+void PluginLoader::setConfiguredPluginDirectories(const std::vector<std::filesystem::path>& dirs) {
+    configuredDirs_.clear();
+    for (const auto& d : dirs) {
+        if (!d.empty()) {
+            configuredDirs_.push_back(d);
+        }
+    }
+}
+
 std::vector<std::filesystem::path> PluginLoader::getDefaultPluginDirectories() {
     std::vector<fs::path> directories;
 
-    // 1. Environment variable override (exclusive - if set, only use this)
-    if (const char* pluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
-        directories.push_back(fs::path(pluginDir));
-        return directories; // Return early to make this an exclusive override
+    // 1. Configured directories (highest precedence; stable order; may include multiple)
+    for (const auto& c : configuredDirs_) {
+        directories.push_back(c);
     }
 
-    // 2. Build directory (for development)
+    // 2. Environment variable (deprecated; additive not exclusive)
+    if (const char* pluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
+        directories.push_back(fs::path(pluginDir));
+    }
+
+    // 3. Build directory (for development)
     // Look for plugin next to the daemon executable
     try {
 #ifdef __APPLE__
@@ -300,16 +324,16 @@ std::vector<std::filesystem::path> PluginLoader::getDefaultPluginDirectories() {
         // Ignore errors in finding exe path
     }
 
-    // 3. User plugin directory
+    // 4. User plugin directory
     if (const char* home = std::getenv("HOME")) {
         directories.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
     }
 
-    // 4. System plugin directories
+    // 5. System plugin directories
     directories.push_back(fs::path("/usr/local/lib/yams/plugins"));
     directories.push_back(fs::path("/usr/lib/yams/plugins"));
 
-    // 5. Installation prefix (if configured via compile definition)
+    // 6. Installation prefix (if configured via compile definition)
     // Note: CMAKE_INSTALL_PREFIX is not defined as a preprocessor macro by default.
     // We pass YAMS_INSTALL_PREFIX from CMake to enable runtime discovery of
     // installed plugins.

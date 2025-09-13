@@ -7,7 +7,6 @@
 #include <optional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
-#include <yams/core/task.h>
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -31,16 +30,16 @@ public:
 
     explicit AsioTransportAdapter(const Options& opts);
 
-    Task<Result<Response>> send_request(const Request& req);
+    boost::asio::awaitable<Result<Response>> send_request(const Request& req);
 
     using HeaderCallback = std::function<void(const Response&)>;
     using ChunkCallback = std::function<bool(const Response&, bool)>;
     using ErrorCallback = std::function<void(const Error&)>;
     using CompleteCallback = std::function<void()>;
 
-    Task<Result<void>> send_request_streaming(const Request& req, HeaderCallback onHeader,
-                                              ChunkCallback onChunk, ErrorCallback onError,
-                                              CompleteCallback onComplete);
+    boost::asio::awaitable<Result<void>>
+    send_request_streaming(const Request& req, HeaderCallback onHeader, ChunkCallback onChunk,
+                           ErrorCallback onError, CompleteCallback onComplete);
 
 public:
     // Toggle FSM metrics and snapshot logging for transport observability
@@ -54,7 +53,8 @@ public:
 private:
     // Multiplexing: per-socket connection shared across requests
     // Awaitable to allow async creation/connection path
-    static Task<std::shared_ptr<Connection>> get_or_create_connection(const Options& opts);
+    static boost::asio::awaitable<std::shared_ptr<Connection>>
+    get_or_create_connection(const Options& opts);
 
     // Helper to connect with timeout
     boost::asio::awaitable<Result<std::unique_ptr<boost::asio::local::stream_protocol::socket>>>

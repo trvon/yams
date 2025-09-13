@@ -91,6 +91,18 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
     if (pImpl->config_.socketPath.empty()) {
         pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
+    // In test builds, default to no auto-start to avoid forking child daemons
+#ifdef YAMS_TESTING
+    pImpl->config_.autoStart = false;
+#endif
+    // Honor env toggle to disable auto-start (useful in tests/CI to avoid forking)
+    if (const char* noauto = std::getenv("YAMS_DISABLE_AUTOSTART")) {
+        std::string v(noauto);
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        if (v == "1" || v == "true" || v == "on" || v == "yes") {
+            pImpl->config_.autoStart = false;
+        }
+    }
     // Optional env override for max inflight (load testing): YAMS_MAX_INFLIGHT
     if (const char* mi = std::getenv("YAMS_MAX_INFLIGHT")) {
         try {
@@ -174,7 +186,7 @@ pingDaemonSync(const std::filesystem::path& socketPath,
     }
 }
 
-Task<Result<void>> DaemonClient::connect() {
+boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Async variant using adapter's connect helper and timers; avoids blocking sleeps
     // If daemon is not reachable and autoStart is disabled, surface a failure.
     const auto socketPath = pImpl->config_.socketPath.empty()
@@ -190,8 +202,9 @@ Task<Result<void>> DaemonClient::connect() {
     using boost::asio::this_coro::executor;
     using boost::asio::experimental::awaitable_operators::operator||;
 
-    auto try_connect = [&](std::chrono::milliseconds timeout) -> Task<Result<void>> {
-        auto ex = co_await executor;
+    auto try_connect =
+        [&](std::chrono::milliseconds timeout) -> boost::asio::awaitable<Result<void>> {
+        auto ex = co_await boost::asio::this_coro::executor;
         boost::asio::local::stream_protocol::socket sock(ex);
         boost::asio::local::stream_protocol::endpoint ep(socketPath.string());
         steady_timer t(ex);
@@ -236,7 +249,7 @@ Task<Result<void>> DaemonClient::connect() {
             spdlog::debug("Daemon started successfully after {} retries", i + 1);
             co_return Result<void>();
         }
-        steady_timer t(co_await executor);
+        steady_timer t(co_await boost::asio::this_coro::executor);
         auto delay = baseDelay * (1 << std::min(i, 5));
         t.expires_after(delay);
         co_await t.async_wait(boost::asio::use_awaitable);
@@ -254,12 +267,13 @@ bool DaemonClient::isConnected() const {
                           std::chrono::milliseconds(150), std::chrono::milliseconds(300));
 }
 
-Task<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
+boost::asio::awaitable<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
     // Always use streaming search
     co_return co_await streamingSearch(req);
 }
 
-Task<Result<SearchResponse>> DaemonClient::streamingSearch(const SearchRequest& req) {
+boost::asio::awaitable<Result<SearchResponse>>
+DaemonClient::streamingSearch(const SearchRequest& req) {
     spdlog::debug("DaemonClient::streamingSearch called");
     auto handler = std::make_shared<StreamingSearchHandler>(req.pathsOnly, req.limit);
 
@@ -272,7 +286,7 @@ Task<Result<SearchResponse>> DaemonClient::streamingSearch(const SearchRequest& 
     co_return handler->getResults();
 }
 
-Task<Result<GetResponse>> DaemonClient::get(const GetRequest& req) {
+boost::asio::awaitable<Result<GetResponse>> DaemonClient::get(const GetRequest& req) {
     struct GetHandler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* res = std::get_if<GetResponse>(&r)) {
@@ -312,17 +326,17 @@ Task<Result<GetResponse>> DaemonClient::get(const GetRequest& req) {
     co_return handler->getResults();
 }
 
-Task<Result<ListResponse>> DaemonClient::list(const ListRequest& req) {
+boost::asio::awaitable<Result<ListResponse>> DaemonClient::list(const ListRequest& req) {
     spdlog::debug("DaemonClient::list entry: [{}] streaming=true", getRequestName(Request{req}));
     co_return co_await streamingList(req);
 }
 
-Task<Result<GrepResponse>> DaemonClient::grep(const GrepRequest& req) {
+boost::asio::awaitable<Result<GrepResponse>> DaemonClient::grep(const GrepRequest& req) {
     spdlog::debug("DaemonClient::grep entry: [{}] streaming=true", getRequestName(Request{req}));
     co_return co_await streamingGrep(req);
 }
 
-Task<Result<StatusResponse>> DaemonClient::status() {
+boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
     StatusRequest req;
     req.detailed = true;
 
@@ -362,11 +376,11 @@ Task<Result<StatusResponse>> DaemonClient::status() {
     co_return lastErr;
 }
 
-Task<Result<Response>> DaemonClient::executeRequest(const Request& req) {
+boost::asio::awaitable<Result<Response>> DaemonClient::executeRequest(const Request& req) {
     co_return co_await sendRequest(req);
 }
 
-Task<Result<void>> DaemonClient::shutdown(bool graceful) {
+boost::asio::awaitable<Result<void>> DaemonClient::shutdown(bool graceful) {
     ShutdownRequest req;
     req.graceful = graceful;
 
@@ -398,7 +412,7 @@ Task<Result<void>> DaemonClient::shutdown(bool graceful) {
     co_return Result<void>();
 }
 
-Task<Result<void>> DaemonClient::ping() {
+boost::asio::awaitable<Result<void>> DaemonClient::ping() {
     PingRequest req;
 
     struct Handler : public ChunkedResponseHandler {
@@ -432,7 +446,7 @@ Task<Result<void>> DaemonClient::ping() {
     co_return Error{ErrorCode::InvalidData, "Unexpected response type for ping"};
 }
 
-Task<Result<Response>> DaemonClient::sendRequest(const Request& req) {
+boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
                   false, pImpl->config_.socketPath.string());
     // Skip the legacy connect() call when using AsioTransportAdapter
@@ -675,7 +689,7 @@ void DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
 }
 
 // Streaming list helper method
-Task<Result<ListResponse>> DaemonClient::streamingList(const ListRequest& req) {
+boost::asio::awaitable<Result<ListResponse>> DaemonClient::streamingList(const ListRequest& req) {
     auto handler = std::make_shared<StreamingListHandler>(req.pathsOnly, req.limit);
 
     auto result = co_await sendRequestStreaming(req, handler);
@@ -769,7 +783,7 @@ Result<GrepResponse> DaemonClient::StreamingGrepHandler::getResults() const {
 }
 
 // Streaming grep helper method
-Task<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
+boost::asio::awaitable<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
     // If pathsOnly or filesOnly/countOnly, we can progressively print in handler
     size_t perFileCap = 0;
     if (req.maxMatches > 0) {
@@ -786,7 +800,7 @@ Task<Result<GrepResponse>> DaemonClient::streamingGrep(const GrepRequest& req) {
     co_return handler->getResults();
 }
 
-Task<Result<void>>
+boost::asio::awaitable<Result<void>>
 DaemonClient::sendRequestStreaming(const Request& req,
                                    std::shared_ptr<ChunkedResponseHandler> handler) {
     spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'",
@@ -838,7 +852,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
 }
 
 // Streaming AddDocument helper: header-first then final chunk contains full response
-Task<Result<AddDocumentResponse>>
+boost::asio::awaitable<Result<AddDocumentResponse>>
 DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
     struct AddDocHandler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& headerResponse) override {
@@ -906,7 +920,7 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
 }
 
-Task<Result<EmbeddingResponse>>
+boost::asio::awaitable<Result<EmbeddingResponse>>
 DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
@@ -948,13 +962,13 @@ DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing EmbeddingResponse in stream"};
 }
 
-Task<Result<BatchEmbeddingResponse>>
+boost::asio::awaitable<Result<BatchEmbeddingResponse>>
 DaemonClient::generateBatchEmbeddings(const BatchEmbeddingRequest& req) {
     // Route through streaming path even for batch for progress events
     co_return co_await streamingBatchEmbeddings(req);
 }
 
-Task<Result<BatchEmbeddingResponse>>
+boost::asio::awaitable<Result<BatchEmbeddingResponse>>
 DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         Handler() {}
@@ -1095,7 +1109,7 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing BatchEmbeddingResponse or handle in stream"};
 }
 
-Task<Result<EmbedDocumentsResponse>>
+boost::asio::awaitable<Result<EmbedDocumentsResponse>>
 DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& headerResponse) override {
@@ -1152,7 +1166,7 @@ DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing EmbedDocumentsResponse in stream"};
 }
 
-Task<Result<std::vector<EmbeddingEvent>>>
+boost::asio::awaitable<Result<std::vector<EmbeddingEvent>>>
 DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& headerResponse) override {
@@ -1193,7 +1207,8 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
     co_return handler->events;
 }
 
-Task<Result<ModelLoadResponse>> DaemonClient::loadModel(const LoadModelRequest& req) {
+boost::asio::awaitable<Result<ModelLoadResponse>>
+DaemonClient::loadModel(const LoadModelRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* fin = std::get_if<ModelLoadResponse>(&r))
@@ -1237,7 +1252,8 @@ Task<Result<ModelLoadResponse>> DaemonClient::loadModel(const LoadModelRequest& 
     co_return Error{ErrorCode::InvalidData, "Missing ModelLoadResponse in stream"};
 }
 
-Task<Result<SuccessResponse>> DaemonClient::unloadModel(const UnloadModelRequest& req) {
+boost::asio::awaitable<Result<SuccessResponse>>
+DaemonClient::unloadModel(const UnloadModelRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* ok = std::get_if<SuccessResponse>(&r))
@@ -1269,7 +1285,8 @@ Task<Result<SuccessResponse>> DaemonClient::unloadModel(const UnloadModelRequest
     co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }
 
-Task<Result<ModelStatusResponse>> DaemonClient::getModelStatus(const ModelStatusRequest& req) {
+boost::asio::awaitable<Result<ModelStatusResponse>>
+DaemonClient::getModelStatus(const ModelStatusRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* s = std::get_if<ModelStatusResponse>(&r))
@@ -1301,7 +1318,8 @@ Task<Result<ModelStatusResponse>> DaemonClient::getModelStatus(const ModelStatus
     co_return Error{ErrorCode::InvalidData, "Missing ModelStatusResponse in stream"};
 }
 
-Task<Result<GetStatsResponse>> DaemonClient::getStats(const GetStatsRequest& req) {
+boost::asio::awaitable<Result<GetStatsResponse>>
+DaemonClient::getStats(const GetStatsRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* s = std::get_if<GetStatsResponse>(&r))
@@ -1333,7 +1351,7 @@ Task<Result<GetStatsResponse>> DaemonClient::getStats(const GetStatsRequest& req
     co_return Error{ErrorCode::InvalidData, "Missing GetStatsResponse in stream"};
 }
 
-Task<Result<UpdateDocumentResponse>>
+boost::asio::awaitable<Result<UpdateDocumentResponse>>
 DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
@@ -1597,7 +1615,7 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
     }
 }
 
-Task<Result<AddResponse>> DaemonClient::add(const AddRequest& req) {
+boost::asio::awaitable<Result<AddResponse>> DaemonClient::add(const AddRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* s = std::get_if<AddResponse>(&r))
@@ -1629,7 +1647,7 @@ Task<Result<AddResponse>> DaemonClient::add(const AddRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing AddResponse in stream"};
 }
 
-Task<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
+boost::asio::awaitable<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {
             if (auto* s = std::get_if<SuccessResponse>(&r))

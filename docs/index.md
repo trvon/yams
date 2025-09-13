@@ -6,7 +6,7 @@
 
 Persistent memory for LLMs and applications. Content‑addressed storage with deduplication, compression, semantic search, and full‑text indexing.
 
-## Features
+## What it does
 
 - Content‑addressed storage (SHA‑256)
 - Block‑level deduplication (Rabin fingerprinting)
@@ -14,7 +14,44 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 - Search: full‑text (SQLite FTS5) + semantic (vector)
 - Crash safety: WAL
 - Fast and portable CLI + MCP server
-- Extensible plugin system
+
+<div class="hero-cta">
+  <h2>Managed hosting coming soon</h2>
+  <p>Get hosting updates. Help shape the roadmap.</p>
+  <button class="waitlist-toggle-btn" type="button">Sign up</button>
+  <form action="https://formspree.io/f/xgvzbbzy" method="POST" class="waitlist-form" style="display:none">
+    <input type="email" name="email" placeholder="email@domain.com" required />
+    <input type="text" name="name" placeholder="Full name (optional)" />
+    <input type="text" name="use_case" placeholder="Primary use case (optional)" />
+    <!-- Honeypot field -->
+    <input type="text" name="_gotcha" style="display:none" />
+    <!-- Redirect to thanks page -->
+    <input type="hidden" name="_redirect" value="/thanks/" />
+    <!-- Tag the submission -->
+    <input type="hidden" name="list" value="hosting-early-access" />
+    <button type="submit">Join waitlist</button>
+  </form>
+  <p class="privacy-note">We only email about hosting. Unsubscribe anytime.</p>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var cta = document.querySelector('.hero-cta');
+  if (!cta) return;
+  var btn = cta.querySelector('.waitlist-toggle-btn');
+  var form = cta.querySelector('form.waitlist-form');
+  var heading = cta.querySelector('h1, h2, h3, h4, h5, h6');
+  if (!btn || !form) return;
+  btn.addEventListener('click', function () {
+    var isHidden = form.style.display === 'none' || form.hidden;
+    form.style.display = isHidden ? '' : 'none';
+    form.hidden = !isHidden;
+    if (isHidden && heading && (heading.hidden || heading.getAttribute('aria-hidden') === 'true')) {
+      heading.hidden = false;
+      heading.removeAttribute('aria-hidden');
+    }
+  });
+});
+</script>
 
 
 ## Install
@@ -23,52 +60,6 @@ Persistent memory for LLMs and applications. Content‑addressed storage with de
 
 ```bash
 docker run --rm -it ghcr.io/trvon/yams:latest --version
-```
-
-### Linux Packages
-
-**DEB (Debian/Ubuntu):**
-```bash
-# Download and install the .deb package
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-amd64.deb -o yams.deb
-sudo dpkg -i yams.deb
-# Fix any dependency issues
-sudo apt-get install -f
-```
-
-**RPM (Fedora/RedHat/CentOS):**
-```bash
-# Download and install the .rpm package
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.rpm -o yams.rpm
-sudo rpm -i yams.rpm
-# Or with yum/dnf
-sudo dnf install ./yams.rpm
-```
-
-**AppImage (Universal Linux):**
-```bash
-# Download AppImage (works on most Linux distributions)
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-latest-x86_64.AppImage -o yams
-chmod +x yams
-./yams --version
-# Optionally move to PATH
-sudo mv yams /usr/local/bin/
-```
-
-### Native Binary
-
-```bash
-# macOS ARM64
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-arm64.zip -o yams.zip
-unzip yams.zip && sudo mv yams /usr/local/bin/
-
-# macOS x86_64
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-macos-x86_64.zip -o yams.zip
-unzip yams.zip && sudo mv yams /usr/local/bin/
-
-# Linux x86_64
-curl -L https://github.com/trvon/yams/releases/latest/download/yams-linux-x86_64.tar.gz | tar xz
-sudo mv yams /usr/local/bin/
 ```
 
 ### Build from Source
@@ -83,7 +74,7 @@ conan profile detect --force
 # Build with Conan (recommended - this is what creates the release binaries)
 conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
 cmake --preset yams-release
-cmake --build --preset yams-release
+cmake --build --preset build-yams-release
 sudo cmake --install build/yams-release
 ```
 

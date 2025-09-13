@@ -27,6 +27,11 @@ public:
     [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
     process_streaming(const Request& request) override;
 
+    // Prefer this overload for rvalues to take ownership into the coroutine
+    // frame and avoid lifetime pitfalls when callers pass temporaries.
+    [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
+    process_streaming(Request&& request);
+
     [[nodiscard]] bool supports_streaming(const Request& request) const override;
 
     [[nodiscard]] boost::asio::awaitable<RequestProcessor::ResponseChunk> next_chunk() override;
@@ -39,6 +44,9 @@ public:
 #endif
 
 private:
+    // Unified implementation that operates on an owned Request copy
+    [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
+    process_streaming_impl(Request request);
     // Lazy compute: store request to compute on first next_chunk() to allow
     // header to be written immediately by RequestHandler before heavy work
     // (critical for Grep to avoid header-timeouts in clients/pools).
@@ -72,9 +80,15 @@ private:
     std::shared_ptr<RequestProcessor> delegate_;
     RequestHandler::Config cfg_;
     Mode mode_{Mode::None};
+    // When we want to avoid copying the original Request across translation
+    // units (to dodge any ODR/ABI surprises), we precompute and cache the
+    // final response and stream it after emitting a heartbeat.
+    std::optional<Response> pending_final_;
     std::optional<SearchState> search_;
     std::optional<ListState> list_;
     std::optional<GrepState> grep_;
+    // Cached total for embedding requests to avoid any ABI/ODR surprises when copying variants
+    std::size_t pending_total_{0};
 };
 
 } // namespace yams::daemon

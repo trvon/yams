@@ -175,7 +175,7 @@ public:
                 }
 
                 // Analyze connectivity (mock implementation)
-                auto connectivity_score = analyzeGraphConnectivity();
+                [[maybe_unused]] auto connectivity_score = analyzeGraphConnectivity();
 
                 optimization_progress_ = 0.5;
                 if (progress_callback_) {
@@ -519,6 +519,7 @@ private:
 
     std::unique_ptr<VectorIndexManager>
     createOptimizedIndex(const std::vector<VectorData>& vectors) {
+        (void)vectors;
         // Mock optimized index creation
         auto config = IndexConfig{};
         config.type = IndexType::HNSW;
@@ -527,6 +528,7 @@ private:
     }
 
     void swapIndex(std::unique_ptr<VectorIndexManager> new_index) {
+        (void)new_index;
         // Mock index swapping
         // In real implementation, would atomically swap the index
     }
@@ -571,7 +573,6 @@ private:
             std::unique_lock<std::mutex> lock(schedule_mutex_);
 
             // Wait for next optimization window
-            auto now = std::chrono::system_clock::now();
             auto next_optimization = calculateNextOptimizationTime();
 
             if (schedule_cv_.wait_until(lock, next_optimization, [this] {

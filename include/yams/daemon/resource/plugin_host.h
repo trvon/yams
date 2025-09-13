@@ -59,6 +59,9 @@ public:
     Result<void*> getInterface(const std::string& name, const std::string& ifaceId,
                                uint32_t version);
 
+    // Diagnostics for last scan
+    std::vector<std::pair<std::filesystem::path, std::string>> getLastScanSkips() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;

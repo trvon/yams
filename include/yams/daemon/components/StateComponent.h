@@ -20,6 +20,10 @@ struct DaemonReadiness {
     std::atomic<bool> modelProviderReady{false};
     std::atomic<bool> vectorIndexReady{false};
     std::atomic<bool> pluginsReady{false};
+    // Vector database guard/health fields
+    std::atomic<bool> vectorDbInitAttempted{false};
+    std::atomic<bool> vectorDbReady{false};
+    std::atomic<uint32_t> vectorDbDim{0};
 
     // Progress tracking for long-running initializations (0-100)
     std::atomic<int> searchProgress{0};

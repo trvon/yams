@@ -16,7 +16,12 @@
 #include <utility>
 #include <vector>
 
-#include <yams/core/task.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -467,7 +472,7 @@ public:
 
     // Async (coroutine) execution path using pooled DaemonClient::call<TRequest>()
     // Mirrors the sync logic but avoids blocking during the daemon roundtrip.
-    [[nodiscard]] yams::Task<Result<void>>
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
     execute_async(const TRequest& req, std::function<Result<void>()> fallback, RenderFunc render) {
         auto acquire_start = std::chrono::steady_clock::now();
         auto lease_res = pool_->acquire();
@@ -503,6 +508,7 @@ public:
         constexpr int kMaxAttempts = 3;
         std::chrono::milliseconds backoff{75};
         Error last_err{ErrorCode::Unknown, "unknown"};
+        auto exec = co_await boost::asio::this_coro::executor;
         for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
             auto t0 = std::chrono::steady_clock::now();
             auto resp = co_await lease->call<TRequest>(req);
@@ -539,10 +545,10 @@ public:
             }
 
             if (attempt < kMaxAttempts && is_transient(last_err)) {
-                // Tiny jittered backoff (can't mix Task with boost::asio::awaitable, use sync
-                // sleep)
+                // Tiny jittered backoff using non-blocking timer
                 auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
-                std::this_thread::sleep_for(backoff + jitter);
+                boost::asio::steady_timer timer(exec, backoff + jitter);
+                co_await timer.async_wait(boost::asio::use_awaitable);
                 backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
                 continue;
             }
@@ -611,8 +617,8 @@ private:
 // Async version of daemon_first that can be used with run_sync bridge
 template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>,
           typename Fallback, typename Render>
-inline yams::Task<Result<void>> async_daemon_first(const TRequest& req, Fallback&& fallback,
-                                                   Render&& render) {
+inline boost::asio::awaitable<Result<void>>
+daemon_request_async(const TRequest& req, Fallback&& fallback, Render&& render) {
     // Static pool with basic defaults. Tunable via env if desired.
     static DaemonClientPool::Config cfg = [] {
         DaemonClientPool::Config c;
@@ -633,9 +639,54 @@ inline yams::Task<Result<void>> async_daemon_first(const TRequest& req, Fallback
     }();
 
     static PooledRequestManager<TRequest, TResponse> manager(cfg);
-    auto result = co_await manager.execute_async(req, std::forward<Fallback>(fallback),
-                                                 std::forward<Render>(render));
-    co_return result;
+    co_return co_await manager.execute_async(req, std::forward<Fallback>(fallback),
+                                             std::forward<Render>(render));
+}
+
+// Run an awaitable<Result<void>> to completion on the GlobalIOContext and return the Result.
+inline Result<void> run_awaitable(boost::asio::awaitable<Result<void>> aw) {
+    auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+    auto fut = boost::asio::co_spawn(io, std::move(aw), boost::asio::use_future);
+    try {
+        return fut.get();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()};
+    } catch (...) {
+        return Error{ErrorCode::InternalError, "Awaitable threw unknown exception"};
+    }
+}
+
+// Generic runner for any boost::asio::awaitable<Result<T>>. Optional timeout (0 => no timeout).
+template <typename T>
+inline Result<T> run_result(boost::asio::awaitable<Result<T>> aw,
+                            std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+    auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+    std::promise<Result<T>> prom;
+    auto fut = prom.get_future();
+    boost::asio::co_spawn(
+        io,
+        [a = std::move(aw), &prom]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto r = co_await std::move(a);
+                prom.set_value(std::move(r));
+            } catch (const std::exception& e) {
+                prom.set_value(
+                    Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()});
+            } catch (...) {
+                prom.set_value(
+                    Error{ErrorCode::InternalError, "Awaitable threw unknown exception"});
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    if (timeout.count() > 0) {
+        if (fut.wait_for(timeout) != std::future_status::ready)
+            return Error{ErrorCode::Timeout, "Awaitable timed out"};
+    } else {
+        fut.wait();
+    }
+    return fut.get();
 }
 
 } // namespace yams::cli

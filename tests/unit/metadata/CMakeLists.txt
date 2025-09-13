@@ -18,6 +18,8 @@ target_link_libraries(metadata_tests
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/testdata)
 gtest_discover_tests(metadata_tests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
     PROPERTIES
         ENVIRONMENT "XDG_DATA_HOME=${CMAKE_BINARY_DIR}/testdata"
         LABELS "metadata;unit"

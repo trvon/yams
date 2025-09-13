@@ -214,6 +214,16 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("auto_load_plugins") != daemonSection.end()) {
                     config.autoLoadPlugins = (daemonSection.at("auto_load_plugins") == "true");
                 }
+                if (daemonSection.find("plugin_name_policy") != daemonSection.end()) {
+                    config.pluginNamePolicy = daemonSection.at("plugin_name_policy");
+                }
+                if (daemonSection.find("auto_repair_batch_size") != daemonSection.end()) {
+                    try {
+                        config.autoRepairBatchSize = static_cast<size_t>(
+                            std::stoul(daemonSection.at("auto_repair_batch_size")));
+                    } catch (...) {
+                    }
+                }
             } else {
                 // Daemon section missing (probably old config) - use safe defaults
                 spdlog::info(
@@ -416,6 +426,14 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+    }
+
+    // Propagate configured plugin directory (if any) into PluginLoader global configuredDirs
+    if (!config.pluginDir.empty()) {
+        yams::daemon::PluginLoader::setConfiguredPluginDirectories({config.pluginDir});
+    } else {
+        // Clear configured dirs to rely solely on defaults if none provided
+        yams::daemon::PluginLoader::setConfiguredPluginDirectories({});
     }
 
     // If dataDir not specified, allow environment to define it (YAMS_STORAGE or YAMS_DATA_DIR)

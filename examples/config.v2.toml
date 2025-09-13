@@ -201,6 +201,9 @@ enable = true
 auto_load_plugins = true
 # Optional explicit plugin directory (comment out to use defaults and YAMS_PLUGIN_DIR)
 # plugin_dir = "/usr/local/lib/yams/plugins"
+# Enforce plugin naming policy: "relaxed" (accept yams_*_plugin.* or libyams_*_plugin.*)
+# or "spec" (require libyams_*_plugin.*). Environment override: YAMS_PLUGIN_NAME_POLICY.
+plugin_name_policy = "relaxed"
 # Worker threads for daemon (0 = auto)
 worker_threads = 0
 # Max memory in GB the daemon will attempt to use (0 = unlimited)

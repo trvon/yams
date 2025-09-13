@@ -68,8 +68,9 @@ public:
             });
 
             // plugin list
-            plugin->add_subcommand("list", "List loaded plugins and their interfaces")
-                ->callback([this]() { listPlugins(); });
+            auto* list = plugin->add_subcommand("list", "List loaded plugins and their interfaces");
+            list->add_flag("-v,--verbose", verboseList_, "Show skipped plugins and reasons");
+            list->callback([this]() { listPlugins(); });
 
             // plugin scan [--dir DIR] [TARGET]
             auto* scan =
@@ -175,6 +176,7 @@ private:
     std::string untrustPath_;
     std::string installSrc_;
     std::string nameToggle_;
+    bool verboseList_{false};
 };
 
 // Factory
@@ -192,33 +194,122 @@ void PluginCommand::listPlugins() {
         ClientConfig cfg;
         cfg.dataDir = cli_->getDataPath();
         cfg.enableChunkedResponses = false;
-        cfg.singleUseConnections = true;
+        cfg.singleUseConnections = false; // keep connection for multiple calls
         cfg.requestTimeout = std::chrono::milliseconds(10000);
+        cfg.autoStart = true; // start a managed daemon if not running
         DaemonClient client(cfg);
-        GetStatsRequest req;
-        req.detailed = true; // request detailed stats so plugins_json is populated
-        std::promise<Result<yams::daemon::GetStatsResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<yams::daemon::GetStatsResponse>(
-                             Error{ErrorCode::Timeout, "stats timeout"});
-        if (!res) {
-            std::cout << "Failed to query daemon stats for plugins\n";
+
+        auto fetch_status = [&]() -> Result<StatusResponse> {
+            std::promise<Result<StatusResponse>> prom;
+            auto fut = prom.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    prom.set_value(co_await client.status());
+                    co_return;
+                },
+                boost::asio::detached);
+            if (fut.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+                return Error{ErrorCode::Timeout, "status timeout"};
+            return fut.get();
+        };
+
+        auto fetch_stats = [&]() -> Result<GetStatsResponse> {
+            GetStatsRequest req;
+            req.detailed = true;
+            std::promise<Result<GetStatsResponse>> prom;
+            auto fut = prom.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    prom.set_value(co_await client.call(req));
+                    co_return;
+                },
+                boost::asio::detached);
+            if (fut.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+                return Error{ErrorCode::Timeout, "stats timeout"};
+            return fut.get();
+        };
+
+        // Try once
+        auto sres = fetch_status();
+        auto res = fetch_stats();
+        bool have_typed = sres && !sres.value().providers.empty();
+        bool have_json = res && res.value().additionalStats.contains("plugins_json");
+        // If not available, request a scan and then wait briefly for readiness/providers
+        bool need_scan = !(have_typed || have_json);
+        if (need_scan) {
+            PluginScanRequest scan; // empty -> server uses configured search paths
+            std::promise<Result<PluginScanResponse>> prom;
+            auto fut = prom.get_future();
+            boost::asio::co_spawn(
+                boost::asio::system_executor{},
+                [&]() -> boost::asio::awaitable<void> {
+                    prom.set_value(co_await client.call(scan));
+                    co_return;
+                },
+                boost::asio::detached);
+            (void)fut.wait_for(std::chrono::seconds(10)); // best-effort
+            // Wait up to ~3s for plugin readiness/providers
+            for (int i = 0; i < 6; ++i) {
+                sres = fetch_status();
+                if (sres) {
+                    const auto& st = sres.value();
+                    if (!st.providers.empty())
+                        break;
+                    auto itp = st.readinessStates.find("plugins");
+                    if (itp != st.readinessStates.end() && itp->second)
+                        break;
+                    auto itmp = st.readinessStates.find("model_provider");
+                    if (itmp != st.readinessStates.end() && itmp->second)
+                        break;
+                }
+                // Fallback to JSON snapshot
+                res = fetch_stats();
+                if (res && res.value().additionalStats.contains("plugins_json"))
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+        if (!sres && !res) {
+            std::cout << "Failed to query daemon for plugins\n";
+            return;
+        }
+        // Prefer typed providers if present
+        if (sres && !sres.value().providers.empty()) {
+            const auto& st = sres.value();
+            std::cout << "Loaded plugins (" << st.providers.size() << "):\n";
+            for (const auto& p : st.providers) {
+                std::cout << "  - " << p.name;
+                if (p.isProvider)
+                    std::cout << " [provider]";
+                if (!p.ready)
+                    std::cout << " [not-ready]";
+                if (p.degraded)
+                    std::cout << " [degraded]";
+                if (p.modelsLoaded > 0)
+                    std::cout << " models=" << p.modelsLoaded;
+                if (!p.error.empty())
+                    std::cout << " error=\"" << p.error << "\"";
+                std::cout << "\n";
+            }
+            // When verbose, show skipped plugin diagnostics if present
+            if (verboseList_ && !st.skippedPlugins.empty()) {
+                std::cout << "\nSkipped plugins (" << st.skippedPlugins.size() << "):\n";
+                for (const auto& sp : st.skippedPlugins) {
+                    std::cout << "  - " << sp.path << ": " << sp.reason << "\n";
+                }
+            }
             return;
         }
         const auto& resp = res.value();
         auto it = resp.additionalStats.find("plugins_json");
         if (it == resp.additionalStats.end()) {
-            std::cout << "No plugin information available.\n";
+            std::cout << "No plugin information available.\n"
+                         "- Ensure the daemon is running (yams daemon start)\n"
+                         "- Configure [daemon].plugin_dir in ~/.config/yams/config.toml\n"
+                         "- Place plugins there (e.g., libyams_onnx_plugin.so) and re-run 'yams "
+                         "plugins list'\n";
             return;
         }
         nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
@@ -232,6 +323,7 @@ void PluginCommand::listPlugins() {
             std::string path = rec.value("path", "");
             bool provider = rec.value("provider", false);
             bool degraded = rec.value("degraded", false);
+            std::string error = rec.value("error", std::string());
             int models = 0;
             if (rec.contains("models_loaded")) {
                 try {
@@ -248,19 +340,8 @@ void PluginCommand::listPlugins() {
                 std::cout << " [degraded]";
             if (models > 0)
                 std::cout << " models=" << models;
-            if (rec.contains("error")) {
-                try {
-                    auto err = rec["error"];
-                    if (err.is_string()) {
-                        auto s = err.get<std::string>();
-                        if (!s.empty())
-                            std::cout << " error=\"" << s << "\"";
-                    } else {
-                        std::cout << " error=" << err.dump();
-                    }
-                } catch (...) {
-                }
-            }
+            if (!error.empty())
+                std::cout << " error=\"" << error << "\"";
             std::cout << "\n";
         }
     } catch (const std::exception& e) {

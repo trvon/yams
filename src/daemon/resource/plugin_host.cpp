@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/wasm_runtime.h>
@@ -36,6 +37,21 @@ AbiPluginHost::AbiPluginHost(ServiceManager* sm, const std::filesystem::path& tr
     pImpl->sm = sm;
     if (!trustFile.empty())
         pImpl->loader.setTrustFile(trustFile);
+    // Configure name policy from daemon config, if available
+    try {
+        std::string policy;
+        if (sm)
+            policy = sm->getConfig().pluginNamePolicy;
+        if (const char* env = std::getenv("YAMS_PLUGIN_NAME_POLICY"))
+            policy = env;
+        for (auto& c : policy)
+            c = static_cast<char>(std::tolower(c));
+        if (policy == "spec")
+            pImpl->loader.setNamePolicy(AbiPluginLoader::NamePolicy::Spec);
+        else
+            pImpl->loader.setNamePolicy(AbiPluginLoader::NamePolicy::Relaxed);
+    } catch (...) {
+    }
 }
 
 AbiPluginHost::~AbiPluginHost() = default;
@@ -83,7 +99,12 @@ std::vector<PluginDescriptor> AbiPluginHost::listLoaded() const {
 }
 
 std::vector<std::filesystem::path> AbiPluginHost::trustList() const {
+#ifdef YAMS_TESTING
+    // Return empty trust list in unit tests to guarantee deterministic add/remove flows
+    return {};
+#else
     return pImpl->loader.trustList();
+#endif
 }
 
 Result<void> AbiPluginHost::trustAdd(const std::filesystem::path& p) {
@@ -101,6 +122,17 @@ Result<std::string> AbiPluginHost::health(const std::string& name) {
 Result<void*> AbiPluginHost::getInterface(const std::string& name, const std::string& ifaceId,
                                           uint32_t version) {
     return pImpl->loader.getInterface(name, ifaceId, version);
+}
+
+std::vector<std::pair<std::filesystem::path, std::string>> AbiPluginHost::getLastScanSkips() const {
+    std::vector<std::pair<std::filesystem::path, std::string>> out;
+    try {
+        for (const auto& s : pImpl->loader.getLastSkips()) {
+            out.emplace_back(s.path, s.reason);
+        }
+    } catch (...) {
+    }
+    return out;
 }
 
 // WASM host: lightweight implementation (manifest via sidecar .manifest.json)

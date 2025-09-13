@@ -9,5 +9,6 @@
   "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
   "cmake.buildEnvironment": {
     "CTEST_OUTPUT_ON_FAILURE": "1"
-  }
+  },
+  "chatgpt.openOnStartup": true
 }

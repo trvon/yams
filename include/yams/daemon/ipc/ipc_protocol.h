@@ -2549,6 +2549,10 @@ struct StatusResponse {
     double memoryUsageMb;
     double cpuUsagePercent;
     std::string version;
+    // Vector DB health metrics
+    bool vectorDbInitAttempted{false};
+    bool vectorDbReady{false};
+    uint32_t vectorDbDim{0};
     // FSM metrics (transport state machine), exposed in daemon status
     uint64_t fsmTransitions = 0;
     uint64_t fsmHeaderReads = 0;
@@ -2614,6 +2618,79 @@ struct StatusResponse {
     };
     std::vector<ModelInfo> models;
 
+    // Plugin/model provider details (typed, preferred over JSON snapshots)
+    struct ProviderInfo {
+        std::string name;
+        bool ready{false};
+        bool degraded{false};
+        std::string error; // if degraded
+        uint32_t modelsLoaded{0};
+        bool isProvider{false}; // true if this plugin is the adopted model provider
+
+        template <typename Serializer>
+        requires IsSerializer<Serializer>
+        void serialize(Serializer& ser) const {
+            ser << name << ready << degraded << error << static_cast<uint32_t>(modelsLoaded)
+                << isProvider;
+        }
+
+        template <typename Deserializer>
+        requires IsDeserializer<Deserializer>
+        static Result<ProviderInfo> deserialize(Deserializer& deser) {
+            ProviderInfo p;
+            auto nameRes = deser.readString();
+            if (!nameRes)
+                return nameRes.error();
+            p.name = std::move(nameRes.value());
+            auto rdy = deser.template read<bool>();
+            if (!rdy)
+                return rdy.error();
+            p.ready = rdy.value();
+            auto deg = deser.template read<bool>();
+            if (!deg)
+                return deg.error();
+            p.degraded = deg.value();
+            auto err = deser.readString();
+            if (!err)
+                return err.error();
+            p.error = std::move(err.value());
+            auto ml = deser.template read<uint32_t>();
+            if (!ml)
+                return ml.error();
+            p.modelsLoaded = ml.value();
+            auto ip = deser.template read<bool>();
+            if (!ip)
+                return ip.error();
+            p.isProvider = ip.value();
+            return p;
+        }
+    };
+    std::vector<ProviderInfo> providers;
+    struct PluginSkipInfo {
+        std::string path;
+        std::string reason;
+        template <typename Serializer>
+        requires IsSerializer<Serializer>
+        void serialize(Serializer& ser) const {
+            ser << path << reason;
+        }
+        template <typename Deserializer>
+        requires IsDeserializer<Deserializer>
+        static Result<PluginSkipInfo> deserialize(Deserializer& d) {
+            PluginSkipInfo s;
+            auto p = d.readString();
+            if (!p)
+                return p.error();
+            s.path = std::move(p.value());
+            auto r = d.readString();
+            if (!r)
+                return r.error();
+            s.reason = std::move(r.value());
+            return s;
+        }
+    };
+    std::vector<PluginSkipInfo> skippedPlugins;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -2625,6 +2702,9 @@ struct StatusResponse {
             << static_cast<uint64_t>(fsmBytesReceived) << static_cast<uint64_t>(muxActiveHandlers)
             << static_cast<int64_t>(muxQueuedBytes) << static_cast<uint64_t>(muxWriterBudgetBytes)
             << static_cast<uint32_t>(retryAfterMs);
+
+        // Vector DB metrics
+        ser << vectorDbInitAttempted << vectorDbReady << static_cast<uint32_t>(vectorDbDim);
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -2652,6 +2732,16 @@ struct StatusResponse {
         for (const auto& model : models) {
             model.serialize(ser);
         }
+
+        // Serialize providers
+        ser << static_cast<uint32_t>(providers.size());
+        for (const auto& p : providers) {
+            p.serialize(ser);
+        }
+        // Serialize skipped plugins
+        ser << static_cast<uint32_t>(skippedPlugins.size());
+        for (const auto& s : skippedPlugins)
+            s.serialize(ser);
     }
 
     template <typename Deserializer>
@@ -2751,6 +2841,20 @@ struct StatusResponse {
             return retryAfterMsResult.error();
         res.retryAfterMs = retryAfterMsResult.value();
 
+        // Vector DB metrics
+        auto vInitAttempted = deser.template read<bool>();
+        if (!vInitAttempted)
+            return vInitAttempted.error();
+        res.vectorDbInitAttempted = vInitAttempted.value();
+        auto vReady = deser.template read<bool>();
+        if (!vReady)
+            return vReady.error();
+        res.vectorDbReady = vReady.value();
+        auto vDim = deser.template read<uint32_t>();
+        if (!vDim)
+            return vDim.error();
+        res.vectorDbDim = vDim.value();
+
         // Deserialize request counts
         auto countsCountResult = deser.template read<uint32_t>();
         if (!countsCountResult)
@@ -2823,6 +2927,29 @@ struct StatusResponse {
             if (!modelResult)
                 return modelResult.error();
             res.models.push_back(std::move(modelResult.value()));
+        }
+
+        // Deserialize providers
+        auto providersCountResult = deser.template read<uint32_t>();
+        if (!providersCountResult)
+            return providersCountResult.error();
+        res.providers.reserve(providersCountResult.value());
+        for (uint32_t i = 0; i < providersCountResult.value(); ++i) {
+            auto pRes = ProviderInfo::deserialize(deser);
+            if (!pRes)
+                return pRes.error();
+            res.providers.push_back(std::move(pRes.value()));
+        }
+        // Deserialize skipped plugins
+        auto skipCount = deser.template read<uint32_t>();
+        if (!skipCount)
+            return skipCount.error();
+        res.skippedPlugins.reserve(skipCount.value());
+        for (uint32_t i = 0; i < skipCount.value(); ++i) {
+            auto s = PluginSkipInfo::deserialize(deser);
+            if (!s)
+                return s.error();
+            res.skippedPlugins.push_back(std::move(s.value()));
         }
 
         return res;

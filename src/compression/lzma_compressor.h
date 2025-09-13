@@ -66,7 +66,8 @@ public:
 
     // LZMA doesn't have built-in streaming like Zstandard
     // These return nullptr for now
-    [[nodiscard]] std::unique_ptr<IStreamingCompressor> createStreamCompressor(uint8_t level = 0) {
+    [[nodiscard]] std::unique_ptr<IStreamingCompressor>
+    createStreamCompressor([[maybe_unused]] uint8_t level = 0) {
         return nullptr;
     }
 

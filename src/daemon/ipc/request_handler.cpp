@@ -846,7 +846,8 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         const bool always_unary = std::holds_alternative<ShutdownRequest>(request) ||
                                   std::holds_alternative<PingRequest>(request) ||
                                   std::holds_alternative<StatusRequest>(request) ||
-                                  std::holds_alternative<GetStatsRequest>(request);
+                                  std::holds_alternative<GetStatsRequest>(request) ||
+                                  std::holds_alternative<PrepareSessionRequest>(request);
 
         if (!client_expects_streaming || force_unary || always_unary) {
             spdlog::debug("handle_streaming_request: non-streaming path selected (request_id={} "
@@ -934,50 +935,116 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             co_return Result<void>();
         }
 
-        // We have a complete response, write header first
-        spdlog::debug("handle_streaming_request: complete response type={} (request_id={})",
-                      static_cast<int>(getMessageType(response_opt.value())), request_id);
+        // We have a complete response. For control/health requests, emit a single non-chunked
+        // frame to preserve classic unary semantics; otherwise, write header + immediate final
+        // chunk (one-shot streaming).
         auto& response = response_opt.value();
+        const bool is_control = std::holds_alternative<ShutdownRequest>(request) ||
+                                std::holds_alternative<PingRequest>(request) ||
+                                std::holds_alternative<StatusRequest>(request) ||
+                                std::holds_alternative<GetStatsRequest>(request) ||
+                                std::holds_alternative<PrepareSessionRequest>(request);
+        if (is_control) {
+            spdlog::debug("handle_streaming_request: writing classic unary for control type={} "
+                          "(request_id={})",
+                          static_cast<int>(getMessageType(response)), request_id);
+            // Frame a complete non-chunked message and send with write_message helper
+            Message response_msg;
+            response_msg.version = PROTOCOL_VERSION;
+            response_msg.requestId = request_id;
+            response_msg.timestamp = std::chrono::steady_clock::now();
+            response_msg.payload = response;
+            if (fsm) {
+                try {
+                    fsm_helpers::require_can_write(*fsm,
+                                                   "handle_streaming_request:write_complete_unary");
+                } catch (const std::exception& ex) {
+                    co_return Error{ErrorCode::InternalError,
+                                    std::string{"Invalid state before complete unary write: "} +
+                                        ex.what()};
+                }
+            }
+            auto write_result = co_await write_message(socket, response_msg);
+            if (!write_result) {
+                co_return write_result.error();
+            }
+        } else {
+            spdlog::debug(
+                "handle_streaming_request: one-shot streaming response type={} (request_id={})",
+                static_cast<int>(getMessageType(response)), request_id);
+            // Write header frame (no payload)
+            if (fsm) {
+                try {
+                    fsm_helpers::require_can_write(*fsm, "handle_streaming_request:write_header");
+                } catch (const std::exception& ex) {
+                    spdlog::error("FSM write guard failed before header write (request_id={}): {}",
+                                  request_id, ex.what());
+                    co_return Error{ErrorCode::InternalError,
+                                    std::string{"Invalid state before header write: "} + ex.what()};
+                }
+            }
+            {
+                int mt = static_cast<int>(getMessageType(response));
+                spdlog::debug("handle_streaming_request: writing header for request_id={} type={}",
+                              request_id, mt);
+            }
+            auto hdr_res = co_await write_header(socket, response, request_id, true, fsm);
+            if (!hdr_res) {
+                spdlog::debug("handle_streaming_request: write_header failed (request_id={}): {}",
+                              request_id, hdr_res.error().message);
+                co_return hdr_res.error();
+            }
+            if (fsm)
+                fsm->on_stream_next(false);
 
-        // Create message envelope for response (preserve requestId for correlation)
-        Message response_msg;
-        response_msg.version = PROTOCOL_VERSION;
-        response_msg.requestId = request_id;
-        response_msg.timestamp = std::chrono::steady_clock::now();
-        response_msg.payload = response;
+            // Write final chunk with the same response payload
+            auto chk_res = co_await write_chunk(socket, response, request_id, true, true, fsm);
+            if (!chk_res) {
+                spdlog::debug("handle_streaming_request: write_chunk failed (request_id={}): {}",
+                              request_id, chk_res.error().message);
+                co_return chk_res.error();
+            }
+        }
 
-        // Send a single non-chunked frame for complete responses
+        // Write header frame (no payload)
         if (fsm) {
             try {
-                fsm_helpers::require_can_write(*fsm, "handle_streaming_request:write_complete");
+                fsm_helpers::require_can_write(*fsm, "handle_streaming_request:write_header");
             } catch (const std::exception& ex) {
-                spdlog::error(
-                    "FSM write guard failed before complete response write (request_id={}): {}",
-                    request_id, ex.what());
+                spdlog::error("FSM write guard failed before header write (request_id={}): {}",
+                              request_id, ex.what());
                 co_return Error{ErrorCode::InternalError,
-                                std::string{"Invalid state before complete write: "} + ex.what()};
+                                std::string{"Invalid state before header write: "} + ex.what()};
             }
         }
         {
-            int mt = static_cast<int>(getMessageType(std::get<Response>(response_msg.payload)));
-            spdlog::debug("handle_streaming_request: writing complete response (non-chunked) for "
-                          "request_id={} type={}",
+            int mt = static_cast<int>(getMessageType(response));
+            spdlog::debug("handle_streaming_request: writing header for request_id={} type={}",
                           request_id, mt);
         }
-        auto write_result = co_await write_message(socket, response_msg);
-        if (!write_result) {
-            spdlog::debug("handle_streaming_request: write_message failed for request_id={} msg={}",
-                          request_id, write_result.error().message);
-            co_return write_result.error();
+        auto hdr_res = co_await write_header(socket, response, request_id, true, fsm);
+        if (!hdr_res) {
+            spdlog::debug("handle_streaming_request: write_header failed (request_id={}): {}",
+                          request_id, hdr_res.error().message);
+            co_return hdr_res.error();
+        }
+        if (fsm)
+            fsm->on_stream_next(false);
+
+        // Write final chunk with the same response payload
+        auto chk_res = co_await write_chunk(socket, response, request_id, true, true, fsm);
+        if (!chk_res) {
+            spdlog::debug("handle_streaming_request: write_chunk failed (request_id={}): {}",
+                          request_id, chk_res.error().message);
+            co_return chk_res.error();
         }
 
-        // Signal FSM that response has completed; transition to Connected for persistence
+        // Signal FSM that response has completed
         if (fsm) {
             fsm->on_response_complete(config_.close_after_response);
-            spdlog::info("non-streaming response complete: close_after_response={} fsm_state={} "
-                         "request_id={}",
-                         config_.close_after_response, ConnectionFsm::to_string(fsm->state()),
-                         request_id);
+            spdlog::info(
+                "one-shot streaming complete: close_after_response={} fsm_state={} request_id={}",
+                config_.close_after_response, ConnectionFsm::to_string(fsm->state()), request_id);
         }
         if (config_.close_after_response) {
             // Optional graceful half-close: shutdown send side then briefly drain peer
@@ -997,13 +1064,13 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 spdlog::info("graceful half-close complete (request_id={} fd={})", request_id,
                              socket.native_handle());
             } else {
-                spdlog::info("closing socket after non-streaming response (request_id={} fd={})",
-                             request_id, socket.native_handle());
+                spdlog::info("closing socket after response (request_id={} fd={})", request_id,
+                             socket.native_handle());
                 socket.close();
             }
         } else {
-            spdlog::info("keeping socket open after non-streaming response (request_id={} fd={})",
-                         request_id, socket.native_handle());
+            spdlog::info("keeping socket open after response (request_id={} fd={})", request_id,
+                         socket.native_handle());
         }
 
         auto duration = std::chrono::steady_clock::now() - start_time;

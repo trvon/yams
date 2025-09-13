@@ -75,7 +75,7 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
     auto rankStartTime = std::chrono::high_resolution_clock::now();
     ranker_->rankResults(results, queryAst.get());
     auto rankEndTime = std::chrono::high_resolution_clock::now();
-    auto rankingTime =
+    [[maybe_unused]] auto rankingTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(rankEndTime - rankStartTime);
 
     // Sort results if requested
@@ -94,8 +94,8 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
         generateSnippets(results);
     }
     auto highlightEndTime = std::chrono::high_resolution_clock::now();
-    auto highlightTime = std::chrono::duration_cast<std::chrono::milliseconds>(highlightEndTime -
-                                                                               highlightStartTime);
+    [[maybe_unused]] auto highlightTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+        highlightEndTime - highlightStartTime);
 
     // Generate facets
     if (request.includeFacets && config_.enableFaceting) {
@@ -212,6 +212,7 @@ void SearchExecutor::clearCache() {
 
 Result<std::vector<SearchResultItem>>
 SearchExecutor::executeFTSQuery(const std::string& ftsQuery, const SearchRequest& request) {
+    (void)request;
     std::vector<SearchResultItem> results;
 
     try {

@@ -92,42 +92,7 @@ private:
     boost::asio::awaitable<Response> handleUnloadModelRequest(const UnloadModelRequest& req);
     boost::asio::awaitable<Response> handleModelStatusRequest(const ModelStatusRequest& req);
 
-    // Helper functions for status reporting
-    double getMemoryUsage();
-    double getCpuUsage();
-
-    // Search helper methods
-    Response handleHashSearch(const SearchRequest& req,
-                              std::shared_ptr<metadata::MetadataRepository> metadataRepo);
-    Response handleFuzzySearch(const SearchRequest& req,
-                               std::shared_ptr<metadata::MetadataRepository> metadataRepo);
-    Response handleHybridSearch(const SearchRequest& req,
-                                std::shared_ptr<metadata::MetadataRepository> metadataRepo);
-    Response handleMetadataSearch(const SearchRequest& req,
-                                  std::shared_ptr<metadata::MetadataRepository> metadataRepo);
-    bool isValidHash(const std::string& hash);
-    std::string truncateSnippet(const std::string& snippet, size_t maxLength);
-
-    // Grep helper methods
-    bool matchesAnyPattern(const std::string& filename, const std::vector<std::string>& patterns);
-    std::string escapeRegex(const std::string& text);
-
-    // AddDocument helper methods
-    Result<std::pair<std::string, std::string>>
-    handleSingleFileAdd(const std::filesystem::path& filePath, const AddDocumentRequest& req,
-                        std::shared_ptr<yams::api::IContentStore> contentStore,
-                        std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo);
-    Result<std::pair<std::string, std::string>>
-    handleContentAdd(const AddDocumentRequest& req,
-                     std::shared_ptr<yams::api::IContentStore> contentStore,
-                     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo);
-    Result<size_t>
-    handleDirectoryAdd(const std::filesystem::path& dirPath, const AddDocumentRequest& req,
-                       std::shared_ptr<yams::api::IContentStore> contentStore,
-                       std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo);
-    void addTagsAndMetadata(int64_t docId, const std::vector<std::string>& tags,
-                            const std::map<std::string, std::string>& metadata,
-                            std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo);
+    // Legacy helper declarations removed after dispatcher split
 
 private:
     YamsDaemon* daemon_;

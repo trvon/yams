@@ -1374,9 +1374,24 @@ public:
             return Result<void>();
         }
 
-        // TODO: Implement actual merging
-        // For now, just clear delta index
-        delta_index_ = std::make_unique<FlatIndex>(config_);
+        // Move all vectors from the delta (FLAT) index into the main index and
+        // then clear the delta. This ensures searches hit data added prior to a
+        // build/merge call, and fixes tests that expect non-empty results after
+        // buildIndex().
+        auto delta_ids = delta_index_->getAllIds();
+        for (const auto& id : delta_ids) {
+            auto v = delta_index_->getVector(id);
+            if (!v) {
+                // Best-effort: skip malformed entries
+                continue;
+            }
+            (void)main_index_->add(id, v.value());
+        }
+
+        // Reset delta to an empty flat index for subsequent incremental writes
+        IndexConfig delta_config = config_;
+        delta_config.type = IndexType::FLAT;
+        delta_index_ = std::make_unique<FlatIndex>(delta_config);
 
         return Result<void>();
     }

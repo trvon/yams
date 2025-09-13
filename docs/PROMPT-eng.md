@@ -287,7 +287,6 @@ yams search "pbi=001" --paths-only
 11. **DRY:** Single sources with references/hashes.
 12. **Constants:** Use named constants for repeated values.
 13. **API Docs:** Persist external specs in‑repo and in YAMS.
-14. **Forbidden:** Using system `grep/find/rg` for repository queries.
 
 ---
 

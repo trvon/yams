@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <yams/core/task.h>
+#include <boost/asio/awaitable.hpp>
 #include <yams/core/types.h>
 
 namespace yams::mcp {
@@ -719,11 +719,12 @@ template <ToolRequest RequestType, ToolResponse ResponseType>
 requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
 class AsyncToolWrapper {
 public:
-    using AsyncHandlerFn = std::function<yams::Task<Result<ResponseType>>(const RequestType&)>;
+    using AsyncHandlerFn =
+        std::function<boost::asio::awaitable<Result<ResponseType>>(const RequestType&)>;
 
     explicit AsyncToolWrapper(AsyncHandlerFn handler) : handler_(std::move(handler)) {}
 
-    yams::Task<json> operator()(const json& args) {
+    boost::asio::awaitable<json> operator()(const json& args) {
         try {
             auto req = RequestType::fromJson(args);
             auto result = co_await handler_(req);
@@ -765,7 +766,7 @@ private:
 class ToolRegistry {
 public:
     using AsyncHandlerMap =
-        std::unordered_map<std::string, std::function<yams::Task<json>(const json&)>>;
+        std::unordered_map<std::string, std::function<boost::asio::awaitable<json>(const json&)>>;
 
     ToolRegistry() {
         handlers_.reserve(32); // Pre-allocate for performance
@@ -773,12 +774,13 @@ public:
 
     template <ToolRequest RequestType, ToolResponse ResponseType>
     requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
-    void registerTool(std::string_view name,
-                      std::function<yams::Task<Result<ResponseType>>(const RequestType&)> handler,
-                      json schema = {}, std::string_view description = {}) {
+    void registerTool(
+        std::string_view name,
+        std::function<boost::asio::awaitable<Result<ResponseType>>(const RequestType&)> handler,
+        json schema = {}, std::string_view description = {}) {
         auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::move(handler));
-        auto handlerFn = [wrapper =
-                              std::move(wrapper)](const json& args) mutable -> yams::Task<json> {
+        auto handlerFn = [wrapper = std::move(wrapper)](
+                             const json& args) mutable -> boost::asio::awaitable<json> {
             return wrapper(args);
         };
 
@@ -789,7 +791,7 @@ public:
         }
     }
 
-    yams::Task<json> callTool(std::string_view name, const json& arguments) {
+    boost::asio::awaitable<json> callTool(std::string_view name, const json& arguments) {
         if (auto it = handlers_.find(std::string(name)); it != handlers_.end()) {
             co_return co_await it->second(arguments);
         }
@@ -818,13 +820,13 @@ public:
 private:
     struct AsyncToolDescriptor {
         std::string_view name;
-        const std::function<yams::Task<json>(const json&)>& handler;
+        const std::function<boost::asio::awaitable<json>(const json&)>& handler;
         json schema;
         std::string_view description;
 
         AsyncToolDescriptor(std::string_view n,
-                            const std::function<yams::Task<json>(const json&)>& h, json s,
-                            std::string_view d)
+                            const std::function<boost::asio::awaitable<json>(const json&)>& h,
+                            json s, std::string_view d)
             : name(n), handler(h), schema(std::move(s)), description(d) {}
     };
 

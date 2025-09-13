@@ -19,6 +19,23 @@ void signalHandler(int signal) {
 }
 
 int main(int argc, char* argv[]) {
+    std::set_terminate([]() noexcept {
+        try {
+            if (auto ep = std::current_exception()) {
+                try {
+                    std::rethrow_exception(ep);
+                } catch (const std::exception& e) {
+                    spdlog::critical("std::terminate: uncaught exception: {}", e.what());
+                } catch (...) {
+                    spdlog::critical("std::terminate: unknown uncaught exception");
+                }
+            } else {
+                spdlog::critical("std::terminate called without active exception");
+            }
+        } catch (...) {
+        }
+        std::_Exit(1);
+    });
     CLI::App app{"YAMS MCP Server - Model Context Protocol server for YAMS"};
 
     std::string log_level = "info";
@@ -91,6 +108,10 @@ int main(int argc, char* argv[]) {
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+#ifndef _WIN32
+    // Prevent abrupt termination when the client closes the pipe early
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     try {
         std::unique_ptr<yams::mcp::ITransport> transport =

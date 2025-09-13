@@ -40,6 +40,15 @@ public:
         }
 #endif
 
+        // Lightweight, environment-driven mock mode for CI and constrained hosts
+        // (works regardless of gtest being present in this translation unit).
+        if (std::getenv("YAMS_USE_MOCK_PROVIDER") || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
+            std::getenv("YAMS_TEST_MODE")) {
+            test_mode_ = true;
+            spdlog::warn("[ONNX] Mock provider mode enabled via env; skipping ONNX init");
+            return;
+        }
+
         // Initialize ONNX Runtime environment
         env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, modelName.c_str());
 
@@ -74,6 +83,67 @@ public:
     Result<void> loadModel() {
         if (test_mode_) {
             // In test mode, pretend loading succeeded
+            // Derive embeddingDim_/maxSequenceLength_/pooling/normalize from nearby configs when
+            // available to better match real model characteristics.
+            try {
+                parseModelConfigHints();
+            } catch (...) {
+            }
+            // Heuristics based on common model families when config hints are absent
+            auto lname = modelName_;
+            std::transform(lname.begin(), lname.end(), lname.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            // Dimension defaults
+            if (embeddingDim_ == 0 || embeddingDim_ == 384) {
+                auto has = [&](const char* s) { return lname.find(s) != std::string::npos; };
+                // OpenAI TE3 sizes (mock support for external references)
+                if (has("text-embedding-3-large")) {
+                    embeddingDim_ = 3072;
+                } else if (has("text-embedding-3-small")) {
+                    embeddingDim_ = 1536;
+                } else if (has("e5")) {
+                    if (has("large"))
+                        embeddingDim_ = 1024;
+                    else if (has("small"))
+                        embeddingDim_ = 384;
+                    else
+                        embeddingDim_ = 768; // base/default
+                } else if (has("gte")) {
+                    if (has("large"))
+                        embeddingDim_ = 1024;
+                    else if (has("small"))
+                        embeddingDim_ = 384;
+                    else
+                        embeddingDim_ = 768; // base/default
+                } else if (has("bge")) {
+                    if (has("-m3") || has("m3") || has("large"))
+                        embeddingDim_ = 1024;
+                    else if (has("small"))
+                        embeddingDim_ = 384;
+                    else
+                        embeddingDim_ = 768; // base/default
+                } else if (has("nomic") || has("mpnet")) {
+                    embeddingDim_ = 768;
+                } else if (has("minilm")) {
+                    embeddingDim_ = 384;
+                }
+            }
+            // Sequence length defaults
+            if (maxSequenceLength_ == 0 || maxSequenceLength_ == 512) {
+                auto has = [&](const char* s) { return lname.find(s) != std::string::npos; };
+                if (has("nomic") || has("bge-m3") || has("text-embedding-3-")) {
+                    maxSequenceLength_ = 8192;
+                } else if (has("minilm")) {
+                    maxSequenceLength_ = 256;
+                } else if (has("mpnet") || has("bge") || has("e5") || has("gte")) {
+                    maxSequenceLength_ = 512;
+                }
+            }
+            // Respect explicit config cap
+            if (config_.max_sequence_length > 0 &&
+                maxSequenceLength_ > config_.max_sequence_length) {
+                maxSequenceLength_ = config_.max_sequence_length;
+            }
             isLoaded_ = true;
             return Result<void>();
         }
@@ -172,9 +242,81 @@ public:
 
     Result<std::vector<float>> generateEmbedding(const std::string& text) {
         if (test_mode_) {
-            // Return mock embedding in test mode
-            std::vector<float> embedding(embeddingDim_, 0.1f);
-            return embedding;
+            // Representative mock: deterministic per-text embedding derived from tokens.
+            // - Uses same preprocessing (tokenize/truncate/pad + attention mask)
+            // - Pseudo-random per-token vector seeded by token id and position
+            // - Pooling respects configured pooling_mode_
+            // - Optional L2 normalization
+            const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
+            auto toks = preprocessor_.tokenize(text);
+            toks = preprocessor_.truncateTokens(toks, seq_len);
+            toks = preprocessor_.padTokens(toks, seq_len);
+            auto mask = preprocessor_.generateAttentionMask(toks);
+
+            const size_t D = embeddingDim_ > 0 ? embeddingDim_ : 384;
+            auto prng_val = [](uint32_t seed) -> float {
+                // xorshift32 → map to [-1, 1]
+                uint32_t x = seed ? seed : 0x9e3779b9u;
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                // Scale to [0,1)
+                float u = (x & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+                return 2.0f * u - 1.0f;
+            };
+
+            std::vector<float> emb(D, 0.0f);
+            if (pooling_mode_ == Pooling::CLS) {
+                const int32_t t = toks.empty() ? 0 : toks[0];
+                for (size_t d = 0; d < D; ++d) {
+                    emb[d] = prng_val(static_cast<uint32_t>(t * 1315423911u + d * 2654435761u));
+                }
+            } else if (pooling_mode_ == Pooling::MAX) {
+                for (size_t i = 0; i < std::min(seq_len, toks.size()); ++i) {
+                    if (i >= mask.size() || mask[i] <= 0)
+                        continue;
+                    const int32_t t = toks[i];
+                    for (size_t d = 0; d < D; ++d) {
+                        float v = prng_val(static_cast<uint32_t>(t * 2246822519u + i * 3266489917u +
+                                                                 d * 668265263u));
+                        emb[d] = (i == 0) ? v : std::max(emb[d], v);
+                    }
+                }
+            } else { // MEAN pooling
+                double denom = 0.0;
+                for (size_t i = 0; i < std::min(seq_len, toks.size()); ++i) {
+                    float w = (i < mask.size() && mask[i] > 0) ? 1.0f : 0.0f;
+                    if (w <= 0.0f)
+                        continue;
+                    denom += w;
+                    const int32_t t = toks[i];
+                    for (size_t d = 0; d < D; ++d) {
+                        float v = prng_val(
+                            static_cast<uint32_t>(t * 374761393u + i * 1664525u + d * 1013904223u));
+                        emb[d] += v * w;
+                    }
+                }
+                if (denom > 0.0) {
+                    for (size_t d = 0; d < D; ++d)
+                        emb[d] = static_cast<float>(emb[d] / denom);
+                }
+            }
+
+            if (normalize_) {
+                double n2 = 0.0;
+                for (auto v : emb) {
+                    double dv = static_cast<double>(v);
+                    n2 += dv * dv;
+                }
+                n2 = std::sqrt(n2);
+                if (n2 > 1e-8) {
+                    for (auto& v : emb)
+                        v = static_cast<float>(v / n2);
+                } else {
+                    std::fill(emb.begin(), emb.end(), 0.0f);
+                }
+            }
+            return emb;
         }
 
         if (!isLoaded_) {
@@ -212,10 +354,15 @@ public:
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) {
         if (test_mode_) {
-            // Return mock embeddings in test mode
-            std::vector<std::vector<float>> embs(texts.size(),
-                                                 std::vector<float>(embeddingDim_, 0.1f));
-            return embs;
+            std::vector<std::vector<float>> res;
+            res.reserve(texts.size());
+            for (const auto& t : texts) {
+                auto one = generateEmbedding(t);
+                if (!one)
+                    return one.error();
+                res.emplace_back(std::move(one.value()));
+            }
+            return res;
         }
         if (!isLoaded_) {
             if (auto result = loadModel(); !result) {
@@ -225,7 +372,7 @@ public:
         return runOnnxBatch(texts);
     }
 
-    bool isValid() const { return isLoaded_ && session_ != nullptr; }
+    bool isValid() const { return test_mode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr); }
 
     size_t getEmbeddingDim() const { return embeddingDim_; }
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
@@ -690,16 +837,32 @@ bool OnnxModelSession::isValid() const {
 // ============================================================================
 
 OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
-    // Initialize ONNX Runtime environment (shared across all models)
-    ortEnv_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
+    // In mock mode, avoid initializing any ONNX Runtime state to prevent
+    // platform-specific crashes on hosts without compatible runtimes.
+    if (std::getenv("YAMS_USE_MOCK_PROVIDER") || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
+        std::getenv("YAMS_TEST_MODE")) {
+        spdlog::warn("[ONNX] Mock provider mode enabled; skipping global ONNX environment init");
+        return;
+    }
 
-    sessionOptions_ = std::make_shared<Ort::SessionOptions>();
-    sessionOptions_->SetIntraOpNumThreads(config.numThreads);
-    sessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    try {
+        // Initialize ONNX Runtime environment (shared across all models)
+        ortEnv_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
 
-    if (config.enableGPU) {
-        // TODO: Add GPU provider configuration
-        spdlog::info("GPU support requested but not yet implemented");
+        sessionOptions_ = std::make_shared<Ort::SessionOptions>();
+        sessionOptions_->SetIntraOpNumThreads(config.numThreads);
+        sessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+        if (config.enableGPU) {
+            // TODO: Add GPU provider configuration
+            spdlog::info("GPU support requested but not yet implemented");
+        }
+    } catch (const std::exception& e) {
+        // Do not crash the daemon if runtime init fails; log and continue.
+        spdlog::warn("[ONNX] Runtime environment init failed: {} — continuing (mock may be used)",
+                     e.what());
+    } catch (...) {
+        spdlog::warn("[ONNX] Runtime environment init failed with unknown error — continuing");
     }
 }
 
@@ -922,15 +1085,29 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     auto t0 = std::chrono::steady_clock::now();
     entry.pool = std::make_shared<ResourcePool<OnnxModelSession>>(
         poolConfig,
-        [modelPath, modelName, embConfig](const std::string& id) -> Result<ModelSessionPtr> {
+        [modelPath, modelName, embConfig,
+         timeout = config_.modelLoadTimeout](const std::string& id) -> Result<ModelSessionPtr> {
             (void)id;
-            try {
-                auto session = std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
-                return session;
-            } catch (const std::exception& e) {
-                return Error{ErrorCode::InternalError,
-                             std::string("Failed to create model session: ") + e.what()};
+            // Bound session creation time to avoid hanging the pool indefinitely
+            auto fut = std::async(std::launch::async, [=]() -> Result<ModelSessionPtr> {
+                try {
+                    auto session =
+                        std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
+                    return session;
+                } catch (const std::exception& e) {
+                    return Error{ErrorCode::InternalError,
+                                 std::string("Failed to create model session: ") + e.what()};
+                } catch (...) {
+                    return Error{ErrorCode::InternalError, "Unknown error creating ONNX session"};
+                }
+            });
+
+            if (fut.wait_for(timeout) == std::future_status::ready) {
+                return fut.get();
             }
+            spdlog::warn("[ONNX] Session creation timed out after {}s for model {}",
+                         timeout.count(), modelName);
+            return Error{ErrorCode::Timeout, "Model load timed out"};
         },
         [](const OnnxModelSession& session) { return session.isValid(); });
     auto t1 = std::chrono::steady_clock::now();

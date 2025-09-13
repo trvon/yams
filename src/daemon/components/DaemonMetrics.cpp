@@ -300,6 +300,12 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
     // Vector DB snapshot (size and exact rows when available)
     try {
         if (services_) {
+            try {
+                out.vectorDbInitAttempted = state_->readiness.vectorDbInitAttempted.load();
+                out.vectorDbReady = state_->readiness.vectorDbReady.load();
+                out.vectorDbDim = state_->readiness.vectorDbDim.load();
+            } catch (...) {
+            }
             // Size via filepath
             try {
                 auto dd = services_->getResolvedDataDir();
@@ -319,9 +325,13 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                 }
             } catch (...) {
             }
-            // Fallback: cheap temp handle if DB exists and rows still unknown
+            // Fallback: cheap temp handle if DB exists and rows still unknown AND
+            // the daemon has not yet finished initializing its long-lived handle.
+            // Avoid re-opening the DB on every metrics tick when the true row
+            // count is legitimately 0 (empty DB) or when the main handle is
+            // already available.
             try {
-                if (out.vectorRowsExact == 0) {
+                if (out.vectorRowsExact == 0 && !out.vectorDbReady) {
                     auto dd = services_->getResolvedDataDir();
                     if (!dd.empty()) {
                         auto vdbp = dd / "vectors.db";
@@ -349,16 +359,30 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
             auto mr = services_->getMetadataRepo();
             out.serviceContentStore = cs ? "running" : "unavailable";
             out.serviceMetadataRepo = mr ? "running" : "unavailable";
-            // Compression and store stats
+            // Compression and store stats (optional)
+            // Allow disabling via env to avoid instability on platforms with
+            // fragile SQLite setups. When disabled, high-level metrics still
+            // refresh but deep store stats remain unset.
+            bool disableStoreStats = false;
             try {
-                if (cs) {
-                    auto ss = cs->getStats();
-                    out.storeObjects = ss.totalObjects;
-                    out.uniqueBlocks = ss.uniqueBlocks;
-                    out.deduplicatedBytes = ss.deduplicatedBytes;
-                    out.compressionRatio = ss.dedupRatio();
+                if (const char* env = std::getenv("YAMS_DISABLE_STORE_STATS")) {
+                    std::string v(env);
+                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                    disableStoreStats = (v == "1" || v == "true" || v == "yes" || v == "on");
                 }
             } catch (...) {
+            }
+            if (!disableStoreStats) {
+                try {
+                    if (cs) {
+                        auto ss = cs->getStats();
+                        out.storeObjects = ss.totalObjects;
+                        out.uniqueBlocks = ss.uniqueBlocks;
+                        out.deduplicatedBytes = ss.deduplicatedBytes;
+                        out.compressionRatio = ss.dedupRatio();
+                    }
+                } catch (...) {
+                }
             }
             // Search executor and reason when unavailable
             if (services_->getSearchExecutor()) {

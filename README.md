@@ -141,16 +141,6 @@ MCP config (example):
 }
 ```
 
-## API (C++)
-```cpp
-#include <yams/api/content_store.h>
-auto store = yams::api::createContentStore(getenv("YAMS_STORAGE"));
-yams::api::ContentMetadata meta{.tags={"code","v1.0"}};
-auto r = store->store("file.txt", meta);
-auto q = store->search("query", 10);
-store->retrieve(hash, "out.txt");
-```
-
 ## Troubleshooting
 Conan: create default profile
 ```bash
@@ -165,24 +155,6 @@ Plugins not listed by `yams plugin list`:
 - Ensure onnxruntime shared libs are resolvable by the loader (e.g., `ldd libyams_onnx_plugin.so`).
 - Check the daemon startup log for: `Plugin scan directories: dir1;dir2;...` to confirm discovery paths.
 
-## Performance & Tuning
-The daemon exposes centralized tuning knobs (via TuneAdvisor) to improve throughput, especially for add/index operations:
-
-- `YAMS_WORKER_THREADS` — CPU worker threads for embeddings/model work (default ~half cores)
-- `YAMS_WRITER_BUDGET_BYTES` — Base writer budget per turn (bytes) used by the mux (default ~3 MiB)
-- `YAMS_SERVER_WRITER_BUDGET_BYTES` — Server override for per‑turn writer budget (bytes)
-- `YAMS_MAX_MUX_BYTES` — Backpressure threshold for total queued bytes (default 256 MiB)
-- `YAMS_SERVER_QUEUE_BYTES_CAP` — Per‑connection queued bytes cap (default 256 MiB)
-- `YAMS_SERVER_QUEUE_FRAMES_CAP` — Per‑request queued frames cap (default 1024)
-- `YAMS_SERVER_MAX_INFLIGHT` — Max inflight requests per connection (default 2048)
-
-Example for faster local adds:
-```bash
-export YAMS_WORKER_THREADS=$(nproc)
-export YAMS_WRITER_BUDGET_BYTES=$((4*1024*1024))
-export YAMS_SERVER_WRITER_BUDGET_BYTES=$((4*1024*1024))
-export YAMS_MAX_MUX_BYTES=$((512*1024*1024))
-```
 Monitor with `yams stats --verbose` and `yams doctor`.
 
 ## License

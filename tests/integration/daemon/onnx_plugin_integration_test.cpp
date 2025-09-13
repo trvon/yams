@@ -53,8 +53,7 @@ TEST(OnnxPluginIT, LoadPluginAndGenerateEmbedding) {
 
     auto pluginPath = get_plugin_path();
     if (!pluginPath) {
-        GTEST_SKIP()
-            << "ONNX plugin file not provided; set TEST_ONNX_PLUGIN_FILE or build plugins/onnx";
+        GTEST_SKIP() << "ONNX plugin not built in this configuration";
     }
     std::string models_root;
     if (!find_model_root(models_root)) {
@@ -75,6 +74,8 @@ TEST(OnnxPluginIT, LoadPluginAndGenerateEmbedding) {
     fs::path cfgFile = xdg / "yams" / "config.toml";
     {
         std::ofstream out(cfgFile);
+        out << "[daemon]\n";
+        out << "plugin_dir = \"" << pluginPath->parent_path().string() << "\"\n\n";
         out << "[embeddings]\n";
         out << "preferred_model = \"all-MiniLM-L6-v2\"\n";
         out << "model_path = \"" << models_root << "\"\n";
@@ -222,14 +223,9 @@ TEST(OnnxPluginIT, LoadAllModelsInModelsRoot) {
     cc.autoStart = false;
     yams::daemon::DaemonClient client(cc);
 
-    // Trust+load plugin
-    yams::daemon::PluginTrustAddRequest tr;
-    tr.path = pluginPath->parent_path().string();
-    ASSERT_TRUE(yams::cli::run_sync(client.call(tr), 5s));
-    yams::daemon::PluginLoadRequest pl;
-    pl.pathOrName = pluginPath->string();
-    pl.dryRun = false;
-    ASSERT_TRUE(yams::cli::run_sync(client.call(pl), 10s));
+    // Request a scan of configured plugin_dir; daemon will adopt provider if available
+    yams::daemon::PluginScanRequest scan;
+    (void)yams::cli::run_sync(client.call(scan), 10s);
 
     // Wait for model provider readiness
     bool mp_ready = false;

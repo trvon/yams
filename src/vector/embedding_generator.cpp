@@ -1341,10 +1341,10 @@ public:
                 size_t i = 0, n = s.size();
                 while (i < n) {
                     unsigned char c = p[i];
-                    if (c < 0x80) {
+                    if (c < 0x80) { // ASCII
                         out.push_back(static_cast<char>(c));
                         ++i;
-                    } else if ((c >> 5) == 0x6 && i + 1 < n) {
+                    } else if (c >= 0xC2 && c <= 0xDF && i + 1 < n) { // 2-byte
                         unsigned char c1 = p[i + 1];
                         if ((c1 & 0xC0) == 0x80) {
                             out.push_back(static_cast<char>(c));
@@ -1354,7 +1354,7 @@ public:
                             out.push_back('?');
                             ++i;
                         }
-                    } else if ((c >> 4) == 0xE && i + 2 < n) {
+                    } else if (c >= 0xE0 && c <= 0xEF && i + 2 < n) { // 3-byte
                         unsigned char c1 = p[i + 1], c2 = p[i + 2];
                         if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
                             out.push_back(static_cast<char>(c));
@@ -1365,7 +1365,7 @@ public:
                             out.push_back('?');
                             ++i;
                         }
-                    } else if ((c >> 3) == 0x1E && i + 3 < n) {
+                    } else if (c >= 0xF0 && c <= 0xF4 && i + 3 < n) { // 4-byte
                         unsigned char c1 = p[i + 1], c2 = p[i + 2], c3 = p[i + 3];
                         if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
                             out.push_back(static_cast<char>(c));

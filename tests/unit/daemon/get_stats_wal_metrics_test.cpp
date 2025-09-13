@@ -39,7 +39,20 @@ TEST(DaemonStatsWalMetricsTest, GetStatsIncludesWalKeys) {
     ioc.run();
     auto resp = fut.get();
 
-    ASSERT_TRUE(std::holds_alternative<GetStatsResponse>(resp));
+    if (!std::holds_alternative<GetStatsResponse>(resp)) {
+        // Provide diagnostic info to ease debugging if the dispatcher changed behavior.
+        ADD_FAILURE() << "Expected GetStatsResponse variant but got index=" << resp.index();
+        if (std::holds_alternative<StatusResponse>(resp)) {
+            auto sr = std::get<StatusResponse>(resp);
+            ADD_FAILURE() << "Received StatusResponse (state=" << sr.overallStatus
+                          << ") instead of GetStatsResponse";
+        } else if (std::holds_alternative<ErrorResponse>(resp)) {
+            auto er = std::get<ErrorResponse>(resp);
+            ADD_FAILURE() << "Received ErrorResponse: code=" << static_cast<int>(er.code)
+                          << " msg=" << er.message;
+        }
+        FAIL() << "GetStatsRequest should always yield GetStatsResponse even when not ready";
+    }
     auto s = std::get<GetStatsResponse>(resp);
 
     // The provider returns zeros until attached; we only assert presence of keys

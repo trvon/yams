@@ -19,8 +19,7 @@ namespace yams::storage {
 
 // Constants
 constexpr size_t TEMP_NAME_LENGTH = 16;
-constexpr size_t MAX_RETRY_ATTEMPTS = 3;
-constexpr auto RETRY_DELAY = std::chrono::milliseconds(10);
+// Removed unused retry helpers; reintroduce if backoff is implemented
 
 // Implementation details
 struct StorageEngine::Impl {

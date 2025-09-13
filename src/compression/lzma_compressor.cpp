@@ -302,6 +302,7 @@ private:
 
     [[nodiscard]] Result<std::vector<std::byte>> decompressLZMA(std::span<const std::byte> data,
                                                                 size_t expectedSize) {
+        (void)expectedSize;
         if (data.size() < KRONOS_LZMA_PROPS_SIZE) {
             return Error{ErrorCode::InvalidData, "Compressed data too small for LZMA"};
         }
@@ -377,6 +378,7 @@ private:
 
     [[nodiscard]] Result<std::vector<std::byte>> decompressLZMA2(std::span<const std::byte> data,
                                                                  size_t expectedSize) {
+        (void)expectedSize;
         if (data.size() < LZMA2_PROPS_SIZE) {
             return Error{ErrorCode::InvalidData, "Compressed data too small for LZMA2"};
         }

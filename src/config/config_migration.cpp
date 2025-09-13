@@ -363,6 +363,8 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
              {{"enable", "true"},
               {"auto_load_plugins", "true"},
               {"plugin_dir", ""},
+              {"plugin_name_policy", "relaxed"},
+              {"auto_repair_batch_size", "16"},
               {"worker_threads", "0"},
               {"max_memory_gb", "0"},
               {"log_level", "info"}}},

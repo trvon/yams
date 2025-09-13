@@ -98,4 +98,29 @@ void DaemonLifecycleFsm::reset() {
     transitionTo(LifecycleState::Unknown);
 }
 
+void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degraded,
+                                              const std::string& reason) {
+    auto it = degraded_.find(name);
+    if (it == degraded_.end() || it->second != degraded) {
+        degraded_[name] = degraded;
+        if (!reason.empty())
+            degradeReasons_[name] = reason;
+        spdlog::warn("Subsystem '{}' degraded: {}{}", name, degraded ? "true" : "false",
+                     reason.empty() ? "" : (std::string{" reason="} + reason));
+    } else if (degraded && !reason.empty()) {
+        // Update reason when degraded remains true
+        degradeReasons_[name] = reason;
+    }
+}
+
+bool DaemonLifecycleFsm::isSubsystemDegraded(const std::string& name) const {
+    auto it = degraded_.find(name);
+    return it != degraded_.end() && it->second;
+}
+
+std::string DaemonLifecycleFsm::degradationReason(const std::string& name) const {
+    auto it = degradeReasons_.find(name);
+    return it == degradeReasons_.end() ? std::string() : it->second;
+}
+
 } // namespace yams::daemon

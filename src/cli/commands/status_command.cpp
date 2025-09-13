@@ -9,6 +9,7 @@
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/recommendation_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -108,6 +109,20 @@ public:
                                 pj[k] = v;
                             j["initProgress"] = std::move(pj);
                         }
+                        if (!s.providers.empty()) {
+                            nlohmann::json pv = nlohmann::json::array();
+                            for (const auto& p : s.providers) {
+                                nlohmann::json rec;
+                                rec["name"] = p.name;
+                                rec["ready"] = p.ready;
+                                rec["degraded"] = p.degraded;
+                                rec["error"] = p.error;
+                                rec["models_loaded"] = p.modelsLoaded;
+                                rec["is_provider"] = p.isProvider;
+                                pv.push_back(std::move(rec));
+                            }
+                            j["plugins"] = std::move(pv);
+                        }
                         std::cout << j.dump(2) << std::endl;
                     } else {
                         std::cout << "== DAEMON STATUS ==\n";
@@ -127,6 +142,26 @@ public:
                                   << "%\n";
                         if (!s.ready && !waitingSummary.empty()) {
                             std::cout << "WAIT : " << waitingSummary << "\n";
+                        }
+                        // Short plugins summary (typed providers)
+                        if (!s.providers.empty()) {
+                            std::cout << "PLUG : " << s.providers.size() << " loaded";
+                            // Identify adopted provider and its state
+                            for (const auto& p : s.providers) {
+                                if (p.isProvider) {
+                                    std::cout << ", provider='" << p.name << "'";
+                                    if (!p.ready)
+                                        std::cout << " [not-ready]";
+                                    if (p.degraded)
+                                        std::cout << " [degraded]";
+                                    if (p.modelsLoaded > 0)
+                                        std::cout << ", models=" << p.modelsLoaded;
+                                    if (!p.error.empty())
+                                        std::cout << ", error=\"" << p.error << "\"";
+                                    break;
+                                }
+                            }
+                            std::cout << "\n";
                         }
                     }
                     // In verbose mode, pull vector DB quick stats (size + rows) from daemon stats
@@ -219,9 +254,11 @@ private:
         uint64_t workerQueued = 0;
         uint64_t workerUtilPct = 0;
 
-        // Issues/Recommendations
-        std::vector<std::string> warnings;
-        std::vector<std::string> recommendations;
+        // Collected advice (built after gathering raw stats)
+        yams::cli::RecommendationBuilder advice;
+        // Internal legacy warnings gathered conditionally (verbose or critical); will be
+        // migrated into advice builder generation path
+        std::vector<std::string> legacyWarnings;
     };
 
     StatusInfo gatherStatusInfo(std::shared_ptr<api::IContentStore> store,
@@ -237,7 +274,7 @@ private:
             info.storagePath = cli_->getDataPath().string();
         } catch (const std::exception& e) {
             info.storageHealthy = false;
-            info.warnings.push_back("Storage access failed: " + std::string(e.what()));
+            info.legacyWarnings.push_back("Storage access failed: " + std::string(e.what()));
         }
 
         // Configuration migration status
@@ -283,7 +320,8 @@ private:
             info.configMigrationNeeded = false;
             info.configVersion = "unknown";
             if (verbose_) {
-                info.warnings.push_back("Config migration check failed: " + std::string(e.what()));
+                info.legacyWarnings.push_back("Config migration check failed: " +
+                                              std::string(e.what()));
             }
         }
 
@@ -370,39 +408,58 @@ private:
         } catch (const std::exception& e) {
             info.vectorDbHealthy = false;
             if (verbose_) {
-                info.warnings.push_back("Vector database check failed: " + std::string(e.what()));
+                info.legacyWarnings.push_back("Vector database check failed: " +
+                                              std::string(e.what()));
             }
         }
 
-        // Generate recommendations
+        // Generate structured recommendations/advice
         generateRecommendations(info);
 
         return info;
     }
 
     void generateRecommendations(StatusInfo& info) {
-        // Configuration migration (highest priority)
+        // Taxonomy codes (STATUS_ prefix) adopted per unified plan
         if (info.configMigrationNeeded) {
-            info.recommendations.push_back("Update configuration: yams config migrate");
+            info.advice.warning("STATUS_CONFIG_MIGRATION",
+                                "Update configuration: yams config migrate",
+                                "New configuration format available");
         }
-
         if (!info.hasModels) {
-            info.recommendations.push_back(
-                "Download an embedding model: yams model --download all-MiniLM-L6-v2");
+            info.advice.warning(
+                "STATUS_NO_MODELS",
+                "Download an embedding model: yams model --download all-MiniLM-L6-v2",
+                "Semantic search and embeddings require a model");
         }
-
         if (info.hasModels && !info.autoGenerationEnabled) {
-            info.recommendations.push_back("Enable auto-embedding: yams config embeddings enable");
+            info.advice.info("STATUS_EMB_AUTO_DISABLED",
+                             "Enable auto-embedding: yams config embeddings enable",
+                             "Keeps embeddings up to date automatically");
         }
-
         if (info.totalDocuments > 0 && info.embeddingCount == 0) {
-            info.recommendations.push_back(
-                "Generate embeddings for existing documents: yams repair --embeddings");
+            info.advice.warning(
+                "STATUS_EMB_NONE",
+                "Generate embeddings for existing documents: yams repair --embeddings",
+                "Semantic relevance requires vector representations");
         }
-
         if (info.totalDocuments > 100 && info.embeddingCount < info.totalDocuments / 2) {
-            info.recommendations.push_back(
-                "Many documents lack embeddings - consider running: yams repair --embeddings");
+            info.advice.info(
+                "STATUS_EMB_LOW_COVERAGE",
+                "Many documents lack embeddings - consider running: yams repair --embeddings",
+                "Higher coverage improves semantic recall");
+        }
+        // Promote legacyWarnings into structured advice (Warning severity) preserving message.
+        for (const auto& w : info.legacyWarnings) {
+            // Map specific known substrings to stable codes; fallback generic.
+            std::string code = "STATUS_MISC_WARNING";
+            if (w.find("Storage access failed") != std::string::npos)
+                code = "STATUS_STORAGE_UNHEALTHY";
+            else if (w.find("Config migration check failed") != std::string::npos)
+                code = "STATUS_CONFIG_CHECK_FAILED";
+            else if (w.find("Vector database check failed") != std::string::npos)
+                code = "STATUS_VECTOR_DB_ERROR";
+            info.advice.warning(code, w);
         }
     }
 
@@ -414,14 +471,12 @@ private:
         std::cout << "    \"totalSize\": " << info.totalSize << ",\n";
         std::cout << "    \"path\": \"" << info.storagePath << "\"\n";
         std::cout << "  },\n";
-
         std::cout << "  \"configuration\": {\n";
         std::cout << "    \"migrationNeeded\": " << (info.configMigrationNeeded ? "true" : "false")
                   << ",\n";
         std::cout << "    \"version\": \"" << info.configVersion << "\",\n";
         std::cout << "    \"path\": \"" << info.configPath << "\"\n";
         std::cout << "  },\n";
-
         std::cout << "  \"models\": {\n";
         std::cout << "    \"available\": [";
         for (size_t i = 0; i < info.availableModels.size(); ++i) {
@@ -432,7 +487,6 @@ private:
         std::cout << "],\n";
         std::cout << "    \"hasModels\": " << (info.hasModels ? "true" : "false") << "\n";
         std::cout << "  },\n";
-
         std::cout << "  \"embeddings\": {\n";
         std::cout << "    \"autoGenerationEnabled\": "
                   << (info.autoGenerationEnabled ? "true" : "false") << ",\n";
@@ -441,22 +495,7 @@ private:
                   << ",\n";
         std::cout << "    \"preferredModel\": \"" << info.preferredModel << "\"\n";
         std::cout << "  },\n";
-
-        std::cout << "  \"recommendations\": [";
-        for (size_t i = 0; i < info.recommendations.size(); ++i) {
-            if (i > 0)
-                std::cout << ", ";
-            std::cout << "\"" << info.recommendations[i] << "\"";
-        }
-        std::cout << "],\n";
-
-        std::cout << "  \"warnings\": [";
-        for (size_t i = 0; i < info.warnings.size(); ++i) {
-            if (i > 0)
-                std::cout << ", ";
-            std::cout << "\"" << info.warnings[i] << "\"";
-        }
-        std::cout << "]\n";
+        std::cout << "  \"advice\": " << yams::cli::recommendationsToJson(info.advice) << "\n";
         std::cout << "}\n";
     }
 
@@ -618,17 +657,8 @@ private:
         }
         renderRows(rows);
 
-        if (!info.recommendations.empty()) {
-            std::cout << "\nRecommendations:\n";
-            for (const auto& rec : info.recommendations) {
-                std::cout << "  → " << rec << "\n";
-            }
-        }
-        if (!info.warnings.empty() && (verbose_ || !info.storageHealthy)) {
-            std::cout << "\nWarnings:\n";
-            for (const auto& warning : info.warnings) {
-                std::cout << "  ⚠ " << warning << "\n";
-            }
+        if (!info.advice.empty()) {
+            yams::cli::printRecommendationsText(info.advice, std::cout);
         }
         std::cout << "\nFor detailed statistics: yams stats\n";
         std::cout << "For configuration help: yams config --help\n";

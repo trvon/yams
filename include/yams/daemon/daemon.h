@@ -41,7 +41,11 @@ struct DaemonConfig {
     bool enableModelProvider = false;
     ModelPoolConfig modelPoolConfig;
     std::filesystem::path pluginDir;
-    bool autoLoadPlugins = true;
+    std::string pluginNamePolicy{"relaxed"};
+    // Default to disabled to avoid unintended plugin loading in plain daemon
+    // invocations and tests that don't explicitly opt in. Tests that rely on
+    // plugins (e.g., ONNX embeddings) set this to true in their config.
+    bool autoLoadPlugins = false;
     bool enableAutoRepair = true;
     size_t autoRepairBatchSize = 32;
     size_t maxPendingRepairs = 1000;
@@ -82,6 +86,11 @@ public:
     const StateComponent& getState() const { return state_; }
     // Lifecycle FSM accessor
     const DaemonLifecycleFsm& getLifecycle() const { return lifecycleFsm_; }
+    // Mark or clear subsystem degradation (sticky until cleared by operator action)
+    void setSubsystemDegraded(const std::string& name, bool degraded,
+                              const std::string& reason = std::string()) {
+        lifecycleFsm_.setSubsystemDegraded(name, degraded, reason);
+    }
 
     // Socket server accessor (for testing)
     SocketServer* getSocketServer() const { return socketServer_.get(); }

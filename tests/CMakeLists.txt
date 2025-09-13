@@ -6,6 +6,7 @@ option(YAMS_ENABLE_BENCHMARKS "Enable benchmarks in CTest" OFF)
 option(YAMS_ENABLE_NEW_INTEGRATION_TESTS "Enable new integration tests" ON)
 
 # Reasonable default discovery and test timeouts
+set(YAMS_GTEST_DISCOVERY_MODE "PRE_TEST" CACHE STRING "gtest discovery mode (PRE_TEST or POST_BUILD)")
 set(YAMS_CTEST_DISCOVERY_TIMEOUT "30" CACHE STRING "Default GTest discovery timeout (s)")
 set(YAMS_CTEST_DEFAULT_TEST_TIMEOUT "60" CACHE STRING "Default per-test timeout (s)")
 
@@ -25,10 +26,19 @@ target_link_libraries(test_utils INTERFACE
 # Define YAMS_TESTING for all tests to enable test-safe code paths
 target_compile_definitions(test_utils INTERFACE YAMS_TESTING=1)
 
-# Enable better test discovery
-set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE POST_BUILD)
+# Enable better test discovery (central default)
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE ${YAMS_GTEST_DISCOVERY_MODE})
 set_property(GLOBAL PROPERTY CTEST_TARGETS_ADDED 1)
 set(ENV{CTEST_OUTPUT_ON_FAILURE} 1)
+
+# Lightweight wrapper so call sites don't repeat defaults
+function(yams_gtest_discover_tests target)
+  gtest_discover_tests(${target}
+    DISCOVERY_MODE ${YAMS_GTEST_DISCOVERY_MODE}
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    ${ARGN}
+  )
+endfunction()
 
 # Unit tests
 add_subdirectory(unit)

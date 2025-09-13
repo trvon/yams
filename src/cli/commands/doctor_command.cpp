@@ -4,6 +4,8 @@
 #include <boost/asio/system_executor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
+#include <yams/cli/recommendation_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/resource/plugin_loader.h>
@@ -14,6 +16,7 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
+#include "yams/cli/prompt_util.h"
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -29,12 +32,11 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <CLI/CLI.hpp>
-extern "C" {
 #include <yams/plugins/model_provider_v1.h>
-}
 
 namespace yams::cli {
 
@@ -44,62 +46,7 @@ public:
     std::string getDescription() const override {
         return "Diagnose daemon connectivity and plugin health";
     }
-
-    void registerCommand(CLI::App& app, YamsCLI* cli) override {
-        cli_ = cli;
-        auto* doctor = app.add_subcommand(getName(), getDescription());
-        doctor->require_subcommand(0); // allow bare doctor
-        doctor->add_flag("--fix", fixAllTop_, "Fix everything (embeddings + FTS5)");
-        // Non-interactive fix flags
-        doctor->add_flag("--fix-config-dims", fixConfigDims_,
-                         "Align config embedding dims to target (non-interactive)");
-        doctor->add_flag("--recreate-vectors", recreateVectors_,
-                         "Drop and recreate vector tables to target dim (non-interactive)");
-        doctor->add_option(
-            "--dim", recreateDim_,
-            "Target dimension to use with --recreate-vectors (defaults to resolved target)");
-        doctor->add_flag("--stop-daemon", stopDaemon_,
-                         "Attempt to stop daemon before DB operations");
-
-        // doctor (no args) -> quick daemon + plugin scan summary OR repair when --fix
-        doctor->callback([this]() { cli_->setPendingCommand(this); });
-
-        // doctor daemon
-        auto* dsub = doctor->add_subcommand("daemon", "Check daemon socket and status");
-        dsub->callback([this]() { checkDaemon(); });
-
-        // doctor plugin [NAME|PATH]
-        auto* psub = doctor->add_subcommand("plugin", "Check a plugin (.so/.wasm or by name)");
-        psub->add_option("target", pluginArg_, "Plugin path or logical name");
-        psub->add_option("--iface", ifaceId_, "Interface ID to probe (default: model_provider_v1)");
-        psub->add_option("--iface-version", ifaceVersion_, "Interface version (default: 1)");
-        psub->add_flag("--no-daemon", noDaemonProbe_, "Skip daemon dry-run load");
-        psub->callback([this]() {
-            if (pluginArg_.empty()) {
-                std::cout
-                    << "target is optional now. Examples:\n"
-                       "  yams doctor plugin onnx\n"
-                       "  yams doctor plugin ~/.local/lib/yams/plugins/libyams_onnx_plugin.so\n\n";
-                runAll();
-                return;
-            }
-            checkPlugin(pluginArg_);
-        });
-
-        // doctor plugins (summary)
-        doctor->add_subcommand("plugins", "Show plugin summary (loaded + scan)")
-            ->callback([this]() { runAll(); });
-
-        // doctor repair [--embeddings|--fts5|--graph|--all]
-        auto* rsub =
-            doctor->add_subcommand("repair", "Repair common issues (embeddings, FTS5, graph)");
-        rsub->add_flag("--embeddings", fixEmbeddings_, "Generate missing vector embeddings");
-        rsub->add_flag("--fts5", fixFts5_, "Rebuild FTS5 text index (best-effort)");
-        rsub->add_flag("--graph", fixGraph_,
-                       "Construct/repair knowledge graph from tags and metadata");
-        rsub->add_flag("--all", fixAll_, "Run all repair operations");
-        rsub->callback([this]() { runRepair(); });
-    }
+    void registerCommand(CLI::App& app, YamsCLI* cli) override;
 
     Result<void> execute() override { return Result<void>(); }
     boost::asio::awaitable<Result<void>> executeAsync() override {
@@ -227,6 +174,127 @@ public:
         dim = 384;
         src = "heuristic";
         return {dim, src};
+    }
+
+    // (Removed clearEmbeddingDegraded helper; subcommand placeholder was eliminated. If
+    // reintroduced, prefer declaring the method before use or moving implementation
+    // out-of-line to avoid ordering issues in inline class definition bodies.)
+    void clearEmbeddingDegraded() {
+        using namespace yams::daemon;
+        try {
+            // Connect to daemon
+            ClientConfig cfg;
+            if (cli_)
+                cfg.dataDir = cli_->getDataPath();
+            cfg.singleUseConnections = true;
+            cfg.requestTimeout = std::chrono::seconds(10);
+            DaemonClient client(cfg);
+            // Updated: run asynchronous daemon client call via generic run_result helper
+            auto status = yams::cli::run_result(client.status(), std::chrono::seconds(3));
+            if (!status) {
+                std::cout << "Daemon unavailable: " << status.error().message << "\n";
+                return;
+            }
+            bool degraded = false;
+            std::string reason;
+            try {
+                const auto& st = status.value();
+                auto it = st.readinessStates.find("embedding_degraded");
+                degraded = (it != st.readinessStates.end() && it->second);
+                // Reason flags (best-effort)
+                for (const auto& kv : st.readinessStates) {
+                    if (kv.second && kv.first.rfind("embedding_degraded_reason_", 0) == 0) {
+                        reason = kv.first.substr(std::string("embedding_degraded_reason_").size());
+                        break;
+                    }
+                }
+            } catch (...) {
+            }
+            if (!degraded) {
+                std::cout << "Embedding subsystem is not degraded. Nothing to clear.\n";
+                return;
+            }
+            std::cout << "Embedding subsystem is degraded";
+            if (!reason.empty())
+                std::cout << " (reason: " << reason << ")";
+            std::cout << "\n";
+
+            // Determine target model to load: prefer loaded model or configured preferred model
+            std::string targetModel;
+            try {
+                const auto& st = status.value();
+                for (const auto& m : st.models) {
+                    if (m.name != "(provider)") {
+                        targetModel = m.name;
+                        break;
+                    }
+                }
+            } catch (...) {
+            }
+            if (targetModel.empty()) {
+                // Read from config or env
+                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
+                    targetModel = p;
+                if (targetModel.empty()) {
+                    // Fallback: prefer common local models
+                    const char* home = std::getenv("HOME");
+                    if (home) {
+                        namespace fs = std::filesystem;
+                        fs::path base = fs::path(home) / ".yams" / "models";
+                        std::vector<std::string> prefs{"nomic-embed-text-v1.5",
+                                                       "nomic-embed-text-v1", "all-MiniLM-L6-v2",
+                                                       "all-mpnet-base-v2"};
+                        for (const auto& p : prefs) {
+                            if (std::filesystem::exists(base / p / "model.onnx")) {
+                                targetModel = p;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (targetModel.empty()) {
+                std::cout
+                    << "No target model found (set YAMS_PREFERRED_MODEL or install a model).\n";
+                return;
+            }
+
+            // Prompt for confirmation
+            if (!yams::cli::prompt_yes_no("Load model '" + targetModel +
+                                          "' to clear degraded? [Y/n] ")) {
+                std::cout << "Cancelled.\n";
+                return;
+            }
+
+            // Issue LoadModel
+            LoadModelRequest lreq;
+            lreq.modelName = targetModel;
+            lreq.preload = true;
+            auto lres = yams::cli::run_result(client.loadModel(lreq), std::chrono::seconds(30));
+            if (!lres) {
+                std::cout << "Model load failed: " << lres.error().message << "\n";
+                return;
+            }
+
+            // Verify status again
+            auto s2 = yams::cli::run_result(client.status(), std::chrono::seconds(5));
+            bool cleared = false;
+            if (s2) {
+                try {
+                    const auto& st2 = s2.value();
+                    auto it2 = st2.readinessStates.find("embedding_degraded");
+                    cleared = (it2 == st2.readinessStates.end() || !it2->second);
+                } catch (...) {
+                }
+            }
+            if (cleared) {
+                std::cout << "Degraded cleared.\n";
+            } else {
+                std::cout << "Degraded still active. Check daemon logs for details.\n";
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Clear degraded error: " << e.what() << "\n";
+        }
     }
 
 private:
@@ -715,18 +783,18 @@ private:
     }
 
     // Build/repair knowledge graph using tags/metadata (non-destructive)
-    Result<void> repairGraph();
+    // repairGraph declared earlier in the class
 
     // Minimal daemon check: connect and get status
     void checkDaemon() {
         using namespace yams::daemon;
         try {
-            ClientConfig cfg;
+            yams::daemon::ClientConfig cfg;
             if (cli_)
                 cfg.dataDir = cli_->getDataPath();
             cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(3000);
-            DaemonClient client(cfg);
+            yams::daemon::DaemonClient client(cfg);
             std::cout << "Daemon: ";
             std::promise<Result<yams::daemon::StatusResponse>> prom;
             auto fut = prom.get_future();
@@ -1025,12 +1093,12 @@ private:
         if (!noDaemonProbe_) {
             try {
                 using namespace yams::daemon;
-                ClientConfig cfg;
+                yams::daemon::ClientConfig cfg;
                 if (cli_)
                     cfg.dataDir = cli_->getDataPath();
                 cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(4000);
-                DaemonClient client(cfg);
+                yams::daemon::DaemonClient client(cfg);
                 PluginLoadRequest req;
                 req.pathOrName = target.string();
                 req.dryRun = true;
@@ -1062,6 +1130,8 @@ private:
 
     // doctor (no args): quick combined
     void runAll() {
+        // Minimal structured recommendations example (will expand in future audits)
+        yams::cli::RecommendationBuilder recs;
         // Keep doctor fast and non-invasive by default:
         // - Daemon status
         // - Installed models
@@ -1092,8 +1162,10 @@ private:
 
                 std::cout << "\nKnowledge Graph\n----------------\n";
                 if (entities <= 0 && nodes <= 0) {
-                    std::cout << "Graph entities: 0 — run 'yams doctor repair --graph' to build "
-                                 "from tags/metadata.\n";
+                    std::string msg = "Knowledge graph empty — run 'yams doctor repair --graph' to "
+                                      "build from tags/metadata";
+                    std::cout << msg << "\n";
+                    recs.warning("DOCTOR_KG_EMPTY", msg);
                 } else {
                     if (nodes >= 0)
                         std::cout << "Nodes:        " << nodes << "\n";
@@ -1114,10 +1186,10 @@ private:
         // Show currently loaded plugins (via daemon stats) succinctly
         try {
             using namespace yams::daemon;
-            ClientConfig cfg;
+            yams::daemon::ClientConfig cfg;
             cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(1200);
-            DaemonClient client(cfg);
+            yams::daemon::DaemonClient client(cfg);
             GetStatsRequest sreq;
             sreq.detailed = false;
             sreq.showFileTypes = false;
@@ -1228,15 +1300,20 @@ private:
         } catch (...) {
         }
 
+        // Emit collected recommendations (text only for now)
+        if (!recs.empty()) {
+            yams::cli::printRecommendationsText(recs, std::cout);
+        }
+
         std::cout << "\nHint: run 'yams doctor plugin <path|name>' for a deep plugin check.\n";
 
         // Compact live repair progress (short poll). Non-blocking when no repair activity.
         try {
             using namespace yams::daemon;
-            ClientConfig cfg;
+            yams::daemon::ClientConfig cfg;
             cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(1200);
-            DaemonClient client(cfg);
+            yams::daemon::DaemonClient client(cfg);
             // Poll a few times; stop early if nothing changes or no queue
             uint64_t lastGen = 0, lastFail = 0, lastQ = 0, lastBatches = 0;
             bool printedHeader = false;
@@ -1304,20 +1381,7 @@ private:
         }
     }
 
-    static bool promptYesNo(const std::string& prompt, bool defaultYes) {
-        std::cout << prompt;
-        std::string line;
-        std::getline(std::cin, line);
-
-        if (line.empty())
-            return defaultYes;
-        char c = static_cast<char>(std::tolower(line[0]));
-        if (c == 'y')
-            return true;
-        if (c == 'n')
-            return false;
-        return defaultYes;
-    }
+    // Legacy prompt removed; using prompt_yes_no from prompt_util.h
 
     static void checkInstalledModels() {
         namespace fs = std::filesystem;
@@ -1329,7 +1393,9 @@ private:
         if (!fs::exists(base, ec) || !fs::is_directory(base, ec))
             return;
 
-        std::vector<std::string> warnings;
+        std::vector<std::string> warnings; // legacy textual list (kept for existing output)
+        // Also build structured recommendations (printed later if any)
+        yams::cli::RecommendationBuilder recBuilder;
         for (const auto& entry : fs::directory_iterator(base, ec)) {
             if (!entry.is_directory())
                 continue;
@@ -1349,7 +1415,12 @@ private:
                 warnings.emplace_back(
                     "  - " + name +
                     ": missing config.json — run 'yams model download --apply-config " + name +
-                    " --force' to refresh model files");
+                    " --force'");
+                recBuilder.warning(
+                    "DOCTOR_MODEL_MISSING_CONFIG",
+                    name + ": missing config.json; run 'yams model download --apply-config " +
+                        name + " --force'",
+                    "Model may have default/incorrect embedding dim inference");
             }
 
             // Nomic-specific guidance: tokenizer.json is needed for best compatibility
@@ -1357,7 +1428,11 @@ private:
                 warnings.emplace_back(
                     "  - " + name +
                     ": missing tokenizer.json — run 'yams model download --apply-config " + name +
-                    " --force' to fetch tokenizer");
+                    " --force'");
+                recBuilder.info(
+                    "DOCTOR_MODEL_MISSING_TOKENIZER",
+                    name + ": missing tokenizer.json; download to ensure consistent tokenization",
+                    "Tokenizer improves text splitting and pooling accuracy");
             }
         }
 
@@ -1368,6 +1443,10 @@ private:
                 std::cout << w << "\n";
             std::cout << "\nTip: You can also supply --hf <org/name> when downloading if the name "
                          "isn't recognized.\n";
+            if (!recBuilder.empty()) {
+                std::cout << "\nRecommendations (models):\n";
+                yams::cli::printRecommendationsText(recBuilder, std::cout);
+            }
         }
     }
 
@@ -1395,9 +1474,10 @@ private:
                 std::cout << "Could not resolve embedding dimension from config/model.\n";
                 return;
             }
-            if (promptYesNo(std::string("Create a new vectors.db now using dim=") +
-                                std::to_string(__dim) + " (source: " + __src + ")? [y/N]: ",
-                            false)) {
+            if (yams::cli::prompt_yes_no(std::string("Create a new vectors.db now using dim=") +
+                                             std::to_string(__dim) + " (source: " + __src +
+                                             ")? [y/N]: ",
+                                         yams::cli::YesNoOptions{.defaultYes = false})) {
                 // Ensure parent directory exists
                 try {
                     fs::create_directories(dbPath.parent_path());
@@ -1445,7 +1525,8 @@ private:
                     timeout_ms);
                 if (!openOpt) {
                     std::cout << "\n⚠ Timeout opening DB after " << timeout_ms << " ms";
-                    if (promptYesNo(" — temporarily stop daemon to proceed? [y/N]: ", false)) {
+                    if (yams::cli::prompt_yes_no(" — temporarily stop daemon to proceed? [y/N]: ",
+                                                 yams::cli::YesNoOptions{.defaultYes = false})) {
                         std::cout << "Stopping daemon...\n";
                         ensureDaemonStopped();
                         openOpt = runWithSpinner(
@@ -1568,9 +1649,10 @@ private:
                 return;
             }
 
-            if (promptYesNo(std::string("Initialize vector tables now using dim=") +
-                                std::to_string(initDim) + " (source: " + initSrc + ")? [y/N]: ",
-                            false)) {
+            if (yams::cli::prompt_yes_no(std::string("Initialize vector tables now using dim=") +
+                                             std::to_string(initDim) + " (source: " + initSrc +
+                                             ")? [y/N]: ",
+                                         yams::cli::YesNoOptions{.defaultYes = false})) {
                 int timeout_ms = 15000;
                 if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
                     try {
@@ -1589,7 +1671,8 @@ private:
                     timeout_ms);
                 if (!openOpt) {
                     std::cout << "\n⚠ Timeout opening DB after " << timeout_ms << " ms";
-                    if (promptYesNo(" — temporarily stop daemon to proceed? [y/N]: ", false)) {
+                    if (yams::cli::prompt_yes_no(" — temporarily stop daemon to proceed? [y/N]: ",
+                                                 yams::cli::YesNoOptions{.defaultYes = false})) {
                         ensureDaemonStopped();
                         openOpt = runWithSpinner(
                             "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
@@ -1680,6 +1763,9 @@ private:
                 printError("Failed to update config dims");
             }
         }
+
+        // (Removed unconditional prompts; alignment/recreation prompts now only offered when
+        // a mismatch is detected later.)
         if (recreateVectors_) {
             int timeout_ms2 = 15000;
             if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
@@ -1747,9 +1833,9 @@ private:
                                 std::to_string(*cfgDims.vector_db));
             if (cfgDims.index)
                 printStatusLine("vector_index.dimension", std::to_string(*cfgDims.index));
-            if (promptYesNo(std::string("Align all config dims to target ( ") +
-                                std::to_string(targetDim) + ")? [y/N]: ",
-                            false)) {
+            if (yams::cli::prompt_yes_no(std::string("Align all config dims to target ( ") +
+                                             std::to_string(targetDim) + ")? [y/N]: ",
+                                         yams::cli::YesNoOptions{.defaultYes = false})) {
                 if (writeOrReplaceConfigDims(cfgPath, targetDim)) {
                     printSuccess("Updated config dims");
                 } else {
@@ -1762,9 +1848,18 @@ private:
             std::cout << "\n⚠ Embedding dimension mismatch detected.\n";
             std::cout << "- Stored vectors are " << *dbDim << "-d but target requires " << targetDim
                       << "-d.\n";
+            // Structured recommendation for dimension mismatch (still interactive afterwards)
+            yams::cli::RecommendationBuilder rb;
+            rb.warning("DOCTOR_VEC_DIM_MISMATCH",
+                       std::string("Vector DB dimension ") + std::to_string(*dbDim) +
+                           " differs from target " + std::to_string(targetDim) +
+                           " — recreate or repair embeddings",
+                       "Mismatched dims degrade semantic search recall");
+            yams::cli::printRecommendationsText(rb, std::cout);
 
-            if (promptYesNo("\nRecreate vectors.db now with the correct dimension? [y/N]: ",
-                            false)) {
+            if (yams::cli::prompt_yes_no(
+                    "\nRecreate vectors.db now with the correct dimension? [y/N]: ",
+                    yams::cli::YesNoOptions{.defaultYes = false})) {
                 int timeout_ms = 15000;
                 if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
                     try {
@@ -1784,7 +1879,8 @@ private:
                     timeout_ms);
                 if (!openOpt) {
                     std::cout << "\n⚠ Timeout opening DB after " << timeout_ms << " ms";
-                    if (promptYesNo(" — temporarily stop daemon to proceed? [y/N]: ", false)) {
+                    if (yams::cli::prompt_yes_no(" — temporarily stop daemon to proceed? [y/N]: ",
+                                                 yams::cli::YesNoOptions{.defaultYes = false})) {
                         ensureDaemonStopped();
                         openOpt = runWithSpinner(
                             "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
@@ -1863,14 +1959,14 @@ private:
                 std::cout << "\n✓ Recreated vector tables in existing DB (dim=" << targetDim
                           << ").\nNext: yams repair --embeddings\n";
                 // Offer to restart daemon now to avoid stale in-memory dims
-                if (promptYesNo("Restart daemon now to apply changes? [y/N]: ", false)) {
+                if (yams::cli::prompt_yes_no("Restart daemon now to apply changes? [y/N]: ",
+                                             yams::cli::YesNoOptions{.defaultYes = false})) {
                     ensureDaemonStopped();
                     try {
-                        using namespace yams::daemon;
-                        ClientConfig cfg;
+                        yams::daemon::ClientConfig cfg;
                         if (cli_)
                             cfg.dataDir = cli_->getDataPath();
-                        auto sr = DaemonClient::startDaemon(cfg);
+                        auto sr = yams::daemon::DaemonClient::startDaemon(cfg);
                         if (!sr)
                             printWarn(std::string("Daemon restart failed: ") + sr.error().message);
                         else
@@ -1903,11 +1999,88 @@ private:
     bool recreateVectors_{false};
     std::optional<size_t> recreateDim_{};
     bool stopDaemon_{false};
+    // Dedupe state
+    bool dedupeApply_{false};
+    std::string dedupeMode_{"path"};
+    std::string dedupeStrategy_{"keep-newest"};
+    bool dedupeForce_{false};
+    bool dedupeVerbose_{false};
+    Result<void> repairGraph();
+    void runDedupe();
 };
 
 // Factory
 std::unique_ptr<ICommand> createDoctorCommand() {
     return std::make_unique<DoctorCommand>();
+}
+
+void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
+    cli_ = cli;
+    auto* doctor = app.add_subcommand(getName(), getDescription());
+    doctor->require_subcommand(0); // allow bare doctor
+    doctor->add_flag("--fix", fixAllTop_, "Fix everything (embeddings + FTS5)");
+    doctor->add_flag("--fix-config-dims", fixConfigDims_,
+                     "Align config embedding dims to target (non-interactive)");
+    doctor->add_flag("--recreate-vectors", recreateVectors_,
+                     "Drop and recreate vector tables to target dim (non-interactive)");
+    doctor->add_option(
+        "--dim", recreateDim_,
+        "Target dimension to use with --recreate-vectors (defaults to resolved target)");
+    doctor->add_flag("--stop-daemon", stopDaemon_, "Attempt to stop daemon before DB operations");
+
+    doctor->callback([this]() { cli_->setPendingCommand(this); });
+
+    auto* dsub = doctor->add_subcommand("daemon", "Check daemon socket and status");
+    dsub->callback([this]() { checkDaemon(); });
+
+    auto* psub = doctor->add_subcommand("plugin", "Check a plugin (.so/.wasm or by name)");
+    psub->add_option("target", pluginArg_, "Plugin path or logical name");
+    psub->add_option("--iface", ifaceId_, "Interface ID to probe (default: model_provider_v1)");
+    psub->add_option("--iface-version", ifaceVersion_, "Interface version (default: 1)");
+    psub->add_flag("--no-daemon", noDaemonProbe_, "Skip daemon dry-run load");
+    psub->callback([this]() {
+        if (pluginArg_.empty()) {
+            std::cout
+                << "target is optional now. Examples:\n"
+                   "  yams doctor plugin onnx\n"
+                   "  yams doctor plugin ~/.local/lib/yams/plugins/libyams_onnx_plugin.so\n\n";
+            runAll();
+            return;
+        }
+        checkPlugin(pluginArg_);
+    });
+
+    doctor->add_subcommand("plugins", "Show plugin summary (loaded + scan)")->callback([this]() {
+        runAll();
+    });
+
+    auto* emb = doctor->add_subcommand("embeddings", "Embeddings diagnostics and actions");
+    emb->require_subcommand();
+    emb->add_subcommand("clear-degraded",
+                        "Attempt to clear embedding degraded state (reloads preferred model)")
+        ->callback([this]() { clearEmbeddingDegraded(); });
+
+    auto* rsub = doctor->add_subcommand("repair", "Repair common issues (embeddings, FTS5, graph)");
+    rsub->add_flag("--embeddings", fixEmbeddings_, "Generate missing vector embeddings");
+    rsub->add_flag("--fts5", fixFts5_, "Rebuild FTS5 text index (best-effort)");
+    rsub->add_flag("--graph", fixGraph_, "Construct/repair knowledge graph from tags and metadata");
+    rsub->add_flag("--all", fixAll_, "Run all repair operations");
+    rsub->callback([this]() { runRepair(); });
+
+    auto* dd = doctor->add_subcommand(
+        "dedupe", "Detect (and optionally remove) duplicate documents (metadata)");
+    dd->add_flag("--apply", dedupeApply_, "Apply deletions (default: dry-run)");
+    dd->add_option("--mode", dedupeMode_, "Grouping mode: path | name | hash")
+        ->default_val("path")
+        ->check(CLI::IsMember({"path", "name", "hash"}));
+    dd->add_option("--strategy", dedupeStrategy_,
+                   "Keep strategy: keep-newest | keep-oldest | keep-largest")
+        ->default_val("keep-newest")
+        ->check(CLI::IsMember({"keep-newest", "keep-oldest", "keep-largest"}));
+    dd->add_flag("--force", dedupeForce_,
+                 "Allow deletion even when differing hashes (treat as duplicates)");
+    dd->add_flag("-v,--verbose", dedupeVerbose_, "Verbose listing of each group");
+    dd->callback([this]() { runDedupe(); });
 }
 
 // Build/repair knowledge graph using tags/metadata (non-destructive)
@@ -2050,6 +2223,176 @@ Result<void> DoctorCommand::repairGraph() {
         return Result<void>();
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError, e.what()};
+    }
+}
+
+void DoctorCommand::runDedupe() {
+    try {
+        printHeader("Document Dedupe");
+        if (!cli_) {
+            printError("CLI context unavailable");
+            return;
+        }
+        namespace fs = std::filesystem;
+        fs::path dataDir = cli_->getDataPath();
+        std::vector<fs::path> candidates = {dataDir / "metadata" / "metadata.db",
+                                            dataDir / "metadata.db"};
+        fs::path dbPath;
+        for (const auto& c : candidates) {
+            if (fs::exists(c)) {
+                dbPath = c;
+                break;
+            }
+        }
+        if (dbPath.empty()) {
+            printError("metadata.db not found under data path");
+            return;
+        }
+        yams::metadata::Database db;
+        auto ro = db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite);
+        if (!ro) {
+            printError(std::string("Open failed: ") + ro.error().message);
+            return;
+        }
+        auto ps = db.prepare(
+            "SELECT id,file_path,file_name,file_size,sha256_hash,modified_time,indexed_time FROM "
+            "documents");
+        if (!ps) {
+            printError("Prepare failed: " + ps.error().message);
+            return;
+        }
+        yams::metadata::Statement stmt = std::move(ps).value();
+        struct Row {
+            int64_t id;
+            std::string path;
+            std::string name;
+            int64_t size;
+            std::string hash;
+            int64_t mtime;
+            int64_t itime;
+        };
+        std::vector<Row> rows;
+        while (true) {
+            auto step = stmt.step();
+            if (!step) {
+                printError("Step error: " + step.error().message);
+                return;
+            }
+            if (!step.value())
+                break;
+            rows.push_back({stmt.getInt64(0), stmt.getString(1), stmt.getString(2),
+                            stmt.getInt64(3), stmt.getString(4), stmt.getInt64(5),
+                            stmt.getInt64(6)});
+        }
+        if (rows.empty()) {
+            printSuccess("No documents");
+            return;
+        }
+        struct G {
+            Row r;
+        };
+        std::unordered_map<std::string, std::vector<G>> groups;
+        auto keyFn = [&](const Row& r) -> std::string {
+            if (dedupeMode_ == "name")
+                return r.name;
+            if (dedupeMode_ == "hash")
+                return r.hash;
+            return r.path;
+        };
+        for (auto& r : rows)
+            groups[keyFn(r)].push_back({r});
+        size_t dupGroups = 0, candDel = 0, skipped = 0;
+        std::vector<int64_t> toDelete;
+        for (auto& [k, vec] : groups) {
+            if (vec.size() < 2)
+                continue;
+            bool hashesDiffer = false;
+            std::string h0 = vec.front().r.hash;
+            for (auto& gi : vec)
+                if (gi.r.hash != h0) {
+                    hashesDiffer = true;
+                    break;
+                }
+            if (hashesDiffer && !dedupeForce_) {
+                skipped++;
+                continue;
+            }
+            dupGroups++;
+            auto newest = [](const G& a, const G& b) { return a.r.mtime > b.r.mtime; };
+            auto oldest = [](const G& a, const G& b) { return a.r.mtime < b.r.mtime; };
+            auto largest = [](const G& a, const G& b) { return a.r.size > b.r.size; };
+            if (dedupeStrategy_ == "keep-oldest")
+                std::sort(vec.begin(), vec.end(), oldest);
+            else if (dedupeStrategy_ == "keep-largest")
+                std::sort(vec.begin(), vec.end(), largest);
+            else
+                std::sort(vec.begin(), vec.end(), newest);
+            for (size_t i = 1; i < vec.size(); ++i)
+                toDelete.push_back(vec[i].r.id);
+            candDel += vec.size() - 1;
+            if (dedupeVerbose_) {
+                std::cout << "Group: " << k << " keep=" << vec[0].r.id << " total=" << vec.size()
+                          << (hashesDiffer ? " (hash-diff)" : "") << "\n";
+                for (size_t i = 0; i < vec.size(); ++i) {
+                    const auto& rr = vec[i].r;
+                    std::cout << (i == 0 ? "  KEEP" : "  DEL ") << " id=" << rr.id
+                              << " hash=" << rr.hash.substr(0, 8) << " size=" << rr.size
+                              << " mtime=" << rr.mtime << " itime=" << rr.itime << "\n";
+                }
+            }
+        }
+        if (!dupGroups) {
+            printSuccess("No duplicate groups (mode=" + dedupeMode_ + ")");
+            return;
+        }
+        printStatusLine("Total documents", std::to_string(rows.size()));
+        printStatusLine("Duplicate groups", std::to_string(dupGroups));
+        printStatusLine("Deletion candidates", std::to_string(candDel));
+        if (skipped)
+            printStatusLine("Skipped (hash mismatch, use --force)", std::to_string(skipped));
+        if (!dedupeApply_) {
+            printWarn("Dry-run. Use --apply to delete.");
+            return;
+        }
+        if (toDelete.empty()) {
+            printSuccess("Nothing to delete");
+            return;
+        }
+        auto br = db.execute("BEGIN TRANSACTION");
+        if (!br) {
+            printError("BEGIN failed: " + br.error().message);
+            return;
+        }
+        bool err = false;
+        for (auto id : toDelete) {
+            auto psd = db.prepare("DELETE FROM documents WHERE id=?");
+            if (!psd) {
+                printError("Prepare delete failed");
+                err = true;
+                break;
+            }
+            auto st2 = std::move(psd).value();
+            auto b = st2.bind(1, id);
+            if (!b) {
+                err = true;
+                break;
+            }
+            auto ex = st2.execute();
+            if (!ex) {
+                err = true;
+                break;
+            }
+        }
+        auto er = db.execute(err ? "ROLLBACK" : "COMMIT");
+        if (!er)
+            printError("Txn end failed: " + er.error().message);
+        if (err) {
+            printError("Aborted due to errors");
+            return;
+        }
+        printSuccess("Deleted " + std::to_string(toDelete.size()) + " duplicate rows");
+    } catch (const std::exception& e) {
+        printError(std::string("Exception: ") + e.what());
     }
 }
 } // namespace yams::cli
