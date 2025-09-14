@@ -3,6 +3,7 @@
 set(APP_SERVICES_SOURCES
     document_service.cpp
     search_service.cpp
+    enhanced_search_executor.cpp
     grep_service.cpp
     grep_mode_tls.cpp
     download_service.cpp

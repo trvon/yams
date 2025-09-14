@@ -14,6 +14,7 @@ add_library(yams_search
     hybrid_search_factory.cpp
     search_engine_builder.cpp
     bk_tree.cpp
+    hotzone_manager.cpp
 )
 set_target_properties(yams_search PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 

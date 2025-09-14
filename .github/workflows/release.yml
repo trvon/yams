@@ -615,12 +615,15 @@ jobs:
           cat "$COMBINED_NOTES"
 
       - name: Publish matrix.json (expected platform count)
+        if: matrix.os == 'linux-hosted'
         shell: bash
         run: |
+          # Only generate once (linux-hosted) to avoid artifact name collision across matrix entries.
           # Update to reflect current matrix total (3 platforms)
           echo '{"total": 3}' > matrix.json
 
       - name: Upload matrix metadata
+        if: matrix.os == 'linux-hosted'
         uses: actions/upload-artifact@v4
         with:
           name: matrix

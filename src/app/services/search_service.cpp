@@ -2,6 +2,7 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_host.h>
@@ -205,6 +206,18 @@ public:
         if (const char* r = std::getenv("YAMS_SEARCH_DEGRADED_REASON")) {
             repairDetails_ = r;
         }
+
+        // Enhanced search config (best-effort; off by default). Keep lightweight and safe.
+        try {
+            enhancedCfg_ = EnhancedSearchExecutor::loadConfigFromToml();
+            if (enhancedCfg_.enable) {
+                hotzones_ = std::make_shared<yams::search::HotzoneManager>(enhancedCfg_.hotzones);
+                enhanced_.setHotzoneManager(hotzones_);
+            }
+        } catch (...) {
+            // Ignore config errors; keep enhancements disabled.
+            enhancedCfg_ = {};
+        }
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
@@ -308,6 +321,10 @@ public:
 
         if (result && !normalizedReq.pathsOnly) {
             auto resp = std::move(result).value();
+            // Apply optional enhanced pipeline (Phase A: hotzones only) before snippets.
+            if (enhancedCfg_.enable) {
+                enhanced_.apply(ctx_, enhancedCfg_, normalizedReq.query, resp.results);
+            }
             co_await hydrateSnippetsAsync_worker(normalizedReq, resp);
             result = Result<SearchResponse>(std::move(resp));
         }
@@ -340,6 +357,9 @@ private:
     AppContext ctx_;
     bool degraded_{false};
     std::string repairDetails_{};
+    EnhancedConfig enhancedCfg_{}; // off by default
+    EnhancedSearchExecutor enhanced_{};
+    std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
 
     boost::asio::awaitable<void> hydrateSnippetsAsync(const SearchRequest& req,
                                                       SearchResponse& resp) {
