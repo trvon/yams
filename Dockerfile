@@ -1,10 +1,8 @@
 # syntax=docker/dockerfile:1.7-labs
-FROM ubuntu:22.04 AS builder
 
-ARG YAMS_VERSION=dev
-ARG GIT_COMMIT=""
-ARG GIT_TAG=""
-
+# Stage 0: base build dependencies & toolchain
+FROM ubuntu:22.04 AS deps
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git curl pkg-config ca-certificates \
     libssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev \
@@ -18,28 +16,33 @@ RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && /opt/venv/bin/pip install "conan==2.3.*" "cmake==3.27.*" "ninja==1.11.*"
 ENV PATH="/opt/venv/bin:${PATH}"
-
 WORKDIR /src
 
-# 1) Copy only dependency graph inputs (keeps conan install cacheable)
+# Stage 1: conan-base (only dependency graph resolution) — leveraged by warm-cache seeding
+FROM deps AS conan-base
+ARG YAMS_VERSION=dev
+ARG GIT_COMMIT=""
+ARG GIT_TAG=""
+
+# Copy only dependency graph inputs (limits cache busting)
 COPY conanfile.py conanfile.txt* CMakeLists.txt CMakePresets.json* ./
 COPY conan/ ./conan/
-# Optional but recommended if you maintain it:
-# COPY conan.lock ./
+# COPY conan.lock ./  # Uncomment if you maintain a lockfile for deterministic builds
 
-# 2) Create/update profile once (stable layer)
+# Detect profile + install dependencies (cached via BuildKit cache mount)
 RUN --mount=type=cache,target=/root/.conan2 \
     conan profile detect --force && \
     sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' /root/.conan2/profiles/default && \
-    conan profile show && \
     conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
 
-# 3) Now copy the rest of the source (this won’t invalidate the conan install layer)
+# Stage 2: full build
+FROM conan-base AS builder
 COPY . .
-
-RUN --mount=type=cache,target=/root/.conan2 cmake --preset yams-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=OFF -DYAMS_BUILD_BENCHMARKS=OFF
-RUN --mount=type=cache,target=/root/.conan2 cmake --build --preset yams-release --target install
-# Install already used --target install above (CMake preset should contain DESTDIR/prefix). Ensure prefix layout:
+# Configure & build (reuse Conan cache) — tests/benchmarks/docs OFF for lean runtime image
+RUN --mount=type=cache,target=/root/.conan2 \
+    cmake --preset yams-release -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=OFF -DYAMS_BUILD_BENCHMARKS=OFF
+RUN --mount=type=cache,target=/root/.conan2 \
+    cmake --build --preset yams-release --target install
 RUN --mount=type=cache,target=/root/.conan2 test -d /opt/yams || cmake --install build/yams-release --prefix /opt/yams
 
 FROM debian:trixie-slim AS runtime

@@ -25,7 +25,74 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
+  warm:
+    name: Warm Conan & ccache (matrix)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-hosted
+            runs_on: ubuntu-latest
+            suffix: linux-x86_64
+          - os: macos-hosted-arm64
+            runs_on: macos-15
+            suffix: macos-arm64
+          - os: macos-hosted-x64
+            runs_on: macos-15
+            suffix: macos-x86_64
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cache Conan (warm)
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          restore-keys: |
+            conan-${{ runner.os }}-${{ matrix.suffix }}-
+            conan-${{ runner.os }}-
+      - name: Cache ccache (warm)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.ccache
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-
+      - name: Install Conan
+        if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade "conan>=2,<3" || python -m pip install --upgrade "conan>=2,<3"
+          conan --version
+          mkdir -p ~/.conan2
+          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+      - name: Detect profile & pre-install (Release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          conan profile detect --force
+          sed -i'' -e 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          HOST_PROFILE="conan/profiles/host-linux-clang"
+          if [ "$RUNNER_OS" = "macOS" ]; then HOST_PROFILE="conan/profiles/host-macos-apple-clang"; fi
+          conan install . -of build/warm-release -pr:h=$HOST_PROFILE -pr:b=default -s build_type=Release -b missing
+      - name: Detect profile & pre-install (Debug)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_PROFILE="conan/profiles/host-linux-clang"
+          if [ "$RUNNER_OS" = "macOS" ]; then HOST_PROFILE="conan/profiles/host-macos-apple-clang"; fi
+          conan install . -of build/warm-debug -pr:h=$HOST_PROFILE -pr:b=default -s build_type=Debug -b missing || true
+      - name: Summary
+        run: echo "Warm matrix for ${{ matrix.suffix }} completed" >> $GITHUB_STEP_SUMMARY
+
+  build-release: # build job now depends on warm
+    needs: [warm]
     name: Build and Release (${{ matrix.os }})
     # Only run if:
     # - CI passed successfully (workflow_run), OR
@@ -71,14 +138,36 @@ jobs:
           # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
 
+      - name: Cache Conan packages (early)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          restore-keys: |
+            conan-${{ runner.os }}-${{ matrix.suffix }}-
+            conan-${{ runner.os }}-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.ccache
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-
+
       - name: Install optional system dependencies (Linux only)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev
-          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev"
+          sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev ccache
+          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev ccache"
 
       - name: Sanitize stdlib flags (macOS only)
         if: runner.os == 'macOS'
@@ -250,6 +339,19 @@ jobs:
             echo "cmake present: $(cmake --version | head -1)"
             echo "ninja present: $(ninja --version || true)"
           fi
+          # Install ccache on macOS if missing
+          if [ "$RUNNER_OS" = "macOS" ] && ! command -v ccache >/dev/null 2>&1; then
+            brew install ccache || true
+          fi
+
+      - name: Setup ccache env
+        shell: bash
+        run: |
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=700M" >> $GITHUB_ENV
+          ccache -z 2>/dev/null || true
 
       - name: Setup Conan (hosted Linux/macOS)
         if: ${{ matrix.hosted  }}
@@ -335,9 +437,15 @@ jobs:
             -DYAMS_VERSION="${{ steps.meta.outputs.version }}" \
             -DCMAKE_CXX_STANDARD=20 \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             ${{ matrix.cmake_args}}
           cmake --build --preset yams-release --parallel
           echo "BUILD_DIR=build/yams-release" >> $GITHUB_ENV
+
+      - name: ccache stats (post-build)
+        shell: bash
+        run: |
+          ccache -s || echo "ccache stats unavailable"
 
       - name: Collect benchmark results
         shell: bash
@@ -383,58 +491,46 @@ jobs:
           fi
           echo "" >> "$SUMMARY_FILE"
 
-          # Add coverage information if available
+          # Add coverage information if available (no python dependency)
           if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
-            tmp_cov=$(mktemp)
-            python3 2>/dev/null <<'PY' > "$tmp_cov"
-            import xml.etree.ElementTree as ET
-            try:
-                root = ET.parse('ci-artifacts/coverage/coverage.xml').getroot()
-                line_rate = float(root.get('line-rate', 0))
-                print(f"{line_rate * 100:.1f}%")
-            except Exception:
-                print('N/A')
-            PY
-            coverage_pct="$(cat "$tmp_cov" 2>/dev/null || echo N/A)"
-            rm -f "$tmp_cov" 2>/dev/null || true
-            # Fallback if python failed entirely
-            if [ -z "$coverage_pct" ]; then coverage_pct='N/A'; fi
+            # Extract line-rate="0.8234" attribute and convert to percent with one decimal
+            raw_rate=$(grep -Eo 'line-rate="[0-9.]+"' ci-artifacts/coverage/coverage.xml | head -1 | sed -E 's/.*="([0-9.]+)"/\1/' ) || raw_rate=""
+            if [ -n "$raw_rate" ]; then
+              # Use awk for safe float multiplication & formatting
+              coverage_pct=$(awk -v r="$raw_rate" 'BEGIN{ printf("%.1f%%", r*100) }')
+            else
+              coverage_pct="N/A"
+            fi
             echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
           fi
 
-          # Add benchmark results if available from CI or validation
-          if [ -d "$BUILD_DIR/bench_results" ] && [ "$(find $BUILD_DIR/bench_results -name '*.json' 2>/dev/null)" ]; then
+          # Add benchmark results if available from CI or validation (jq preferred, fallback to grep)
+          if [ -d "$BUILD_DIR/bench_results" ] && ls "$BUILD_DIR/bench_results"/*.json >/dev/null 2>&1; then
             echo "### Performance Metrics" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |" >> "$SUMMARY_FILE"
             echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
-
-            for json_file in "$BUILD_DIR/bench_results"/*.json;
-            do
-              if [ -f "$json_file" ]; then
-                python3 - "$json_file" <<'PY' 2>/dev/null >> "$SUMMARY_FILE" || true
-                  import json, sys
-                  try:
-                      path = sys.argv[1]
-                      with open(path) as f:
-                          data = json.load(f)
-                          if 'benchmarks' in data:
-                              for bench in data['benchmarks']:
-                                  name = bench.get('name', 'Unknown')
-                                  real_time = bench.get('real_time', 0.0)
-                                  cpu_time = bench.get('cpu_time', 0.0)
-                                  bytes_per_sec = bench.get('bytes_per_second', 0.0)
-                                  items_per_sec = bench.get('items_per_second', 0.0)
-                                  memory = f"{bytes_per_sec/1024/1024:.1f} MB/s" if bytes_per_sec > 0 else (f"  {items_per_sec:.0f} ops/s" if items_per_sec > 0 else "N/A")
-                                  print(f"| {name} | {real_time:.0f} | {cpu_time:.0f} | {memory} |")
-                  except Exception:
-                      pass
-                  PY
-              fi
-            done
+            if command -v jq >/dev/null 2>&1; then
+              for json_file in "$BUILD_DIR/bench_results"/*.json; do
+                jq -r '.benchmarks[]? | "| \(.name // \"Unknown\") | \(.real_time // 0 | floor) | \(.cpu_time // 0 | floor) | \n"' "$json_file" 2>/dev/null | while IFS= read -r line; do
+                  name=$(echo "$line" | cut -d'|' -f2 | sed 's/^ *//;s/ *$//')
+                  rtime=$(echo "$line" | cut -d'|' -f3 | tr -d ' ')
+                  ctime=$(echo "$line" | cut -d'|' -f4 | tr -d ' ')
+                  # Derive memory throughput if bytes_per_second present
+                  mem=$(jq -r --arg n "$name" '.benchmarks[]? | select(.name==$n) | if (.bytes_per_second // 0) > 0 then ((.bytes_per_second/1024/1024)|tostring)+" MB/s" else (if (.items_per_second // 0) > 0 then ((.items_per_second)|tostring)+" ops/s" else "N/A" end) end' "$json_file" 2>/dev/null)
+                  [ -z "$mem" ] && mem="N/A"
+                  echo "| $name | $rtime | $ctime | $mem |" >> "$SUMMARY_FILE"
+                done
+              done
+            else
+              # Minimal fallback: grep fields (less robust)
+              for json_file in "$BUILD_DIR/bench_results"/*.json; do
+                grep '"name"' "$json_file" | sed -E 's/.*"name": *"([^"]+)".*/| \1 | ? | ? | N/A |/' >> "$SUMMARY_FILE" || true
+              done
+            fi
             echo "" >> "$SUMMARY_FILE"
           fi
 

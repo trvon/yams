@@ -9,7 +9,54 @@ permissions:
   contents: write
 
 jobs:
+  warm:
+    name: Warm Conan & ccache
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cache Conan packages (warm)
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          restore-keys: |
+            conan-${{ runner.os }}-
+      - name: Cache ccache (warm)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+      - name: Install Conan (warm)
+        shell: bash
+        run: |
+          pip3 install --no-cache-dir "conan>=2,<3" || python3 -m pip install "conan>=2,<3"
+          conan --version
+          mkdir -p ~/.conan2
+          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+      - name: Detect profile & install (Release)
+        shell: bash
+        run: |
+          conan profile detect --force
+          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          conan install . -of build/warm-release -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Release -b missing
+      - name: Install (Debug)
+        shell: bash
+        run: |
+          conan install . -of build/warm-debug -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Debug -b missing
+      - name: Summary
+        run: |
+          echo "Warm job completed" >> $GITHUB_STEP_SUMMARY
+
   run-tests:
+    needs: [warm]
     runs-on: ubuntu-latest
 
     env:
@@ -21,14 +68,44 @@ jobs:
         with:
           fetch-depth: 0 # Ensure tags are available for version derivation if needed
 
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          restore-keys: |
+            conan-${{ runner.os }}-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
       - name: Install optional system dependencies
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev || true
+            sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev ccache || true
           echo "Optional packages installed (best-effort)."
+
+      - name: Setup ccache env
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
+            # Limit size to balance cache reuse vs storage
+          echo "CCACHE_MAXSIZE=500M" >> $GITHUB_ENV
+          ccache -p 2>/dev/null || true
+          ccache -z 2>/dev/null || true
 
       - name: Install Conan
         shell: bash
@@ -91,6 +168,7 @@ jobs:
             -DYAMS_BUILD_TESTS=ON \
             -DYAMS_ENABLE_SANITIZERS=ON \
             -DYAMS_ENABLE_COVERAGE=ON \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage" # Needed for install step if any
           echo "BUILD_DIR=${{ env.BUILD_DIR }}" >> $GITHUB_ENV # Ensure BUILD_DIR is available for subsequent steps
 
@@ -98,6 +176,11 @@ jobs:
         shell: bash
         run: |
           cmake --build --preset yams-debug
+
+      - name: ccache stats (post-build)
+        shell: bash
+        run: |
+          ccache -s || echo "ccache not available"
 
       - name: Run Tests
         shell: bash

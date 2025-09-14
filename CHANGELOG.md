@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.6.20]
 
+### Fixes
+- Fixing prefix for sourcehut builds
+- Adding cache for Github CI
+
+## [v0.6.20]
+
 ### Added
 - Asynchronous post‑ingest pipeline (daemon): decouples heavy work from `add`/`add_directory`.
   - New `PostIngestQueue` performs extraction → full‑text index → knowledge graph upserts in the background.

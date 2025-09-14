@@ -119,6 +119,8 @@ jobs:
             GIT_TAG=${{ github.ref_name }}
           cache-from: type=gha,scope=amd64
           cache-to: type=gha,mode=max,scope=amd64
+          # Enable BuildKit inline caching and leverage Conan layer reuse; future enhancement could mount host cache
+          provenance: false
 
   # Build ARM64 image on native Linux ARM64 runner (no QEMU)
   build-arm64:
@@ -220,6 +222,7 @@ jobs:
             GIT_TAG=${{ github.ref_name }}
           cache-from: type=gha,scope=arm64
           cache-to: type=gha,mode=max,scope=arm64
+          provenance: false
 
   # Create multi-arch manifest
   create-manifest:

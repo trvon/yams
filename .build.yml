@@ -37,6 +37,7 @@ packages:
   - cmake
   - ninja-build
   - zip
+  - ccache
   - lld
   - clang
   - llvm
@@ -92,6 +93,16 @@ tasks:
       set -e
       # Ensure pipx/venv/pip path is prepared
       export PATH="${HOME}/.local/bin:${PATH}"
+
+      # Configure ccache (optional acceleration)
+      export CCACHE_DIR="${HOME}/.cache/ccache"
+      mkdir -p "${CCACHE_DIR}"
+      echo "CCACHE_DIR=${CCACHE_DIR}" >> ~/.buildenv
+      if command -v ccache >/dev/null 2>&1; then
+        ccache --set-config=max_size=2G || true
+        ccache --zero-stats || true
+        ccache -s || true
+      fi
 
       # Install Conan via pipx when available; otherwise fallback to user pip or an isolated venv
       if ! command -v conan >/dev/null 2>&1; then
@@ -181,7 +192,13 @@ tasks:
       cmake --build --preset yams-release
 
       # Install the built artifacts into the staging directory.
-      cmake --install "${BUILD_DIR}" --config Release
+      mkdir -p "${STAGE_DIR}"
+      cmake --install "${BUILD_DIR}" --config Release --prefix "${STAGE_DIR}"
+
+      # Show ccache stats after build (if available)
+      if command -v ccache >/dev/null 2>&1; then
+        ccache -s || true
+      fi
 
   - package: |
       # Package on tag builds or when explicitly channelized as nightly/weekly
@@ -196,6 +213,11 @@ tasks:
       cd "${STAGE_DIR}"
       tar -czf "../yams-${CLEAN_VERSION}-linux-x86_64.tar.gz" .
       echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
+      # Also publish a raw stage archive for debugging/inspection
+      tar -czf "../yams-${CLEAN_VERSION}-stage.tar.gz" .
+      if command -v zip >/dev/null 2>&1; then
+        zip -qry "../yams-${CLEAN_VERSION}-stage.zip" .
+      fi
 
   - package_cpack: |
       # Package on tag builds or when explicitly channelized as nightly/weekly
@@ -216,5 +238,7 @@ tasks:
 artifacts:
   # Files available for download after a successful build.
   - "yams/yams-*.tar.gz"
+  - "yams/yams-*-stage.tar.gz"
+  - "yams/yams-*-stage.zip"
   - "yams/build/yams-release/*.deb"
   - "yams/build/yams-release/*.rpm"
