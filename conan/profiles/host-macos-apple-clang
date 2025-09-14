@@ -12,5 +12,4 @@ tools.cmake.cmaketoolchain:generator=Ninja
 # apple-clang already implies libc++; no compiler_executables override needed.
 # NOTE: If a transitive recipe injects -stdlib=libstdc++, the workflows now sanitize
 # CXXFLAGS/LDFLAGS on macOS to enforce -stdlib=libc++ prior to invoking Conan.
-[env]
 
