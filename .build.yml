@@ -65,10 +65,22 @@ tasks:
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.
   - compute_version: |
       set -e
-      # Move into repository directory (SourceHut clones into ./yams)
-      cd yams
+      # Detect repository root (some runners check out into ./, others into ./yams)
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
 
       CHANNEL="${RELEASE_CHANNEL:-}"
+      # Auto-channelize main branch builds as nightly when not tagged
+      if [[ -z "${CHANNEL}" && "${GIT_REF:-}" == "refs/heads/main" ]]; then
+        CHANNEL="nightly"
+        export RELEASE_CHANNEL="nightly"
+        # Persist for subsequent tasks which may source this
+        echo "RELEASE_CHANNEL=nightly" >> ~/.buildenv
+      fi
 
       if [ "$CHANNEL" = "nightly" ]; then
         CLEAN_VERSION="nightly-$(date -u +%Y%m%d)"
@@ -134,8 +146,13 @@ tasks:
       CONAN_CPU_COUNT="${CONAN_CPU_COUNT:-$(nproc || getconf _NPROCESSORS_ONLN || echo 2)}"
       echo "CONAN_CPU_COUNT=${CONAN_CPU_COUNT}" >> ~/.buildenv
 
-      # Move into repository directory (SourceHut clones into ./yams)
-      cd yams
+      # Detect and move into repository root
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
 
       # Configure the Conan profile.
       # Prefer clang to avoid GCC 15 regressions with onnxruntime
@@ -157,7 +174,12 @@ tasks:
 
   - yams_semver_guard: |
       set -e
-      cd yams
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
       echo "Running YAMS semver guard..."
       python3 scripts/ci/check_yams_semver.py
 
@@ -168,7 +190,12 @@ tasks:
         echo "conan not found in PATH; aborting build" >&2
         exit 1
       fi
-      cd yams
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
       export YAMS_DISABLE_MODEL_PRELOAD=1
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Starting build for version ${CLEAN_VERSION}"
@@ -202,12 +229,20 @@ tasks:
 
   - package: |
       # Package on tag builds or when explicitly channelized as nightly/weekly
+      # Auto-channelize main branch builds as nightly when not tagged
+      if [[ -z "${RELEASE_CHANNEL:-}" && "${GIT_REF:-}" == "refs/heads/main" ]]; then
+        export RELEASE_CHANNEL=nightly
+      fi
       if [[ "${GIT_REF:-}" != refs/tags/* && "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
         echo "Skipping packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
         exit 0
       fi
-
-      cd yams
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging the release..."
       cd "${STAGE_DIR}"
@@ -221,12 +256,20 @@ tasks:
 
   - package_cpack: |
       # Package on tag builds or when explicitly channelized as nightly/weekly
+      # Auto-channelize main branch builds as nightly when not tagged
+      if [[ -z "${RELEASE_CHANNEL:-}" && "${GIT_REF:-}" == "refs/heads/main" ]]; then
+        export RELEASE_CHANNEL=nightly
+      fi
       if [[ "${GIT_REF:-}" != refs/tags/* && "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
         echo "Skipping CPack packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
         exit 0
       fi
-
-      cd yams
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging with CPack..."
       cd "${BUILD_DIR}"
@@ -236,7 +279,12 @@ tasks:
       cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
 
 artifacts:
-  # Files available for download after a successful build.
+  # Files available for download after a successful build. Support both repo layouts.
+  - "yams-*.tar.gz"
+  - "yams-*-stage.tar.gz"
+  - "yams-*-stage.zip"
+  - "build/yams-release/*.deb"
+  - "build/yams-release/*.rpm"
   - "yams/yams-*.tar.gz"
   - "yams/yams-*-stage.tar.gz"
   - "yams/yams-*-stage.zip"

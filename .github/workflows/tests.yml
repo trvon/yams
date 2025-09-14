@@ -12,7 +12,8 @@ jobs:
   warm:
     name: Warm Conan & ccache
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Increased timeout because first-time Debug dependency builds (LLVM/Boost/etc.) can exceed 15m on cache misses.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,15 +42,15 @@ jobs:
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
-      - name: Detect profile & install (Release)
+      - name: Detect profile & install (Debug only)
         shell: bash
         run: |
+          # Only Debug is required for test job; skipping Release halves cold start time.
+          # If we later add a Release test/benchmark stage, re-introduce a Release preinstall here.
           conan profile detect --force
           sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          conan install . -of build/warm-release -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Release -b missing
-      - name: Install (Debug)
-        shell: bash
-        run: |
+          # Use CPU core count to speed recipe builds when they fall back to source builds.
+          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
           conan install . -of build/warm-debug -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Debug -b missing
       - name: Summary
         run: |
