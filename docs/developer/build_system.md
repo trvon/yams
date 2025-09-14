@@ -1,213 +1,290 @@
-# Developer Build System
+docker run --rm -it ghcr.io/trvon/yams:latest --version
+docker run --rm -it -v $HOME/yams-data:/var/lib/yams ghcr.io/trvon/yams:latest yams init --non-interactive
+# Build System (Developer Reference)
 
-Concise overview of YAMS build and dependency tooling for contributors.
+Compact overview of how to build, test, and extend YAMS. Start with the **Quick Loop**, then dive deeper.
 
-## Stack
+## 1. Stack
+| Layer | Tool |
+|-------|------|
+| Build | CMake ≥ 3.25 |
+| Dependencies | Conan 2.x |
+| Generator | Ninja (preferred) |
+| Compilers | Clang ≥14 / GCC ≥11 |
+| Optional | ccache, lld, clang-tidy |
 
-- Build system: CMake (3.25+)
-- Dependency manager: Conan 2.x
-- Generators: Ninja (recommended), Unix Makefiles supported
-- Compilers: Clang ≥14 or GCC ≥11 (macOS/Linux)
-- Optional: ccache for faster rebuilds
+## 2. Directory Layout & Presets
+Out-of-source builds under `build/` per configuration. Generated presets:
+- Debug: `build/yams-debug` (inner: `build/yams-debug/build`)
+- Release: `build/yams-release` (inner: `build/yams-release/build`)
 
-## Build directories and presets
+Use the preset (never build inside source). Artifacts + CTest run from inner dir but presets abstract that.
 
-Conan generates CMakePresets and an out-of-source build tree per configuration:
-
-- Release:
-  - Conan output: build/yams-release
-  - Configure preset: yams-release
-  - Inner CMake build dir: build/yams-release/build
-- Debug:
-  - Conan output: build/yams-debug
-  - Configure preset: yams-debug
-  - Inner build dir: build/yams-debug/build
-
-Notes:
-- Paths may differ slightly depending on the generator; use the preset’s inner build path for ctest and artifacts.
-- Keep build/* out of version control.
-
-## One-time setup
-
-Detect a Conan profile for your host toolchain:
-
+## 3. One-Time: Profile
 ```bash
 conan profile detect --force
 ```
 
-## Install dependencies
-
-Conan resolves and fetches third-party libraries and generates CMake presets.
-
-Release:
-
-```bash
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
-```
-
-Debug:
-
-```bash
-conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
-```
-
-Tips:
-- Append --build=missing to build packages not available precompiled.
-- Use a custom profile via -pr:h=<host> -pr:b=<build> as needed.
-
-ONNX embeddings (enablement and mapping)
-
-- Conan option: `yams/*:enable_onnx` (default True in this repo’s profiles) pulls `onnxruntime` and sets the CMake cache var `YAMS_ENABLE_ONNX` via the generated toolchain.
-- CMake option: `YAMS_ENABLE_ONNX` toggles ONNX support in `src/vector`. When ON and `onnxruntime` is found, the build defines `YAMS_USE_ONNX_RUNTIME`, enabling the ONNX-backed embedding path.
-- Typical flows:
-  - Conan: `conan install . -of build/yams-debug -s build_type=Debug -b missing -o yams/*:enable_onnx=True`
-  - Plain CMake: `cmake -S . -B build -G Ninja -DYAMS_ENABLE_ONNX=ON -DCMAKE_PREFIX_PATH=/path/to/onnxruntime`
-- Validation: configure logs should contain `ONNX Runtime found - enabling local embedding generation`. If you see `ONNX Runtime disabled`, check options and dependency visibility.
-
-## Configure and build
-
-CMake configure (from repo root):
-
-```bash
-cmake --preset yams-release
-# or
-cmake --preset yams-debug
-```
-
-Build:
-
-```bash
-cmake --build --preset yams-release -j
-# or
-cmake --build --preset yams-debug -j
-```
-
-Install (optional):
-
-```bash
-sudo cmake --install build/yams-release
-# set a custom prefix with -DCMAKE_INSTALL_PREFIX=/opt/yams when configuring
-```
-
-## Tests
-
-Run tests with ctest from the inner build directory:
-
+## 4. Quick Loop (Conan)
 ```bash
 # Debug
+conan install . -of build/yams-debug -s build_type=Debug -b missing \
+  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=True
+cmake --preset yams-debug
+cmake --build --preset yams-debug -j
 ctest --preset yams-debug --output-on-failure
-# To parallelize: add -jN (e.g., -j$(nproc) on Linux)
-
-# Release
-ctest --preset yams-release --output-on-failure
-# To parallelize: add -jN (e.g., -j$(nproc) on Linux)
 ```
 
-For single-config Ninja (default here), CMake puts intermediate build files under build/yams-*/build; use the test presets, not raw paths.
+Release variant: swap preset/output folder + `-s build_type=Release`.
 
-### Managed plugin tests
+## 5. ONNX / GenAI Paths
+Options (Conan scope):
+- `enable_onnx` (default True) — toggles embedding / GenAI integration.
+- `use_conan_onnx` (default False) — when True pull packaged ORT (currently 1.18.x); when False allow internal newer ORT path.
 
-- Build the plugin unit tests explicitly, then run with the test preset:
-  - Build: `cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests`
-  - Run: `ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure`
-  - Run: `ctest --preset yams-debug -R ObjectStorageAdapterUnitTests --output-on-failure`
+CMake variables:
+- `YAMS_ENABLE_ONNX` — mirrors `enable_onnx`.
+- `YAMS_BUILD_INTERNAL_ONNXRUNTIME` — triggers provider to fetch/build ORT (version via `YAMS_INTERNAL_ORT_VERSION`).
 
-S3 plugin smoke test (optional, networked)
-- Enable at configure time: `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON`
-- Build: `cmake --build --preset yams-debug --target s3_plugin_smoke_test`
-- Environment required:
-  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
-  - `S3_TEST_BUCKET`
-  - Optional for R2: `S3_TEST_ENDPOINT=<ACCOUNT>.r2.cloudflarestorage.com`, `S3_TEST_USE_PATH_STYLE=1`
-- Run: `ctest --preset yams-debug -R s3_plugin_smoke_test --output-on-failure`
-
-Discovery and paths
-- The plugin loader checks `YAMS_PLUGIN_DIR` for discovery in addition to default paths. The smoke test sets this automatically to the built plugin path; you can also set it manually for custom runs.
-- System prerequisites for S3 plugin tests: libcurl and OpenSSL development headers.
-
-> **Note on Optional Tests:** Integration tests for plugins like S3 and ONNX are disabled by default. This is a common practice to prevent build and test failures for developers who may not have the required external dependencies (like S3 credentials or the ONNX Runtime library) configured in their local environment. It separates fast, local unit tests from slower integration tests. You can enable them via CMake options when you are specifically working on these components.
-
-## Build options and toolchain notes
-
-- Generator selection: set CMAKE_GENERATOR (e.g., Ninja) in your environment or profile.
-- Install prefix: set CMAKE_INSTALL_PREFIX at configure time.
-- Werror/code style: adhere to the project’s CMake defaults; do not relax warnings locally unless troubleshooting.
-- Sanitizers: enable via your toolchain or add flags in a local cache:
-  - Example (single-config): -DCMAKE_C_FLAGS_DEBUG="-fsanitize=address,undefined" -DCMAKE_CXX_FLAGS_DEBUG="-fsanitize=address,undefined"
-  - For multi-config generators, use CMAKE_<LANG>_FLAGS_<CONFIG>.
-- ccache: export CC="ccache clang" and CXX="ccache clang++" (or set via toolchain/profile) to speed up rebuilds.
-
-## Dependency management (Conan)
-
-- Dependencies are declared in the project’s conanfile (e.g., conanfile.py/conanfile.txt).
-- Change dependencies by editing the conanfile; then re-run conan install for each configuration output-folder.
-- Pinning: prefer exact versions and revisions where feasible; consider lockfiles for reproducible CI.
-- Editable packages: use conan editable add for local development of dependent packages.
-
-Example round-trip after editing dependencies:
-
+Internal build example (new GenAI headers):
 ```bash
-# Release
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
-cmake --preset yams-release
-cmake --build --preset yams-release -j
+conan install . -of build/yams-debug -s build_type=Debug -b missing \
+  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=False
+cmake --preset yams-debug -DYAMS_BUILD_INTERNAL_ONNXRUNTIME=ON
+cmake --build --preset yams-debug -j
+```
+If a stale `onnxruntime::onnxruntime` target persists, remove the build directory to force provider logic.
+
+Lazy discovery behavior (root CMake): it now performs a quiet `find_package(onnxruntime)`; missing packages no longer hard-fail. Actual target creation or internal build happens inside `src/vector` and `plugins/onnx` via `OnnxRuntimeProvider.cmake`. Warnings guide you to enable `use_conan_onnx` or `YAMS_BUILD_INTERNAL_ONNXRUNTIME` as needed.
+
+Plain CMake (no Conan) supplying external ORT:
+```bash
+cmake -S . -B build -G Ninja -DYAMS_ENABLE_ONNX=ON -DCMAKE_PREFIX_PATH=/path/to/onnxruntime
+cmake --build build -j
 ```
 
-## CI-friendly flow
+## 6. Configure & Build (Presets)
+```bash
+cmake --preset yams-debug   # or yams-release
+cmake --build --preset yams-debug -j
+```
+Install:
+```bash
+sudo cmake --install build/yams-release
+```
 
+## 7. Tests
+```bash
+ctest --preset yams-debug --output-on-failure
+ctest --preset yams-release --output-on-failure
+```
+Targeted plugin/unit tests:
+```bash
+cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests
+ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure
+```
+S3 smoke (opt-in): add `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON` then build & run `s3_plugin_smoke_test`.
+
+Integration tests (S3 / ONNX) off by default; enable only while working on those components.
+
+## 8. Key Build Options
+| CMake Var | Purpose |
+|-----------|---------|
+| YAMS_BUILD_CLI | Build command-line interface |
+| YAMS_BUILD_MCP_SERVER | Build MCP server |
+| YAMS_BUILD_TESTS / YAMS_BUILD_BENCHMARKS | Self-explanatory |
+| YAMS_ENABLE_ONNX | Enable ONNX vector/GenAI paths |
+| YAMS_BUILD_INTERNAL_ONNXRUNTIME | Fetch/build ORT when Conan package insufficient |
+| YAMS_INTERNAL_ORT_VERSION | Override internal ORT version (cache var) |
+| YAMS_ENABLE_PDF | PDF extraction (FetchContent PDFium) |
+| YAMS_HAVE_WASMTIME | Enable WASM host codepaths |
+| YAMS_ENABLE_SANITIZERS | Debug ASan/UBSan toggle |
+
+Disable clang-tidy (single configure):
+```bash
+cmake --preset yams-debug -D CMAKE_CXX_CLANG_TIDY= -D CMAKE_C_CLANG_TIDY=
+```
+````markdown
+docker run --rm -it ghcr.io/trvon/yams:latest --version
+docker run --rm -it -v $HOME/yams-data:/var/lib/yams ghcr.io/trvon/yams:latest yams init --non-interactive
+# Build System (Developer Reference)
+
+Compact overview of how to build, test, and extend YAMS. Start with the **Quick Loop**, then dive deeper.
+
+## 1. Stack
+| Layer | Tool |
+|-------|------|
+| Build | CMake ≥ 3.25 |
+| Dependencies | Conan 2.x |
+| Generator | Ninja (preferred) |
+| Compilers | Clang ≥14 / GCC ≥11 |
+| Optional | ccache, lld, clang-tidy |
+
+## 2. Directory Layout & Presets
+Out-of-source builds under `build/` per configuration. Generated presets:
+- Debug: `build/yams-debug` (inner: `build/yams-debug/build`)
+- Release: `build/yams-release` (inner: `build/yams-release/build`)
+
+Use the preset (never build inside source). Artifacts + CTest run from inner dir but presets abstract that.
+
+## 3. One-Time: Profile
 ```bash
 conan profile detect --force
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+```
+
+## 4. Quick Loop (Conan)
+```bash
+# Debug
+conan install . -of build/yams-debug -s build_type=Debug -b missing \
+  -o yams/*:enable_onnx=True
+cmake --preset yams-debug
+cmake --build --preset yams-debug -j
+ctest --preset yams-debug --output-on-failure
+```
+
+Release variant: swap preset/output folder + `-s build_type=Release`.
+
+## 5. ONNX / GenAI Paths
+Conan option:
+- `enable_onnx` (default True) — enables ONNX vector + GenAI adapter code paths.
+
+CMake variable:
+- `YAMS_ENABLE_ONNX` — mirrors `enable_onnx`.
+
+Internal ONNX Runtime source builds have been removed. YAMS now relies on an
+existing `onnxruntime::onnxruntime` target (Conan or system). If ONNX is enabled
+but the runtime target is absent you get a warning and stub GenAI code is used.
+
+### Automatic GenAI Header Fetch
+If ONNX is enabled and the detected ONNX Runtime does not ship GenAI C++ headers,
+the build auto-downloads the `onnxruntime-genai` archive (v0.9.1) and exposes its
+headers via `onnxruntime::genai_headers` (interface). No new options or env vars.
+
+Flow:
+1. Root CMake does a quiet `find_package(onnxruntime)`.
+2. Provider scans for `onnxruntime/genai/embedding.h`.
+3. If missing, it fetches and extracts the GenAI extension headers (one-time cache).
+4. Detection module try-compiles against a candidate header. On success it defines
+   `YAMS_GENAI_RUNTIME_PRESENT` consumed by vector library & ONNX plugin.
+
+Provider log snippets:
+| Log | Meaning |
+|-----|---------|
+| `[OnnxRuntimeProvider] onnxruntime distribution already includes GenAI headers` | Packaged/runtime already ships extension headers. |
+| `[OnnxRuntimeProvider] onnxruntime-genai headers provided (v0.9.1)` | Auto-fetch succeeded; headers now available. |
+| `[OnnxRuntimeProvider] onnxruntime-genai headers still unavailable after fetch attempt` | Fetch/extract failed; continue with stubs. |
+| `[OnnxRuntimeProvider] No ONNX Runtime target found (no internal build fallback enabled)` | Runtime absent; ONNX/GenAI features stubbed. |
+
+Detection messages:
+| Log | Meaning |
+|-----|---------|
+| `[GenAI] ONNX GenAI headers usable (probe succeeded)` | Headers compile; adaptive path active. |
+| `[GenAI] No candidate ONNX GenAI headers found in exported include dirs` | No headers; stub implementation. |
+
+Plain CMake (no Conan) supplying external ORT:
+```bash
+cmake -S . -B build -G Ninja -DYAMS_ENABLE_ONNX=ON -DCMAKE_PREFIX_PATH=/path/to/onnxruntime
+cmake --build build -j
+```
+
+## 6. Configure & Build (Presets)
+```bash
+cmake --preset yams-debug   # or yams-release
+cmake --build --preset yams-debug -j
+```
+Install:
+```bash
+sudo cmake --install build/yams-release
+```
+
+## 7. Tests
+```bash
+ctest --preset yams-debug --output-on-failure
+ctest --preset yams-release --output-on-failure
+```
+Targeted plugin/unit tests:
+```bash
+cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests
+ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure
+```
+S3 smoke (opt-in): add `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON` then build & run `s3_plugin_smoke_test`.
+
+Integration tests (S3 / ONNX) off by default; enable only while working on those components.
+
+## 8. Key Build Options
+| CMake Var | Purpose |
+|-----------|---------|
+| YAMS_BUILD_CLI | Build command-line interface |
+| YAMS_BUILD_MCP_SERVER | Build MCP server |
+| YAMS_BUILD_TESTS / YAMS_BUILD_BENCHMARKS | Self-explanatory |
+| YAMS_ENABLE_ONNX | Enable ONNX vector/GenAI paths |
+| YAMS_ENABLE_PDF | PDF extraction (FetchContent PDFium) |
+| YAMS_HAVE_WASMTIME | Enable WASM host codepaths |
+| YAMS_ENABLE_SANITIZERS | Debug ASan/UBSan toggle |
+
+Disable clang-tidy (single configure):
+```bash
+cmake --preset yams-debug -D CMAKE_CXX_CLANG_TIDY= -D CMAKE_C_CLANG_TIDY=
+```
+
+## 9. Dependency Management Notes
+Edit `conanfile.py` then re-run `conan install` for each configuration. Prefer pinned versions. Use `--build=missing` to compile absent binaries. Boost is overridden to a consistent version. ORT availability determined by `enable_onnx` and presence of a packaged/runtime target; GenAI headers auto-fetched if missing.
+
+## 10. Common Scenarios
+| Scenario | Commands |
+|---------|----------|
+| Fresh debug loop | Conan install (Debug) → preset build → ctest |
+| (Removed) Switch ORT to internal | No longer supported; provide newer ORT externally |
+| System-only (no Conan) | Provide all libs, configure manually with flags |
+| Release packaging | Conan install (Release) → build → `cpack`/package target |
+
+## 11. CI Flow
+```bash
+conan profile detect --force
+conan install . -of build/yams-release -s build_type=Release --build=missing
 cmake --preset yams-release
 cmake --build --preset yams-release -j$(nproc)
 ctest --preset yams-release --output-on-failure -j$(nproc)
 ```
+Cache `~/.conan` + optionally `build/`.
 
-Cache:
-- Cache ~/.conan and optionally the build/ directory (if your CI preserves workspaces) to reduce cold start time.
+## 12. Troubleshooting Quick Table
+| Symptom | Fix |
+|---------|-----|
+| Preset missing | Re-run Conan install (regenerates presets) |
+| Runtime missing | Ensure `enable_onnx=True` in Conan options or supply system ORT path |
+| ONNX disabled | Check option + provider messages |
+| Link errors after dep change | Delete inner `CMakeCache.txt` or rebuild from empty folder |
+| Tests undiscovered | Use `ctest --preset ...`; ensure `YAMS_BUILD_TESTS=ON` |
+| Slow incremental builds | Ensure Unity build active (Debug preset) or enable ccache |
 
-## Docker (optional)
+## 13. Conventions
+Out-of-source only. Keep Release for perf/benchmarks; iterate in Debug. Prefer presets over ad hoc flags. Avoid committing generated build artifacts.
 
-Run the published image for CLI checks:
+## 14. Toolchain Modules
+`ToolchainDetect.cmake` picks lld/ThinLTO when available. `Sanitizers.cmake` enables ASan/UBSan (and optionally TSAN) in Debug. Provider module: `OnnxRuntimeProvider.cmake` selects existing runtime and auto-fetches GenAI headers if absent.
 
-```bash
-docker run --rm -it ghcr.io/trvon/yams:latest --version
-```
+---
+Revision notes:
+- Removed internal ORT build path; added automatic GenAI header fetch (no new options).
+- Consolidated ONNX & GenAI guidance into section 5.
+- Introduced quick scenario table + troubleshooting table.
 
-Persist data with a bind mount:
+### Diagnostics: Provider Log Lines
+During configure you may see:
 
-```bash
-mkdir -p $HOME/yams-data
-docker run --rm -it -v $HOME/yams-data:/var/lib/yams ghcr.io/trvon/yams:latest yams init --non-interactive
-```
+| Log Snippet | Meaning | Action |
+|-------------|---------|--------|
+| `[OnnxRuntimeProvider] Reusing existing onnxruntime::onnxruntime target` | Target from Conan/system reused. | None. |
+| `[OnnxRuntimeProvider] onnxruntime distribution already includes GenAI headers` | Runtime ships GenAI headers. | None. |
+| `[OnnxRuntimeProvider] onnxruntime-genai headers provided (v0.9.1)` | Extension headers fetched. | None. |
+| `[OnnxRuntimeProvider] onnxruntime-genai headers still unavailable after fetch attempt` | Fetch failed; stub mode. | Check network or provide newer ORT. |
+| `[OnnxRuntimeProvider] No ONNX Runtime target found (no internal build fallback enabled)` | Runtime missing; stubs used. | Provide ORT or disable ONNX. |
 
-For containerized builds, use a dev image with toolchains or mount your build cache and run the Conan/CMake flow inside.
+GenAI detection messages:
+| Message | Interpretation |
+|---------|----------------|
+| `[GenAI] ONNX GenAI headers usable (probe succeeded)` | Adaptive GenAI path active. |
+| `[GenAI] No candidate ONNX GenAI headers found in exported include dirs` | GenAI headers absent; stubs compiled. |
 
-## Troubleshooting
-
-- Missing compiler/CMake/Ninja:
-  - Ensure they’re on PATH; re-run conan profile detect.
-- Preset not found:
-  - Re-run conan install to regenerate presets.
-- Link errors after dependency changes:
-  - Clean or re-generate: delete the build/yams-*/CMakeCache.txt (inner build folder) or start with a fresh output-folder.
-- Tests not discovered:
-  - Run ctest from the correct inner build directory; confirm enable_testing/add_test in the codebase.
-- ABI or stdlib mismatches:
-  - Align compiler versions and libc++/libstdc++ across your profile and environment.
-
-## Conventions
-
-- Out-of-source builds only (build/*).
-- Do not commit local cache or build artifacts.
-- Keep Release builds for benchmarks and distribution; Debug for development.
-- Prefer presets over ad-hoc build commands for repeatability.
-
-
-## Toolchain & Sanitizers
-
-- CMake modules under `cmake/` control portable defaults:
-  - `ToolchainDetect.cmake`: prefers LLD and ThinLTO when supported; enables IPO/LTO portably.
-  - `Sanitizers.cmake`: toggles `ENABLE_ASAN`, `ENABLE_UBSAN`, `ENABLE_TSAN` in Debug builds only.
-- The default toolchain preference is LLVM (Clang + LLD) when present; otherwise the system toolchain is used.
-- No changes to Conan profiles are required; CI passes settings/conf via CLI.
+````

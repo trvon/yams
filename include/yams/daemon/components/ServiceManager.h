@@ -9,6 +9,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/daemon.h> // For DaemonConfig
@@ -76,8 +77,14 @@ public:
     std::shared_ptr<vector::EmbeddingGenerator> getEmbeddingGenerator() const {
         return embeddingGenerator_;
     }
+    std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return workerPool_; }
+    PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
+    void enqueuePostIngest(const std::string& hash, const std::string& mime) {
+        if (postIngest_)
+            postIngest_->enqueue(PostIngestQueue::Task{hash, mime, {}});
+    }
     // Last search engine build metadata (for diagnostics/status)
     std::string getLastSearchBuildReason() const { return lastSearchBuildReason_; }
     bool getLastVectorEnabled() const { return lastVectorEnabled_; }
@@ -89,6 +96,9 @@ public:
     getContentExtractors() const {
         return contentExtractors_;
     }
+
+    // ContentStore diagnostics
+    std::string getContentStoreError() const { return contentStoreError_; }
 
     // WAL metrics provider (may return zeros until a WALManager is attached)
     std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
@@ -218,9 +228,7 @@ public:
     // initialization but integrates with Boost.Asio coroutine flow.
     boost::asio::awaitable<Result<void>> initializeAsyncAwaitable(yams::compat::stop_token token);
 
-#ifdef YAMS_TESTING
-    // Additional test-only accessors can go here if needed
-    // Inject a mock model provider and override the adopted provider plugin name (tests only)
+    // Test helpers: inject mock provider and tweak provider state/name
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         modelProvider_ = std::move(provider);
     }
@@ -232,12 +240,10 @@ public:
         lastModelError_ = error;
     }
     // Force a vector DB initialization attempt and return whether work was performed
-    // (skipped=false indicates already attempted or lock-busy/disabled). This is a thin
-    // test-only wrapper to exercise single-shot behavior deterministically.
+    // (skipped=false indicates already attempted or lock-busy/disabled).
     Result<bool> __test_forceVectorDbInitOnce(const std::filesystem::path& dataDir) {
         return initializeVectorDatabaseOnce(dataDir);
     }
-#endif
 
 private:
     // Awaitable phase helpers (coroutine-based)
@@ -285,6 +291,7 @@ private:
     std::filesystem::path resolvedDataDir_;
 
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
+    std::unique_ptr<PostIngestQueue> postIngest_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     bool embeddingsAutoOnAdd_{false};
     // Prevent duplicate plugin autoload scheduling
@@ -312,6 +319,10 @@ private:
     // Diagnostics: track last search build reason and vector enablement
     std::string lastSearchBuildReason_{"unknown"};
     bool lastVectorEnabled_{false};
+    std::string embeddingModelName_;
+
+    // Diagnostics: track last content store init error (empty when none)
+    std::string contentStoreError_;
 };
 
 } // namespace yams::daemon

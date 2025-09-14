@@ -2,6 +2,21 @@
 
 This plugin implements a host‑backed ONNX model provider via the YAMS C‑ABI. When loaded, the daemon retrieves the `model_provider_v1` interface table from the plugin and adopts it as the active `IModelProvider`.
 
+Interface
+- Advertises: `{ id: "model_provider_v1", version: 2 }` (v1.2 pre‑stable)
+- Base API: load/unload models; single and batch embeddings.
+- Extensions implemented:
+  - `get_embedding_dim`
+  - `get_runtime_info_json` → returns `{ backend: "onnxruntime", pipeline: "raw_ort", model, dim, intra_threads, inter_threads }`
+  - `free_string`
+  - `set_threading` → returns UNSUPPORTED (not wired yet)
+
+Status
+- The daemon uses the v1.2 helpers to populate embedding runtime details in status when this provider is adopted.
+
+Future
+- When ONNX Runtime GenAI is wired in YAMS, a GenAI pipeline will be preferred when present and may report `pipeline: genai`.
+
 The plugin is designed to be robust in production and ergonomic in local workflows. It supports model discovery from Hugging Face Hub and local paths, parses model metadata (dimension, max sequence length, pooling/normalization), and communicates those capabilities back to YAMS for correct allocation, validation, and search behavior.
 
 ## Feature Summary
@@ -190,4 +205,3 @@ ctest -R onnx_plugin_harness_test --output-on-failure
 ---
 
 By documenting HF URL support, parameter discovery, and configuration knobs here, we set the ground truth for refactoring the implementation to match this behavior. If any gaps exist in the current code, treat this README as the spec for the next hardening pass.
-

@@ -52,6 +52,13 @@ packages:
   - liburing-dev      # enables io_uring async path instead of fallback
   - libarchive-dev    # enables archive extraction features
   - libtag1-dev       # enables taglib (audio metadata) detection
+  - libsqlite3-dev    # enables SQLite database support
+  - libssl-dev
+  - libcurl4-openssl-dev
+  - libsqlite3-dev
+  - libncurses-dev
+  - protobuf-compiler
+  - libprotobuf-dev
 
 tasks:
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.

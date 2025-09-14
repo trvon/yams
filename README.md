@@ -38,12 +38,17 @@ Dependencies quick ref:
 
 Common build options: `YAMS_BUILD_TESTS=ON|OFF`, `YAMS_BUILD_BENCHMARKS=ON|OFF`, `YAMS_ENABLE_PDF=ON|OFF`, `YAMS_ENABLE_TUI=ON|OFF`, `YAMS_ENABLE_ONNX=ON|OFF`.
 
+Further build documentation:
+- GCC specifics / quick reference: `docs/BUILD-GCC.md`
+- Developer build system & internal ONNX Runtime path: `docs/developer/build_system.md`
+
 ONNX embeddings (experimental):
 
 - The ONNX plugin is experimental and may not work as intended.
 - Conan: default profiles enable `yams/*:enable_onnx=True`. With custom profiles, pass `-o yams/*:enable_onnx=True` to `conan install`.
 - Plain CMake: configure with `-DYAMS_ENABLE_ONNX=ON` and ensure `onnxruntime` is discoverable (e.g., via `CMAKE_PREFIX_PATH`).
 - Verify configure logs include: `ONNX Runtime found - enabling local embedding generation` (and not disabled).
+- Internal newer ORT (GenAI headers) path: run Conan with `-o yams/*:use_conan_onnx=False` and configure with `-DYAMS_BUILD_INTERNAL_ONNXRUNTIME=ON` (see developer build doc for details).
 
 Note: Plain CMake without Conan may miss dependencies; prefer Conan builds.
 

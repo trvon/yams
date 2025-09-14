@@ -1,205 +1,106 @@
 # Building YAMS with GCC/G++
 
-Note: The project prefers LLVM (Clang + LLD) when available. These GCC instructions remain supported, and the build will fall back to GCC automatically when LLVM is not detected.
+YAMS prefers Clang + LLD when present; these instructions cover the fully supported GCC flow. If LLVM is not detected the presets transparently fall back to GCC.
 
-This document provides instructions for building YAMS with the GNU Compiler Collection (GCC/G++).
+Use this file as a quick reference. Progresses from "10‑second build" to deeper detail.
 
-## Prerequisites
+## 1. Prerequisites (Minimal)
 
-### Compiler Requirements
+Compiler:
+- GCC 11+ (coroutines / C++20)
+- GCC 13+ recommended (full `std::format`)
 
-- GCC/G++ 11.0 or later (for C++20 and coroutine support)
-- GCC/G++ 13.0 or later (recommended for std::format support)
-
-To check your GCC version:
+Quick check:
 ```bash
-g++ --version
+
 ```
 
-### Build Tools
-
-For the fastest builds, install:
+Fast build helpers (optional but recommended):
 ```bash
 # Ubuntu/Debian
 sudo apt-get install -y ninja-build ccache lld clang-tidy
-
 # Fedora
 sudo dnf install -y ninja-build ccache lld clang-tools-extra
-
-# Arch Linux
+# Arch
 sudo pacman -S --needed ninja ccache lld clang
 ```
+If `lld` or `clang-tidy` are missing the presets still work (they silently drop related flags).
 
-Notes:
-- clang-tidy is provided by clang-tools-extra on Fedora and bundled with clang on Arch.
-- lld is an optional faster linker; remove it from presets if not installed.
+Install a newer GCC (examples):
+* Ubuntu: `sudo apt-get install gcc-13 g++-13` (enable via update-alternatives if desired)
+* Fedora / Arch: distro packages are recent
+* RHEL/CentOS/Rocky: enable devtoolset (`gcc-toolset-13`)
+## 2. System Packages
 
-### Installing GCC
+Core dev libs (names by distro): OpenSSL, libcurl, sqlite3, ncurses (for TUI), protobuf compiler + dev headers, zlib.
 
-#### Ubuntu/Debian
+Ubuntu example:
 ```bash
-# For GCC 11
-sudo apt-get update
-sudo apt-get install gcc-11 g++-11
-
-# For GCC 13 (recommended)
-sudo add-apt-repository ppa:ubuntu-toolchain-r/test
-sudo apt-get update
-sudo apt-get install gcc-13 g++-13
-
-# Set as default (optional)
-sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
-sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
+sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-openssl-dev libsqlite3-dev libncurses-dev protobuf-compiler libprotobuf-dev
 ```
+Other distros: use analogous `*-devel` / package names.
 
-#### RHEL/CentOS/Rocky Linux
+## 3. Quick Start (Conan + Presets)
+
 ```bash
-# Enable developer toolset for newer GCC
-sudo yum install gcc-toolset-11
-scl enable gcc-toolset-11 bash
-
-# Or for GCC 13
-sudo yum install gcc-toolset-13
-scl enable gcc-toolset-13 bash
-```
-
-#### Fedora
-```bash
-sudo dnf install gcc g++
-```
-
-#### Arch Linux
-```bash
-sudo pacman -S gcc
-```
-
-## System Dependencies
-
-Install required system libraries:
-
-### Ubuntu/Debian
-```bash
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    pkg-config \
-    libssl-dev \
-    libcurl4-openssl-dev \
-    libsqlite3-dev \
-    libncurses-dev \
-    protobuf-compiler \
-    libprotobuf-dev liburing-dev
-```
-
-### RHEL/CentOS/Rocky Linux
-```bash
-sudo yum install -y \
-    cmake3 \
-    openssl-devel \
-    libcurl-devel \
-    sqlite-devel \
-    ncurses-devel \
-    protobuf-compiler \
-    protobuf-devel
-```
-
-### Fedora
-```bash
-sudo dnf install -y \
-    cmake \
-    openssl-devel \
-    libcurl-devel \
-    sqlite-devel \
-    ncurses-devel \
-    protobuf-compiler \
-    protobuf-devel
-```
-
-### Arch Linux
-```bash
-sudo pacman -S \
-    cmake \
-    openssl \
-    curl \
-    sqlite \
-    ncurses \
-    protobuf
-```
-
-## CMake Presets (Ninja) — Recommended
-
-The repository ships with CMake Ninja presets for fast, repeatable builds. Debug presets enable Unity builds; Release presets enable IPO/LTO. Optional overlays use ccache and lld when available.
-
-Tip: Control parallelism via environment:
-```bash
-export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
-```
-
-### Quick start (Conan dependencies)
-```bash
-# Configure + build Debug (tests, tracing, Unity build)
-conan install . -of build/yams-debug -s build_type=Debug -b missing -o yams/*:enable_onnx=True
+# Debug (Unity build, sanitizers, tests optional)
+conan install . -of build/yams-debug -s build_type=Debug -b missing \
+  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=True
 cmake --preset yams-debug
-cmake --build --preset yams-debug
+cmake --build --preset yams-debug -j
 
-# Configure + build Release (IPO/LTO)
-conan install . -of build/yams-release -s build_type=Release -b missing -o yams/*:enable_onnx=True
+# Release (LTO/IPO)
+conan install . -of build/yams-release -s build_type=Release -b missing \
+  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=True
 cmake --preset yams-release
-cmake --build --preset yams-release
+cmake --build --preset yams-release -j
 
-# Run tests (Debug)
+# Tests (Debug)
 ctest --preset yams-debug --output-on-failure
 ```
 
-### Testing managed plugins (in-tree plugins)
+Set parallelism: `export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)` (Linux) or pass `-j` to build step.
 
-- Build the specific test targets first (ctest does not build targets):
-  - `cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests`
-- Run the tests using the debug test preset:
-  - `ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure`
-  - `ctest --preset yams-debug -R ObjectStorageAdapterUnitTests --output-on-failure`
+GenAI headers:
+If the packaged ONNX Runtime lacks GenAI C++ headers, YAMS automatically
+downloads the lightweight `onnxruntime-genai` headers (v0.9.1) at configure
+time (no additional flags). You will see a provider log entry
+`onnxruntime-genai headers provided (v0.9.1)` on success.
 
-S3 plugin smoke test (optional, networked)
-- Enable the smoke test at configure time: `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON`
-- Build the target: `cmake --build --preset yams-debug --target s3_plugin_smoke_test`
-- Required environment:
-  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
-  - `S3_TEST_BUCKET`
-  - Optional for Cloudflare R2: `S3_TEST_ENDPOINT=<ACCOUNT>.r2.cloudflarestorage.com`, `S3_TEST_USE_PATH_STYLE=1`
-- Run: `ctest --preset yams-debug -R s3_plugin_smoke_test --output-on-failure`
+### Plugin & Targeted Tests
 
-Notes
-- Ensure system dependencies for the S3 plugin are present: libcurl and OpenSSL development headers.
-- Plugin discovery can be overridden with `YAMS_PLUGIN_DIR` (the loader checks this environment variable). For local runs, the build system wires this for the smoke test; you can also set it manually to the built plugin folder.
+Explicitly build plugin/unit test targets first (ctest does not auto-build):
+```bash
+cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests
+ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure
+ctest --preset yams-debug -R ObjectStorageAdapterUnitTests --output-on-failure
+```
+S3 smoke (networked, optional):
+```bash
+cmake --build --preset yams-debug --target s3_plugin_smoke_test
+ctest --preset yams-debug -R s3_plugin_smoke_test --output-on-failure
+```
+Enable integration smoke: `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON` at configure time.
 
-> **Note on Optional Tests:** Integration tests for plugins like S3 and ONNX are disabled by default. This is a common practice to prevent build and test failures for developers who may not have the required external dependencies (like S3 credentials or the ONNX Runtime library) configured in their local environment. It separates fast, local unit tests from slower integration tests. You can enable them via CMake options when you are specifically working on these components.
+Integration tests (S3 / ONNX) are disabled by default to keep local loops fast.
 
-### System dependencies (no Conan)
+### No-Conan (System Dependencies Only)
+Presets: `yams-debug-no-conan`, `yams-release-no-conan` (assumes you supply all libs and set `YAMS_ENABLE_ONNX=ON` + provide ORT via `CMAKE_PREFIX_PATH` or internal build flag).
 ```bash
 cmake --preset yams-debug-no-conan
-cmake --build --preset yams-debug-no-conan
-
-cmake --preset yams-release-no-conan
-cmake --build --preset yams-release-no-conan
+cmake --build --preset yams-debug-no-conan -j
 ```
 
-### Debug defaults
-- Strict clang-tidy runs by default in Debug presets (checks: bugprone-*, performance-*, modernize-*, cppcoreguidelines-*, readability-*, portability-*, clang-analyzer-*, concurrency-*) with warnings-as-errors and header-filter=.*. If a repo-level .clang-tidy exists, it is respected.
-- Sanitizers (ASan/UBSan) are enabled by default for Debug builds. Disable with `-DYAMS_ENABLE_SANITIZERS=OFF`.
+## 4. Defaults & Tooling (Debug)
 
-Disable or relax checks:
-```bash
-# Disable clang-tidy for a single configure
-cmake --preset yams-debug -D CMAKE_CXX_CLANG_TIDY= -D CMAKE_C_CLANG_TIDY=
-# Or turn off sanitizers
-cmake --preset yams-debug -D YAMS_ENABLE_SANITIZERS=OFF
-```
+Debug presets enable:
+- Unity builds (faster iterative compile)
+- Address/UB sanitizers (`-DYAMS_ENABLE_SANITIZERS=OFF` to disable)
+- clang-tidy (disable per-config: `-D CMAKE_CXX_CLANG_TIDY=`)
 
-Notes:
-- If ccache or lld isn’t installed, either install them (recommended) or remove those overlays from the preset inheritance in CMakePresets.json.
-- Ninja is recommended; install via your distro (see Build Tools above).
+If `ccache` present it is leveraged via environment/toolchain; if absent nothing breaks.
 
-## Building YAMS (Manual/Classic)
+## 5. Manual (Without Presets)
 
 If you prefer manual configuration without presets:
 
@@ -225,7 +126,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-### Development Build
+### Development Build (Debug + tests)
 
 For development with tests and debugging:
 
@@ -242,7 +143,7 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-### Building Without CURL
+### Disable CURL
 
 If you don't need HTTP download features, you can build without CURL:
 
@@ -256,7 +157,7 @@ make -j$(nproc)
 
 Note: When YAMS_REQUIRE_CURL=OFF, HTTP downloader features will be unavailable.
 
-### Build with Coverage
+### Coverage
 
 For code coverage analysis:
 
@@ -280,9 +181,9 @@ gcovr --root .. \
     --output coverage.html
 ```
 
-## Compiler-Specific Considerations
+## 6. Compiler Notes
 
-### std::format Support
+### std::format
 
 YAMS automatically detects std::format availability:
 
@@ -290,11 +191,11 @@ YAMS automatically detects std::format availability:
 - GCC 11–12: Falls back to fmt library
 - The build system will automatically configure the appropriate option
 
-### Coroutine Support
+### Coroutines
 
 GCC has full C++20 coroutine support starting from version 11.0. The build system automatically adds the `-fcoroutines` flag when using GCC.
 
-### Link-Time Optimization (LTO)
+### LTO
 
 For optimal release builds with LTO:
 
@@ -305,13 +206,13 @@ CC=gcc CXX=g++ cmake .. \
     -DCMAKE_EXE_LINKER_FLAGS="-flto"
 ```
 
-## Troubleshooting
+## 7. Troubleshooting
 
-### Issue: "std::format not found"
+### "std::format not found"
 
 Solution: This is expected with GCC < 13. The build will automatically use the fmt library as a fallback.
 
-### Issue: "ncurses library not found"
+### "ncurses library not found"
 
 Solution: Install ncurses development package:
 ```bash
@@ -322,7 +223,7 @@ sudo apt-get install libncurses-dev
 sudo yum install ncurses-devel
 ```
 
-### Issue: Compilation errors with coroutines
+### Coroutine compilation errors
 
 Solution: Ensure you're using GCC 11 or later:
 ```bash
@@ -331,14 +232,14 @@ g++ --version
 
 If using an older version, upgrade GCC or use a developer toolset.
 
-### Issue: Undefined references during linking
+### Undefined references during linking
 
 Solution: Ensure all dependencies are installed and pkg-config can find them:
 ```bash
 pkg-config --list-all | grep -E "(sqlite|openssl|protobuf|libcurl)"
 ```
 
-### Issue: "Could NOT find CURL" during configuration
+### "Could NOT find CURL"
 
 Solution: Either install libcurl development package:
 ```bash
@@ -354,7 +255,7 @@ Or build without CURL support:
 cmake .. -DYAMS_REQUIRE_CURL=OFF
 ```
 
-### Issue: "ONNX runtime disabled in this build" or embeddings silently fall back
+### ONNX / GenAI disabled
 
 Causes and fixes:
 - ONNX disabled at configure time. Enable explicitly:
@@ -365,7 +266,7 @@ Causes and fixes:
   - Set `-DCMAKE_PREFIX_PATH=/path/to/onnxruntime` so `find_package(onnxruntime REQUIRED)` succeeds.
 - Validate your configure log shows: `ONNX Runtime found - enabling local embedding generation`.
 
-## Performance Optimization
+## 8. Performance Tips
 
 For best performance with GCC:
 
@@ -378,7 +279,7 @@ CC=gcc CXX=g++ cmake .. \
 
 Note: `-march=native` optimizes for your specific CPU but makes binaries non-portable.
 
-## Verification
+## 9. Quick Verification
 
 After building, verify the installation:
 
@@ -393,21 +294,18 @@ echo "Hello, YAMS!" | ./tools/yams-cli/yams add -
 yams --version
 ```
 
-## Continuous Integration
+## 10. CI Snapshot
 
 YAMS CI/CD pipeline tests GCC builds on Ubuntu. The configuration used in CI can be found in `.github/workflows/ci.yml` under the "traditional" build matrix entry.
 
-## Additional Resources
+## 11. References
 
 - GCC Documentation: https://gcc.gnu.org/onlinedocs/
 - GCC C++20 Status: https://gcc.gnu.org/projects/cxx-status.html#cxx20
 - CMake Presets: https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
 - YAMS Build Options: BUILD.md
 
-## Sanitizers (Debug)
-
-Enable Address/Undefined sanitizer in Debug builds via CMake options (portable):
-
+## 12. Sanitizer Example (Standalone)
 ```bash
 cmake -S . -B build/asan -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=build/asan/generators/conan_toolchain.cmake \
@@ -415,3 +313,9 @@ cmake -S . -B build/asan -G Ninja \
 cmake --build build/asan -j
 ctest --test-dir build/asan --output-on-failure
 ```
+
+---
+Revision highlights in this doc:
+- Added internal ONNX Runtime path (`use_conan_onnx=False` + `YAMS_BUILD_INTERNAL_ONNXRUNTIME=ON`).
+- Reordered for progressive disclosure (quick start → detail → troubleshooting).
+- Condensed distro package lists & redundant wording.

@@ -24,21 +24,34 @@ if(NOT TARGET onnxruntime::onnxruntime)
     return()
 endif()
 
+set(_genai_search_includes)
 get_target_property(_ort_includes onnxruntime::onnxruntime INTERFACE_INCLUDE_DIRECTORIES)
-if(NOT _ort_includes)
-    message(STATUS "[GenAI] No include dirs exported by onnxruntime target; skipping probe")
+if(_ort_includes)
+    list(APPEND _genai_search_includes ${_ort_includes})
+endif()
+if(TARGET onnxruntime::genai_headers)
+    get_target_property(_genai_inc onnxruntime::genai_headers INTERFACE_INCLUDE_DIRECTORIES)
+    if(_genai_inc)
+        list(APPEND _genai_search_includes ${_genai_inc})
+    endif()
+endif()
+list(REMOVE_DUPLICATES _genai_search_includes)
+if(NOT _genai_search_includes)
+    message(STATUS "[GenAI] No include dirs available for GenAI probe")
     return()
 endif()
 
 # Candidate header names (adjust as ONNX Runtime GenAI API stabilizes)
 set(_GENAI_HEADER_CANDIDATES
+    "ort_genai.h"                      # layout in standalone onnxruntime-genai repo (src/)
+    "onnxruntime/genai/ort_genai.h"    # potential packaged future layout
     "onnxruntime/genai/embedding.h"
     "onnxruntime/genai/genai_api.h"
     "onnxruntime/genai/pipeline.h"
 )
 
 set(_found_candidate_header "")
-foreach(_inc IN LISTS _ort_includes)
+foreach(_inc IN LISTS _genai_search_includes)
     foreach(_hdr IN LISTS _GENAI_HEADER_CANDIDATES)
         if(EXISTS "${_inc}/${_hdr}")
             set(_found_candidate_header "${_hdr}")
@@ -59,15 +72,12 @@ message(STATUS "[GenAI] Candidate GenAI header found: ${_found_candidate_header}
 
 file(WRITE ${CMAKE_BINARY_DIR}/genai_probe.cpp "#include <${_found_candidate_header}>\nint main(){return 0;}")
 
-try_compile(_genai_tc
-    ${CMAKE_BINARY_DIR}/genai_probe_build
-    ${CMAKE_BINARY_DIR}/genai_probe.cpp
-    CMAKE_FLAGS
-      -DCMAKE_CXX_STANDARD=20
-      -DCMAKE_CXX_STANDARD_REQUIRED=ON
-      -DCMAKE_CXX_EXTENSIONS=OFF
-    INCLUDE_DIRECTORIES ${_ort_includes}
-)
+# Use check_cxx_source_compiles which respects CMAKE_REQUIRED_INCLUDES
+set(_saved_required_includes ${CMAKE_REQUIRED_INCLUDES})
+set(CMAKE_REQUIRED_INCLUDES ${_genai_search_includes})
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("#include <${_found_candidate_header}>\nint main(){return 0;}" _genai_tc)
+set(CMAKE_REQUIRED_INCLUDES ${_saved_required_includes})
 
 if(_genai_tc)
     set(YAMS_GENAI_RUNTIME_PRESENT TRUE CACHE BOOL "ONNX Runtime GenAI headers available" FORCE)

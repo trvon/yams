@@ -274,6 +274,60 @@ public:
         use(target);
     }
 
+    // ---- Watch config (Phase 1) ----
+    void enableWatch(bool on, const std::optional<std::string>& name) override {
+        auto use = name ? *name : current().value_or("");
+        if (use.empty())
+            return;
+        auto p = sessions_dir() / (use + ".json");
+        auto j = load_json(p);
+        j["watch"]["enabled"] = on;
+        if (!j["watch"].contains("interval_ms"))
+            j["watch"]["interval_ms"] = 2000; // default 2s
+        save_json(p, j);
+    }
+
+    bool watchEnabled(const std::optional<std::string>& name) const override {
+        auto use = name ? *name : current().value_or("");
+        if (use.empty())
+            return false;
+        auto j = load_json(sessions_dir() / (use + ".json"));
+        if (j.contains("watch") && j["watch"].contains("enabled"))
+            return j["watch"]["enabled"].get<bool>();
+        return false;
+    }
+
+    void setWatchIntervalMs(uint32_t intervalMs, const std::optional<std::string>& name) override {
+        auto use = name ? *name : current().value_or("");
+        if (use.empty())
+            return;
+        auto p = sessions_dir() / (use + ".json");
+        auto j = load_json(p);
+        j["watch"]["enabled"] = j.contains("watch") && j["watch"].contains("enabled")
+                                    ? j["watch"]["enabled"].get<bool>()
+                                    : false;
+        j["watch"]["interval_ms"] = static_cast<uint32_t>(intervalMs);
+        save_json(p, j);
+    }
+
+    uint32_t watchIntervalMs(const std::optional<std::string>& name) const override {
+        auto use = name ? *name : current().value_or("");
+        if (use.empty())
+            return 2000;
+        auto j = load_json(sessions_dir() / (use + ".json"));
+        if (j.contains("watch") && j["watch"].contains("interval_ms"))
+            return j["watch"]["interval_ms"].get<uint32_t>();
+        return 2000;
+    }
+
+    std::vector<std::string>
+    getPinnedPatterns(const std::optional<std::string>& name) const override {
+        auto use = name ? *name : current().value_or("");
+        if (use.empty())
+            return {};
+        return listPathSelectors(use);
+    }
+
 private:
     const AppContext* ctx_{nullptr};
 };

@@ -72,10 +72,17 @@ pip install conan
 conan profile detect --force
 
 # Build with Conan (recommended - this is what creates the release binaries)
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
+conan install . --output-folder=build/yams-release -s build_type=Release --build=missing -o yams/*:enable_onnx=True
 cmake --preset yams-release
-cmake --build --preset build-yams-release
+cmake --build --preset yams-release -j
 sudo cmake --install build/yams-release
+
+# GenAI headers auto-fetch: if your ONNX Runtime package lacks GenAI C++ headers
+# YAMS will transparently download the extension headers (v0.9.1) during configure.
+
+See also:
+- Quick GCC guide: `docs/BUILD-GCC.md`
+- Developer build system: `docs/developer/build_system.md`
 ```
 
 ## Quick start

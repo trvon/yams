@@ -315,6 +315,121 @@ struct MCPStatsResponse {
     json toJson() const;
 };
 
+// Status DTOs
+struct MCPStatusRequest {
+    using RequestType = MCPStatusRequest;
+    bool detailed = false;
+    static MCPStatusRequest fromJson(const json& j) {
+        MCPStatusRequest r;
+        if (j.contains("detailed"))
+            r.detailed = j.at("detailed").get<bool>();
+        return r;
+    }
+    json toJson() const {
+        json j;
+        j["detailed"] = detailed;
+        return j;
+    }
+};
+
+struct MCPStatusResponse {
+    using ResponseType = MCPStatusResponse;
+    bool running = false;
+    bool ready = false;
+    std::string overallStatus;
+    std::string lifecycleState;
+    std::string lastError;
+    std::string version;
+    uint64_t uptimeSeconds = 0;
+    uint64_t requestsProcessed = 0;
+    uint64_t activeConnections = 0;
+    double memoryUsageMb = 0.0;
+    double cpuUsagePercent = 0.0;
+    json counters;        // flattened requestCounts
+    json readinessStates; // subsystem readiness map
+    json initProgress;    // subsystem init progress map
+
+    static MCPStatusResponse fromJson(const json& j) {
+        MCPStatusResponse r;
+        r.running = j.value("running", false);
+        r.ready = j.value("ready", false);
+        r.overallStatus = j.value("overallStatus", "");
+        r.lifecycleState = j.value("lifecycleState", "");
+        r.lastError = j.value("lastError", "");
+        r.version = j.value("version", "");
+        r.uptimeSeconds = j.value("uptimeSeconds", 0ull);
+        r.requestsProcessed = j.value("requestsProcessed", 0ull);
+        r.activeConnections = j.value("activeConnections", 0ull);
+        r.memoryUsageMb = j.value("memoryUsageMb", 0.0);
+        r.cpuUsagePercent = j.value("cpuUsagePercent", 0.0);
+        if (j.contains("counters"))
+            r.counters = j.at("counters");
+        if (j.contains("readinessStates"))
+            r.readinessStates = j.at("readinessStates");
+        if (j.contains("initProgress"))
+            r.initProgress = j.at("initProgress");
+        return r;
+    }
+    json toJson() const {
+        json j;
+        j["running"] = running;
+        j["ready"] = ready;
+        j["overallStatus"] = overallStatus;
+        j["lifecycleState"] = lifecycleState;
+        j["lastError"] = lastError;
+        j["version"] = version;
+        j["uptimeSeconds"] = uptimeSeconds;
+        j["requestsProcessed"] = requestsProcessed;
+        j["activeConnections"] = activeConnections;
+        j["memoryUsageMb"] = memoryUsageMb;
+        j["cpuUsagePercent"] = cpuUsagePercent;
+        j["counters"] = counters;
+        j["readinessStates"] = readinessStates;
+        j["initProgress"] = initProgress;
+        return j;
+    }
+};
+
+// Doctor tool
+struct MCPDoctorRequest {
+    using RequestType = MCPDoctorRequest;
+    bool verbose = true;
+    static MCPDoctorRequest fromJson(const json& j) {
+        MCPDoctorRequest r;
+        if (j.contains("verbose"))
+            r.verbose = j.at("verbose").get<bool>();
+        return r;
+    }
+    json toJson() const {
+        json j;
+        j["verbose"] = verbose;
+        return j;
+    }
+};
+
+struct MCPDoctorResponse {
+    using ResponseType = MCPDoctorResponse;
+    std::string summary;
+    std::vector<std::string> issues;
+    json details;
+    static MCPDoctorResponse fromJson(const json& j) {
+        MCPDoctorResponse r;
+        r.summary = j.value("summary", "");
+        if (j.contains("issues"))
+            r.issues = j.at("issues").get<std::vector<std::string>>();
+        if (j.contains("details"))
+            r.details = j.at("details");
+        return r;
+    }
+    json toJson() const {
+        json j;
+        j["summary"] = summary;
+        j["issues"] = issues;
+        j["details"] = details;
+        return j;
+    }
+};
+
 // Add directory DTOs
 struct MCPAddDirectoryRequest {
     using RequestType = MCPAddDirectoryRequest;

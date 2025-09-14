@@ -1139,6 +1139,29 @@ private:
         checkDaemon();
         checkInstalledModels();
         checkEmbeddingDimMismatch();
+        // Show embedding runtime from daemon status (best-effort)
+        try {
+            using namespace yams::daemon;
+            DaemonClient client;
+            auto st = yams::cli::run_result(client.status(), std::chrono::seconds(3));
+            if (st) {
+                const auto& s = st.value();
+                std::cout << "\nEmbedding Runtime\n-----------------\n";
+                std::cout << "Available: " << (s.embeddingAvailable ? "yes" : "no") << "\n";
+                if (!s.embeddingBackend.empty())
+                    std::cout << "Backend : " << s.embeddingBackend << "\n";
+                if (!s.embeddingModel.empty())
+                    std::cout << "Model   : " << s.embeddingModel << "\n";
+                if (!s.embeddingModelPath.empty())
+                    std::cout << "Path    : " << s.embeddingModelPath << "\n";
+                if (s.embeddingDim > 0)
+                    std::cout << "Dim     : " << s.embeddingDim << "\n";
+                if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0)
+                    std::cout << "Threads : " << s.embeddingThreadsIntra << "/"
+                              << s.embeddingThreadsInter << "\n";
+            }
+        } catch (...) {
+        }
 
         // Knowledge graph quick check: show basic index stats and recommend repair when empty
         try {

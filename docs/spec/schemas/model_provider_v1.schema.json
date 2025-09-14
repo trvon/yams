@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "model_provider_v1",
+  "type": "object",
+  "description": "Schema for the model_provider_v1 interface table (v1.2).",
+  "properties": {
+    "abi_version": { "type": "integer", "enum": [2] },
+    "set_progress_callback": { "type": "string", "description": "fn ptr" },
+    "load_model": { "type": "string" },
+    "unload_model": { "type": "string" },
+    "is_model_loaded": { "type": "string" },
+    "get_loaded_models": { "type": "string" },
+    "free_model_list": { "type": "string" },
+    "generate_embedding": { "type": "string" },
+    "free_embedding": { "type": "string" },
+    "generate_embedding_batch": { "type": "string" },
+    "free_embedding_batch": { "type": "string" },
+    "get_embedding_dim": { "type": "string" },
+    "get_runtime_info_json": { "type": "string" },
+    "free_string": { "type": "string" },
+    "set_threading": { "type": "string" }
+  },
+  "required": [
+    "abi_version",
+    "load_model",
+    "unload_model",
+    "is_model_loaded",
+    "get_loaded_models",
+    "generate_embedding",
+    "free_embedding"
+  ]
+}
+

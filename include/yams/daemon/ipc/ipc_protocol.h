@@ -2575,6 +2575,19 @@ struct StatusResponse {
     std::string lifecycleState; // mirrors FSM state string when available
     std::string lastError;      // last lifecycle error if any (empty when none)
 
+    // Content store diagnostics
+    std::string contentStoreRoot;  // absolute path to storage root (daemon-resolved)
+    std::string contentStoreError; // last initialization error (if any)
+
+    // Embedding runtime details (best-effort)
+    bool embeddingAvailable{false};
+    std::string embeddingBackend;   // provider|daemon|local|hybrid|unknown
+    std::string embeddingModel;     // preferred/active model name if known
+    std::string embeddingModelPath; // resolved model path, when known
+    uint32_t embeddingDim{0};
+    int32_t embeddingThreadsIntra{0};
+    int32_t embeddingThreadsInter{0};
+
     // Model information
     struct ModelInfo {
         std::string name;
@@ -2742,6 +2755,14 @@ struct StatusResponse {
         ser << static_cast<uint32_t>(skippedPlugins.size());
         for (const auto& s : skippedPlugins)
             s.serialize(ser);
+
+        // Serialize content store diagnostics (as strings)
+        ser << contentStoreRoot << contentStoreError;
+
+        // Serialize embedding runtime details
+        ser << embeddingAvailable << embeddingBackend << embeddingModel
+            << static_cast<uint32_t>(embeddingDim) << static_cast<int32_t>(embeddingThreadsIntra)
+            << static_cast<int32_t>(embeddingThreadsInter);
     }
 
     template <typename Deserializer>
@@ -2951,6 +2972,42 @@ struct StatusResponse {
                 return s.error();
             res.skippedPlugins.push_back(std::move(s.value()));
         }
+
+        // Deserialize content store diagnostics
+        auto csr = deser.readString();
+        if (!csr)
+            return csr.error();
+        res.contentStoreRoot = std::move(csr.value());
+        auto cse = deser.readString();
+        if (!cse)
+            return cse.error();
+        res.contentStoreError = std::move(cse.value());
+
+        // Deserialize embedding runtime details
+        auto eavail = deser.template read<bool>();
+        if (!eavail)
+            return eavail.error();
+        res.embeddingAvailable = eavail.value();
+        auto eb = deser.readString();
+        if (!eb)
+            return eb.error();
+        res.embeddingBackend = std::move(eb.value());
+        auto em = deser.readString();
+        if (!em)
+            return em.error();
+        res.embeddingModel = std::move(em.value());
+        auto ed = deser.template read<uint32_t>();
+        if (!ed)
+            return ed.error();
+        res.embeddingDim = ed.value();
+        auto ei = deser.template read<int32_t>();
+        if (!ei)
+            return ei.error();
+        res.embeddingThreadsIntra = ei.value();
+        auto ej = deser.template read<int32_t>();
+        if (!ej)
+            return ej.error();
+        res.embeddingThreadsInter = ej.value();
 
         return res;
     }

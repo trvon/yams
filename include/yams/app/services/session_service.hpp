@@ -61,6 +61,20 @@ public:
     virtual void save(const std::optional<std::filesystem::path>& outFile) const = 0;
     virtual void load(const std::filesystem::path& inFile,
                       const std::optional<std::string>& name) = 0;
+
+    // Session watch (auto-ingest) configuration — Phase 1 (config only)
+    // Enable or disable monitoring for a session (current when name not provided)
+    virtual void enableWatch(bool on, const std::optional<std::string>& name = std::nullopt) = 0;
+    // Query whether monitoring is enabled
+    virtual bool watchEnabled(const std::optional<std::string>& name = std::nullopt) const = 0;
+    // Set or get polling interval in milliseconds
+    virtual void setWatchIntervalMs(uint32_t intervalMs,
+                                    const std::optional<std::string>& name = std::nullopt) = 0;
+    virtual uint32_t
+    watchIntervalMs(const std::optional<std::string>& name = std::nullopt) const = 0;
+    // Convenience: get pinned patterns for a session (current when name not provided)
+    virtual std::vector<std::string>
+    getPinnedPatterns(const std::optional<std::string>& name = std::nullopt) const = 0;
 };
 
 std::shared_ptr<ISessionService> makeSessionService(const AppContext* ctx = nullptr);

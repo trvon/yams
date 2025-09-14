@@ -13,7 +13,7 @@ static const char* kManifestJson = R"JSON({
   "name": "onnx",
   "version": "0.1.0",
   "interfaces": [
-    {"id": "model_provider_v1", "version": 1}
+    {"id": "model_provider_v1", "version": 2}
   ]
 })JSON";
 

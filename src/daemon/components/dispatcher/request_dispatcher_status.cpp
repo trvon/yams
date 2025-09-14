@@ -23,15 +23,7 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
     try {
-        const bool fastMode = []() {
-            if (const char* v = std::getenv("YAMS_STATUS_FAST")) {
-                std::string s(v);
-                std::transform(s.begin(), s.end(), s.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return (s == "1" || s == "true" || s == "on" || s == "yes");
-            }
-            return false;
-        }();
+        // fastMode flag removed; status path remains lightweight via DaemonMetrics
         if (metrics_) {
             metrics_->refresh();
             auto snap = metrics_->getSnapshot();
@@ -42,9 +34,10 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             res.activeConnections = snap.activeConnections;
             res.memoryUsageMb = snap.memoryUsageMb;
             res.cpuUsagePercent = snap.cpuUsagePercent;
+            // Resolved via DaemonMetrics: ready reflects lifecycle readiness
             res.ready = snap.ready;
-            res.overallStatus = snap.overallStatus;
-            res.lifecycleState = snap.lifecycleState;
+            res.overallStatus = snap.overallStatus;   // normalized lowercase
+            res.lifecycleState = snap.lifecycleState; // normalized lowercase
             res.lastError = snap.lastError;
             res.fsmTransitions = snap.fsmTransitions;
             res.fsmHeaderReads = snap.fsmHeaderReads;
@@ -58,11 +51,22 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             res.requestCounts["worker_threads"] = snap.workerThreads;
             res.requestCounts["worker_active"] = snap.workerActive;
             res.requestCounts["worker_queued"] = snap.workerQueued;
+            res.requestCounts["post_ingest_threads"] = snap.postIngestThreads;
+            res.requestCounts["post_ingest_queued"] = snap.postIngestQueued;
+            res.requestCounts["post_ingest_processed"] = snap.postIngestProcessed;
+            res.requestCounts["post_ingest_failed"] = snap.postIngestFailed;
+            res.requestCounts["post_ingest_latency_ms_ema"] =
+                static_cast<size_t>(snap.postIngestLatencyMsEma);
+            res.requestCounts["post_ingest_rate_sec_ema"] =
+                static_cast<size_t>(snap.postIngestRateSecEma);
             res.retryAfterMs = snap.retryAfterMs;
             for (const auto& [k, v] : snap.readinessStates)
                 res.readinessStates[k] = v;
             for (const auto& [k, v] : snap.initProgress)
                 res.initProgress[k] = v;
+            // Content store diagnostics
+            res.contentStoreRoot = snap.contentStoreRoot;
+            res.contentStoreError = snap.contentStoreError;
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;
@@ -81,7 +85,13 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             }
         }
         if (!metrics_) {
-            res.ready = state_->readiness.fullyReady();
+            // Align boolean readiness with lifecycle readiness in non-metrics path
+            try {
+                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                res.ready = (lifecycleSnapshot.state == LifecycleState::Ready);
+            } catch (...) {
+                res.ready = false;
+            }
             res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
             res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
             res.readinessStates["database"] = state_->readiness.databaseReady.load();
@@ -105,6 +115,9 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             auto d = yams::daemon::dispatch::collect_vector_diag(serviceManager_);
             res.readinessStates["vector_embeddings_available"] = d.embeddingsAvailable;
             res.readinessStates["vector_scoring_enabled"] = d.scoringEnabled;
+            // Also mirror in counters for MCP/CLI parity
+            res.requestCounts["vector_embeddings_available"] = d.embeddingsAvailable ? 1 : 0;
+            res.requestCounts["vector_scoring_enabled"] = d.scoringEnabled ? 1 : 0;
             res.readinessStates["search_engine_build_reason_initial"] =
                 (d.buildReason == "initial");
             res.readinessStates["search_engine_build_reason_rebuild"] =
@@ -117,19 +130,19 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
             switch (lifecycleSnapshot.state) {
                 case LifecycleState::Ready:
-                    res.overallStatus = "Ready";
+                    res.overallStatus = "ready";
                     res.lifecycleState = "ready";
                     break;
                 case LifecycleState::Degraded:
-                    res.overallStatus = "Degraded";
+                    res.overallStatus = "degraded";
                     res.lifecycleState = "degraded";
                     break;
                 case LifecycleState::Stopping:
-                    res.overallStatus = "Stopping";
+                    res.overallStatus = "stopping";
                     res.lifecycleState = "stopping";
                     break;
                 case LifecycleState::Stopped:
-                    res.overallStatus = "Stopped";
+                    res.overallStatus = "stopped";
                     res.lifecycleState = "stopped";
                     break;
                 case LifecycleState::Unknown:
@@ -142,7 +155,10 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
                 res.lastError = lifecycleSnapshot.lastError;
             }
         } catch (...) {
+            // Fallback: preserve lowercase normalization
             res.overallStatus = state_->readiness.overallStatus();
+            for (auto& c : res.overallStatus)
+                c = static_cast<char>(std::tolower(c));
             res.lifecycleState = res.overallStatus;
         }
         // Populate typed provider details (prefer clients to use this)
@@ -214,7 +230,8 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
         fallback.memoryUsageMb = 0;
         fallback.cpuUsagePercent = 0;
         fallback.version = YAMS_VERSION_STRING;
-        fallback.overallStatus = "Starting";
+        // Normalize lowercase to preserve client readiness derivations
+        fallback.overallStatus = "starting";
         co_return fallback;
     }
     co_return res;
@@ -234,8 +251,19 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         response.additionalStats["wal_pending_entries"] = "0";
         response.additionalStats["plugins_loaded"] = "0";
         response.additionalStats["plugins_json"] = "[]";
-        // Minimal readiness hint
-        response.additionalStats["not_ready"] = "true";
+        // Minimal readiness hint (align to lifecycle readiness)
+        bool notReady = true;
+        try {
+            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            if (lifecycleSnapshot.state == LifecycleState::Ready ||
+                lifecycleSnapshot.state == LifecycleState::Degraded) {
+                notReady = false;
+            }
+        } catch (...) {
+            notReady = true;
+        }
+        response.additionalStats["not_ready"] =
+            notReady ? std::string{"true"} : std::string{"false"};
         (void)req; // unused in minimal implementation
         co_return response;
     } catch (...) {

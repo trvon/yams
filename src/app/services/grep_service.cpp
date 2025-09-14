@@ -213,6 +213,61 @@ public:
                     }
                 }
             }
+            // Optional preselection via hybrid engine (guarded) to accelerate regex scans.
+            // If enabled and no FTS candidates found, use hybrid search to pick top-K docs to scan.
+            if (docs.empty()) {
+                bool usePreselect = true;
+                if (const char* env = std::getenv("YAMS_GREP_PRESELECT")) {
+                    std::string v(env);
+                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                    usePreselect = !(v == "0" || v == "false" || v == "off");
+                }
+                const bool hasExplicitPaths = !req.paths.empty();
+                if (usePreselect && !hasExplicitPaths) {
+                    try {
+                        std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
+                        if (!eng) {
+                            auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
+                            yams::search::SearchEngineBuilder builder;
+                            builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
+                            auto opts =
+                                yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                            // Favor keyword heavier for grep-like queries
+                            opts.hybrid.final_top_k = 1000;
+                            opts.hybrid.vector_weight = 0.30f;
+                            opts.hybrid.keyword_weight = 0.70f;
+                            auto engRes = builder.buildEmbedded(opts);
+                            if (engRes)
+                                eng = engRes.value();
+                        }
+                        if (eng) {
+                            auto hres = eng->search(req.pattern, /*topk*/ 1000);
+                            if (hres && !hres.value().empty()) {
+                                std::unordered_set<std::string> allowPaths;
+                                allowPaths.reserve(hres.value().size());
+                                for (const auto& r : hres.value()) {
+                                    auto it = r.metadata.find("path");
+                                    if (it != r.metadata.end() && !it->second.empty()) {
+                                        allowPaths.insert(it->second);
+                                    }
+                                }
+                                auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                                if (!allRes) {
+                                    return Error{ErrorCode::InternalError,
+                                                 "Failed to enumerate documents: " +
+                                                     allRes.error().message};
+                                }
+                                for (auto& d : allRes.value()) {
+                                    if (allowPaths.find(d.filePath) != allowPaths.end())
+                                        docs.push_back(std::move(d));
+                                }
+                            }
+                        }
+                    } catch (...) {
+                        // ignore preselect errors; fall through to full scan
+                    }
+                }
+            }
             if (docs.empty()) {
                 auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
                 if (!allRes) {

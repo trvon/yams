@@ -8,6 +8,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
@@ -183,7 +184,14 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
 
     // Readiness flags and progress
     try {
-        out.ready = state_->readiness.fullyReady();
+        // Align boolean readiness with lifecycle readiness (authoritative)
+        // rather than deprecated DaemonReadiness::fullyReady().
+        try {
+            auto lsnap = lifecycle_->snapshot();
+            out.ready = (lsnap.state == LifecycleState::Ready);
+        } catch (...) {
+            out.ready = false;
+        }
         out.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
         out.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
         out.readinessStates["database"] = state_->readiness.databaseReady.load();
@@ -201,7 +209,7 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
     } catch (...) {
     }
 
-    // Lifecycle
+    // Lifecycle (authoritative overall status)
     try {
         auto s = lifecycle_->snapshot();
         switch (s.state) {
@@ -251,6 +259,14 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
             out.workerThreads = services_->getWorkerThreads();
             out.workerActive = services_->getWorkerActive();
             out.workerQueued = services_->getWorkerQueueDepth();
+            if (auto* pq = services_->getPostIngestQueue()) {
+                out.postIngestThreads = pq->threads();
+                out.postIngestQueued = pq->size();
+                out.postIngestProcessed = pq->processed();
+                out.postIngestFailed = pq->failed();
+                out.postIngestLatencyMsEma = pq->latencyMsEma();
+                out.postIngestRateSecEma = pq->ratePerSecEma();
+            }
         } else {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }
@@ -359,6 +375,18 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
             auto mr = services_->getMetadataRepo();
             out.serviceContentStore = cs ? "running" : "unavailable";
             out.serviceMetadataRepo = mr ? "running" : "unavailable";
+            // Content store diagnostics
+            try {
+                auto dd = services_->getResolvedDataDir();
+                if (!dd.empty()) {
+                    out.contentStoreRoot = (dd / "storage").string();
+                }
+            } catch (...) {
+            }
+            try {
+                out.contentStoreError = services_->getContentStoreError();
+            } catch (...) {
+            }
             // Compression and store stats (optional)
             // Allow disabling via env to avoid instability on platforms with
             // fragile SQLite setups. When disabled, high-level metrics still
@@ -410,6 +438,50 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
             auto dd = services_->getResolvedDataDir();
             if (!dd.empty())
                 out.dataDir = dd.string();
+        }
+    } catch (...) {
+    }
+
+    // Embedding runtime details (best-effort)
+    try {
+        if (services_) {
+            auto gen = services_->getEmbeddingGenerator();
+            if (gen) {
+                try {
+                    out.embeddingAvailable = gen->isInitialized();
+                } catch (...) {
+                    out.embeddingAvailable = true; // best-effort
+                }
+                try {
+                    out.embeddingDim = static_cast<uint32_t>(gen->getEmbeddingDimension());
+                } catch (...) {
+                }
+            }
+            // Backend label heuristic and model name
+            out.embeddingModel = services_->getEmbeddingModelName();
+            try {
+                auto prov = services_->getModelProvider();
+                if (prov && prov->isAvailable()) {
+                    out.embeddingBackend = "provider";
+                    // Try to get model path via provider v1.2 JSON
+                    if (!out.embeddingModel.empty()) {
+                        try {
+                            if (auto mi = prov->getModelInfo(out.embeddingModel)) {
+                                out.embeddingModelPath = mi.value().path;
+                                if (out.embeddingDim == 0 && mi.value().embeddingDim > 0)
+                                    out.embeddingDim =
+                                        static_cast<uint32_t>(mi.value().embeddingDim);
+                            }
+                        } catch (...) {
+                        }
+                    }
+                } else if (gen) {
+                    out.embeddingBackend = "local"; // generator-only path
+                } else {
+                    out.embeddingBackend = "unknown";
+                }
+            } catch (...) {
+            }
         }
     } catch (...) {
     }

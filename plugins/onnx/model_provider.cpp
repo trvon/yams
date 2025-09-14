@@ -10,6 +10,12 @@
 
 namespace {
 
+// Provide a C-callable function for threading control (not supported yet)
+static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/, int /*intra*/,
+                                        int /*inter*/) {
+    return YAMS_ERR_UNSUPPORTED;
+}
+
 struct ProviderCtx {
     std::mutex mu;
     yams_model_load_progress_cb progress_cb = nullptr;
@@ -355,6 +361,89 @@ struct ProviderSingleton {
             if (vecs)
                 std::free(vecs);
         };
+
+        // v1.2: get_embedding_dim
+        vtable.get_embedding_dim = [](void* self, const char* model_id,
+                                      size_t* out_dim) -> yams_status_t {
+            if (!self || !model_id || !out_dim)
+                return YAMS_ERR_INVALID_ARG;
+            auto* c = static_cast<ProviderCtx*>(self);
+            if (!c->ready || !c->pool)
+                return YAMS_ERR_INTERNAL;
+            auto h = c->pool->acquireModel(model_id, std::chrono::seconds(5));
+            if (!h)
+                return YAMS_ERR_INTERNAL;
+            auto& s = *h.value();
+            *out_dim = s.getEmbeddingDim();
+            return YAMS_OK;
+        };
+
+        // v1.2: get_runtime_info_json
+        vtable.get_runtime_info_json = [](void* self, const char* model_id,
+                                          char** out_json) -> yams_status_t {
+            if (!self || !model_id || !out_json)
+                return YAMS_ERR_INVALID_ARG;
+            auto* c = static_cast<ProviderCtx*>(self);
+            if (!c->pool)
+                return YAMS_ERR_INTERNAL;
+            nlohmann::json j;
+            j["backend"] = "onnxruntime";
+            j["pipeline"] = "raw_ort";
+            j["model"] = model_id;
+            // Best-effort dimension
+            size_t dim = 0;
+            if (c->ready) {
+                auto h = c->pool->acquireModel(model_id, std::chrono::seconds(2));
+                if (h) {
+                    dim = h.value()->getEmbeddingDim();
+                    try {
+                        const auto& info = h.value()->getInfo();
+                        if (!info.path.empty())
+                            j["path"] = info.path;
+                    } catch (...) {
+                    }
+                }
+            }
+            j["dim"] = dim;
+            j["intra_threads"] =
+                static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+            j["inter_threads"] = 1;
+            // Source hint from path when present
+            try {
+                if (j.contains("path") && j["path"].is_string()) {
+                    std::string p = j["path"].get<std::string>();
+                    if (p.find("/.cache/huggingface/") != std::string::npos)
+                        j["source"] = "huggingface-cache";
+                    else if (p.find(".yams/models/") != std::string::npos)
+                        j["source"] = "yams-models";
+                    else if (p.rfind("http://", 0) == 0 || p.rfind("https://", 0) == 0)
+                        j["source"] = "remote";
+                    else
+                        j["source"] = "local";
+                }
+            } catch (...) {
+            }
+            std::string s;
+            try {
+                s = j.dump();
+            } catch (...) {
+                s = "{}";
+            }
+            char* buf = static_cast<char*>(std::malloc(s.size() + 1));
+            if (!buf)
+                return YAMS_ERR_INTERNAL;
+            std::memcpy(buf, s.c_str(), s.size() + 1);
+            *out_json = buf;
+            return YAMS_OK;
+        };
+
+        vtable.free_string = [](void* /*self*/, char* s) {
+            if (s)
+                std::free(s);
+        };
+
+        // Assign function pointer for set_threading
+        vtable.set_threading = &onnx_set_threading;
     }
 };
 

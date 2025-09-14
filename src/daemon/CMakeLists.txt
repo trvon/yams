@@ -348,6 +348,7 @@ add_library(yams_daemon STATIC
     components/dispatcher/request_dispatcher_misc.cpp
     components/LifecycleComponent.cpp
     components/ServiceManager.cpp
+    components/PostIngestQueue.cpp
     components/PoolManager.cpp
     components/WorkerPool.cpp
     components/RepairCoordinator.cpp
@@ -590,7 +591,13 @@ install(TARGETS yams_daemon
 
 # Install daemon executable
 install(TARGETS yams-daemon
+    # Explicit permissions to guard against environments/tooling that may strip
+    # execute bits (observed macOS case where installed file became 0644).
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
 )
 
 # Install headers

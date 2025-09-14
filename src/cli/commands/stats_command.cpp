@@ -59,17 +59,30 @@ public:
                           "Use daemon results only (no local fallback)");
         vectors->callback([this]() {
             vectorsMode_ = true;
-            cli_->setPendingCommand(this);
+            auto r = this->executeVectors();
+            if (!r) {
+                spdlog::error("Stats (vectors) failed: {}", r.error().message);
+                std::exit(1);
+            }
         });
 
         // System help: explain fields/metrics shown by stats
         auto* helpCmd = cmd->add_subcommand("help", "Show system metrics help for stats output");
         helpCmd->callback([this]() { renderSystemHelp(); });
 
-        cmd->callback([this]() { cli_->setPendingCommand(this); });
+        cmd->callback([this]() {
+            auto r = this->execute();
+            if (!r) {
+                spdlog::error("Stats command failed: {}", r.error().message);
+                std::exit(1);
+            }
+        });
     }
 
     Result<void> execute() override {
+        // Temporary mitigation: force local-only stats until daemon path bug is fixed
+        return executeLocal();
+
         // Apply color mode overrides
         if (forceColor_) {
             yams::cli::ui::set_color_mode(yams::cli::ui::ColorMode::ForceOn);
@@ -119,12 +132,17 @@ public:
             cfg.enableChunkedResponses = false; // stats is small; avoid streaming complexity
             cfg.singleUseConnections = true;    // keep isolation to avoid cross-talk
 
-            // Fast-fallback mode: short timeout in non-verbose, non-watch, text mode (and not
-            // daemon-only)
+            // Fast-fallback mode: non-verbose, non-watch, text, and not daemon-only.
+            // Use a more tolerant timeout to avoid spurious local fallbacks, and align with
+            // DaemonClient defaults and status/doctor behavior.
             bool shortMode = (!verbose_ && !watchMode_ && format_ != "json" && !daemonOnly_);
             auto reqTimeout =
-                shortMode ? std::chrono::milliseconds(1500) : std::chrono::milliseconds(30000);
+                shortMode ? std::chrono::milliseconds(5000) : std::chrono::milliseconds(30000);
             cfg.requestTimeout = reqTimeout;
+            // Make connection/header/body timeouts explicit to reduce edge-case stalls
+            cfg.connectTimeout = std::chrono::milliseconds(shortMode ? 2000 : 3000);
+            cfg.headerTimeout = std::chrono::milliseconds(shortMode ? 5000 : 15000);
+            cfg.bodyTimeout = std::chrono::milliseconds(shortMode ? 15000 : 30000);
 
             yams::daemon::DaemonClient client(cfg);
 
@@ -176,6 +194,9 @@ public:
 
     // Native coroutine implementation to avoid promise bridging when runner is async
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        // Temporary mitigation: force local-only stats until daemon path bug is fixed
+        co_return executeLocal();
+
         // Apply color mode overrides (same as execute)
         if (forceColor_) {
             yams::cli::ui::set_color_mode(yams::cli::ui::ColorMode::ForceOn);
@@ -211,6 +232,9 @@ public:
             cfg.enableChunkedResponses = false;
             cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(30000);
+            cfg.connectTimeout = std::chrono::milliseconds(3000);
+            cfg.headerTimeout = std::chrono::milliseconds(15000);
+            cfg.bodyTimeout = std::chrono::milliseconds(30000);
             yams::daemon::DaemonClient client(cfg);
             auto result = co_await client.call(dreq);
             if (result)
@@ -252,84 +276,7 @@ private:
         std::cout << "  - Use 'yams stats --format json' for scriptable output\n";
         std::cout << "  - Use 'yams stats vectors' to focus on embedding coverage\n";
     }
-    Result<void> executeVectors() {
-        // For now, vectors uses the same stats request but focuses on vector data
-        yams::daemon::GetStatsRequest dreq;
-        dreq.detailed = verbose_;
-        dreq.includeCache = false; // Focus on vector-specific data
-
-        // Render lambda for results - focus on vector-related data, prefer daemon JSON
-        auto render = [&](const yams::daemon::GetStatsResponse& resp) -> Result<void> {
-            uint64_t totalDocs = resp.totalDocuments;
-            uint64_t vecSize = resp.vectorIndexSize;
-            uint64_t indexedDocs = resp.indexedDocuments;
-            auto itJson = resp.additionalStats.find("json");
-            if (itJson != resp.additionalStats.end()) {
-                try {
-                    auto j = json::parse(itJson->second);
-                    if (j.contains("total_documents"))
-                        totalDocs = j["total_documents"].get<uint64_t>();
-                    if (j.contains("vector_index_size"))
-                        vecSize = j["vector_index_size"].get<uint64_t>();
-                    if (j.contains("indexed_documents"))
-                        indexedDocs = j["indexed_documents"].get<uint64_t>();
-                } catch (...) {
-                }
-            }
-            if (format_ == "json") {
-                json output;
-                output["vectorDatabase"] = {{"indexedDocuments", indexedDocs},
-                                            {"vectorIndexSize", vecSize},
-                                            {"totalDocuments", totalDocs}};
-                std::cout << output.dump(2) << std::endl;
-            } else {
-                std::cout << "== VECTORS ==\n";
-                std::cout << "INDEX: " << formatNumber(indexedDocs) << "\n";
-                std::cout << "SIZE : " << formatSize(vecSize) << "\n";
-                if (totalDocs > 0) {
-                    double coverage =
-                        (double)indexedDocs / std::max<uint64_t>(1, totalDocs) * 100.0;
-                    std::cout << "COV  : " << std::fixed << std::setprecision(1) << coverage
-                              << "%\n";
-                }
-            }
-            return Result<void>();
-        };
-
-        // Prefer a direct daemon call (no pooling) for determinism
-        auto fallback = [&]() -> Result<void> { return executeVectorsLocal(); };
-
-        try {
-            yams::daemon::ClientConfig cfg;
-            cfg.dataDir = cli_->getDataPath();
-            cfg.enableChunkedResponses = false;
-            cfg.singleUseConnections = true;
-            cfg.requestTimeout = std::chrono::milliseconds(30000);
-            yams::daemon::DaemonClient client(cfg);
-
-            std::promise<Result<yams::daemon::GetStatsResponse>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    auto r = co_await client.call(dreq);
-                    prom.set_value(std::move(r));
-                    co_return;
-                },
-                boost::asio::detached);
-            if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-                auto result = fut.get();
-                if (result) {
-                    return render(result.value());
-                }
-            }
-            return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) unavailable"}
-                               : fallback();
-        } catch (...) {
-            return daemonOnly_ ? Error{ErrorCode::Unknown, "Daemon stats (vectors) exception"}
-                               : fallback();
-        }
-    }
+    Result<void> executeVectors() { return executeVectorsLocal(); }
 
     Result<void> executeVectorsLocal() {
         // Original local vector stats implementation

@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -181,17 +182,41 @@ std::vector<std::string> AbiModelProviderAdapter::getLoadedModels() const {
 }
 
 Result<ModelInfo> AbiModelProviderAdapter::getModelInfo(const std::string& modelName) const {
-    // Not part of v1; return minimal info if loaded
     if (!isModelLoaded(modelName))
         return Error{ErrorCode::NotFound, "Model not loaded"};
     ModelInfo info;
     info.name = modelName;
-    info.embeddingDim = getEmbeddingDim(modelName);
+    // Use v1.2 JSON if available
+    if (table_ && table_->get_runtime_info_json && table_->free_string) {
+        char* json_c = nullptr;
+        if (table_->get_runtime_info_json(table_->self, modelName.c_str(), &json_c) == YAMS_OK &&
+            json_c) {
+            try {
+                nlohmann::json j = nlohmann::json::parse(json_c);
+                if (j.contains("model"))
+                    info.name = j.value("model", info.name);
+                if (j.contains("dim"))
+                    info.embeddingDim = j.value("dim", 0ull);
+                if (j.contains("runtime_version")) {
+                    (void)j["runtime_version"]; // could be surfaced later
+                }
+            } catch (...) {
+            }
+        }
+        if (json_c)
+            table_->free_string(table_->self, json_c);
+    }
+    if (info.embeddingDim == 0)
+        info.embeddingDim = getEmbeddingDim(modelName);
     return info;
 }
 
-size_t AbiModelProviderAdapter::getEmbeddingDim(const std::string& /*modelName*/) const {
-    // Not part of v1; unknown
+size_t AbiModelProviderAdapter::getEmbeddingDim(const std::string& modelName) const {
+    if (table_ && table_->get_embedding_dim) {
+        size_t dim = 0;
+        if (table_->get_embedding_dim(table_->self, modelName.c_str(), &dim) == YAMS_OK)
+            return dim;
+    }
     return 0;
 }
 
@@ -200,7 +225,7 @@ std::string AbiModelProviderAdapter::getProviderName() const {
 }
 
 std::string AbiModelProviderAdapter::getProviderVersion() const {
-    return "v1";
+    return "v1.2";
 }
 
 bool AbiModelProviderAdapter::isAvailable() const {

@@ -182,6 +182,11 @@ public:
     // Bulk edges
     virtual Result<void> addEdges(const std::vector<KGEdge>& edges) = 0;
 
+    // Bulk edges with de-duplication: do not insert edges that already exist with the same
+    // (src_node_id, dst_node_id, relation). Implementations should perform this efficiently
+    // (e.g., INSERT ... SELECT ... WHERE NOT EXISTS) wrapped in a transaction.
+    virtual Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) = 0;
+
     // Adjacency queries
     virtual Result<std::vector<KGEdge>>
     getEdgesFrom(std::int64_t srcNodeId, std::optional<std::string_view> relation = std::nullopt,

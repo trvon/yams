@@ -1,11 +1,16 @@
+#include <yams/cli/daemon_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
+#include <yams/metadata/migration.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -533,64 +538,53 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize a single multiplexed daemon client (replaces legacy pool/managers)
+    // Initialize a single multiplexed daemon client (set dataDir for storage parity)
     {
         yams::daemon::ClientConfig cfg;
-
-        // Align daemon storage with CLI: resolve dataDir from env/config/XDG/HOME
-        std::filesystem::path dataDir;
-        if (const char* envStorage = std::getenv("YAMS_STORAGE"); envStorage && *envStorage) {
-            dataDir = envStorage;
-        } else if (const char* envData = std::getenv("YAMS_DATA_DIR"); envData && *envData) {
-            dataDir = envData;
-        } else {
-            try {
-                // Try config.toml via ConfigMigrator
+        // Resolve data root (env > config.toml core.data_dir > XDG_DATA_HOME > ~/.local/share/yams)
+        namespace fs = std::filesystem;
+        fs::path dataRoot;
+        try {
+            if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
+                if (envStorage && *envStorage)
+                    dataRoot = fs::path(envStorage);
+            }
+            if (dataRoot.empty()) {
+                fs::path configPath;
+                if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME"))
+                    configPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
+                else if (const char* homeEnv = std::getenv("HOME"))
+                    configPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
                 std::map<std::string, std::map<std::string, std::string>> toml;
-                std::filesystem::path configPath;
-                if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-                    configPath = std::filesystem::path(xdgConfigHome) / "yams" / "config.toml";
-                } else if (const char* homeEnv = std::getenv("HOME")) {
-                    configPath =
-                        std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
-                }
-                if (!configPath.empty() && std::filesystem::exists(configPath)) {
+                if (!configPath.empty() && fs::exists(configPath)) {
                     yams::config::ConfigMigrator migrator;
-                    if (auto parsed = migrator.parseTomlConfig(configPath)) {
+                    if (auto parsed = migrator.parseTomlConfig(configPath))
                         toml = std::move(parsed.value());
-                    }
                 }
-                if (auto it = toml.find("core"); it != toml.end()) {
+                if (auto it = toml.find("core"); dataRoot.empty() && it != toml.end()) {
                     const auto& core = it->second;
                     if (auto f = core.find("data_dir"); f != core.end() && !f->second.empty()) {
                         std::string p = f->second;
                         if (!p.empty() && p.front() == '~') {
-                            if (const char* home = std::getenv("HOME")) {
+                            if (const char* home = std::getenv("HOME"))
                                 p = std::string(home) + p.substr(1);
-                            }
                         }
-                        dataDir = std::filesystem::path(p);
+                        dataRoot = fs::path(p);
                     }
                 }
-            } catch (...) {
-                // ignore config errors
             }
-            if (dataDir.empty()) {
-                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-                    dataDir = std::filesystem::path(xdgDataHome) / "yams";
-                } else if (const char* homeEnv = std::getenv("HOME")) {
-                    dataDir = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
-                }
+            if (dataRoot.empty()) {
+                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME"))
+                    dataRoot = fs::path(xdgDataHome) / "yams";
+                else if (const char* homeEnv = std::getenv("HOME"))
+                    dataRoot = fs::path(homeEnv) / ".local" / "share" / "yams";
+                else
+                    dataRoot = fs::current_path() / "yams_data";
             }
+        } catch (...) {
+            // leave dataRoot empty on error; daemon will still resolve
         }
-        if (!dataDir.empty()) {
-            cfg.dataDir = dataDir;
-#ifndef _WIN32
-            ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
-            ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
-#endif
-        }
-
+        cfg.dataDir = dataRoot;
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
         cfg.requestTimeout = std::chrono::seconds(30);
@@ -739,7 +733,21 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
             }
         }).detach();
     }
-    startThreadPool(4);
+    // Size worker pool: prefer TuneAdvisor setting, else ~25% of cores clamped [2..8]
+    try {
+        using TA = yams::daemon::TuneAdvisor;
+        uint32_t taThreads = 0;
+        try {
+            taThreads = TA::mcpWorkerThreads();
+        } catch (...) {
+        }
+        unsigned hw = std::thread::hardware_concurrency();
+        std::size_t threads = taThreads ? static_cast<std::size_t>(taThreads)
+                                        : std::clamp<std::size_t>(hw ? (hw / 4u) : 2u, 2u, 8u);
+        startThreadPool(threads);
+    } catch (...) {
+        startThreadPool(4);
+    }
 }
 
 MCPServer::~MCPServer() {
@@ -808,22 +816,65 @@ void MCPServer::start() {
                 continue; // do not send a response (required by spec)
             }
 
-            // All handling is now synchronous within this loop
-            auto response = handleRequest(request);
-            if (response) {
-                if (!isNotification) {
-                    sendResponse(response.value());
-                }
+            // Extract method/params for routing
+            std::string method = request.value("method", "");
+            json params = request.value("params", json::object());
+
+            // Dispatch request handling to the MCP worker pool to keep the main loop responsive.
+            // Notifications are handled inline without a response.
+            if (isNotification) {
+                (void)handleRequest(request); // best-effort side-effects
+            } else if (method == "tools/call") {
+                // Fully async tools/call path: avoid promise/future bridge
+                const auto toolName = params.value("name", "");
+                const auto toolArgs = params.value("arguments", json::object());
+                auto id_copy = request.value("id", json{});
+                // Emit start progress
+                sendProgress("tool", 0.0, std::string("calling ") + toolName);
+                auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+                boost::asio::co_spawn(
+                    io,
+                    [this, toolName, toolArgs, id_copy]() -> boost::asio::awaitable<void> {
+                        try {
+                            json raw = co_await callToolAsync(toolName, toolArgs);
+                            if (raw.is_object() && raw.contains("error")) {
+                                json err = raw["error"];
+                                sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                              {"error", err},
+                                              {"id", id_copy}});
+                            } else {
+                                sendResponse(createResponse(id_copy, raw));
+                            }
+                            sendProgress("tool", 100.0, std::string("completed ") + toolName);
+                        } catch (const std::exception& e) {
+                            json err = {{"code", -32603}, {"message", e.what()}};
+                            sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                          {"error", err},
+                                          {"id", id_copy}});
+                        } catch (...) {
+                            json err = {{"code", -32603}, {"message", "Tool call failed"}};
+                            sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                          {"error", err},
+                                          {"id", id_copy}});
+                        }
+                        co_return;
+                    },
+                    boost::asio::detached);
             } else {
-                if (!isNotification) {
-                    const auto& error = response.error();
-                    json errorResponse = {
-                        {"jsonrpc", protocol::JSONRPC_VERSION},
-                        {"error",
-                         {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
-                        {"id", request.value("id", nullptr)}};
-                    sendResponse(errorResponse);
-                }
+                enqueueTask([this, req = request]() mutable {
+                    auto response = handleRequest(req);
+                    if (response) {
+                        sendResponse(response.value());
+                    } else {
+                        const auto& error = response.error();
+                        json errorResponse = {
+                            {"jsonrpc", protocol::JSONRPC_VERSION},
+                            {"error",
+                             {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
+                            {"id", req.value("id", nullptr)}};
+                        sendResponse(errorResponse);
+                    }
+                });
             }
         }
     } catch (const std::exception& e) {
@@ -1218,6 +1269,12 @@ json MCPServer::listResources() {
                          {"description", "Current YAMS storage statistics and health status"},
                          {"mimeType", "application/json"}});
 
+    // Daemon status (symmetry with stats)
+    resources.push_back({{"uri", "yams://status"},
+                         {"name", "Daemon Status"},
+                         {"description", "YAMS daemon status and readiness metrics"},
+                         {"mimeType", "application/json"}});
+
     // Add a resource for recent documents
     resources.push_back({{"uri", "yams://recent"},
                          {"name", "Recent Documents"},
@@ -1253,6 +1310,57 @@ json MCPServer::readResource(const std::string& uri) {
                                     {"warnings", health.warnings},
                                     {"errors", health.errors}}}})
                                 .dump()}}}}};
+    } else if (uri == "yams://status") {
+        try {
+            if (!daemon_client_)
+                daemon_client_ = std::make_shared<yams::daemon::DaemonClient>();
+            auto st = yams::cli::run_result(daemon_client_->status(), std::chrono::seconds(3));
+            if (!st) {
+                return {{"contents",
+                         {{{"uri", uri},
+                           {"mimeType", "application/json"},
+                           {"text",
+                            json({{"error", std::string("status error: ") + st.error().message}})
+                                .dump()}}}}};
+            }
+            const auto& s = st.value();
+            json j;
+            j["running"] = s.running;
+            j["ready"] = s.ready;
+            j["uptimeSeconds"] = s.uptimeSeconds;
+            j["requestsProcessed"] = s.requestsProcessed;
+            j["activeConnections"] = s.activeConnections;
+            j["memoryUsageMb"] = s.memoryUsageMb;
+            j["cpuUsagePercent"] = s.cpuUsagePercent;
+            j["version"] = s.version;
+            j["overallStatus"] = s.overallStatus;
+            j["lifecycleState"] = s.lifecycleState;
+            j["lastError"] = s.lastError;
+            j["readinessStates"] = s.readinessStates;
+            j["initProgress"] = s.initProgress;
+            j["counters"] = s.requestCounts;
+            // Also include MCP worker counters
+            try {
+                size_t queued = 0;
+                {
+                    std::lock_guard<std::mutex> lk(taskMutex_);
+                    queued = taskQueue_.size();
+                }
+                j["counters"]["mcp_worker_threads"] = workerPool_.size();
+                j["counters"]["mcp_worker_active"] = mcpWorkerActive_.load();
+                j["counters"]["mcp_worker_queued"] = queued;
+                j["counters"]["mcp_worker_processed"] = mcpWorkerProcessed_.load();
+                j["counters"]["mcp_worker_failed"] = mcpWorkerFailed_.load();
+            } catch (...) {
+            }
+            return {{"contents",
+                     {{{"uri", uri}, {"mimeType", "application/json"}, {"text", j.dump()}}}}};
+        } catch (...) {
+            return {{"contents",
+                     {{{"uri", uri},
+                       {"mimeType", "application/json"},
+                       {"text", json({{"error", "status exception"}}).dump()}}}}};
+        }
     } else if (uri == "yams://recent") {
         // Get recent documents
         if (!metadataRepo_) {
@@ -2060,6 +2168,16 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
     }
 }
 
+boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
+                                                      const json& arguments) {
+    spdlog::debug("MCP callToolAsync invoked: '{}'", name);
+    if (!toolRegistry_) {
+        co_return json{{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
+    }
+    auto result = co_await toolRegistry_->callTool(name, arguments);
+    co_return result;
+}
+
 // Modern C++20 tool handler implementations
 boost::asio::awaitable<Result<MCPSearchResponse>>
 MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
@@ -2188,11 +2306,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
     // Parity with CLI: race streaming vs delayed unary and use whichever returns first.
     // Body timeout may be overridden via env YAMS_MCP_SEARCH_BODY_TIMEOUT_MS (default 60000).
-    auto callOnce = [&](const yams::daemon::SearchRequest& rq)
-        -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
-        co_return co_await daemon_client_->streamingSearch(rq);
-    };
-
     Result<yams::daemon::SearchResponse> res(Error{ErrorCode::Unknown, "uninitialized"});
     {
         std::shared_ptr<std::atomic_bool> decided = std::make_shared<std::atomic_bool>(false);
@@ -2706,19 +2819,29 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
                           req.snapshotLabel);
         }
         daemon::AddDocumentRequest addReq;
-        // Resolve stored path to absolute under YAMS_STORAGE (or standard data dir) if relative
+        // Resolve stored path to absolute under daemon-resolved content store root if relative
         std::filesystem::path __abs = std::filesystem::path(mcp_response.storedPath);
         if (__abs.is_relative()) {
             std::filesystem::path __base;
-            if (const char* envStorage = std::getenv("YAMS_STORAGE"); envStorage && *envStorage) {
-                __base = std::filesystem::path(envStorage);
-            } else if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-                       xdgDataHome && *xdgDataHome) {
-                __base = std::filesystem::path(xdgDataHome) / "yams";
-            } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
-                __base = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
-            } else {
-                __base = std::filesystem::current_path();
+            try {
+                auto sres = co_await daemon_client_->status();
+                if (sres) {
+                    const auto& s = sres.value();
+                    if (!s.contentStoreRoot.empty()) {
+                        __base = std::filesystem::path(s.contentStoreRoot).parent_path();
+                    }
+                }
+            } catch (...) {
+            }
+            if (__base.empty()) {
+                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+                    xdgDataHome && *xdgDataHome) {
+                    __base = std::filesystem::path(xdgDataHome) / "yams";
+                } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
+                    __base = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
+                } else {
+                    __base = std::filesystem::current_path();
+                }
             }
             __abs = __base / __abs;
         }
@@ -2819,6 +2942,24 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
         for (const auto& [k, v] : req.metadata)
             addReq.metadata[k] = v;
 
+        // Preflight: require daemon content_store readiness
+        try {
+            auto sres = co_await daemon_client_->status();
+            if (!sres)
+                co_return sres.error();
+            const auto& s = sres.value();
+            bool csr = false;
+            if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
+                csr = it->second;
+            if (!csr) {
+                std::string hint = "Content store not ready. Check daemon status and config.";
+                if (!s.contentStoreError.empty())
+                    hint += std::string(" Error: ") + s.contentStoreError;
+                co_return Error{ErrorCode::InvalidState, hint};
+            }
+        } catch (...) {
+            co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
+        }
         // Call daemon to add/index the downloaded document
         auto addres = co_await daemon_client_->streamingAddDocument(addReq);
         if (!addres) {
@@ -2837,6 +2978,24 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
 
 boost::asio::awaitable<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
+    // Preflight: require daemon content_store readiness
+    try {
+        auto sres = co_await daemon_client_->status();
+        if (!sres)
+            co_return sres.error();
+        const auto& s = sres.value();
+        bool csr = false;
+        if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
+            csr = it->second;
+        if (!csr) {
+            std::string hint = "Content store not ready. Check daemon status and config.";
+            if (!s.contentStoreError.empty())
+                hint += std::string(" Error: ") + s.contentStoreError;
+            co_return Error{ErrorCode::InvalidState, hint};
+        }
+    } catch (...) {
+        co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
+    }
     // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
     // Normalize path: expand '~' and make absolute using PWD for relative paths
@@ -2919,9 +3078,9 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             daemon_req.metadata[key] = value.dump();
         }
     }
-    // Increase daemon timeouts for potentially long single-file adds
-    daemon_client_->setHeaderTimeout(std::chrono::seconds(60));
-    daemon_client_->setBodyTimeout(std::chrono::seconds(300));
+    // Prefer fast unary call first with short timeouts; fall back to streaming if needed
+    daemon_client_->setHeaderTimeout(std::chrono::seconds(5));
+    daemon_client_->setBodyTimeout(std::chrono::seconds(30));
     // Validate that the target file path exists and is not a directory. However, if the user
     // supplied inline content AND the provided path resolves to a directory, we will gracefully
     // downgrade this to a content-only add instead of returning an error. This improves UX for
@@ -2946,7 +3105,18 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             }
         }
     }
-    // Try daemon-first add with streaming; on failure, fall back to local service store.
+    // 1) Unary call (non-streaming) for single-shot response
+    auto ures = co_await daemon_client_->call(daemon_req);
+    if (ures) {
+        MCPStoreDocumentResponse out;
+        const auto& add = ures.value();
+        out.hash = add.hash;
+        out.bytesStored = 0;
+        out.bytesDeduped = 0;
+        co_return out;
+    }
+    spdlog::warn("[MCP] add: unary path failed ({}); trying streaming", ures.error().message);
+    // 2) Streaming fallback with the same short caps
     auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
     if (dres) {
         MCPStoreDocumentResponse out;
@@ -3149,36 +3319,93 @@ MCPServer::handleGetStats(const MCPStatsRequest& req) {
     co_return out;
 }
 
+boost::asio::awaitable<Result<MCPStatusResponse>>
+MCPServer::handleGetStatus(const MCPStatusRequest& req) {
+    (void)req;
+    auto sres = co_await daemon_client_->status();
+    if (!sres)
+        co_return sres.error();
+    const auto& s = sres.value();
+    MCPStatusResponse out;
+    out.running = s.running;
+    out.ready = s.ready;
+    out.overallStatus = s.overallStatus;
+    out.lifecycleState = s.lifecycleState;
+    out.lastError = s.lastError;
+    out.version = s.version;
+    out.uptimeSeconds = s.uptimeSeconds;
+    out.requestsProcessed = s.requestsProcessed;
+    out.activeConnections = s.activeConnections;
+    out.memoryUsageMb = s.memoryUsageMb;
+    out.cpuUsagePercent = s.cpuUsagePercent;
+    out.counters = s.requestCounts;
+    // Merge MCP worker pool counters for observability
+    try {
+        // queued size snapshot under lock
+        size_t queued = 0;
+        {
+            std::lock_guard<std::mutex> lk(taskMutex_);
+            queued = taskQueue_.size();
+        }
+        out.counters["mcp_worker_threads"] = workerPool_.size();
+        out.counters["mcp_worker_active"] = mcpWorkerActive_.load();
+        out.counters["mcp_worker_queued"] = queued;
+        out.counters["mcp_worker_processed"] = mcpWorkerProcessed_.load();
+        out.counters["mcp_worker_failed"] = mcpWorkerFailed_.load();
+    } catch (...) {
+    }
+    out.readinessStates = s.readinessStates;
+    out.initProgress = s.initProgress;
+    co_return out;
+}
+
 boost::asio::awaitable<Result<MCPAddDirectoryResponse>>
 MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
-    // Use app::services IndexingService to add directory contents
-    auto indexingService = app::services::makeIndexingService(appContext_);
-    if (!indexingService) {
-        co_return Error{ErrorCode::NotInitialized, "Indexing service not available"};
-    }
-
-    app::services::AddDirectoryRequest sreq;
-    sreq.directoryPath = req.directoryPath;
-    sreq.collection = req.collection;
-    sreq.includePatterns = req.includePatterns;
-    sreq.excludePatterns = req.excludePatterns;
-    sreq.recursive = req.recursive;
-    sreq.followSymlinks = req.followSymlinks;
-
-    // Convert metadata and enrich with snapshot/tags when provided
-    for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string()) {
-            sreq.metadata[key] = value.get<std::string>();
-        } else {
-            sreq.metadata[key] = value.dump();
+    // Preflight: require daemon content_store readiness; avoid any local fallback
+    try {
+        auto sres = co_await daemon_client_->status();
+        if (!sres)
+            co_return sres.error();
+        const auto& s = sres.value();
+        bool csr = false;
+        if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
+            csr = it->second;
+        if (!csr) {
+            std::string hint = "Content store not ready. Check daemon status and config.";
+            if (!s.contentStoreError.empty())
+                hint += std::string(" Error: ") + s.contentStoreError;
+            co_return Error{ErrorCode::InvalidState, hint};
         }
+    } catch (...) {
+        // If status fails unexpectedly, return a clear error instead of attempting local work
+        co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
     }
-    if (!req.snapshotId.empty()) {
-        sreq.metadata["snapshot_id"] = req.snapshotId;
+    // Prefer daemon-side directory add to ensure post-ingest queue and graph/indexing are engaged.
+    // Build a daemon AddDocumentRequest targeting the directory with recursive patterns.
+    daemon::AddDocumentRequest addReq;
+    // Normalize directory path similar to add() path normalization
+    std::string path = req.directoryPath;
+    if (!path.empty() && path.rfind("file://", 0) == 0)
+        path = path.substr(7);
+    if (!path.empty() && path.front() == '~') {
+        if (const char* home = std::getenv("HOME"))
+            path = std::string(home) + path.substr(1);
     }
-    if (!req.snapshotLabel.empty()) {
-        sreq.metadata["snapshot_label"] = req.snapshotLabel;
+    if (!path.empty() && path.front() != '/') {
+        std::filesystem::path base = std::filesystem::current_path();
+        std::filesystem::path cand = base / path;
+        std::error_code ec;
+        auto canon = std::filesystem::weakly_canonical(cand, ec);
+        path = (!ec && !canon.empty()) ? canon.string() : cand.string();
     }
+    addReq.path = path;
+    addReq.recursive = req.recursive;
+    addReq.includePatterns = req.includePatterns;
+    addReq.excludePatterns = req.excludePatterns;
+    addReq.collection = req.collection;
+    addReq.snapshotId = req.snapshotId;
+    addReq.snapshotLabel = req.snapshotLabel;
+    // Preserve tags in metadata (IndexingService consumes tags via metadata in daemon path)
     if (!req.tags.empty()) {
         std::string joined;
         for (size_t i = 0; i < req.tags.size(); ++i) {
@@ -3186,36 +3413,107 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
                 joined += ",";
             joined += req.tags[i];
         }
-        sreq.metadata["tags"] = joined;
+        addReq.metadata["tags"] = joined;
     }
-
-    auto sres = indexingService->addDirectory(sreq);
-    if (!sres) {
-        co_return sres.error();
+    for (const auto& [k, v] : req.metadata.items()) {
+        if (v.is_string())
+            addReq.metadata[k] = v.get<std::string>();
+        else
+            addReq.metadata[k] = v.dump();
     }
-
+    // Defer extraction to daemon post-ingest queue for speed
+    addReq.noEmbeddings = false; // allow embeddings policy to decide later
+    // Call daemon (streamingAddDocument handles directory on daemon side)
+    auto dres = co_await daemon_client_->streamingAddDocument(addReq);
+    if (!dres) {
+        co_return dres.error();
+    }
+    const auto& ar = dres.value();
     MCPAddDirectoryResponse out;
-    const auto& resp = sres.value();
-    out.directoryPath = resp.directoryPath;
-    out.collection = resp.collection;
-    out.filesProcessed = resp.filesProcessed;
-    out.filesIndexed = resp.filesIndexed;
-    out.filesSkipped = resp.filesSkipped;
-    out.filesFailed = resp.filesFailed;
+    out.directoryPath = req.directoryPath;
+    out.collection = req.collection;
+    out.filesProcessed = ar.documentsAdded; // daemon returns documentsAdded for dir case
+    out.filesIndexed = ar.documentsAdded;
+    out.filesSkipped = 0;
+    out.filesFailed = 0;
+    // Results are not returned by daemon; leave empty for now
+    co_return out;
+}
 
-    out.results.clear();
-    for (const auto& r : resp.results) {
-        json j;
-        j["path"] = r.path;
-        j["hash"] = r.hash;
-        j["size_bytes"] = r.sizeBytes;
-        j["success"] = r.success;
-        if (r.error.has_value()) {
-            j["error"] = *r.error;
+boost::asio::awaitable<Result<MCPDoctorResponse>>
+MCPServer::handleDoctor(const MCPDoctorRequest& req) {
+    (void)req;
+    // Fetch daemon status first
+    auto sres = co_await daemon_client_->status();
+    if (!sres)
+        co_return sres.error();
+    const auto& s = sres.value();
+
+    MCPDoctorResponse out;
+    std::vector<std::string> issues;
+    json details;
+    details["overallStatus"] = s.overallStatus;
+    details["lifecycleState"] = s.lifecycleState;
+    details["lastError"] = s.lastError;
+    details["readiness"] = s.readinessStates;
+    details["counters"] = s.requestCounts;
+
+    if (!s.running) {
+        issues.push_back("daemon_not_running");
+    }
+    if (!s.ready) {
+        issues.push_back("daemon_not_ready");
+        for (const auto& [k, v] : s.readinessStates) {
+            if (!v)
+                issues.push_back(std::string("subsystem_not_ready:") + k);
         }
-        out.results.push_back(std::move(j));
+    }
+    if (s.requestCounts.count("post_ingest_queued") &&
+        s.requestCounts.at("post_ingest_queued") > 1000) {
+        issues.push_back("post_ingest_backlog_high");
+    }
+    if (s.requestCounts.count("worker_queued") && s.requestCounts.at("worker_queued") > 1000) {
+        issues.push_back("worker_queue_high");
+    }
+    if (s.readinessStates.count("vector_embeddings_available") &&
+        !s.readinessStates.at("vector_embeddings_available")) {
+        issues.push_back("vector_embeddings_unavailable");
     }
 
+    // Suggestions
+    std::vector<std::string> suggestions;
+    for (const auto& iss : issues) {
+        if (iss == "vector_embeddings_unavailable") {
+            suggestions.push_back(
+                "Load or initialize an embedding model; check plugins and model provider logs.");
+        } else if (iss.rfind("subsystem_not_ready:", 0) == 0) {
+            suggestions.push_back(
+                "Review logs for the listed subsystem and ensure dependencies are initialized.");
+        } else if (iss == "post_ingest_backlog_high") {
+            suggestions.push_back("Increase post-ingest threads via TuneAdvisor or pause adds "
+                                  "until the queue drains.");
+        } else if (iss == "worker_queue_high") {
+            suggestions.push_back(
+                "Reduce parallel requests or increase worker threads via TuneAdvisor.");
+        } else if (iss == "daemon_not_ready") {
+            suggestions.push_back(
+                "Wait for initialization to complete or investigate lifecycle lastError.");
+        } else if (iss == "daemon_not_running") {
+            suggestions.push_back("Start or restart the daemon.");
+        }
+    }
+
+    // Build summary
+    std::string summary;
+    if (issues.empty()) {
+        summary = "All systems nominal.";
+    } else {
+        summary = std::to_string(issues.size()) + " issue(s) detected.";
+    }
+    details["suggestions"] = suggestions;
+    out.summary = summary;
+    out.issues = std::move(issues);
+    out.details = std::move(details);
     co_return out;
 }
 
@@ -3567,6 +3865,24 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "Include verbose statistics"},
                  {"default", false}}}}}},
         "Get storage statistics including deduplication savings and file type breakdown");
+
+    toolRegistry_->registerTool<MCPStatusRequest, MCPStatusResponse>(
+        "status", [this](const MCPStatusRequest& req) { return handleGetStatus(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"detailed",
+                {{"type", "boolean"},
+                 {"description", "Include verbose metrics"},
+                 {"default", false}}}}}},
+        "Get daemon status, readiness, and metrics");
+
+    toolRegistry_->registerTool<MCPDoctorRequest, MCPDoctorResponse>(
+        "doctor", [this](const MCPDoctorRequest& req) { return handleDoctor(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"verbose",
+                {{"type", "boolean"}, {"description", "Verbose output"}, {"default", true}}}}}},
+        "Diagnose daemon readiness and provide actionable suggestions");
 
     toolRegistry_->registerTool<MCPAddDirectoryRequest, MCPAddDirectoryResponse>(
         "add_directory",
@@ -4359,11 +4675,15 @@ void MCPServer::startThreadPool(std::size_t threads) {
                     task = std::move(taskQueue_.front());
                     taskQueue_.pop_front();
                 }
+                mcpWorkerActive_.fetch_add(1, std::memory_order_relaxed);
                 try {
                     task();
+                    mcpWorkerProcessed_.fetch_add(1, std::memory_order_relaxed);
                 } catch (...) {
+                    mcpWorkerFailed_.fetch_add(1, std::memory_order_relaxed);
                     // Swallow to keep worker alive
                 }
+                mcpWorkerActive_.fetch_sub(1, std::memory_order_relaxed);
             }
         });
     }

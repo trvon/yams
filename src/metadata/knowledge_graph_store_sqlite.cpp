@@ -582,6 +582,74 @@ public:
         });
     }
 
+    Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) override {
+        if (edges.empty())
+            return Result<void>();
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            return db.transaction([&]() -> Result<void> {
+                // Use INSERT ... SELECT ... WHERE NOT EXISTS to avoid duplicates without requiring
+                // a unique index
+                auto stmtR = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, "
+                                        "weight, created_time, properties) "
+                                        "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                                        "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND "
+                                        "dst_node_id = ? AND relation = ?"
+                                        ")");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+
+                for (const auto& e : edges) {
+                    auto br = stmt.clearBindings();
+                    if (!br)
+                        return br.error();
+                    // Insert value params
+                    br = stmt.bind(1, e.srcNodeId);
+                    if (!br)
+                        return br.error();
+                    br = stmt.bind(2, e.dstNodeId);
+                    if (!br)
+                        return br.error();
+                    br = stmt.bind(3, e.relation);
+                    if (!br)
+                        return br.error();
+                    br = stmt.bind(4, static_cast<double>(e.weight));
+                    if (!br)
+                        return br.error();
+                    if (e.createdTime.has_value())
+                        br = stmt.bind(5, e.createdTime.value());
+                    else
+                        br = stmt.bind(5, nullptr);
+                    if (!br)
+                        return br.error();
+                    if (e.properties.has_value())
+                        br = stmt.bind(6, e.properties.value());
+                    else
+                        br = stmt.bind(6, nullptr);
+                    if (!br)
+                        return br.error();
+                    // WHERE NOT EXISTS params
+                    br = stmt.bind(7, e.srcNodeId);
+                    if (!br)
+                        return br.error();
+                    br = stmt.bind(8, e.dstNodeId);
+                    if (!br)
+                        return br.error();
+                    br = stmt.bind(9, e.relation);
+                    if (!br)
+                        return br.error();
+                    auto ex = stmt.execute();
+                    if (!ex)
+                        return ex.error();
+                    auto rr = stmt.reset();
+                    if (!rr)
+                        return rr;
+                }
+                return Result<void>();
+            });
+        });
+    }
+
     Result<std::vector<KGEdge>> getEdgesFrom(std::int64_t srcNodeId,
                                              std::optional<std::string_view> relation,
                                              std::size_t limit, std::size_t offset) override {

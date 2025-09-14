@@ -209,6 +209,41 @@ Env:
             ->default_val("names")
             ->check(CLI::IsMember({"names", "paths", "hashes"}));
         emitCmd->callback([this]() { this->mode_ = Mode::Emit; });
+
+        // Watch controls (Phase 1: config only; daemon monitor to consume settings)
+        auto* watchCmd = cmd->add_subcommand("watch", "Configure session auto-ingest watch");
+        bool start = false, stop = false;
+        std::string whichSession;
+        uint32_t intervalMs = 0;
+        watchCmd->add_flag("--start", start, "Enable watch for the session");
+        watchCmd->add_flag("--stop", stop, "Disable watch for the session");
+        watchCmd->add_option("--interval", intervalMs, "Polling interval in ms (set)");
+        watchCmd->add_option("--session", whichSession, "Target session (default: current)");
+        watchCmd->callback([this, &start, &stop, &whichSession, &intervalMs]() {
+            auto svc = sessionSvc();
+            if (!svc) {
+                std::cout << "Session service unavailable\n";
+                return;
+            }
+            std::optional<std::string> name =
+                whichSession.empty() ? std::nullopt : std::optional<std::string>(whichSession);
+            if (intervalMs > 0)
+                svc->setWatchIntervalMs(intervalMs, name);
+            if (start && stop) {
+                std::cout << "Specify only one of --start/--stop\n";
+                return;
+            }
+            if (start)
+                svc->enableWatch(true, name);
+            else if (stop)
+                svc->enableWatch(false, name);
+            // Status output
+            bool enabled = svc->watchEnabled(name);
+            uint32_t curMs = svc->watchIntervalMs(name);
+            auto sess = name ? *name : (svc->current().value_or(std::string{"(none)"}));
+            std::cout << "Watch: " << (enabled ? "enabled" : "disabled") << ", interval=" << curMs
+                      << " ms, session='" << sess << "'\n";
+        });
     }
 
     Result<void> execute() override {

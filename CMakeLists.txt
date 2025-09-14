@@ -48,12 +48,29 @@ project(YAMS
 # ----------------------------------------------------------------------------
 option(YAMS_ENABLE_CCACHE "Enable ccache compiler launcher when available" ON)
 if(YAMS_ENABLE_CCACHE)
+    # Detect if a preset/user forced a launcher to 'ccache' but it's not actually available.
+    # If so, gracefully unset to prevent build failures like "ccache: not found" on CI runners.
+    set(_YAMS_PRESET_WANTS_CCACHE OFF)
+    foreach(_lang C CXX)
+        if(DEFINED CMAKE_${_lang}_COMPILER_LAUNCHER)
+            string(FIND "${CMAKE_${_lang}_COMPILER_LAUNCHER}" "ccache" _pos)
+            if(NOT _pos EQUAL -1)
+                set(_YAMS_PRESET_WANTS_CCACHE ON)
+            endif()
+        endif()
+    endforeach()
+
     find_program(CCACHE_PROGRAM ccache)
     if(CCACHE_PROGRAM)
         message(STATUS "ccache found: ${CCACHE_PROGRAM} (compiler launcher enabled)")
         set(CMAKE_C_COMPILER_LAUNCHER   ${CCACHE_PROGRAM})
         set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
     else()
+        if(_YAMS_PRESET_WANTS_CCACHE)
+            message(WARNING "CMAKE_*_COMPILER_LAUNCHER requested 'ccache' but it is not installed; unsetting launcher to continue without ccache")
+            unset(CMAKE_C_COMPILER_LAUNCHER)
+            unset(CMAKE_CXX_COMPILER_LAUNCHER)
+        endif()
         if(DEFINED ENV{YAMS_FORCE_CCACHE} OR DEFINED ENV{CCACHE})
             message(WARNING "ccache requested (YAMS_FORCE_CCACHE/CCACHE set) but not found in PATH; continuing without it")
         else()
@@ -204,7 +221,7 @@ option(YAMS_ENABLE_APPLE_SILICON_OPTIMIZATIONS "Enable Apple Silicon optimizatio
 option(YAMS_CLANG_USE_LIBCXX "Use libc++ with Clang (Linux requires libc++ dev packages)" OFF)
 option(YAMS_BUILD_API_DOCS "Build Doxygen API documentation" OFF)
 # Build a bundled ONNX Runtime from source if Conan/on-system package lacks required GenAI headers
-option(YAMS_BUILD_INTERNAL_ONNXRUNTIME "Fetch and build an internal ONNX Runtime (fallback when external package lacks GenAI headers)" OFF)
+## Removed: internal ONNX Runtime build path (previously YAMS_BUILD_INTERNAL_ONNXRUNTIME / YAMS_INTERNAL_ORT_VERSION)
 
 # ------------------------------------------------------------------------------
 # Docs build (Pandoc) and embedded CLI help assets
@@ -769,7 +786,11 @@ if(YAMS_USE_CONAN)
     find_package(Protobuf REQUIRED)
     find_package(OpenSSL REQUIRED)
     if(YAMS_ENABLE_ONNX)
-        find_package(onnxruntime REQUIRED)
+    # Avoid hard-failing if onnxruntime package missing; emit guidance and continue (features stubbed).
+        find_package(onnxruntime QUIET)
+        if(NOT onnxruntime_FOUND)
+            message(WARNING "Conan build: onnxruntime package missing but YAMS_ENABLE_ONNX=ON. Add the onnxruntime package to your Conan profile or disable YAMS_ENABLE_ONNX.")
+        endif()
     endif()
     find_package(tl-expected REQUIRED)
     # Boost headers (for Asio) are provided by Conan; import targets to expose include dirs

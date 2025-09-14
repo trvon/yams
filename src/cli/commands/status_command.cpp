@@ -123,6 +123,29 @@ public:
                             }
                             j["plugins"] = std::move(pv);
                         }
+                        // Embedding runtime telemetry
+                        {
+                            nlohmann::json er;
+                            er["available"] = s.embeddingAvailable;
+                            er["backend"] = s.embeddingBackend;
+                            er["model"] = s.embeddingModel;
+                            er["path"] = s.embeddingModelPath;
+                            er["dim"] = s.embeddingDim;
+                            er["intra_threads"] = s.embeddingThreadsIntra;
+                            er["inter_threads"] = s.embeddingThreadsInter;
+                            j["embedding"] = std::move(er);
+                        }
+                        // Embedding runtime telemetry (daemon)
+                        {
+                            nlohmann::json er = nlohmann::json::object();
+                            er["available"] = s.embeddingAvailable;
+                            er["backend"] = s.embeddingBackend;
+                            er["model"] = s.embeddingModel;
+                            er["dim"] = s.embeddingDim;
+                            er["intra_threads"] = s.embeddingThreadsIntra;
+                            er["inter_threads"] = s.embeddingThreadsInter;
+                            j["embedding"] = std::move(er);
+                        }
                         std::cout << j.dump(2) << std::endl;
                     } else {
                         std::cout << "== DAEMON STATUS ==\n";
@@ -163,6 +186,21 @@ public:
                             }
                             std::cout << "\n";
                         }
+                        // Embedding runtime summary
+                        std::cout << "EMBED: "
+                                  << (s.embeddingAvailable ? "available" : "unavailable");
+                        if (!s.embeddingBackend.empty())
+                            std::cout << ", backend=" << s.embeddingBackend;
+                        if (!s.embeddingModel.empty())
+                            std::cout << ", model='" << s.embeddingModel << "'";
+                        if (!s.embeddingModelPath.empty())
+                            std::cout << ", path='" << s.embeddingModelPath << "'";
+                        if (s.embeddingDim > 0)
+                            std::cout << ", dim=" << s.embeddingDim;
+                        if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0)
+                            std::cout << ", threads=" << s.embeddingThreadsIntra << "/"
+                                      << s.embeddingThreadsInter;
+                        std::cout << "\n";
                     }
                     // In verbose mode, pull vector DB quick stats (size + rows) from daemon stats
                     if (!jsonOutput_ && verbose_) {

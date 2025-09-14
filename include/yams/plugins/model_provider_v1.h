@@ -11,7 +11,7 @@ extern "C" {
 
 // Interface identity
 #define YAMS_IFACE_MODEL_PROVIDER_V1 "model_provider_v1"
-#define YAMS_IFACE_MODEL_PROVIDER_V1_VERSION 1u
+#define YAMS_IFACE_MODEL_PROVIDER_V1_VERSION 2u
 
 // Status codes (int ABI)
 enum yams_status_e {
@@ -89,6 +89,22 @@ typedef struct yams_model_provider_v1 {
                                               size_t* out_dim);
 
     void (*free_embedding_batch)(void* self, float* vecs, size_t batch, size_t dim);
+
+    // v1.2 extensions (non-breaking for unstable pre-release):
+    // Retrieve embedding dimension for a loaded model (fast path when known)
+    yams_status_t (*get_embedding_dim)(void* self, const char* model_id, size_t* out_dim);
+
+    // Optional: return runtime/model info as JSON string. The host will free via free_string.
+    // Suggested keys: backend (e.g., "onnxruntime"|"genai"), pipeline ("raw_ort"|"genai"),
+    // model, dim, intra_threads, inter_threads, runtime_version.
+    yams_status_t (*get_runtime_info_json)(void* self, const char* model_id, char** out_json);
+
+    // Free a string allocated by the plugin (paired with get_runtime_info_json)
+    void (*free_string)(void* self, char* s);
+
+    // Optional: set threading parameters for a model or provider (no-op if unsupported)
+    yams_status_t (*set_threading)(void* self, const char* model_id, int intra_threads,
+                                   int inter_threads);
 } yams_model_provider_v1;
 
 #ifdef __cplusplus

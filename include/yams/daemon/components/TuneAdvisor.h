@@ -300,6 +300,45 @@ public:
         return def;
     }
 
+    // -------- Code-controlled worker sizing (no env steering) --------
+    // When non-zero, components should prefer these values over heuristics.
+    static uint32_t postIngestThreads() {
+        return postIngestThreads_.load(std::memory_order_relaxed);
+    }
+    static void setPostIngestThreads(uint32_t n) {
+        postIngestThreads_.store(n, std::memory_order_relaxed);
+    }
+    static uint32_t mcpWorkerThreads() { return mcpWorkerThreads_.load(std::memory_order_relaxed); }
+    static void setMcpWorkerThreads(uint32_t n) {
+        mcpWorkerThreads_.store(n, std::memory_order_relaxed);
+    }
+
+    // KG batching control (code-level, default enabled)
+    static bool kgBatchEdgesEnabled() { return kgBatchEdges_.load(std::memory_order_relaxed); }
+    static void setKgBatchEdgesEnabled(bool e) {
+        kgBatchEdges_.store(e, std::memory_order_relaxed);
+    }
+    static bool kgBatchNodesEnabled() { return kgBatchNodes_.load(std::memory_order_relaxed); }
+    static void setKgBatchNodesEnabled(bool e) {
+        kgBatchNodes_.store(e, std::memory_order_relaxed);
+    }
+
+    // Analyzer toggles and caps
+    static bool analyzerUrls() { return analyzerUrls_.load(std::memory_order_relaxed); }
+    static void setAnalyzerUrls(bool e) { analyzerUrls_.store(e, std::memory_order_relaxed); }
+    static bool analyzerEmails() { return analyzerEmails_.load(std::memory_order_relaxed); }
+    static void setAnalyzerEmails(bool e) { analyzerEmails_.store(e, std::memory_order_relaxed); }
+    static bool analyzerFilePaths() { return analyzerFilePaths_.load(std::memory_order_relaxed); }
+    static void setAnalyzerFilePaths(bool e) {
+        analyzerFilePaths_.store(e, std::memory_order_relaxed);
+    }
+    static std::size_t maxEntitiesPerDoc() {
+        return maxEntitiesPerDoc_.load(std::memory_order_relaxed);
+    }
+    static void setMaxEntitiesPerDoc(std::size_t n) {
+        maxEntitiesPerDoc_.store(n, std::memory_order_relaxed);
+    }
+
 private:
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
@@ -309,6 +348,14 @@ private:
     static inline std::atomic<double> embedSafety_{0.90};
     static inline std::atomic<std::size_t> embedDocCap_{0}; // 0 = no extra cap
     static inline std::atomic<unsigned> embedPauseMs_{0};   // 0 = no pause
+    static inline std::atomic<uint32_t> postIngestThreads_{0};
+    static inline std::atomic<uint32_t> mcpWorkerThreads_{0};
+    static inline std::atomic<bool> kgBatchEdges_{true};
+    static inline std::atomic<bool> kgBatchNodes_{true};
+    static inline std::atomic<bool> analyzerUrls_{true};
+    static inline std::atomic<bool> analyzerEmails_{true};
+    static inline std::atomic<bool> analyzerFilePaths_{false};
+    static inline std::atomic<std::size_t> maxEntitiesPerDoc_{32};
 };
 
 } // namespace yams::daemon

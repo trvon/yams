@@ -200,6 +200,8 @@ private:
     nlohmann::json initialize(const nlohmann::json& params);
     nlohmann::json listTools();
     nlohmann::json callTool(const std::string& name, const nlohmann::json& arguments);
+    boost::asio::awaitable<nlohmann::json> callToolAsync(const std::string& name,
+                                                         const nlohmann::json& arguments);
     nlohmann::json listResources();
     nlohmann::json readResource(const std::string& uri);
     nlohmann::json listPrompts();
@@ -306,6 +308,8 @@ private:
     boost::asio::awaitable<Result<MCPListDocumentsResponse>>
     handleListDocuments(const MCPListDocumentsRequest& req);
     boost::asio::awaitable<Result<MCPStatsResponse>> handleGetStats(const MCPStatsRequest& req);
+    boost::asio::awaitable<Result<MCPStatusResponse>> handleGetStatus(const MCPStatusRequest& req);
+    boost::asio::awaitable<Result<MCPDoctorResponse>> handleDoctor(const MCPDoctorRequest& req);
     boost::asio::awaitable<Result<MCPAddDirectoryResponse>>
     handleAddDirectory(const MCPAddDirectoryRequest& req);
     boost::asio::awaitable<Result<MCPGetByNameResponse>>
@@ -412,6 +416,7 @@ private:
     std::shared_ptr<app::services::IDownloadService> downloadService_;
     std::shared_ptr<app::services::IIndexingService> indexingService_;
     std::shared_ptr<app::services::IStatsService> statsService_;
+    std::unique_ptr<yams::metadata::ConnectionPool> localMetaPool_;
 
     std::atomic<bool> initialized_{false};
     // readyPending_ removed (deprecated after canonical tools/call refactor)
@@ -435,6 +440,9 @@ private:
     std::condition_variable taskCv_;
     std::deque<std::function<void()>> taskQueue_;
     std::atomic<bool> stopWorkers_{false};
+    std::atomic<std::size_t> mcpWorkerActive_{0};
+    std::atomic<std::size_t> mcpWorkerProcessed_{0};
+    std::atomic<std::size_t> mcpWorkerFailed_{0};
 
     // Start/stop the pool and enqueue tasks
     void startThreadPool(std::size_t threads);

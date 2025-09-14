@@ -28,6 +28,7 @@
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkerPool.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -231,10 +232,8 @@ yams::Result<void> ServiceManager::initialize() {
     namespace fs = std::filesystem;
     fs::path dataDir = config_.dataDir;
     if (dataDir.empty()) {
-        if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
-            dataDir = fs::path(storageEnv);
-        } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
-            dataDir = fs::path(dataEnv);
+        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+            dataDir = fs::path(xdgDataHome) / "yams";
         } else if (const char* homeEnv = std::getenv("HOME")) {
             dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
         } else {
@@ -663,7 +662,13 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         fs::path path = dir / "yams-daemon.status.json";
         nlohmann::json j;
         j["ready"] = state.readiness.fullyReady();
-        j["overall"] = state.readiness.overallStatus();
+        // Normalize overall to lowercase for consistency with IPC lifecycle strings
+        {
+            std::string ov = state.readiness.overallStatus();
+            for (auto& c : ov)
+                c = static_cast<char>(std::tolower(c));
+            j["overall"] = ov;
+        }
         nlohmann::json rd;
         rd["ipc_server"] = state.readiness.ipcServerReady.load();
         rd["content_store"] = state.readiness.contentStoreReady.load();
@@ -791,18 +796,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
-    // Resolve data dir (reuse logic from sync path)
+    // Resolve data dir strictly from config with XDG/HOME default only (no env overrides)
     namespace fs = std::filesystem;
     fs::path dataDir = config_.dataDir;
     if (dataDir.empty()) {
-        if (const char* storageEnv = std::getenv("YAMS_STORAGE"))
-            dataDir = fs::path(storageEnv);
-        else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR"))
-            dataDir = fs::path(dataEnv);
-        else if (const char* homeEnv = std::getenv("HOME"))
+        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+            dataDir = fs::path(xdgDataHome) / "yams";
+        } else if (const char* homeEnv = std::getenv("HOME")) {
             dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-        else
+        } else {
             dataDir = fs::path(".") / "yams_data";
+        }
     }
     {
         std::error_code ec;
@@ -829,6 +833,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             writeBootstrapStatusFile(config_, state_);
         } else {
             spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
+            // Record error and fail initialization so lifecycle reflects the failure
+            try {
+                contentStoreError_ = storeRes.error().message;
+            } catch (...) {
+            }
+            co_return Error{ErrorCode::IOError,
+                            std::string("ContentStore initialization failed: ") +
+                                storeRes.error().message};
         }
     }
 
@@ -908,6 +920,42 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (database_ && metadataRepo_)
         searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
+
+    // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
+    try {
+        using TA = yams::daemon::TuneAdvisor;
+        uint32_t taThreads = 0;
+        try {
+            taThreads = TA::postIngestThreads();
+        } catch (...) {
+        }
+        unsigned hw = std::thread::hardware_concurrency();
+        std::size_t threads = taThreads ? static_cast<std::size_t>(taThreads)
+                                        : std::clamp<std::size_t>(hw ? (hw / 8u) : 1u, 1u, 4u);
+        // Initialize KG store on daemon side using connection pool if available
+        std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
+        try {
+            if (connectionPool_) {
+                metadata::KnowledgeGraphStoreConfig kgCfg;
+                kgCfg.enable_alias_fts = true;
+                kgCfg.enable_wal = true;
+                auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*connectionPool_, kgCfg);
+                if (kgRes) {
+                    auto uniqueKg = std::move(kgRes).value();
+                    // Promote to shared_ptr for broader use
+                    kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
+                }
+            }
+        } catch (...) {
+        }
+        postIngest_ = std::make_unique<PostIngestQueue>(contentStore_, metadataRepo_,
+                                                        contentExtractors_, kgStore, threads);
+        spdlog::info("Post-ingest queue initialized (threads={})", threads);
+    } catch (const std::exception& e) {
+        spdlog::warn("Post-ingest queue init failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("Post-ingest queue init failed (unknown)");
+    }
 
     // Vector DB initialization (single guarded attempt invoked earlier in constructor)
     // Idempotent: safe if already attempted.
@@ -2036,6 +2084,7 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                             auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
                             if (eg->initialize()) {
                                 embeddingGenerator_ = eg;
+                                embeddingModelName_ = preferred_local;
                                 spdlog::info("EmbeddingGenerator initialized from local model: {}",
                                              preferred_local);
                                 alignVectorComponentDimensions();
@@ -2089,6 +2138,7 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                 auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
                 if (eg->initialize()) {
                     embeddingGenerator_ = eg;
+                    embeddingModelName_ = preferred;
                     spdlog::info("EmbeddingGenerator initialized from local model (fallback): {}",
                                  preferred);
                     alignVectorComponentDimensions();
@@ -2140,6 +2190,7 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                 }
             }
             embeddingGenerator_ = std::move(eg);
+            embeddingModelName_ = preferred;
         } catch (const std::exception& egEx) {
             spdlog::warn("EmbeddingGenerator init exception: {}", egEx.what());
             embeddingGenerator_.reset();

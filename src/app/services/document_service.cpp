@@ -258,37 +258,39 @@ public:
                 for (const auto& [k, v] : md.tags) {
                     (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
                 }
-                // Best-effort: index content into FTS5 using robust extraction (plugins +
-                // built-ins)
-                try {
-                    auto extractedOpt = yams::extraction::util::extractDocumentText(
-                        ctx_.store, out.hash, info.mimeType, info.fileExtension,
-                        ctx_.contentExtractors);
-                    if (extractedOpt && !extractedOpt->empty()) {
-                        const std::string& extracted = *extractedOpt;
-                        (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
-                                                                      extracted, info.mimeType);
-                        (void)ctx_.metadataRepo->updateFuzzyIndex(docId);
-                        // Try to update extraction flags on the document row
-                        auto d = ctx_.metadataRepo->getDocument(docId);
-                        if (d && d.value().has_value()) {
-                            auto updated = d.value().value();
-                            updated.contentExtracted = true;
-                            updated.extractionStatus = metadata::ExtractionStatus::Success;
-                            (void)ctx_.metadataRepo->updateDocument(updated);
+                if (!req.deferExtraction) {
+                    // Best-effort: index content into FTS5 using robust extraction (plugins +
+                    // built-ins)
+                    try {
+                        auto extractedOpt = yams::extraction::util::extractDocumentText(
+                            ctx_.store, out.hash, info.mimeType, info.fileExtension,
+                            ctx_.contentExtractors);
+                        if (extractedOpt && !extractedOpt->empty()) {
+                            const std::string& extracted = *extractedOpt;
+                            (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
+                                                                          extracted, info.mimeType);
+                            (void)ctx_.metadataRepo->updateFuzzyIndex(docId);
+                            // Try to update extraction flags on the document row
+                            auto d = ctx_.metadataRepo->getDocument(docId);
+                            if (d && d.value().has_value()) {
+                                auto updated = d.value().value();
+                                updated.contentExtracted = true;
+                                updated.extractionStatus = metadata::ExtractionStatus::Success;
+                                (void)ctx_.metadataRepo->updateDocument(updated);
+                            }
+                        } else {
+                            // Mark as attempted but possibly skipped/failed for non-text types
+                            auto d = ctx_.metadataRepo->getDocument(docId);
+                            if (d && d.value().has_value()) {
+                                auto updated = d.value().value();
+                                updated.contentExtracted = false;
+                                updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                                (void)ctx_.metadataRepo->updateDocument(updated);
+                            }
                         }
-                    } else {
-                        // Mark as attempted but possibly skipped/failed for non-text types
-                        auto d = ctx_.metadataRepo->getDocument(docId);
-                        if (d && d.value().has_value()) {
-                            auto updated = d.value().value();
-                            updated.contentExtracted = false;
-                            updated.extractionStatus = metadata::ExtractionStatus::Skipped;
-                            (void)ctx_.metadataRepo->updateDocument(updated);
-                        }
+                    } catch (...) {
+                        // Non-fatal: indexing is opportunistic here
                     }
-                } catch (...) {
-                    // Non-fatal: indexing is opportunistic here
                 }
             }
         }

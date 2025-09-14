@@ -53,6 +53,14 @@ struct MetricsSnapshot {
     std::size_t workerActive{0};
     std::size_t workerQueued{0};
 
+    // Post-ingest queue metrics
+    std::size_t postIngestThreads{0};
+    std::size_t postIngestQueued{0};
+    std::size_t postIngestProcessed{0};
+    std::size_t postIngestFailed{0};
+    double postIngestLatencyMsEma{0.0};
+    double postIngestRateSecEma{0.0};
+
     // Readiness and init progress
     std::map<std::string, bool> readinessStates; // subsystem -> ready
     std::map<std::string, uint8_t> initProgress; // subsystem -> 0-100
@@ -78,6 +86,17 @@ struct MetricsSnapshot {
 
     // Resolved data directory
     std::string dataDir;
+
+    // Content store diagnostics
+    std::string contentStoreRoot;  // absolute path to storage root
+    std::string contentStoreError; // last initialization error (if any)
+
+    // Embedding/model provider snapshot (best-effort)
+    bool embeddingAvailable{false};
+    std::string embeddingBackend;   // provider|local|unknown
+    std::string embeddingModel;     // preferred/active model name if known
+    std::string embeddingModelPath; // resolved model path when known
+    uint32_t embeddingDim{0};
 };
 
 class DaemonMetrics {

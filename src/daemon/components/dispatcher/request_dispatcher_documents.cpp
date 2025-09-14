@@ -378,6 +378,8 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 serviceReq.includePatterns = req.includePatterns;
                 serviceReq.excludePatterns = req.excludePatterns;
                 serviceReq.recursive = req.recursive;
+                // Defer extraction to daemon post-ingest workers for fast returns
+                serviceReq.deferExtraction = true;
                 for (const auto& [key, value] : req.metadata) {
                     serviceReq.metadata[key] = value;
                 }
@@ -390,6 +392,18 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 response.hash = "";
                 response.path = req.path;
                 response.documentsAdded = static_cast<size_t>(serviceResp.filesIndexed);
+                // Enqueue post-ingest work for each successfully indexed file
+                try {
+                    if (serviceManager_ && serviceManager_->getPostIngestQueue()) {
+                        for (const auto& r : serviceResp.results) {
+                            if (r.success && !r.hash.empty()) {
+                                // IndexedFileResult does not expose MIME; let the queue resolve it
+                                serviceManager_->enqueuePostIngest(r.hash, std::string());
+                            }
+                        }
+                    }
+                } catch (...) {
+                }
                 try {
                     if (!req.noEmbeddings && serviceManager_ &&
                         serviceManager_->isEmbeddingsAutoOnAdd()) {
@@ -454,6 +468,8 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 serviceReq.mimeType = req.mimeType;
                 serviceReq.disableAutoMime = req.disableAutoMime;
                 serviceReq.tags = req.tags;
+                // Defer extraction to daemon post-ingest workers for fast returns
+                serviceReq.deferExtraction = true;
                 for (const auto& [key, value] : req.metadata) {
                     serviceReq.metadata[key] = value;
                 }
@@ -474,6 +490,15 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 response.documentsAdded = 1;
                 if (daemon_ && !serviceResp.hash.empty()) {
                     daemon_->onDocumentAdded(serviceResp.hash, response.path);
+                }
+                // Delegate heavy post-ingest work (extraction/index/graph) to background queue
+                try {
+                    if (serviceManager_ && serviceManager_->getPostIngestQueue() &&
+                        !serviceResp.hash.empty()) {
+                        // Use provided mime or let the queue resolve from metadata
+                        serviceManager_->enqueuePostIngest(serviceResp.hash, req.mimeType);
+                    }
+                } catch (...) {
                 }
                 try {
                     if (!req.noEmbeddings && serviceManager_ &&

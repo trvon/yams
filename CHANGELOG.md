@@ -19,6 +19,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+## [v0.6.20]
+
+### Added
+- Asynchronous post‑ingest pipeline (daemon): decouples heavy work from `add`/`add_directory`.
+  - New `PostIngestQueue` performs extraction → full‑text index → knowledge graph upserts in the background.
+  - Queue metrics (threads, queued, processed, failed) with EMAs for latency and throughput are exposed via `status`.
+- Knowledge Graph enrichment beyond tags:
+  - Lightweight analyzers extract URLs, emails, and optional file paths and add `MENTIONS` edges.
+  - Caps and toggles are controlled via `TuneAdvisor`.
+- Batch KG operations:
+  - `KnowledgeGraphStore::upsertNodes(std::vector<KGNode>)` used in the post‑ingest worker to avoid read‑after‑write races.
+  - New `KnowledgeGraphStore::addEdgesUnique(std::vector<KGEdge>)` batches edge inserts with on‑conflict de‑duplication on `(src_node_id, dst_node_id, relation)`.
+- TuneAdvisor controls (code‑level, no env):
+  - `kgBatchNodesEnabled`, `kgBatchEdgesEnabled` (default true)
+  - Analyzer toggles: `analyzerUrls`, `analyzerEmails`, `analyzerFilePaths` (file paths off by default)
+  - `maxEntitiesPerDoc` (default 32)
+- MCP observability and parity:
+  - New `status` tool that returns daemon readiness and counters (includes post‑ingest and MCP worker pools).
+  - New `yams://status` resource for symmetry with `yams://stats`.
+  - Minimal `doctor` tool summarizes degraded subsystems and suggests actions.
+
+### Changed
+- `add` and `add_directory` delegate extraction/index/graph work to the post‑ingest queue; `DocumentService` honors `deferExtraction` to keep adds fast.
+- Post‑ingest worker now batches KG node upserts and uses unique batch edge inserts to reduce DB round‑trips.
+- Vector/Readiness metrics mirrored into `status.requestCounts` for MCP/CLI parity.
+
+### Fixed
+- Daemon readiness consistency across CLI/UI:
+  - `DaemonMetrics` now derives boolean `ready` from the lifecycle state (authoritative),
+    not deprecated `fullyReady()`. Prevents `doctor` showing "NOT READY, state=Ready".
+  - Normalized status strings to lowercase ("ready", "degraded", etc.) in the status path to
+    match serializer/client expectations and avoid case-related derivation bugs.
+  - Stats `not_ready` flag now reflects lifecycle readiness (Ready/Degraded → `false`) instead of
+    always `true`, so `yams stats` won’t unnecessarily fall back to local mode.
+  - Bootstrap status JSON (`yams-daemon.status.json`) now writes a lowercase `overall` field for
+    consistency with IPC lifecycle strings.
+ - Stats daemon reachability:
+   - Increased `yams stats` short-mode timeout from 1.5s → 5s and set explicit connect/header/body
+     timeouts to avoid premature local fallback, aligning with `status`/`doctor` behavior.
+   - `not_ready` heuristic is now lifecycle-driven (Ready/Degraded → false), so stats no longer
+     assumes unready by default.
+   - Temporary mitigation: `yams stats` currently forces local-only output while we investigate a
+     daemon GetStats streaming/header path issue that can stall and cause slow fallbacks. The daemon
+     path will be re-enabled once the bug is fixed.
+
+
 ## [v0.6.19]
 
 ### Fixed

@@ -1,5 +1,6 @@
 add_executable(daemon_stats_unit_tests
     get_stats_wal_metrics_test.cpp
+    status_embedding_test.cpp
 )
 
 target_link_libraries(daemon_stats_unit_tests

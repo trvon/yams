@@ -1129,6 +1129,53 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("last_error");
             kv->set_value(r.lastError);
         }
+        // Encode content store diagnostics in request_counts under reserved keys
+        if (!r.contentStoreRoot.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("content_store_root");
+            kv->set_value(r.contentStoreRoot);
+        }
+        if (!r.contentStoreError.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("content_store_error");
+            kv->set_value(r.contentStoreError);
+        }
+        // Embedding runtime diagnostics (best-effort)
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_available");
+            kv->set_value(r.embeddingAvailable ? "1" : "0");
+        }
+        if (!r.embeddingBackend.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_backend");
+            kv->set_value(r.embeddingBackend);
+        }
+        if (!r.embeddingModel.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_model");
+            kv->set_value(r.embeddingModel);
+        }
+        if (!r.embeddingModelPath.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_model_path");
+            kv->set_value(r.embeddingModelPath);
+        }
+        if (r.embeddingDim > 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_dim");
+            kv->set_value(std::to_string(r.embeddingDim));
+        }
+        if (r.embeddingThreadsIntra != 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_threads_intra");
+            kv->set_value(std::to_string(r.embeddingThreadsIntra));
+        }
+        if (r.embeddingThreadsInter != 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("embedding_threads_inter");
+            kv->set_value(std::to_string(r.embeddingThreadsInter));
+        }
         // readiness: bool->string
         for (const auto& [k, v] : r.readinessStates) {
             auto* kv = o->add_readiness();
@@ -1182,6 +1229,54 @@ template <> struct ProtoBinding<StatusResponse> {
         for (const auto& kv : i.request_counts()) {
             if (kv.key() == "last_error") {
                 r.lastError = kv.value();
+                continue;
+            }
+            if (kv.key() == "content_store_root") {
+                r.contentStoreRoot = kv.value();
+                continue;
+            }
+            if (kv.key() == "content_store_error") {
+                r.contentStoreError = kv.value();
+                continue;
+            }
+            if (kv.key() == "embedding_available") {
+                std::string v = kv.value();
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                r.embeddingAvailable = (v == "1" || v == "true" || v == "yes");
+                continue;
+            }
+            if (kv.key() == "embedding_backend") {
+                r.embeddingBackend = kv.value();
+                continue;
+            }
+            if (kv.key() == "embedding_model") {
+                r.embeddingModel = kv.value();
+                continue;
+            }
+            if (kv.key() == "embedding_model_path") {
+                r.embeddingModelPath = kv.value();
+                continue;
+            }
+            if (kv.key() == "embedding_dim") {
+                try {
+                    r.embeddingDim = static_cast<uint32_t>(std::stoul(kv.value()));
+                } catch (...) {
+                }
+                continue;
+            }
+            if (kv.key() == "embedding_threads_intra") {
+                try {
+                    r.embeddingThreadsIntra = static_cast<int32_t>(std::stol(kv.value()));
+                } catch (...) {
+                }
+                continue;
+            }
+            if (kv.key() == "embedding_threads_inter") {
+                try {
+                    r.embeddingThreadsInter = static_cast<int32_t>(std::stol(kv.value()));
+                } catch (...) {
+                }
                 continue;
             }
             try {

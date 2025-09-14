@@ -120,10 +120,10 @@ jobs:
           cache-from: type=gha,scope=amd64
           cache-to: type=gha,mode=max,scope=amd64
 
-  # Build ARM64 image on Linux runner with QEMU emulation
+  # Build ARM64 image on native Linux ARM64 runner (no QEMU)
   build-arm64:
     name: Build Docker Image (linux/arm64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,11 +136,6 @@ jobs:
             echo "Docker daemon is not available. Ensure Docker is installed and running, and the runner user has permission to access /var/run/docker.sock."
             exit 1
           fi
-
-      - name: Set up QEMU (for ARM emulation)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Determine version
         id: version

@@ -65,7 +65,11 @@ target_link_libraries(search_service_test
 )
 
 gtest_discover_tests(search_service_test
-    DISCOVERY_MODE POST_BUILD
+    # Use PRE_TEST (default) discovery to avoid running --gtest_list_tests during
+    # the parallel build phase, which was causing intermittent "Subprocess killed"
+    # failures under heavy link/load (likely resource pressure). Discovery will
+    # occur at ctest execution time instead.
+    DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 90
     PROPERTIES
         LABELS "unit;services;search"
@@ -88,7 +92,8 @@ target_link_libraries(grep_service_test
 )
 
 gtest_discover_tests(grep_service_test
-    DISCOVERY_MODE POST_BUILD
+    # Switch to PRE_TEST discovery for stability (see note above).
+    DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 90
     PROPERTIES
         LABELS "unit;services;grep"
