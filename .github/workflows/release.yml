@@ -206,8 +206,16 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev ccache
-          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev ccache"
+          # Add rpm / fakeroot / dpkg-dev so CPack can emit .deb and .rpm packages
+          sudo apt-get install -y --no-install-recommends \
+            liburing-dev \
+            libarchive-dev \
+            libtag1-dev \
+            ccache \
+            rpm \
+            fakeroot \
+            dpkg-dev
+          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev ccache rpm fakeroot dpkg-dev"
 
       - name: Sanitize stdlib flags (macOS only)
         if: runner.os == 'macOS'
@@ -272,9 +280,15 @@ jobs:
             TAG_OUT="$VERSION"
           fi
 
+          # Derive a strictly numeric semantic base version for packaging (DEB/RPM require this);
+          # fall back to 0.0.0 if no tag history exists.
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
+
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
+          echo "base_version=$BASE_NUMERIC_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$channel" = "stable" ]; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
@@ -590,24 +604,37 @@ jobs:
         shell: bash
         run: |
           cd "$BUILD_DIR"
-          VERSION="${{ steps.meta.outputs.version }}"
+          DISPLAY_VERSION="${{ steps.meta.outputs.version }}"
+          PKG_VERSION="${{ steps.meta.outputs.base_version }}"   # numeric semantic for DEB/RPM metadata
 
-          # Generate DEB package
-          cpack -G DEB -D CPACK_PACKAGE_VERSION="${VERSION}"
-          DEB_FILE=$(ls *.deb 2>/dev/null | head -1)
+          echo "Packaging with DISPLAY_VERSION=$DISPLAY_VERSION (package metadata version=$PKG_VERSION)"
+
+          # Generate DEB package (use numeric version for control file)
+          cpack -G DEB \
+            -D CPACK_PACKAGE_VERSION="${PKG_VERSION}" \
+            -D CPACK_DEBIAN_PACKAGE_MAINTAINER="Trevon <git@trevon.dev>" \
+            -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" || echo "CPack DEB generation failed"
+          DEB_FILE=$(ls *.deb 2>/dev/null | head -1 || true)
           if [ -n "$DEB_FILE" ]; then
-            mv "$DEB_FILE" "$GITHUB_WORKSPACE/yams-${VERSION}-amd64.deb"
-            echo "Created DEB package: yams-${VERSION}-amd64.deb"
+            TARGET_DEB="yams-${DISPLAY_VERSION}-linux-x86_64.deb"
+            mv "$DEB_FILE" "$GITHUB_WORKSPACE/$TARGET_DEB"
+            echo "Created DEB package: $TARGET_DEB"
+          else
+            echo "WARNING: No .deb produced (possibly due to CPack config or empty install set)" >&2
           fi
 
-          # Generate RPM package
-          if command -v rpmbuild >/dev/null 2>&1;
-          then
-            cpack -G RPM -D CPACK_PACKAGE_VERSION="${VERSION}"
-            RPM_FILE=$(ls *.rpm 2>/dev/null | head -1)
+          # Generate RPM package (only if rpmbuild exists)
+          if command -v rpmbuild >/dev/null 2>&1; then
+            cpack -G RPM \
+              -D CPACK_PACKAGE_VERSION="${PKG_VERSION}" \
+              -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" || echo "CPack RPM generation failed"
+            RPM_FILE=$(ls *.rpm 2>/dev/null | head -1 || true)
             if [ -n "$RPM_FILE" ]; then
-              mv "$RPM_FILE" "$GITHUB_WORKSPACE/yams-${VERSION}-x86_64.rpm"
-              echo "Created RPM package: yams-${VERSION}-x86_64.rpm"
+              TARGET_RPM="yams-${DISPLAY_VERSION}-linux-x86_64.rpm"
+              mv "$RPM_FILE" "$GITHUB_WORKSPACE/$TARGET_RPM"
+              echo "Created RPM package: $TARGET_RPM"
+            else
+              echo "WARNING: No .rpm produced" >&2
             fi
           else
             echo "rpmbuild not found, skipping RPM generation"
@@ -674,6 +701,20 @@ jobs:
             yams-*.rpm
             yams-*.AppImage
           retention-days: 1
+
+      - name: Verify Linux package artifacts
+        if: matrix.os == 'linux-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Verifying expected Linux package artifacts (DEB/RPM)"
+          ls -1 yams-*linux-x86_64.deb 2>/dev/null || { echo "ERROR: Missing .deb package" >&2; exit 1; }
+          if command -v rpmbuild >/dev/null 2>&1; then
+            ls -1 yams-*linux-x86_64.rpm 2>/dev/null || { echo "ERROR: Missing .rpm package" >&2; exit 1; }
+          else
+            echo "rpmbuild unavailable; RPM check skipped" >&2
+          fi
+          echo "Linux package verification complete"
 
   create-release:
     name: Create GitHub Release
@@ -744,6 +785,98 @@ jobs:
         with:
           path: release-artifacts
           pattern: "*"
+
+      - name: List downloaded artifacts (debug)
+        shell: bash
+        run: |
+          echo "Downloaded artifact directories:" >&2
+          find release-artifacts -maxdepth 2 -type f -printf '%P\n' 2>/dev/null || true
+
+      - name: Collect assets into staging directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf assets || true
+          mkdir -p assets
+          # Collect all per-platform release artifacts
+          for dir in release-artifacts/release-*; do
+            [ -d "$dir" ] || continue
+            # Archives
+            cp -v $dir/*.tar.gz assets/ 2>/dev/null || true
+            cp -v $dir/*.zip assets/ 2>/dev/null || true
+            # Packages
+            cp -v $dir/*.deb assets/ 2>/dev/null || true
+            cp -v $dir/*.rpm assets/ 2>/dev/null || true
+            cp -v $dir/*.AppImage assets/ 2>/dev/null || true
+            # Summaries & bench json
+            if [ -d "$dir/bench_results" ]; then
+              cp -v $dir/bench_results/*.json assets/ 2>/dev/null || true
+            fi
+            if [ -f "$dir/release_summary.md" ]; then
+              cp -v "$dir/release_summary.md" "assets/release_summary-$(basename "$dir").md" 2>/dev/null || true
+            fi
+          done
+          echo "Final assets content:" >&2
+          ls -al assets >&2 || true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          echo "Generating SHA256SUMS for release assets" >&2
+          # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
+          ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage)$' | while read -r f; do
+            sha256sum "$f" >> SHA256SUMS
+          done
+          sort -o SHA256SUMS SHA256SUMS
+          echo "Created checksum manifest:" >&2
+          cat SHA256SUMS >&2
+
+      - name: (Optional) Import GPG key and sign checksums
+        if: env.GPG_PRIVATE_KEY && env.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          echo "GPG key present: generating detached signature for SHA256SUMS" >&2
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --detach-sign --armor -o SHA256SUMS.asc SHA256SUMS
+          echo "Signature generated (SHA256SUMS.asc)" >&2
+
+      - name: Verify asset set
+        id: asset_check
+        shell: bash
+        run: |
+          COUNT=$(find assets -type f | wc -l | tr -d ' ')
+          echo "Discovered $COUNT asset files" >&2
+          echo "file_count=$COUNT" >> $GITHUB_OUTPUT
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No asset files assembled for release." >&2
+            exit 1
+          fi
+
+      - name: Check existing release (stable only)
+        id: existing_release
+        shell: bash
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          echo "Checking if release $TAG already exists" >&2
+          if command -v gh >/dev/null 2>&1; then
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "exists=true" >> $GITHUB_OUTPUT
+            else
+              echo "exists=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "gh CLI not installed; skipping existence check" >&2
+            echo "exists=unknown" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check job completion status
         id: check-status
@@ -950,8 +1083,8 @@ jobs:
           echo "--- Combined Release Notes (dry-run) ---"
           cat combined_release_notes.md
 
-      - name: Create GitHub Release
-        if: ${{ github.actor != 'nektos/act' }}
+      - name: Create or update GitHub Release
+        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -960,5 +1093,20 @@ jobs:
           files: assets/*
           draft: false
           prerelease: ${{ steps.meta.outputs.prerelease }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List release assets (post-upload)
+        if: ${{ github.actor != 'nektos/act' }}
+        shell: bash
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "Installing gh CLI for asset listing" >&2
+            type -p curl >/dev/null || sudo apt-get update
+            sudo apt-get install -y gh >/dev/null 2>&1 || true
+          fi
+          TAG="${{ steps.meta.outputs.tag }}"
+          echo "Release assets for $TAG:" >&2
+          gh release view "$TAG" --json assets --jq '.assets[].name' || echo "(Could not list assets)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

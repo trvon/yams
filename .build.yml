@@ -84,24 +84,32 @@ tasks:
         echo "RELEASE_CHANNEL=nightly" >> ~/.buildenv
       fi
 
+      # Determine numeric base version from latest tag (strip leading v), fallback to 0.0.0
+      RAW_TAG_NUMERIC="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+      BASE_NUMERIC_VERSION="${RAW_TAG_NUMERIC#v}"
+
       if [ "$CHANNEL" = "nightly" ]; then
-        CLEAN_VERSION="nightly-$(date -u +%Y%m%d)"
+        CLEAN_VERSION_DISPLAY="nightly-$(date -u +%Y%m%d)"
+        CLEAN_VERSION_CMAKE="${BASE_NUMERIC_VERSION}"
       elif [ "$CHANNEL" = "weekly" ]; then
-        CLEAN_VERSION="weekly-$(date -u +%G)w$(date -u +%V)"
+        CLEAN_VERSION_DISPLAY="weekly-$(date -u +%G)w$(date -u +%V)"
+        CLEAN_VERSION_CMAKE="${BASE_NUMERIC_VERSION}"
       else
-        # Prefer tag-triggered builds; fall back to latest tag or a default.
+        # Prefer tag-triggered builds; otherwise use last tag as numeric
         if [[ "${GIT_REF:-}" =~ ^refs/tags/ ]]; then
           RAW_TAG="${GIT_REF#refs/tags/}"
+          CLEAN_VERSION_DISPLAY="${RAW_TAG#v}"
+          CLEAN_VERSION_CMAKE="${RAW_TAG#v}"
         else
-          RAW_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0-dev)"
+          CLEAN_VERSION_DISPLAY="${BASE_NUMERIC_VERSION}"
+          CLEAN_VERSION_CMAKE="${BASE_NUMERIC_VERSION}"
         fi
-        # Strip optional leading 'v' (e.g., v1.2.3 -> 1.2.3)
-        CLEAN_VERSION="${RAW_TAG#v}"
       fi
 
       # Persist for subsequent tasks
-      echo "YAMS_VERSION=${CLEAN_VERSION}" >> ~/.buildenv
-      echo "Computed YAMS_VERSION=${CLEAN_VERSION} (GIT_REF=${GIT_REF:-n/a}, RELEASE_CHANNEL=${CHANNEL:-n/a})"
+      echo "YAMS_VERSION=${CLEAN_VERSION_DISPLAY}" >> ~/.buildenv
+      echo "YAMS_VERSION_CMAKE=${CLEAN_VERSION_CMAKE}" >> ~/.buildenv
+      echo "Computed YAMS_VERSION(display)=${CLEAN_VERSION_DISPLAY}, YAMS_VERSION_CMAKE=${CLEAN_VERSION_CMAKE} (GIT_REF=${GIT_REF:-n/a}, RELEASE_CHANNEL=${CHANNEL:-n/a})"
 
   - setup: |
       set -e
@@ -205,8 +213,8 @@ tasks:
       fi
       cd "${REPO_DIR}"
       export YAMS_DISABLE_MODEL_PRELOAD=1
-      CLEAN_VERSION="${YAMS_VERSION}"
-      echo "Starting build for version ${CLEAN_VERSION}"
+      CLEAN_VERSION_CMAKE="${YAMS_VERSION_CMAKE}"
+      echo "Starting build (CMake version ${CLEAN_VERSION_CMAKE})"
 
       # Fetch dependencies and generate CMake toolchain/deps.
       # Use clang toolchain to avoid GCC 15 onnxruntime 1.18 build issues.
@@ -219,7 +227,7 @@ tasks:
 
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
-        -DYAMS_VERSION="${CLEAN_VERSION}" \
+        -DYAMS_VERSION="${CLEAN_VERSION_CMAKE}" \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DCURSES_NEED_NCURSES=ON \
@@ -280,7 +288,7 @@ tasks:
         REPO_DIR="."
       fi
       cd "${REPO_DIR}"
-      CLEAN_VERSION="${YAMS_VERSION}"
+      CLEAN_VERSION="${YAMS_VERSION_CMAKE}"
       echo "Packaging with CPack..."
       cd "${BUILD_DIR}"
       # Generate DEB package
