@@ -20,12 +20,24 @@ jobs:
         with:
           fetch-depth: 0
       - name: Cache Conan packages (warm)
+        id: cache_conan_warm
         uses: actions/cache@v4
         with:
-          path: ~/.conan2/p
-          key: conan-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          key: conan2-${{ runner.os }}-${{ hashFiles('conanfile.py', 'CMakePresets.json', 'conan/profiles/host-linux-clang') }}
           restore-keys: |
-            conan-${{ runner.os }}-
+            conan2-${{ runner.os }}-
+      - name: Conan cache diagnostics (warm)
+        shell: bash
+        run: |
+          echo "Conan warm cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}"
+          du -sh ~/.conan2/p 2>/dev/null || true
+          ls ~/.conan2/r 2>/dev/null | head || true
       - name: Cache ccache (warm)
         uses: actions/cache@v4
         with:
@@ -52,6 +64,16 @@ jobs:
           # Use CPU core count to speed recipe builds when they fall back to source builds.
           export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
           conan install . -of build/warm-debug -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Debug -b missing
+      - name: Detect profile & install (Release)
+        shell: bash
+        run: |
+          # Add Release dependency preinstall so subsequent release workflow (workflow_run) reuses packages.
+          # Re-detect only if profile was not previously generated.
+          if [ ! -f ~/.conan2/profiles/default ]; then
+            conan profile detect --force || true
+          fi
+          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
+          conan install . -of build/warm-release -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Release -b missing || true
       - name: Summary
         run: |
           echo "Warm job completed" >> $GITHUB_STEP_SUMMARY
@@ -70,12 +92,24 @@ jobs:
           fetch-depth: 0 # Ensure tags are available for version derivation if needed
 
       - name: Cache Conan packages
+        id: cache_conan_tests
         uses: actions/cache@v4
         with:
-          path: ~/.conan2/p
-          key: conan-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          key: conan2-${{ runner.os }}-${{ hashFiles('conanfile.py', 'CMakePresets.json', 'conan/profiles/host-linux-clang') }}
           restore-keys: |
-            conan-${{ runner.os }}-
+            conan2-${{ runner.os }}-
+      - name: Conan cache diagnostics (test job)
+        shell: bash
+        run: |
+          echo "Conan test job cache hit: ${{ steps.cache_conan_tests.outputs.cache-hit }}"
+          du -sh ~/.conan2/p 2>/dev/null || true
+          ls ~/.conan2/r 2>/dev/null | head || true
 
       - name: Cache ccache
         uses: actions/cache@v4

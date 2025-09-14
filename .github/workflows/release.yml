@@ -5,7 +5,8 @@ on:
     tags:
       - "v*"
   workflow_run:
-    workflows: ["CI"]
+    # Triggered after Tests workflow completes successfully (update if your tests workflow name differs)
+    workflows: ["Tests", "CI"]
     types:
       - completed
   # Nightly at 02:00 UTC (adjust as desired)
@@ -47,13 +48,32 @@ jobs:
         with:
           fetch-depth: 0
       - name: Cache Conan (warm)
+        id: cache_conan_warm
         uses: actions/cache@v4
         with:
-          path: ~/.conan2/p
-          key: conan-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
           restore-keys: |
-            conan-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-
             conan-${{ runner.os }}-
+      - name: Conan cache diagnostics (warm)
+        shell: bash
+        run: |
+          echo "Cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}"
+          for d in p r recipes metadata s; do
+            if [ -d "$HOME/.conan2/$d" ]; then
+              echo "Directory $d present: $(find $HOME/.conan2/$d -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') top-level entries" || true
+              du -sh $HOME/.conan2/$d 2>/dev/null || true
+            else
+              echo "Directory $d missing"
+            fi
+          done
       - name: Cache ccache (warm)
         uses: actions/cache@v4
         with:
@@ -73,6 +93,8 @@ jobs:
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
       - name: Detect profile & pre-install (Release)
+        if: |
+          ! (github.event_name == 'workflow_run' && matrix.suffix == 'linux-x86_64')
         shell: bash
         run: |
           set -euo pipefail
@@ -80,14 +102,11 @@ jobs:
           sed -i'' -e 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           HOST_PROFILE="conan/profiles/host-linux-clang"
           if [ "$RUNNER_OS" = "macOS" ]; then HOST_PROFILE="conan/profiles/host-macos-apple-clang"; fi
+          echo "Warm preinstall executing for $RUNNER_OS (${{ matrix.suffix }}) event=${{ github.event_name }}"
           conan install . -of build/warm-release -pr:h=$HOST_PROFILE -pr:b=default -s build_type=Release -b missing
-      - name: Detect profile & pre-install (Debug)
-        shell: bash
-        run: |
-          set -euo pipefail
-          HOST_PROFILE="conan/profiles/host-linux-clang"
-          if [ "$RUNNER_OS" = "macOS" ]; then HOST_PROFILE="conan/profiles/host-macos-apple-clang"; fi
-          conan install . -of build/warm-debug -pr:h=$HOST_PROFILE -pr:b=default -s build_type=Debug -b missing || true
+      - name: Skip note (Linux workflow_run)
+        if: github.event_name == 'workflow_run' && matrix.suffix == 'linux-x86_64'
+        run: echo "Skipping Linux warm preinstall (workflow_run; tests workflow already produced Release packages)."
       - name: Summary
         run: echo "Warm matrix for ${{ matrix.suffix }} completed" >> $GITHUB_STEP_SUMMARY
 
@@ -139,14 +158,35 @@ jobs:
           fetch-depth: 0
 
       - name: Cache Conan packages (early)
+        id: cache_conan_early
         uses: actions/cache@v4
         continue-on-error: true
         with:
-          path: ~/.conan2/p
-          key: conan-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          # Use same key pattern as tests workflow for maximum cross-workflow reuse
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
           restore-keys: |
-            conan-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-
             conan-${{ runner.os }}-
+      - name: Conan cache diagnostics (early)
+        if: always()
+        shell: bash
+        run: |
+          echo "Early cache hit: ${{ steps.cache_conan_early.outputs.cache-hit }}"
+          for d in p r recipes metadata s; do
+            if [ -d "$HOME/.conan2/$d" ]; then
+              echo "Directory $d present: $(find $HOME/.conan2/$d -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') entries" || true
+              du -sh $HOME/.conan2/$d 2>/dev/null || true
+            else
+              echo "Directory $d missing"
+            fi
+          done
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -276,15 +316,6 @@ jobs:
           path: ci-artifacts/coverage
           if_no_artifact_found: warn
 
-      - name: Cache Conan packages
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: ~/.conan2/p
-          key: yams-release-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
-          restore-keys: |
-            yams-release-${{ runner.os }}-${{ matrix.suffix }}-
-            yams-${{ runner.os }}-
 
       - name: Extract release notes from CHANGELOG.md (stable only)
         id: changelog
@@ -626,14 +657,14 @@ jobs:
         if: matrix.os == 'linux-hosted'
         uses: actions/upload-artifact@v4
         with:
-          name: matrix
+          name: matrix-meta
           path: matrix.json
           retention-days: 1
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.suffix }}
+          name: release-${{ matrix.suffix }}-files${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
           path: |
             yams-*.tar.gz
             yams-*.zip

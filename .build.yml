@@ -38,6 +38,8 @@ packages:
   - ninja-build
   - zip
   - ccache
+  - dpkg-dev
+  - fakeroot
   - lld
   - clang
   - llvm
@@ -105,6 +107,12 @@ tasks:
       set -e
       # Ensure pipx/venv/pip path is prepared
       export PATH="${HOME}/.local/bin:${PATH}"
+
+      # Configure git identity and signing key (requested)
+      git config --global user.name "Trevon" || true
+      git config --global user.email "git@trevon.dev" || true
+      git config --global user.signingkey "C1E8284DAE319BA313FCB40038686EA797D7A8A7" || true
+      # Note: actual signed commits/tags require the private key in the agent; we only set identity here.
 
       # Configure ccache (optional acceleration)
       export CCACHE_DIR="${HOME}/.cache/ccache"
@@ -212,6 +220,8 @@ tasks:
       # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
       cmake --preset yams-release \
         -DYAMS_VERSION="${CLEAN_VERSION}" \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DCURSES_NEED_NCURSES=ON \
         -DCURSES_NEED_WIDE=ON
 
@@ -274,7 +284,10 @@ tasks:
       echo "Packaging with CPack..."
       cd "${BUILD_DIR}"
       # Generate DEB package
-      cpack -G DEB -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
+      cpack -G DEB \
+        -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" \
+        -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" \
+        -D CPACK_DEBIAN_PACKAGE_MAINTAINER="Trevon <git@trevon.dev>"
       # Generate RPM package
       cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
 
