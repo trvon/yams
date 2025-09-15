@@ -626,53 +626,6 @@ jobs:
             echo "WARNING: No .deb produced (possibly due to CPack config or empty install set)" >&2
           fi
 
-      - name: Build macOS pkg (productbuild)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          DISPLAY_VERSION="${{ steps.meta.outputs.version }}"
-          PKG_ROOT="${{ env.STAGE_DIR }}"
-          [ -d "$PKG_ROOT" ] || cmake --install "$BUILD_DIR" --prefix "$PKG_ROOT"
-          PKG_ID="dev.yams.cli"
-          PKG_FILE="yams-${DISPLAY_VERSION}-${{ matrix.suffix }}.pkg"
-          echo "Building macOS pkg: $PKG_FILE" >&2
-          pkgbuild --root "$PKG_ROOT" --identifier "$PKG_ID" --version "$DISPLAY_VERSION" --install-location /usr/local "$PKG_FILE"
-          mv "$PKG_FILE" "$GITHUB_WORKSPACE/$PKG_FILE"
-          echo "Created macOS pkg: $PKG_FILE"
-
-      - name: Codesign macOS artifacts (optional)
-        if: runner.os == 'macOS' && secrets.MACOS_CERT_P12 != ''
-        env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD || '' }}
-          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY || 'Developer ID Application' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "$MACOS_CERT_P12" | base64 -d > cert.p12
-          KEYCHAIN_PASS="buildpass"
-            security create-keychain -p "$KEYCHAIN_PASS" build.keychain
-            security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild || true
-            security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASS" build.keychain
-            security default-keychain -s build.keychain
-            security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
-          find ${{ env.STAGE_DIR }} -type f -perm +111 -maxdepth 6 -exec codesign --force --timestamp --options runtime --sign "$CODESIGN_IDENTITY" {} + || true
-          PKG_FILE=$(ls yams-*-macos-*.pkg 2>/dev/null | head -1 || true)
-          if [ -n "$PKG_FILE" ]; then
-            codesign --force --timestamp --options runtime --sign "$CODESIGN_IDENTITY" "$PKG_FILE" || true
-            echo "Codesigned pkg: $PKG_FILE"
-          fi
-
-      # Notarization temporarily disabled; keep codesign only. Re-introduce steps when ready.
-      - name: (Linux only) RPM & AppImage generation
-        if: matrix.os == 'linux-hosted'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$BUILD_DIR"
-          DISPLAY_VERSION="${{ steps.meta.outputs.version }}"
-          PKG_VERSION="${{ steps.meta.outputs.base_version }}"
           # Generate RPM package (only if rpmbuild exists)
           if command -v rpmbuild >/dev/null 2>&1; then
             cpack -G RPM \
