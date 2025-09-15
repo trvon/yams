@@ -27,7 +27,7 @@ jobs:
             build_type: Debug
             coverage: false
             extra_cmake_flags: "-DYAMS_ENABLE_COVERAGE=OFF -DYAMS_ENABLE_ONNX=OFF"
-  runs-on: ${{ matrix.runs_on }}
+    runs-on: ${{ matrix.runs_on }}
     # Allow longer time for first-time ARM dependency builds.
     timeout-minutes: 35
     steps:
@@ -54,7 +54,7 @@ jobs:
           echo "Conan cache hit: ${{ steps.cache_conan.outputs.cache-hit }}"
           du -sh ~/.conan2/p 2>/dev/null || true
           ls ~/.conan2/r 2>/dev/null | head || true
-  - name: Cache ccache
+      - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: |
@@ -63,10 +63,10 @@ jobs:
           key: ccache-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
           restore-keys: |
             ccache-${{ runner.os }}-
-  - name: Install Conan
+      - name: Install Conan (latest)
         shell: bash
         run: |
-          pip3 install --no-cache-dir "conan==2.4.2" || python3 -m pip install "conan==2.4.2" || python -m pip install "conan==2.4.2"
+          pipx install conan 2>/dev/null || pip3 install --upgrade conan || python3 -m pip install --upgrade conan || python -m pip install --upgrade conan
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
@@ -89,22 +89,7 @@ jobs:
       # Continue directly with build/test steps (single job path)
       - name: Set build dir env
         run: echo "BUILD_DIR=build/yams-debug" >> $GITHUB_ENV
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Ensure tags are available for version derivation if needed
-
-      # (Cache steps already executed above)
-
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/ccache
-            ~/.ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
+      # (Cache & checkout already done above)
 
       - name: Install optional system dependencies
         if: runner.os == 'Linux'
@@ -127,13 +112,7 @@ jobs:
           ccache -p 2>/dev/null || true
           ccache -z 2>/dev/null || true
 
-      - name: Install Conan
-        shell: bash
-        run: |
-          pip3 install "conan==2.4.2" || python3 -m pip install "conan==2.4.2" || python -m pip install "conan==2.4.2"
-          conan --version
-          mkdir -p ~/.conan2
-          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+      # Conan already installed above
 
       - name: Setup Conan Profile
         shell: bash
@@ -203,7 +182,7 @@ jobs:
         run: |
           ccache -s || echo "ccache not available"
 
-  - name: Run Tests
+      - name: Run Tests
         shell: bash
         run: |
           cd ${{ env.BUILD_DIR }}

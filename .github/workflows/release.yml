@@ -85,7 +85,7 @@ jobs:
         if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
         shell: bash
         run: |
-          python3 -m pip install --upgrade "conan==2.4.2" || python -m pip install --upgrade "conan==2.4.2" || pip3 install "conan==2.4.2"
+          pipx install conan 2>/dev/null || python3 -m pip install --upgrade conan || python -m pip install --upgrade conan || pip3 install --upgrade conan
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
@@ -346,7 +346,7 @@ jobs:
         if: ${{ matrix.hosted }}
         shell: bash
         run: |
-          python3 -m pip install --upgrade "conan==2.4.2" || python -m pip install --upgrade "conan==2.4.2" || pip3 install "conan==2.4.2"
+          pipx install conan 2>/dev/null || python3 -m pip install --upgrade conan || python -m pip install --upgrade conan || pip3 install --upgrade conan
           conan --version
           mkdir -p ~/.conan2
           # Best-effort: global.conf may not exist in repo for hosted macOS
