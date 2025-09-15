@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <streambuf>
 
 using namespace yams::chunking;
 
@@ -225,4 +226,110 @@ TEST_F(StreamingChunkerTest, AsyncChunking) {
         totalSize += chunk.size;
     }
     EXPECT_EQ(totalSize, 5 * 1024);
+}
+
+// Helper streambuf that segments reads into fixed-size chunks to simulate multi-write fragmentation
+class SegmentingStringBuf : public std::streambuf {
+public:
+    SegmentingStringBuf(const std::string& data, size_t segment)
+        : data_(data), segment_(segment), pos_(0) {}
+
+protected:
+    std::streamsize xsgetn(char* s, std::streamsize count) override {
+        if (pos_ >= data_.size())
+            return 0;
+        std::streamsize n = static_cast<std::streamsize>(
+            std::min(segment_, static_cast<size_t>(count))); // cap by segment size
+        n = std::min<std::streamsize>(n, static_cast<std::streamsize>(data_.size() - pos_));
+        std::memcpy(s, data_.data() + pos_, static_cast<size_t>(n));
+        pos_ += static_cast<size_t>(n);
+        return n;
+    }
+
+    int underflow() override { return traits_type::eof(); }
+
+private:
+    const std::string data_;
+    const size_t segment_;
+    size_t pos_;
+};
+
+static std::string makePatternData(size_t n) {
+    std::string d;
+    d.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        d[i] = static_cast<char>((i * 1315423911u + 0x9E3779B9u) & 0xFF);
+    }
+    return d;
+}
+
+TEST_F(StreamingChunkerTest, MultiWriteFragmentationEquivalence) {
+    // Deterministic pseudo-random data
+    const size_t N = 256 * 1024 + 777; // cross buffer boundaries
+    auto data = makePatternData(N);
+
+    ChunkingConfig cfg;
+    cfg.minChunkSize = 4 * 1024;
+    cfg.targetChunkSize = 32 * 1024;
+    cfg.maxChunkSize = 64 * 1024;
+
+    auto runWithSeg = [&](size_t seg) {
+        StreamingChunker chunker(cfg);
+        SegmentingStringBuf sb(data, seg);
+        std::istream is(&sb);
+        std::vector<ChunkRef> refs;
+        auto r = chunker.processStream(is, data.size(),
+                                       [&](const ChunkRef& ref, std::span<const std::byte> bytes) {
+                                           refs.push_back(ref);
+                                           // Ensure data span matches ref
+                                           EXPECT_EQ(ref.size, bytes.size());
+                                       });
+        EXPECT_TRUE(r.has_value()) << (r ? "" : r.error().message);
+        return refs;
+    };
+
+    // Single read (all at once)
+    auto refs1 = runWithSeg(data.size());
+    // Two segments
+    auto refs2 = runWithSeg(std::max<size_t>(1, data.size() / 2));
+    // Many small segments
+    auto refsN = runWithSeg(7);
+
+    ASSERT_EQ(refs1.size(), refs2.size());
+    ASSERT_EQ(refs1.size(), refsN.size());
+    for (size_t i = 0; i < refs1.size(); ++i) {
+        EXPECT_EQ(refs1[i].offset, refs2[i].offset);
+        EXPECT_EQ(refs1[i].size, refs2[i].size);
+        EXPECT_EQ(refs1[i].hash, refs2[i].hash);
+        EXPECT_EQ(refs1[i].offset, refsN[i].offset);
+        EXPECT_EQ(refs1[i].size, refsN[i].size);
+        EXPECT_EQ(refs1[i].hash, refsN[i].hash);
+    }
+}
+
+TEST_F(StreamingChunkerTest, FinalFlushEmitsOnceForPartialChunk) {
+    // Create small data that will never reach minChunkSize; ensures finalize emits exactly one
+    const size_t LEN = 37;
+    std::string data(LEN, 'A');
+
+    ChunkingConfig cfg;
+    cfg.minChunkSize = 128; // larger than LEN
+    cfg.targetChunkSize = 256;
+    cfg.maxChunkSize = 1024; // also larger than LEN
+
+    StreamingChunker chunker(cfg);
+    SegmentingStringBuf sb(data, 5); // small reads
+    std::istream is(&sb);
+
+    std::vector<ChunkRef> refs;
+    auto r = chunker.processStream(is, data.size(),
+                                   [&](const ChunkRef& ref, std::span<const std::byte> bytes) {
+                                       refs.push_back(ref);
+                                       EXPECT_EQ(ref.size, bytes.size());
+                                   });
+    ASSERT_TRUE(r.has_value()) << (r ? "" : r.error().message);
+
+    ASSERT_EQ(refs.size(), 1u);
+    EXPECT_EQ(refs[0].offset, 0u);
+    EXPECT_EQ(refs[0].size, LEN);
 }

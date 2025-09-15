@@ -1,0 +1,97 @@
+name: Publish Package Repositories
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: ["completed"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download release artifacts (apt/yum + manifest)
+        uses: actions/download-artifact@v4
+        with:
+          path: repo-artifacts
+        # All artifacts from release run will be downloaded; we filter below.
+
+      - name: Prepare upload set
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -1 repo-artifacts || true
+          # Expect artifacts named: apt-repo, yum-repo, homebrew-formula, etc.
+          if [ -d repo-artifacts/apt-repo ]; then
+            mv repo-artifacts/apt-repo aptrepo
+          fi
+          if [ -d repo-artifacts/yum-repo ]; then
+            mv repo-artifacts/yum-repo yumrepo
+          fi
+          # latest.json is inside assets attached to release; we attempt fetch from GitHub release API.
+          TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName') || TAG=""
+          if [ -z "$TAG" ]; then
+            echo "Could not determine latest tag; skipping manifest fetch" >&2
+          else
+            echo "Latest tag: $TAG" >&2
+            gh release download "$TAG" --pattern latest.json --dir . || echo "No latest.json asset yet"
+          fi
+          # Summaries
+          echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)" >> $GITHUB_OUTPUT
+          echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install wrangler
+        run: npm --yes install wrangler@3
+
+      - name: Publish to R2
+        if: ${{ steps.prep.outputs.HAS_APT == '1' || steps.prep.outputs.HAS_YUM == '1' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Cloudflare credentials missing; aborting publish." >&2
+            exit 1
+          fi
+          upload_file() {
+            local src="$1"; shift
+            local key="$1"; shift
+            echo "-- Upload $key" >&2
+            npx wrangler r2 object put "yams-repository/$key" --file "$src"
+          }
+          if [ -d aptrepo ]; then
+            find aptrepo -type f -print0 | while IFS= read -r -d '' f; do
+              rel="${f#aptrepo/}"; upload_file "$f" "aptrepo/$rel";
+            done
+          fi
+          if [ -d yumrepo ]; then
+            find yumrepo -type f -print0 | while IFS= read -r -d '' f; do
+              rel="${f#yumrepo/}"; upload_file "$f" "yumrepo/$rel";
+            done
+          fi
+          if [ -f latest.json ]; then
+            upload_file latest.json latest.json
+          fi
+          echo "Publish complete." >&2
+
+      - name: Warn if nothing to publish
+        if: ${{ steps.prep.outputs.HAS_APT != '1' && steps.prep.outputs.HAS_YUM != '1' }}
+        run: echo "No repo artifacts found to publish." >&2

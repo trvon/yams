@@ -99,6 +99,23 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                      "Vector database initialization failed: " + vectorDb->getLastError()};
     }
 
+    // Guard: if an existing DB has a fixed dimension that does not match the embedding generator,
+    // abort early with a clear diagnostic instead of failing during batch insert.
+    try {
+        size_t existing = vectorDb->getConfig().embedding_dim;
+        size_t genDim = embeddingGenerator->getEmbeddingDimension();
+        if (existing > 0 && genDim > 0 && existing != genDim) {
+            std::string msg = "Embedding dimension mismatch: vector DB expects " +
+                              std::to_string(existing) + ", but generator produces " +
+                              std::to_string(genDim) +
+                              ". Install/select a model with dim=" + std::to_string(existing) +
+                              " (e.g., all-MiniLM-L6-v2 for 384) or recreate the vector DB.";
+            spdlog::error("[repair] {}", msg);
+            return Error{ErrorCode::InvalidState, msg};
+        }
+    } catch (...) {
+    }
+
     // Get documents to process
     std::vector<metadata::DocumentInfo> documents;
 

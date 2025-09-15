@@ -2051,21 +2051,37 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                     spdlog::debug("No model provider adopted from plugins, trying local fallback");
                     // Fallback to local model generator when provider not available
                     try {
-                        std::string preferred_local;
-                        if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
-                            preferred_local = envp;
-                        }
+                        // Use unified selector that honors env, config preferred_model, preload
+                        // list, and DB-aligned auto-detection
+                        std::string preferred_local = resolvePreferredModel();
                         if (preferred_local.empty()) {
                             namespace fs = std::filesystem;
                             if (const char* home = std::getenv("HOME")) {
                                 fs::path models = fs::path(home) / ".yams" / "models";
                                 std::error_code ec;
                                 if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                                    for (const auto& e : fs::directory_iterator(models, ec)) {
-                                        if (e.is_directory() &&
-                                            fs::exists(e.path() / "model.onnx", ec)) {
-                                            preferred_local = e.path().filename().string();
-                                            break;
+                                    // Prefer a model matching existing DB dim if available
+                                    size_t dbDim = 0;
+                                    try {
+                                        if (auto s = read_vector_sentinel_dim(getResolvedDataDir()))
+                                            dbDim = *s;
+                                    } catch (...) {
+                                    }
+                                    auto exists = [&](const char* n) {
+                                        return fs::exists(models / n / "model.onnx", ec);
+                                    };
+                                    if (dbDim == 384 && exists("all-MiniLM-L6-v2"))
+                                        preferred_local = "all-MiniLM-L6-v2";
+                                    else if (dbDim == 768 && exists("all-mpnet-base-v2"))
+                                        preferred_local = "all-mpnet-base-v2";
+                                    // Fallback: first available
+                                    if (preferred_local.empty()) {
+                                        for (const auto& e : fs::directory_iterator(models, ec)) {
+                                            if (e.is_directory() &&
+                                                fs::exists(e.path() / "model.onnx", ec)) {
+                                                preferred_local = e.path().filename().string();
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -2304,23 +2320,55 @@ std::string ServiceManager::resolvePreferredModel() const {
                         return preferred;
                     }
                 }
+                // daemon.models.preload_models -> take the first
+                if (l.find("daemon.models.preload_models") != std::string::npos) {
+                    auto eq = l.find('=');
+                    if (eq != std::string::npos) {
+                        std::string v = l.substr(eq + 1);
+                        trim(v);
+                        // crude parse: if contains MiniLM or mpnet, prefer ordering
+                        if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
+                            preferred = "all-MiniLM-L6-v2";
+                        } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
+                            preferred = "all-mpnet-base-v2";
+                        }
+                    }
+                    if (!preferred.empty()) {
+                        spdlog::debug("Preferred model from config preload list: {}", preferred);
+                        return preferred;
+                    }
+                }
             }
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for preferred model: {}", e.what());
     }
 
-    // 3. Auto-detect from available models
+    // 3. Auto-detect from available models (prefer models matching existing DB dim)
     try {
         if (const char* home = std::getenv("HOME")) {
             namespace fs = std::filesystem;
             fs::path models = fs::path(home) / ".yams" / "models";
             std::error_code ec;
             if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                // Prefer models in this order
-                std::vector<std::string> preferences = {"nomic-embed-text-v1.5",
-                                                        "nomic-embed-text-v1", "all-MiniLM-L6-v2",
-                                                        "all-mpnet-base-v2"};
+                size_t dbDim = 0;
+                try {
+                    // Prefer sentinel dim when available
+                    if (auto s = read_vector_sentinel_dim(getResolvedDataDir()))
+                        dbDim = *s;
+                } catch (...) {
+                }
+                std::vector<std::string> preferences;
+                if (dbDim == 384) {
+                    preferences = {"all-MiniLM-L6-v2", "all-mpnet-base-v2", "nomic-embed-text-v1.5",
+                                   "nomic-embed-text-v1"};
+                } else if (dbDim == 768) {
+                    preferences = {"all-mpnet-base-v2", "nomic-embed-text-v1.5",
+                                   "nomic-embed-text-v1", "all-MiniLM-L6-v2"};
+                } else {
+                    preferences = {"all-MiniLM-L6-v2", "all-mpnet-base-v2", "nomic-embed-text-v1.5",
+                                   "nomic-embed-text-v1"};
+                }
 
                 for (const auto& pref : preferences) {
                     fs::path modelPath = models / pref;

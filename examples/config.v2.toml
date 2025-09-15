@@ -458,6 +458,21 @@ batch_size = 32
 # Enable experimental features
 enable = false
 
+[experimental.enhanced_search]
+# Alias for PBI-003 bring-up; mirrors [search.enhanced]. Prefer [search.enhanced] for stable use.
+enable = false
+classification_weight = 0.15
+kg_expansion_weight = 0.10
+hotzone_weight = 0.05
+enhanced_search_timeout_ms = 2000
+
+[experimental.hotzones]
+# Alias for PBI-003 bring-up; mirrors [search.hotzones]. Prefer [search.hotzones] for stable use.
+decay_interval_hours = 24
+max_boost_factor = 2.0
+enable_persistence = true
+data_file = "~/.yams/data/hotzones.db"
+
 [experimental.bert_ner]
 # Enable BERT Named Entity Recognition
 enable = false

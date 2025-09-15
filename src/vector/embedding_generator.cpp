@@ -1051,7 +1051,11 @@ public:
         return dim > 0 ? dim : config_.embedding_dim;
     }
     size_t getMaxSequenceLength() const override { return config_.max_sequence_length; }
-    std::string getBackendName() const override { return "LocalONNX"; }
+    std::string getBackendName() const override {
+        if (genai_ && genai_->available())
+            return "LocalONNX(GenAI)";
+        return "LocalONNX";
+    }
     bool isAvailable() const override { return initialized_; }
     GenerationStats getStats() const override { return stats_; }
     void resetStats() override {
@@ -1681,16 +1685,23 @@ public:
     }
 
     size_t getEmbeddingDimension() const override {
+        size_t d = 0;
         if (daemon_backend_->isAvailable()) {
-            return daemon_backend_->getEmbeddingDimension();
+            d = daemon_backend_->getEmbeddingDimension();
         }
+        if (d > 0)
+            return d;
+        // Fallback to local backend's actual dimension when daemon doesn't report one
         return local_backend_->getEmbeddingDimension();
     }
 
     size_t getMaxSequenceLength() const override {
+        size_t s = 0;
         if (daemon_backend_->isAvailable()) {
-            return daemon_backend_->getMaxSequenceLength();
+            s = daemon_backend_->getMaxSequenceLength();
         }
+        if (s > 0)
+            return s;
         return local_backend_->getMaxSequenceLength();
     }
 
@@ -1885,6 +1896,14 @@ public:
 
     const EmbeddingConfig& getConfig() const { return config_; }
 
+    std::string getBackendName() const {
+        try {
+            return backend_ ? backend_->getBackendName() : std::string{"unknown"};
+        } catch (...) {
+            return "unknown";
+        }
+    }
+
     GenerationStats getStats() const {
         if (!backend_) {
             return GenerationStats{};
@@ -2055,6 +2074,14 @@ size_t EmbeddingGenerator::getMaxSequenceLength() const {
 const EmbeddingConfig& EmbeddingGenerator::getConfig() const {
     static const EmbeddingConfig empty_config{};
     return pImpl ? pImpl->getConfig() : empty_config;
+}
+
+std::string EmbeddingGenerator::getBackendName() const {
+    try {
+        return pImpl ? pImpl->getBackendName() : std::string{"unknown"};
+    } catch (...) {
+        return "unknown";
+    }
 }
 
 void EmbeddingGenerator::updateConfig(const EmbeddingConfig& new_config) {

@@ -1,0 +1,17 @@
+[settings]
+os=Linux
+arch=armv8
+compiler=clang
+compiler.version=19
+compiler.libcxx=libstdc++11
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+tools.build:compiler_executables={"c":"clang","cpp":"clang++"}
+
+# Notes:
+# - Mirrors host-linux-clang but sets arch=armv8 for aarch64/ARM64 runners.
+# - Use with GitHub Actions runner label ubuntu-24.04-arm (or ubuntu-22.04-arm) depending on availability.
+# - Conan detects appropriate sysroot/architecture when invoking clang.

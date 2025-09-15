@@ -287,6 +287,8 @@ public:
     size_t getEmbeddingDimension() const;
     size_t getMaxSequenceLength() const;
     const EmbeddingConfig& getConfig() const;
+    // Backend identity for diagnostics
+    std::string getBackendName() const;
     void updateConfig(const EmbeddingConfig& new_config);
 
     // Statistics and monitoring

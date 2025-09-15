@@ -587,9 +587,10 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         cfg.dataDir = dataRoot;
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
-        cfg.requestTimeout = std::chrono::seconds(30);
-        cfg.headerTimeout = std::chrono::seconds(30);
-        cfg.bodyTimeout = std::chrono::seconds(120);
+        // Tighter defaults to avoid perceived hangs in MCP tools; env can override in DaemonClient
+        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        cfg.headerTimeout = std::chrono::milliseconds(5000);
+        cfg.bodyTimeout = std::chrono::milliseconds(15000);
         cfg.maxInflight = 128;
         daemon_client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
     }
@@ -3070,6 +3071,14 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     daemon_req.content = req.content;
     daemon_req.name = req.name;
     daemon_req.mimeType = req.mimeType;
+    daemon_req.disableAutoMime = req.disableAutoMime;
+    daemon_req.noEmbeddings = req.noEmbeddings;
+    daemon_req.collection = req.collection;
+    daemon_req.snapshotId = req.snapshotId;
+    daemon_req.snapshotLabel = req.snapshotLabel;
+    daemon_req.recursive = req.recursive;
+    daemon_req.includePatterns = req.includePatterns;
+    daemon_req.excludePatterns = req.excludePatterns;
     daemon_req.tags = req.tags;
     for (const auto& [key, value] : req.metadata.items()) {
         if (value.is_string()) {
@@ -3085,7 +3094,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // supplied inline content AND the provided path resolves to a directory, we will gracefully
     // downgrade this to a content-only add instead of returning an error. This improves UX for
     // MCP clients that may pass their current working directory as a path while also providing
-    // the actual document content inline.
+    // the actual document content inline. If recursive=true, allow directory adds.
     if (!daemon_req.path.empty()) {
         std::error_code __ec;
         if (!std::filesystem::exists(daemon_req.path, __ec)) {
@@ -3093,6 +3102,14 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
                             std::string("Path does not exist: ") + daemon_req.path};
         }
         if (std::filesystem::is_directory(daemon_req.path, __ec)) {
+            if (daemon_req.recursive && daemon_req.content.empty()) {
+                // Directory add via daemon
+                auto dres_dir = co_await daemon_client_->streamingAddDocument(daemon_req);
+                if (!dres_dir)
+                    co_return dres_dir.error();
+                MCPStoreDocumentResponse out{}; // no single hash for directory
+                co_return out;
+            }
             if (!daemon_req.content.empty()) {
                 spdlog::warn("[MCP] add: provided path '{}' is a directory; treating request as "
                              "content-only add (name='{}')",
@@ -3801,14 +3818,37 @@ void MCPServer::initializeToolRegistry() {
         "add", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
         json{{"type", "object"},
              {"properties",
-              {{"path", {{"type", "string"}, {"description", "File path to store"}}},
-               {"content", {{"type", "string"}, {"description", "Document content"}}},
-               {"name", {{"type", "string"}, {"description", "Document name"}}},
+              {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
+               {"content", {{"type", "string"}, {"description", "Inline document content"}}},
+               {"name", {{"type", "string"}, {"description", "Document name (for stdin/content)"}}},
+               {"mime_type", {{"type", "string"}, {"description", "MIME type override"}}},
+               {"disable_auto_mime",
+                {{"type", "boolean"}, {"description", "Disable automatic MIME detection"}}},
+               {"no_embeddings",
+                {{"type", "boolean"},
+                 {"description", "Disable automatic embedding generation"},
+                 {"default", false}}},
+               {"collection", {{"type", "string"}, {"description", "Collection name"}}},
+               {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+               {"snapshot_label", {{"type", "string"}, {"description", "Snapshot label"}}},
+               {"recursive",
+                {{"type", "boolean"},
+                 {"description", "Recursively add files from directories"},
+                 {"default", false}}},
+               {"include",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Include patterns for recursive adds"}}},
+               {"exclude",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Exclude patterns for recursive adds"}}},
                {"tags",
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
-                 {"description", "Document tags"}}}}}},
-        "Store documents with deduplication and content-based addressing");
+                 {"description", "Document tags"}}},
+               {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
+        "Store documents (or directories) with deduplication; mirrors CLI add");
 
     toolRegistry_->registerTool<MCPRetrieveDocumentRequest, MCPRetrieveDocumentResponse>(
         "get",

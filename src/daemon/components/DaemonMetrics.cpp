@@ -186,10 +186,14 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
     try {
         // Align boolean readiness with lifecycle readiness (authoritative)
         // rather than deprecated DaemonReadiness::fullyReady().
-        try {
-            auto lsnap = lifecycle_->snapshot();
-            out.ready = (lsnap.state == LifecycleState::Ready);
-        } catch (...) {
+        if (lifecycle_) {
+            try {
+                auto lsnap = lifecycle_->snapshot();
+                out.ready = (lsnap.state == LifecycleState::Ready);
+            } catch (...) {
+                out.ready = false;
+            }
+        } else {
             out.ready = false;
         }
         out.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
@@ -211,8 +215,14 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
 
     // Lifecycle (authoritative overall status)
     try {
-        auto s = lifecycle_->snapshot();
-        switch (s.state) {
+        LifecycleState state = LifecycleState::Unknown;
+        std::string lastErr;
+        if (lifecycle_) {
+            auto s = lifecycle_->snapshot();
+            state = s.state;
+            lastErr = s.lastError;
+        }
+        switch (state) {
             case LifecycleState::Ready:
                 out.overallStatus = "ready";
                 out.lifecycleState = "ready";
@@ -247,7 +257,7 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                 out.lifecycleState = "initializing";
                 break;
         }
-        out.lastError = s.lastError;
+        out.lastError = lastErr;
     } catch (...) {
         out.overallStatus = "initializing";
         out.lifecycleState = "initializing";
@@ -457,7 +467,7 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                 } catch (...) {
                 }
             }
-            // Backend label heuristic and model name
+            // Backend label and model details
             out.embeddingModel = services_->getEmbeddingModelName();
             try {
                 auto prov = services_->getModelProvider();
@@ -476,7 +486,27 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                         }
                     }
                 } else if (gen) {
-                    out.embeddingBackend = "local"; // generator-only path
+                    // Prefer generator's own backend name for clarity (e.g., LocalONNX(GenAI),
+                    // Hybrid, Daemon)
+                    try {
+                        out.embeddingBackend = gen->getBackendName();
+                    } catch (...) {
+                        out.embeddingBackend = "local";
+                    }
+                    // Best-effort local model path resolution
+                    if (out.embeddingModelPath.empty() && !out.embeddingModel.empty()) {
+                        try {
+                            if (const char* home = std::getenv("HOME")) {
+                                namespace fs = std::filesystem;
+                                fs::path p = fs::path(home) / ".yams" / "models" /
+                                             out.embeddingModel / "model.onnx";
+                                std::error_code ec;
+                                if (fs::exists(p, ec))
+                                    out.embeddingModelPath = p.string();
+                            }
+                        } catch (...) {
+                        }
+                    }
                 } else {
                     out.embeddingBackend = "unknown";
                 }

@@ -99,12 +99,7 @@ std::vector<PluginDescriptor> AbiPluginHost::listLoaded() const {
 }
 
 std::vector<std::filesystem::path> AbiPluginHost::trustList() const {
-#ifdef YAMS_TESTING
-    // Return empty trust list in unit tests to guarantee deterministic add/remove flows
-    return {};
-#else
     return pImpl->loader.trustList();
-#endif
 }
 
 Result<void> AbiPluginHost::trustAdd(const std::filesystem::path& p) {

@@ -5,6 +5,7 @@ add_executable(metadata_tests
     fts5_test.cpp
     metadata_repository_test.cpp
     kg_store_test.cpp
+    kg_store_alias_and_entities_test.cpp
 )
 
 target_link_libraries(metadata_tests

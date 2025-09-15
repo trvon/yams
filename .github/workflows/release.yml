@@ -3,24 +3,21 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
-  workflow_run:
-    # Triggered after Tests workflow completes successfully (update if your tests workflow name differs)
-    workflows: ["Tests", "CI"]
-    types:
-      - completed
-  # Nightly at 02:00 UTC (adjust as desired)
-  schedule:
-    - cron: "0 2 * * *"
-    # Weekly (every Monday) at 03:00 UTC (adjust as desired)
-    - cron: "0 3 * * 1"
-  # Optional manual run with channel override
+      - "v*"  # Only run automatically for version tags (stable releases)
+  # Manual dispatch retained for ad-hoc nightly/weekly style builds without tagging
   workflow_dispatch:
     inputs:
       channel:
         description: "Release channel (stable|weekly|nightly)"
         required: false
         default: "nightly"
+  # (Disabled) workflow_run & schedule triggers were removed to avoid accidental untagged releases
+  # workflow_run:
+  #   workflows: ["Tests", "CI"]
+  #   types: [completed]
+  # schedule:
+  #   - cron: "0 2 * * *"
+  #   - cron: "0 3 * * 1"
 
 permissions:
   contents: write
@@ -88,7 +85,7 @@ jobs:
         if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
         shell: bash
         run: |
-          python3 -m pip install --upgrade "conan>=2,<3" || python -m pip install --upgrade "conan>=2,<3"
+          python3 -m pip install --upgrade "conan==2.4.2" || python -m pip install --upgrade "conan==2.4.2" || pip3 install "conan==2.4.2"
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
@@ -113,12 +110,10 @@ jobs:
   build-release: # build job now depends on warm
     needs: [warm]
     name: Build and Release (${{ matrix.os }})
-    # Only run if:
-    # - CI passed successfully (workflow_run), OR
-    # - it's a tag push, OR
-    # - it's a scheduled build (nightly/weekly), OR
-    # - it's manually dispatched
-    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Only run on:
+    # - tagged push (stable)
+    # - manual dispatch (nightly/weekly simulation)
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -187,6 +182,14 @@ jobs:
               echo "Directory $d missing"
             fi
           done
+      - name: Cache macOS build directory
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: build/yams-release
+          key: macos-build-${{ matrix.suffix }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}-${{ hashFiles('src/**', 'include/**') }}
+          restore-keys: |
+            macos-build-${{ matrix.suffix }}-
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -343,7 +346,7 @@ jobs:
         if: ${{ matrix.hosted }}
         shell: bash
         run: |
-          python3 -m pip install --upgrade "conan>=2,<3" || python -m pip install --upgrade "conan>=2,<3"
+          python3 -m pip install --upgrade "conan==2.4.2" || python -m pip install --upgrade "conan==2.4.2" || pip3 install "conan==2.4.2"
           conan --version
           mkdir -p ~/.conan2
           # Best-effort: global.conf may not exist in repo for hosted macOS
@@ -623,6 +626,53 @@ jobs:
             echo "WARNING: No .deb produced (possibly due to CPack config or empty install set)" >&2
           fi
 
+      - name: Build macOS pkg (productbuild)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DISPLAY_VERSION="${{ steps.meta.outputs.version }}"
+          PKG_ROOT="${{ env.STAGE_DIR }}"
+          [ -d "$PKG_ROOT" ] || cmake --install "$BUILD_DIR" --prefix "$PKG_ROOT"
+          PKG_ID="dev.yams.cli"
+          PKG_FILE="yams-${DISPLAY_VERSION}-${{ matrix.suffix }}.pkg"
+          echo "Building macOS pkg: $PKG_FILE" >&2
+          pkgbuild --root "$PKG_ROOT" --identifier "$PKG_ID" --version "$DISPLAY_VERSION" --install-location /usr/local "$PKG_FILE"
+          mv "$PKG_FILE" "$GITHUB_WORKSPACE/$PKG_FILE"
+          echo "Created macOS pkg: $PKG_FILE"
+
+      - name: Codesign macOS artifacts (optional)
+        if: runner.os == 'macOS' && secrets.MACOS_CERT_P12 != ''
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD || '' }}
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY || 'Developer ID Application' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$MACOS_CERT_P12" | base64 -d > cert.p12
+          KEYCHAIN_PASS="buildpass"
+            security create-keychain -p "$KEYCHAIN_PASS" build.keychain
+            security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild || true
+            security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASS" build.keychain
+            security default-keychain -s build.keychain
+            security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
+          find ${{ env.STAGE_DIR }} -type f -perm +111 -maxdepth 6 -exec codesign --force --timestamp --options runtime --sign "$CODESIGN_IDENTITY" {} + || true
+          PKG_FILE=$(ls yams-*-macos-*.pkg 2>/dev/null | head -1 || true)
+          if [ -n "$PKG_FILE" ]; then
+            codesign --force --timestamp --options runtime --sign "$CODESIGN_IDENTITY" "$PKG_FILE" || true
+            echo "Codesigned pkg: $PKG_FILE"
+          fi
+
+      # Notarization temporarily disabled; keep codesign only. Re-introduce steps when ready.
+      - name: (Linux only) RPM & AppImage generation
+        if: matrix.os == 'linux-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          DISPLAY_VERSION="${{ steps.meta.outputs.version }}"
+          PKG_VERSION="${{ steps.meta.outputs.base_version }}"
           # Generate RPM package (only if rpmbuild exists)
           if command -v rpmbuild >/dev/null 2>&1; then
             cpack -G RPM \
@@ -639,18 +689,16 @@ jobs:
           else
             echo "rpmbuild not found, skipping RPM generation"
           fi
-
           # Generate AppImage if appimage-builder is available
-          if command -v appimage-builder >/dev/null 2>&1;
-          then
+          if command -v appimage-builder >/dev/null 2>&1; then
             cd "$GITHUB_WORKSPACE"
             cp packaging/appimage/AppImageBuilder.yml .
-            export YAMS_VERSION="${VERSION}"
+            export YAMS_VERSION="${DISPLAY_VERSION}"
             appimage-builder --skip-tests || echo "AppImage build failed, skipping"
             APPIMAGE_FILE=$(ls YAMS-*.AppImage 2>/dev/null | head -1)
             if [ -n "$APPIMAGE_FILE" ]; then
-              mv "$APPIMAGE_FILE" "yams-${VERSION}-x86_64.AppImage"
-              echo "Created AppImage: yams-${VERSION}-x86_64.AppImage"
+              mv "$APPIMAGE_FILE" "yams-${DISPLAY_VERSION}-x86_64.AppImage"
+              echo "Created AppImage: yams-${DISPLAY_VERSION}-x86_64.AppImage"
             fi
           else
             echo "appimage-builder not found, skipping AppImage generation"
@@ -700,6 +748,7 @@ jobs:
             yams-*.deb
             yams-*.rpm
             yams-*.AppImage
+            yams-*.pkg
           retention-days: 1
 
       - name: Verify Linux package artifacts
@@ -772,6 +821,10 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
+          # Derive numeric base version (used for packaging metadata). Fallback 0.0.0
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
+          echo "base_version=$BASE_NUMERIC_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$channel" = "stable" ]; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
@@ -826,7 +879,7 @@ jobs:
           cd assets
           echo "Generating SHA256SUMS for release assets" >&2
           # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
-          ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage)$' | while read -r f; do
+          ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg)$' | while read -r f; do
             sha256sum "$f" >> SHA256SUMS
           done
           sort -o SHA256SUMS SHA256SUMS
@@ -858,6 +911,196 @@ jobs:
             echo "ERROR: No asset files assembled for release." >&2
             exit 1
           fi
+
+      - name: Generate Homebrew formula (stable only)
+        if: steps.meta.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          FORMULA_DIR="homebrew"
+          mkdir -p "$FORMULA_DIR"
+          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Downloading source tarball: $ARCHIVE_URL" >&2
+          TARBALL="${TAG}.tar.gz"
+          curl -Ls -o "$TARBALL" "$ARCHIVE_URL"
+          SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+          echo "Computed sha256: $SHA256" >&2
+          TEMPLATE_PATH="packaging/homebrew/yams.rb"
+          if [ ! -f "$TEMPLATE_PATH" ]; then
+            echo "ERROR: Homebrew template not found at $TEMPLATE_PATH" >&2
+            exit 1
+          fi
+          OUT_FORMULA="$FORMULA_DIR/yams.rb"
+          # Update url & sha256 lines (simple sed in-place replacement)
+          sed \
+            -e "s|^  url \".*\"|  url \"$ARCHIVE_URL\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"$SHA256\"|" \
+            "$TEMPLATE_PATH" > "$OUT_FORMULA"
+          echo "Updated formula at $OUT_FORMULA:" >&2
+          grep -E 'url "|sha256 "' "$OUT_FORMULA" >&2 || true
+          # Create quick install instructions file
+          cat > "$FORMULA_DIR/README.txt" <<EOF
+          Homebrew formula generated for YAMS $VERSION
+          To use without a tap:
+            brew install --build-from-source $OUT_FORMULA
+
+          Recommended (create a tap repository and place yams.rb there), e.g.:
+            1. Create repo: github.com/<you>/homebrew-yams
+            2. Add this formula as Formula/yams.rb
+            3. Users run: brew install <you>/yams/yams
+          EOF
+
+      - name: Upload Homebrew formula artifact
+        if: steps.meta.outputs.channel == 'stable'
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: homebrew/
+          retention-days: 7
+
+      - name: Build APT repository metadata (stable only, linux .deb present)
+        if: steps.meta.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Require at least one .deb in assets
+          if ! ls assets/*.deb >/dev/null 2>&1; then
+            echo "No .deb found; skipping APT repo generation" >&2
+            exit 0
+          fi
+          BASE_VERSION="${{ steps.meta.outputs.base_version }}"
+          REPO_ROOT="aptrepo"
+          POOL_DIR="$REPO_ROOT/pool/main/y/yams"
+          DIST=stable
+          COMPONENT=main
+          ARCH=amd64
+          mkdir -p "$POOL_DIR" "$REPO_ROOT/dists/$DIST/$COMPONENT/binary-$ARCH"
+          # Copy & normalize deb naming (yams_<version>_amd64.deb)
+          for deb in assets/*.deb; do
+            cp "$deb" "$POOL_DIR/$(echo "$deb" | sed -E "s|.*yams-([^-]+)-linux-x86_64\.deb|yams_${BASE_VERSION}_amd64.deb|")" || true
+          done
+          # Install dpkg-dev if missing (for dpkg-scanpackages)
+          if ! command -v dpkg-scanpackages >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y dpkg-dev
+          fi
+          pushd "$REPO_ROOT" >/dev/null
+          dpkg-scanpackages --multiversion pool > dists/$DIST/$COMPONENT/binary-$ARCH/Packages
+          gzip -c dists/$DIST/$COMPONENT/binary-$ARCH/Packages > dists/$DIST/$COMPONENT/binary-$ARCH/Packages.gz
+          cat > dists/$DIST/Release <<REL
+          Origin: YAMS
+          Label: YAMS
+          Suite: $DIST
+          Codename: $DIST
+          Architectures: $ARCH
+          Components: $COMPONENT
+          Description: YAMS APT repository
+          REL
+          # Optional GPG signing if secret present
+          if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
+            gpg --batch --yes -abs -o dists/$DIST/Release.gpg dists/$DIST/Release
+            gpg --batch --yes --clearsign -o dists/$DIST/InRelease dists/$DIST/Release
+          fi
+          popd >/dev/null
+          tree "$REPO_ROOT" || find "$REPO_ROOT" -maxdepth 4 -type f -print
+          cat > "$REPO_ROOT/USAGE.txt" <<EOF
+          Add this APT repo (unsigned example):
+            curl -fsSL https://${{ github.repository_owner }}.pages.dev/aptrepo/gpg.key -o /usr/share/keyrings/yams.gpg   # (If you later publish a key)
+            echo "deb [signed-by=/usr/share/keyrings/yams.gpg] https://${{ github.repository_owner }}.pages.dev/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list
+            sudo apt-get update && sudo apt-get install yams
+
+          If unsigned (temporary/testing):
+            echo "deb [trusted=yes] https://${{ github.repository_owner }}.pages.dev/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list
+            sudo apt-get update && sudo apt-get install yams
+          EOF
+
+      - name: Upload APT repo artifact
+        if: steps.meta.outputs.channel == 'stable' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-repo
+          path: aptrepo/
+          retention-days: 7
+
+      - name: Build YUM repository metadata (stable only, rpm present)
+        if: steps.meta.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! ls assets/*.rpm >/dev/null 2>&1; then
+            echo "No .rpm found; skipping YUM repo generation" >&2
+            exit 0
+          fi
+          YUM_ROOT="yumrepo"
+          mkdir -p "$YUM_ROOT"
+          cp assets/*.rpm "$YUM_ROOT/" 2>/dev/null || true
+          # Install createrepo_c if needed
+          if ! command -v createrepo_c >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y createrepo-c
+          fi
+            
+          createrepo_c "$YUM_ROOT"
+          if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
+            gpg --batch --yes --detach-sign --armor -o "$YUM_ROOT/repodata/repomd.xml.asc" "$YUM_ROOT/repodata/repomd.xml"
+          fi
+          cat > "$YUM_ROOT/USAGE.txt" <<EOF
+          Add YUM/DNF repo (unsigned example):
+            sudo tee /etc/yum.repos.d/yams.repo <<'REPO'
+            [yams]
+            name=YAMS Repository
+            baseurl=https://${{ github.repository_owner }}.pages.dev/yumrepo/
+            enabled=1
+            gpgcheck=0
+            repo_gpgcheck=0
+            REPO
+
+          Then install:
+            sudo dnf makecache || sudo yum makecache
+            sudo dnf install yams || sudo yum install yams
+
+          (Enable gpgcheck once you publish a key and sign RPMs/repodata.)
+          EOF
+
+      - name: Upload YUM repo artifact
+        if: steps.meta.outputs.channel == 'stable' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yum-repo
+          path: yumrepo/
+          retention-days: 7
+
+      - name: Generate latest manifest (latest.json)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+            CHANNEL="${{ steps.meta.outputs.channel }}"
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if [ ! -f SHA256SUMS ]; then
+            echo "Missing SHA256SUMS file; cannot build manifest" >&2
+            exit 1
+          fi
+          mkdir -p assets
+          # Build assets array JSON using awk (avoid jq dependency)
+          ASSETS_JSON=$(awk '{printf "{\"name\":\"%s\",\"sha256\":\"%s\"},", $2, $1}' SHA256SUMS | sed 's/,$//')
+          cat > latest.json <<LJSON
+          {
+            "version": "${VERSION}",
+            "tag": "${TAG}",
+            "channel": "${CHANNEL}",
+            "published_at": "${DATE}",
+            "assets": [${ASSETS_JSON}]
+          }
+          LJSON
+          cp latest.json assets/
+          echo "latest.json manifest:" >&2
+          sed 's/^/  /' latest.json >&2
 
       - name: Check existing release (stable only)
         id: existing_release
@@ -994,13 +1237,14 @@ jobs:
               mv $dir/*.deb assets/ 2>/dev/null || true
               mv $dir/*.rpm assets/ 2>/dev/null || true
               mv $dir/*.AppImage assets/ 2>/dev/null || true
+              # Move macOS pkg packages
+              mv $dir/*.pkg assets/ 2>/dev/null || true
               # Collect benchmark results
               cp $dir/bench_results/*.json assets/ 2>/dev/null || true
             fi
           done
           echo "Collected assets:"
           ls -la assets/
-
       - name: Combine release notes
         shell: bash
         run: |

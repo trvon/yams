@@ -358,7 +358,26 @@ void EmbeddingService::runRepair(yams::compat::stop_token stopToken) {
             else if (!pick.empty() and pick.find("nomic") != std::string::npos)
                 heuristicDim = 768;
         }
+        // Prefer existing DB dimension when present to avoid mismatches during repair
         size_t repairDim = yams::vector::dimres::resolve_dim(dataPath_, heuristicDim, 384);
+        try {
+            vector::VectorDatabaseConfig probeCfg;
+            probeCfg.database_path = (dataPath_ / "vectors.db").string();
+            probeCfg.embedding_dim = repairDim;
+            probeCfg.create_if_missing = false;
+            auto probeDb = std::make_unique<vector::VectorDatabase>(probeCfg);
+            if (probeDb->initialize()) {
+                size_t existing = probeDb->getConfig().embedding_dim;
+                if (existing > 0 && existing != repairDim) {
+                    spdlog::warn("Repair thread: existing vector DB dim={} differs from target "
+                                 "dim={} — aligning generator to {}",
+                                 existing, repairDim, existing);
+                    repairDim = existing;
+                }
+            }
+        } catch (...) {
+            // best-effort probe; continue with resolved dim
+        }
         vdbConfig.embedding_dim = repairDim;
         // Align schema only when missing; avoid dropping existing tables during repair
         try {
@@ -498,6 +517,55 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         const char* home = std::getenv("HOME");
         fs::path modelsPath = fs::path(home ? home : "") / ".yams" / "models";
 
+        // Resolve target vector DB dimension first to steer model selection if needed
+        size_t targetDbDim = 0;
+        try {
+            vector::VectorDatabaseConfig probeCfg;
+            probeCfg.database_path = (dataPath_ / "vectors.db").string();
+            probeCfg.embedding_dim = 384; // provisional
+            probeCfg.create_if_missing = false;
+            auto probeDb = std::make_unique<vector::VectorDatabase>(probeCfg);
+            if (probeDb->initialize()) {
+                targetDbDim = probeDb->getConfig().embedding_dim;
+            }
+        } catch (...) {
+        }
+
+        // If DB exists (targetDbDim>0), prefer a model that matches DB dim to avoid mismatches
+        if (targetDbDim > 0) {
+            auto hasModel = [&](const std::string& name) -> bool {
+                std::error_code ec;
+                return fs::exists(modelsPath / name / "model.onnx", ec);
+            };
+            auto modelDim = [&](const std::string& name) -> size_t {
+                if (name == "all-MiniLM-L6-v2" || name.find("MiniLM") != std::string::npos)
+                    return 384;
+                if (name.find("nomic") != std::string::npos || name == "all-mpnet-base-v2")
+                    return 768;
+                // default heuristic when unknown
+                return 384;
+            };
+            size_t selDim = modelDim(selectedModel);
+            if (selDim != targetDbDim) {
+                // Attempt to switch to a matching model if available
+                if (targetDbDim == 384 && hasModel("all-MiniLM-L6-v2")) {
+                    spdlog::warn("EmbeddingService: switching model '{}' -> 'all-MiniLM-L6-v2' to "
+                                 "match DB dim {}",
+                                 selectedModel, targetDbDim);
+                    selectedModel = "all-MiniLM-L6-v2";
+                } else if (targetDbDim == 768 && hasModel("all-mpnet-base-v2")) {
+                    spdlog::warn("EmbeddingService: switching model '{}' -> 'all-mpnet-base-v2' to "
+                                 "match DB dim {}",
+                                 selectedModel, targetDbDim);
+                    selectedModel = "all-mpnet-base-v2";
+                } else {
+                    spdlog::warn("EmbeddingService: selected model '{}' (dim={}) does not match DB "
+                                 "dim {} and no matching model found; repair may fail",
+                                 selectedModel, selDim, targetDbDim);
+                }
+            }
+        }
+
         vector::EmbeddingConfig embConfig;
         embConfig.model_path = (modelsPath / selectedModel / "model.onnx").string();
         embConfig.model_name = selectedModel;
@@ -583,6 +651,22 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             }
         } catch (const std::exception& e) {
             spdlog::warn("EmbeddingService: schema alignment check failed: {}", e.what());
+        }
+
+        // Hard guard: if the runtime model/generator dimension still diverges from the DB schema,
+        // abort early with a precise operator hint to avoid wasting cycles and failing at insert.
+        try {
+            size_t storedDim = vectorDb->getConfig().embedding_dim;
+            if (storedDim > 0 && actualDim > 0 && storedDim != actualDim) {
+                std::stringstream ss;
+                ss << "Embedding dimension mismatch: DB expects " << storedDim
+                   << ", but runtime model produces " << actualDim
+                   << ". Install/select a model with dim=" << storedDim
+                   << " (e.g., all-MiniLM-L6-v2 for 384) or recreate vectors.db at " << actualDim
+                   << ".";
+                return Error{ErrorCode::InvalidState, ss.str()};
+            }
+        } catch (...) {
         }
 
         // 4. Process documents using dynamic batching (use model-reported seq length)

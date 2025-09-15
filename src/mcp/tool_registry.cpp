@@ -367,6 +367,24 @@ MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
     req.content = j.value("content", std::string{});
     req.name = j.value("name", std::string{});
     req.mimeType = j.value("mime_type", std::string{});
+    req.collection = j.value("collection", std::string{});
+    req.snapshotId = j.value("snapshot_id", std::string{});
+    req.snapshotLabel = j.value("snapshot_label", std::string{});
+    req.recursive = j.value("recursive", false);
+    if (j.contains("include") && j["include"].is_array()) {
+        for (const auto& it : j["include"]) {
+            if (it.is_string())
+                req.includePatterns.push_back(it.get<std::string>());
+        }
+    }
+    if (j.contains("exclude") && j["exclude"].is_array()) {
+        for (const auto& it : j["exclude"]) {
+            if (it.is_string())
+                req.excludePatterns.push_back(it.get<std::string>());
+        }
+    }
+    req.disableAutoMime = j.value("disable_auto_mime", false);
+    req.noEmbeddings = j.value("no_embeddings", false);
 
     if (j.contains("tags") && j["tags"].is_array()) {
         for (const auto& tag : j["tags"]) {
@@ -384,8 +402,21 @@ MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
 }
 
 json MCPStoreDocumentRequest::toJson() const {
-    return json{{"path", path},          {"content", content}, {"name", name},
-                {"mime_type", mimeType}, {"tags", tags},       {"metadata", metadata}};
+    json j = {{"path", path},
+              {"content", content},
+              {"name", name},
+              {"mime_type", mimeType},
+              {"collection", collection},
+              {"snapshot_id", snapshotId},
+              {"snapshot_label", snapshotLabel},
+              {"recursive", recursive},
+              {"include", includePatterns},
+              {"exclude", excludePatterns},
+              {"disable_auto_mime", disableAutoMime},
+              {"no_embeddings", noEmbeddings},
+              {"tags", tags},
+              {"metadata", metadata}};
+    return j;
 }
 
 // MCPStoreDocumentResponse implementation

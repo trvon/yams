@@ -19,38 +19,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+
+## [v0.6.27] - 2025-09-14
+
+### Changed
+- CI/build: Nightly packaging auto-enables on `refs/heads/main` (no time-based scheduler needed). Improved repo-root detection (`yams/` vs `.`) across all tasks, and broadened artifact globs to support both layouts.
+- CI/build: Hardened packaging tasks — CPack RPM now guarded by `rpmbuild` availability and won’t fail the job if RPM tooling is missing; DEB packaging remains enabled. Added `set -e` to packaging steps for clearer early exits while keeping RPM optional.
+- Knowledge Graph: Added unit tests for alias exact/fuzzy resolution, neighbor retrieval, and doc-entity roundtrips (`kg_store_alias_and_entities_test.cpp`).
+- Search + KG: Added SimpleKGScorer end-to-end test validating entity and structural scores and explanations (`kg_scorer_simple_test.cpp`).
+
 ## [v0.6.26]
 
 ### CI Bump
-- Fixing asset upload logic in github ci and release naming in sourcehut
+- Sourcehut debian image updates for packaging on fedora
+- Github CI improvements for testing and release builds
 
-## [v0.6.25]
+## [v0.6.25] - 2025-09-14
 
 ### CI Bump
 - Fixing github actions cache and release naming
 
-## [v0.6.24]
+## [v0.6.24] - 2025-09-14
 
 ### CI Bump
 - Fixing build matrix used in github actions to fix artifact uploading.
 
-## [v0.6.23]
+## [v0.6.23] - 2025-09-14
 
 ### CI Bump
 - Increasing test timeouts and fixing packing errors with sourcehut builds
 
-## [v0.6.22]
+## [v0.6.22] - 2025-09-14
 
 ### CI Bump
 - Fixing macos env error
 
-## [v0.6.21]
+## [v0.6.21] - 2025-09-14
 
 ### Fixes
 - Fixing prefix for sourcehut builds
 - Adding cache for Github CI
 
-## [v0.6.20]
+## [v0.6.20] - 2025-09-13
 
 ### Added
 - Asynchronous post‑ingest pipeline (daemon): decouples heavy work from `add`/`add_directory`.
@@ -95,8 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      daemon GetStats streaming/header path issue that can stall and cause slow fallbacks. The daemon
      path will be re-enabled once the bug is fixed.
 
-
-## [v0.6.19]
+## [v0.6.19] - 2025-09-13
 
 ### Fixed
 - MCP stdio framing correctness and async send:
@@ -122,12 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Daemon & Plugins
 - Plugin autoload diagnostics: adoption logs now include the plugin file path; environment `YAMS_PLUGIN_DIR` is prioritized over system directories to avoid stale installs.
 
-## [v0.6.18]
+## [v0.6.18] - 2025-09-13
 
 ### Hot fix
 - CI Bump : CMake and conan update for 
 
-## [v0.6.17]
+## [v0.6.17] - 2025-09-13
 
 ### Hot fix
 - CI Bump : Resolving compile compatibiliy 

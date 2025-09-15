@@ -64,7 +64,7 @@ EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
         if (!val.empty() && val.front() == '"' && val.back() == '"')
             val = val.substr(1, val.size() - 2);
 
-        if (section == "search.enhanced") {
+        if (section == "search.enhanced" || section == "experimental.enhanced_search") {
             if (key == "enable" && is_bool(val))
                 out.enable = to_bool(val);
             else if (key == "classification_weight")
@@ -75,7 +75,7 @@ EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
                 out.hotzone_weight = std::stod(val);
             else if (key == "enhanced_search_timeout_ms")
                 out.enhanced_search_timeout_ms = std::stoi(val);
-        } else if (section == "search.hotzones") {
+        } else if (section == "search.hotzones" || section == "experimental.hotzones") {
             if (key == "decay_interval_hours")
                 out.hotzones.half_life_hours = std::stod(val);
             else if (key == "max_boost_factor")
@@ -84,6 +84,7 @@ EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
                 out.hotzones.enable_persistence = to_bool(val);
             else if (key == "data_file")
                 out.hotzones.data_file = val;
+            // Other experimental keys (e.g., decay_factor, min_frequency) are ignored in Phase A.
         }
     }
     return out;

@@ -40,6 +40,7 @@ packages:
   - ccache
   - dpkg-dev
   - fakeroot
+  - rpm
   - lld
   - clang
   - llvm
@@ -246,6 +247,7 @@ tasks:
       fi
 
   - package: |
+      set -e
       # Package on tag builds or when explicitly channelized as nightly/weekly
       # Auto-channelize main branch builds as nightly when not tagged
       if [[ -z "${RELEASE_CHANNEL:-}" && "${GIT_REF:-}" == "refs/heads/main" ]]; then
@@ -273,6 +275,7 @@ tasks:
       fi
 
   - package_cpack: |
+      set -e
       # Package on tag builds or when explicitly channelized as nightly/weekly
       # Auto-channelize main branch builds as nightly when not tagged
       if [[ -z "${RELEASE_CHANNEL:-}" && "${GIT_REF:-}" == "refs/heads/main" ]]; then
@@ -296,8 +299,14 @@ tasks:
         -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" \
         -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" \
         -D CPACK_DEBIAN_PACKAGE_MAINTAINER="Trevon <git@trevon.dev>"
-      # Generate RPM package
-      cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}"
+      # Generate RPM package if rpmbuild is available; otherwise skip
+      if command -v rpmbuild >/dev/null 2>&1; then
+        cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" || {
+          echo "CPack RPM failed; continuing without RPM artifact" >&2
+        }
+      else
+        echo "rpmbuild not found; skipping RPM packaging on this image"
+      fi
 
 artifacts:
   # Files available for download after a successful build. Support both repo layouts.

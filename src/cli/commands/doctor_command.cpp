@@ -65,6 +65,45 @@ public:
         namespace fs = std::filesystem;
         size_t dim = 0;
         std::string src;
+        // Prefer existing DB schema when present
+        try {
+            if (cli_) {
+                fs::path dbPath = cli_->getDataPath() / "vectors.db";
+                if (fs::exists(dbPath)) {
+                    sqlite3* db = nullptr;
+                    if (sqlite3_open(dbPath.string().c_str(), &db) == SQLITE_OK && db) {
+                        const char* sql =
+                            "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
+                        sqlite3_stmt* stmt = nullptr;
+                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                                const unsigned char* txt = sqlite3_column_text(stmt, 0);
+                                if (txt) {
+                                    std::string ddl(reinterpret_cast<const char*>(txt));
+                                    auto pos = ddl.find("float[");
+                                    if (pos != std::string::npos) {
+                                        auto end = ddl.find(']', pos);
+                                        if (end != std::string::npos && end > pos + 6) {
+                                            std::string num = ddl.substr(pos + 6, end - (pos + 6));
+                                            try {
+                                                dim = static_cast<size_t>(std::stoul(num));
+                                                src = "db";
+                                            } catch (...) {
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            sqlite3_finalize(stmt);
+                        }
+                        sqlite3_close(db);
+                    }
+                }
+            }
+        } catch (...) {
+        }
+        if (dim > 0)
+            return {dim, src};
         // Config
         try {
             fs::path cfgHome;
@@ -125,7 +164,7 @@ public:
         }
         if (dim > 0)
             return {dim, src};
-        // Generator
+        // Generator (next best)
         try {
             auto emb = cli_ ? cli_->getEmbeddingGenerator() : nullptr;
             if (emb) {
@@ -1417,6 +1456,11 @@ private:
             return;
 
         std::vector<std::string> warnings; // legacy textual list (kept for existing output)
+        struct ModelRec {
+            std::string name;
+            int dim; // 384/768 or -1 for unknown
+        };
+        std::vector<ModelRec> models;
         // Also build structured recommendations (printed later if any)
         yams::cli::RecommendationBuilder recBuilder;
         for (const auto& entry : fs::directory_iterator(base, ec)) {
@@ -1432,6 +1476,15 @@ private:
 
             if (!hasOnnx)
                 continue; // ignore non-model dirs
+
+            // Record model with a heuristic dimension for operator visibility
+            int dim = -1;
+            if (name == "all-MiniLM-L6-v2" || name.find("MiniLM") != std::string::npos)
+                dim = 384;
+            else if (name == "all-mpnet-base-v2" || name.find("mpnet") != std::string::npos ||
+                     name.find("nomic") != std::string::npos)
+                dim = 768;
+            models.push_back({name, dim});
 
             // General guidance: config helps provider infer dim/seq/pooling
             if (!hasConfig) {
@@ -1459,9 +1512,19 @@ private:
             }
         }
 
-        if (!warnings.empty()) {
+        // Print installed models with inferred dimensions
+        if (!models.empty()) {
             std::cout << "\nModels (installed)\n-------------------\n";
-            std::cout << "Some models are missing companion files required for robust inference.\n";
+            for (const auto& m : models) {
+                if (m.dim > 0)
+                    std::cout << "- " << m.name << ": dim=" << m.dim << " (heuristic)\n";
+                else
+                    std::cout << "- " << m.name << ": dim=unknown\n";
+            }
+        }
+        if (!warnings.empty()) {
+            std::cout
+                << "\nSome models are missing companion files required for robust inference.\n";
             for (const auto& w : warnings)
                 std::cout << w << "\n";
             std::cout << "\nTip: You can also supply --hf <org/name> when downloading if the name "
@@ -1770,9 +1833,32 @@ private:
             return;
         }
 
-        std::cout << "DB dimension: " << *dbDim << ", Target ('"
-                  << (targetSrc.empty() ? "auto" : targetSrc) << "') dimension: " << targetDim
+        std::cout << "DB dimension: " << *dbDim << ", Target ('resolved') dimension: " << targetDim
                   << "\n";
+
+        // Warn if installed models imply a different dimension than the DB
+        try {
+            const char* home = std::getenv("HOME");
+            if (home) {
+                namespace fs = std::filesystem;
+                fs::path models = fs::path(home) / ".yams" / "models";
+                std::error_code ec;
+                bool hasMiniLM = fs::exists(models / "all-MiniLM-L6-v2" / "model.onnx", ec);
+                bool hasMpnet = fs::exists(models / "all-mpnet-base-v2" / "model.onnx", ec);
+                if (*dbDim == 384 && hasMpnet && !hasMiniLM) {
+                    std::cout
+                        << "⚠ Installed 768-dim model 'all-mpnet-base-v2' found, but DB is 384.\n"
+                        << "  Install 'all-MiniLM-L6-v2' or recreate vectors.db at 768 to use "
+                           "mpnet.\n";
+                } else if (*dbDim == 768 && hasMiniLM && !hasMpnet) {
+                    std::cout
+                        << "⚠ Installed 384-dim model 'all-MiniLM-L6-v2' found, but DB is 768.\n"
+                        << "  Install 'all-mpnet-base-v2' or recreate vectors.db at 384 to use "
+                           "MiniLM.\n";
+                }
+            }
+        } catch (...) {
+        }
 
         // Non-interactive fixes via flags
         if (stopDaemon_) {

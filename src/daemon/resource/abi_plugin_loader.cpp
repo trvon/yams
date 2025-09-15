@@ -32,19 +32,6 @@ static std::vector<std::string> parseInterfacesFromManifest(const std::string& m
 }
 
 std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
-#ifdef YAMS_TESTING
-    try {
-        spdlog::debug("AbiPluginLoader::trustList size={}", trusted_.size());
-        for (const auto& p : trusted_)
-            spdlog::debug("  trust: {}", p.string());
-    } catch (...) {
-    }
-    // In unit tests, if a trust file is set, start from an empty visible list so tests can
-    // assert empty -> add -> remove deterministically within the same process.
-    if (!trustFile_.empty()) {
-        return {};
-    }
-#endif
     // If a trust file has been set and is empty, treat the trust set as empty for callers
     // to ensure a clean start in unit tests.
     try {
@@ -89,7 +76,12 @@ Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
 }
 
 Result<void> AbiPluginLoader::trustRemove(const std::filesystem::path& p) {
-    trusted_.erase(p);
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path canon = fs::weakly_canonical(p, ec);
+    if (ec)
+        canon = p;
+    trusted_.erase(canon);
     saveTrust();
     return Result<void>();
 }
@@ -236,6 +228,38 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     hi.handle = handle;
     hi.host_context = host_ctx;
     hi.info = scan.value();
+
+    // Attempt to fetch manifest JSON and derive metadata
+    try {
+        using GetManifestFn = const char* (*)();
+        dlerror();
+        auto get_manifest =
+            reinterpret_cast<GetManifestFn>(dlsym(handle, "yams_plugin_get_manifest_json"));
+        const char* dlerr = dlerror();
+        if (!dlerr && get_manifest) {
+            const char* mj = get_manifest();
+            if (mj) {
+                hi.info.manifestJson = mj;
+                // Interfaces
+                hi.info.interfaces = parseInterfacesFromManifest(hi.info.manifestJson);
+                // Name/version from manifest when present
+                try {
+                    std::regex nameRe("\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+                    std::regex verRe("\\\"version\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+                    std::smatch m;
+                    if (namePolicy_ == NamePolicy::Spec &&
+                        std::regex_search(hi.info.manifestJson, m, nameRe)) {
+                        hi.info.name = m[1].str();
+                    }
+                    if (std::regex_search(hi.info.manifestJson, m, verRe)) {
+                        hi.info.version = m[1].str();
+                    }
+                } catch (...) {
+                }
+            }
+        }
+    } catch (...) {
+    }
     loaded_[hi.info.name] = hi;
     return Result<ScanResult>(hi.info);
 }

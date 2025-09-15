@@ -202,6 +202,15 @@ struct MCPStoreDocumentRequest {
     std::string content;
     std::string name;
     std::string mimeType;
+    // Collection/snapshot and directory options to mirror CLI 'add'
+    std::string collection;
+    std::string snapshotId;
+    std::string snapshotLabel;
+    bool recursive = false;
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    bool disableAutoMime = false;
+    bool noEmbeddings = false;
     std::vector<std::string> tags;
     json metadata;
 

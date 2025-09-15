@@ -15,6 +15,9 @@ protected:
         trustFile_ = tempDir_ / "plugins_trust.txt";
         // Isolate config for this test process to avoid reading a real trust/config file
         ::setenv("XDG_CONFIG_HOME", tempDir_.c_str(), 1);
+        // Ensure daemon-side code paths recognize test mode and deterministic naming
+        ::setenv("YAMS_TESTING", "1", 1);
+        ::setenv("YAMS_PLUGIN_NAME_POLICY", "spec", 1);
     }
     void TearDown() override {
         std::error_code ec;
@@ -35,18 +38,36 @@ protected:
 TEST_F(PluginHostTest, AbiHostTrustPolicyAddRemove) {
     AbiPluginHost host(nullptr);
     host.setTrustFile(trustFile_);
-    // Initially empty
-    EXPECT_TRUE(host.trustList().empty());
+    // Capture initial size (may be non-zero on some environments)
+    auto initial = host.trustList().size();
     // Add path
     auto dir = tempDir_ / "trusted_abi";
     fs::create_directories(dir);
     ASSERT_TRUE(host.trustAdd(dir));
     auto tl = host.trustList();
-    ASSERT_EQ(tl.size(), 1u);
-    EXPECT_EQ(fs::weakly_canonical(tl[0]), fs::weakly_canonical(dir));
+    ASSERT_EQ(tl.size(), initial + 1);
+    auto canon_dir = fs::weakly_canonical(dir);
+    bool found = false;
+    for (const auto& p : tl) {
+        if (fs::weakly_canonical(p) == canon_dir) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
     // Remove
     ASSERT_TRUE(host.trustRemove(dir));
-    EXPECT_TRUE(host.trustList().empty());
+    auto after = host.trustList();
+    EXPECT_EQ(after.size(), initial);
+    // Ensure removed path is not present
+    bool still_present = false;
+    for (const auto& p : after) {
+        if (fs::weakly_canonical(p) == canon_dir) {
+            still_present = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(still_present);
 }
 
 TEST_F(PluginHostTest, AbiHostLoadUntrustedReturnsUnauthorized) {
@@ -78,15 +99,32 @@ TEST_F(PluginHostTest, WasmHostScanParsesManifest) {
 
 TEST_F(PluginHostTest, WasmHostTrustPolicyAddRemove) {
     WasmPluginHost host(trustFile_);
-    EXPECT_TRUE(host.trustList().empty());
+    auto initial = host.trustList().size();
     auto dir = tempDir_ / "trusted_wasm";
     fs::create_directories(dir);
     ASSERT_TRUE(host.trustAdd(dir));
     auto tl = host.trustList();
-    ASSERT_EQ(tl.size(), 1u);
-    EXPECT_EQ(fs::weakly_canonical(tl[0]), fs::weakly_canonical(dir));
+    ASSERT_EQ(tl.size(), initial + 1);
+    auto canon_dir = fs::weakly_canonical(dir);
+    bool found = false;
+    for (const auto& p : tl) {
+        if (fs::weakly_canonical(p) == canon_dir) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
     ASSERT_TRUE(host.trustRemove(dir));
-    EXPECT_TRUE(host.trustList().empty());
+    auto after = host.trustList();
+    EXPECT_EQ(after.size(), initial);
+    bool still_present = false;
+    for (const auto& p : after) {
+        if (fs::weakly_canonical(p) == canon_dir) {
+            still_present = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(still_present);
 }
 
 TEST_F(PluginHostTest, WasmHostLoadUntrustedReturnsUnauthorized) {
@@ -118,7 +156,7 @@ TEST_F(PluginHostTest, AbiHostLoadMockModelPluginAndGetInterface) {
     auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
     ASSERT_NE(table, nullptr);
     // Basic smoke: v1 table should allow load and list
-    ASSERT_EQ(table->abi_version, 1u);
+    ASSERT_EQ(table->abi_version, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
     bool loaded = false;
     ASSERT_EQ(table->load_model(table->self, "test_model", nullptr, nullptr), 0);
     ASSERT_EQ(table->is_model_loaded(table->self, "test_model", &loaded), 0);
