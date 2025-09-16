@@ -3553,23 +3553,135 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
 
 boost::asio::awaitable<Result<MCPUpdateMetadataResponse>>
 MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
-    daemon::UpdateDocumentRequest daemon_req;
-    daemon_req.hash = req.hash;
-    daemon_req.name = req.name;
-    daemon_req.addTags = req.tags;
-    for (const auto& [key, value] : req.metadata.items()) {
-        if (value.is_string())
-            daemon_req.metadata[key] = value.get<std::string>();
-        else
-            daemon_req.metadata[key] = value.dump();
+    // Fast path: explicit single-hash update goes through daemon (if available)
+    if (!req.hash.empty() && req.name.empty() && req.path.empty() && req.pattern.empty() &&
+        req.names.empty()) {
+        daemon::UpdateDocumentRequest daemon_req;
+        daemon_req.hash = req.hash;
+        daemon_req.name = req.name;
+        daemon_req.addTags = req.tags;
+        daemon_req.removeTags = req.removeTags;
+        for (const auto& [key, value] : req.metadata.items()) {
+            if (value.is_string())
+                daemon_req.metadata[key] = value.get<std::string>();
+            else
+                daemon_req.metadata[key] = value.dump();
+        }
+        auto dres = co_await daemon_client_->updateDocument(daemon_req);
+        if (!dres)
+            co_return dres.error();
+        MCPUpdateMetadataResponse out;
+        const auto& ur = dres.value();
+        out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
+        out.updated = out.success ? 1 : 0;
+        out.matched = 1;
+        if (!ur.hash.empty())
+            out.updatedHashes.push_back(ur.hash);
+        out.message = out.success ? "Update successful" : "No changes applied";
+        co_return out;
     }
-    auto dres = co_await daemon_client_->updateDocument(daemon_req);
-    if (!dres)
-        co_return dres.error();
+
+    // General path: resolve selectors via document service and apply updates (batch-safe)
+    auto docService = app::services::makeDocumentService(appContext_);
+    if (!docService) {
+        co_return Error{ErrorCode::NotInitialized, "Document service not available"};
+    }
+
+    std::vector<app::services::DocumentEntry> targets;
+
+    auto append_list = [&](const std::string& pat) {
+        app::services::ListDocumentsRequest lreq;
+        lreq.pattern = pat;
+        lreq.limit = 10000;
+        lreq.pathsOnly = false;
+        auto lr = docService->list(lreq);
+        if (lr && !lr.value().documents.empty()) {
+            for (const auto& d : lr.value().documents)
+                targets.push_back(d);
+        }
+    };
+
+    // pattern selector
+    if (!req.pattern.empty())
+        append_list(req.pattern);
+    // path selector (treat as exact first, then suffix match)
+    if (!req.path.empty()) {
+        append_list(req.path);
+        append_list("%/" + req.path);
+    }
+    // explicit name selector
+    if (!req.name.empty()) {
+        append_list("%/" + req.name);
+        append_list(req.name);
+    }
+    // multiple names
+    for (const auto& n : req.names) {
+        append_list("%/" + n);
+        append_list(n);
+    }
+
+    // De-duplicate by hash
+    std::sort(targets.begin(), targets.end(),
+              [](const auto& a, const auto& b) { return a.hash < b.hash; });
+    targets.erase(std::unique(targets.begin(), targets.end(),
+                              [](const auto& a, const auto& b) { return a.hash == b.hash; }),
+                  targets.end());
+
+    // Disambiguation for single-name with multiple matches
+    if ((req.latest || req.oldest) && !targets.empty()) {
+        std::sort(targets.begin(), targets.end(), [](const auto& a, const auto& b) {
+            return a.modified < b.modified; // ascending
+        });
+        app::services::DocumentEntry pick = req.latest ? targets.back() : targets.front();
+        targets.clear();
+        targets.push_back(std::move(pick));
+    }
+
     MCPUpdateMetadataResponse out;
-    const auto& ur = dres.value();
-    out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
-    out.message = out.success ? "Update successful" : "No changes applied";
+    out.matched = targets.size();
+    if (targets.empty()) {
+        out.success = false;
+        out.message = "No matching documents";
+        co_return out;
+    }
+
+    if (req.dryRun) {
+        out.success = true;
+        out.updated = 0;
+        out.message = "Dry-run: would update " + std::to_string(out.matched) + " document(s)";
+        co_return out;
+    }
+
+    std::size_t updated = 0;
+    for (const auto& d : targets) {
+        app::services::UpdateMetadataRequest u;
+        u.name = d.name; // prefer stable name path
+        // metadata
+        if (req.metadata.is_object()) {
+            for (auto it = req.metadata.begin(); it != req.metadata.end(); ++it) {
+                if (it->is_string()) {
+                    u.keyValues[it.key()] = it->get<std::string>();
+                } else {
+                    u.keyValues[it.key()] = it->dump();
+                }
+            }
+        }
+        // tags
+        u.addTags = req.tags;
+        u.removeTags = req.removeTags;
+        u.atomic = true;
+        auto ur = docService->updateMetadata(u);
+        if (ur && ur.value().success) {
+            ++updated;
+            if (!ur.value().hash.empty())
+                out.updatedHashes.push_back(ur.value().hash);
+        }
+    }
+    out.updated = updated;
+    out.success = updated > 0;
+    out.message = (updated > 0) ? ("Updated " + std::to_string(updated) + " of " +
+                                   std::to_string(out.matched) + " document(s)")
+                                : "No changes applied";
     co_return out;
 }
 
@@ -3961,7 +4073,13 @@ void MCPServer::initializeToolRegistry() {
         "get_by_name", [this](const MCPGetByNameRequest& req) { return handleGetByName(req); },
         json{{"type", "object"},
              {"properties",
-              {{"name", {{"type", "string"}, {"description", "Document name to retrieve"}}},
+              {{"name",
+                {{"type", "string"}, {"description", "Document name (basename or subpath)"}}},
+               {"path", {{"type", "string"}, {"description", "Explicit path for exact match"}}},
+               {"subpath",
+                {{"type", "boolean"},
+                 {"description", "Allow suffix match when exact path not found"},
+                 {"default", true}}},
                {"raw_content",
                 {{"type", "boolean"},
                  {"description", "Return raw content without text extraction"},
@@ -3977,9 +4095,8 @@ void MCPServer::initializeToolRegistry() {
                {"oldest",
                 {{"type", "boolean"},
                  {"description", "Select oldest match when ambiguous"},
-                 {"default", false}}}}},
-             {"required", json::array({"name"})}},
-        "Retrieve document content by name");
+                 {"default", false}}}}}},
+        "Retrieve document content by name or path");
 
     toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
         "delete_by_name",
@@ -4029,13 +4146,35 @@ void MCPServer::initializeToolRegistry() {
              {"properties",
               {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
                {"name", {{"type", "string"}, {"description", "Document name"}}},
+               {"path", {{"type", "string"}, {"description", "Explicit path to match"}}},
+               {"names",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Multiple document names to update"}}},
+               {"pattern", {{"type", "string"}, {"description", "Glob-like pattern"}}},
+               {"latest",
+                {{"type", "boolean"},
+                 {"description", "Select newest when ambiguous"},
+                 {"default", false}}},
+               {"oldest",
+                {{"type", "boolean"},
+                 {"description", "Select oldest when ambiguous"},
+                 {"default", false}}},
                {"metadata",
                 {{"type", "object"}, {"description", "Metadata key-value pairs to update"}}},
                {"tags",
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
-                 {"description", "Tags to add or update"}}}}}},
-        "Update document metadata and tags");
+                 {"description", "Tags to add"}}},
+               {"remove_tags",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Tags to remove"}}},
+               {"dry_run",
+                {{"type", "boolean"},
+                 {"description", "Preview changes only"},
+                 {"default", false}}}}}},
+        "Update metadata/tags by hash, name, path, names[], or pattern");
 
     // Session start/stop (simplified)
     // YAMS-specific session management tools
@@ -4173,6 +4312,98 @@ void MCPServer::recordEarlyFeatureUse() {
 
 boost::asio::awaitable<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
+    // Path-first resolution: if explicit path provided or name includes a subpath,
+    // use document service to resolve exact path or suffix, then retrieve by hash.
+    if (!req.path.empty() ||
+        (req.name.find('/') != std::string::npos || req.name.find('\\') != std::string::npos)) {
+        auto docService = app::services::makeDocumentService(appContext_);
+        if (!docService) {
+            co_return Error{ErrorCode::NotInitialized, "Document service not available"};
+        }
+
+        const std::string wanted = !req.path.empty() ? req.path : req.name;
+        std::vector<app::services::DocumentEntry> matches;
+
+        auto try_list = [&](const std::string& pat) {
+            app::services::ListDocumentsRequest lreq;
+            lreq.pattern = pat;
+            lreq.limit = 10000;
+            lreq.pathsOnly = false;
+            auto lr = docService->list(lreq);
+            if (lr && !lr.value().documents.empty()) {
+                for (const auto& d : lr.value().documents)
+                    matches.push_back(d);
+            }
+        };
+
+        // Exact path first
+        try_list(wanted);
+        // Suffix match if allowed and no exact match
+        if (matches.empty() && req.subpath) {
+            try_list(std::string("%/") + wanted);
+        }
+
+        if (matches.empty()) {
+            // Fall through to legacy path below
+        } else {
+            // Disambiguate
+            if (req.latest || req.oldest) {
+                std::sort(matches.begin(), matches.end(),
+                          [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                const auto pick = req.latest ? matches.back() : matches.front();
+                // Retrieve content by hash via RetrievalService
+                yams::app::services::RetrievalService rsvc;
+                yams::app::services::RetrievalOptions ropts;
+                yams::daemon::GetRequest greq;
+                greq.hash = pick.hash;
+                greq.metadataOnly = false;
+                auto grres = rsvc.get(greq, ropts);
+                if (!grres)
+                    co_return grres.error();
+                auto gr = grres.value();
+                MCPGetByNameResponse out;
+                out.size = gr.size;
+                out.hash = gr.hash;
+                out.name = gr.name;
+                out.path = gr.path;
+                out.mimeType = gr.mimeType;
+                if (!gr.content.empty()) {
+                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                    out.content = gr.content.size() <= MAX_BYTES ? gr.content
+                                                                 : gr.content.substr(0, MAX_BYTES);
+                }
+                co_return out;
+            }
+
+            // If not choosing latest/oldest, prefer exact match by path equality
+            auto exactIt = std::find_if(matches.begin(), matches.end(),
+                                        [&](const auto& d) { return d.path == wanted; });
+            const auto chosen = (exactIt != matches.end()) ? *exactIt : matches.front();
+
+            yams::app::services::RetrievalService rsvc;
+            yams::app::services::RetrievalOptions ropts;
+            yams::daemon::GetRequest greq;
+            greq.hash = chosen.hash;
+            greq.metadataOnly = false;
+            auto grres = rsvc.get(greq, ropts);
+            if (!grres)
+                co_return grres.error();
+            auto gr = grres.value();
+            MCPGetByNameResponse out;
+            out.size = gr.size;
+            out.hash = gr.hash;
+            out.name = gr.name;
+            out.path = gr.path;
+            out.mimeType = gr.mimeType;
+            if (!gr.content.empty()) {
+                constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                out.content =
+                    gr.content.size() <= MAX_BYTES ? gr.content : gr.content.substr(0, MAX_BYTES);
+            }
+            co_return out;
+        }
+    }
+
     // Try smart retrieval first, then fallback to base-name list + fuzzy selection
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;

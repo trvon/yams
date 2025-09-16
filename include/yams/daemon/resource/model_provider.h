@@ -191,7 +191,8 @@ using ModelProviderFactory = std::function<std::unique_ptr<IModelProvider>()>;
  * @param preferredProvider Optional name of preferred provider
  * @return Unique pointer to model provider or nullptr if none available
  */
-std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferredProvider = "");
+std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferredProvider = "",
+                                                    bool forceMockProvider = false);
 
 /**
  * Create a model provider with configuration
@@ -200,7 +201,8 @@ std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferred
  * @return Unique pointer to model provider or nullptr if none available
  */
 std::unique_ptr<IModelProvider> createModelProvider(const ModelPoolConfig& config,
-                                                    const std::string& preferredProvider = "");
+                                                    const std::string& preferredProvider = "",
+                                                    bool forceMockProvider = false);
 
 /**
  * Register a model provider factory

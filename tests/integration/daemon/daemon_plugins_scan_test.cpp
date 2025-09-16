@@ -4,14 +4,6 @@
 // Ensure autoloadPluginsNow() is a no-op under mock/disabled ABI plugins.
 TEST(DaemonPlugins, ScanReturnsZeroUnderMock) {
     // Force mock and disable ABI plugins to avoid dlopen on CI/macOS
-#ifdef __APPLE__
-    ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
-    ::setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 1);
-#else
-    setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
-    setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 1);
-#endif
-
     yams::test::DaemonHarness h;
     ASSERT_TRUE(h.start(std::chrono::seconds(2)));
 

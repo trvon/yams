@@ -1,6 +1,8 @@
 // Semantic search E2E: add -> embed -> hybrid search hit
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -20,7 +22,19 @@ TEST(SemanticSearchE2E, AddEmbedSearch) {
     }
 
     // Prefer mock provider for E2E predictability
-    ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
+    auto truthy = [](const char* value) {
+        if (!value || !*value) {
+            return false;
+        }
+        std::string v(value);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    };
+    bool useMockProvider = true;
+    if (const char* v = std::getenv("YAMS_USE_MOCK_PROVIDER")) {
+        useMockProvider = truthy(v);
+    }
 
     fs::path tmp = fs::temp_directory_path() / ("yams_sem_e2e_" + std::to_string(::getpid()));
     fs::create_directories(tmp);
@@ -41,6 +55,7 @@ TEST(SemanticSearchE2E, AddEmbedSearch) {
     cfg.pidFile = pid;
     cfg.logFile = log;
     cfg.enableModelProvider = true;
+    cfg.useMockModelProvider = useMockProvider;
     yams::daemon::YamsDaemon daemon(cfg);
     ASSERT_TRUE(daemon.start()) << "Failed to start daemon";
     auto guard = std::unique_ptr<void, void (*)(void*)>{

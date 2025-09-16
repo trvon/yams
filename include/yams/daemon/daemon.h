@@ -47,6 +47,7 @@ struct DaemonConfig {
     // plugins (e.g., ONNX embeddings) set this to true in their config.
     bool autoLoadPlugins = false;
     bool enableAutoRepair = true;
+    bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
     size_t maxPendingRepairs = 1000;
 

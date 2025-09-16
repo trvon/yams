@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -46,8 +48,19 @@ TEST(DaemonEmbeddingsE2E, PluginEmbeddingsPersistToVectorAndSql) {
     }
 
     // Stabilizers for CI/macOS
-    ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);   // prefer mock provider by default
-    ::setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 0); // avoid dlopen/ONNX on hosts without runtime
+    auto truthy = [](const char* value) {
+        if (!value || !*value) {
+            return false;
+        }
+        std::string v(value);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    };
+    bool useMockProvider = true;
+    if (const char* v = std::getenv("YAMS_USE_MOCK_PROVIDER")) {
+        useMockProvider = truthy(v);
+    }
     ::setenv("YAMS_DISABLE_STORE_STATS", "1", 0); // avoid ContentStore stats path segfaults
 
     fs::path tmp = fs::temp_directory_path() / ("yams_e2e_vdb_sql_" + unique_name(""));
@@ -69,7 +82,8 @@ TEST(DaemonEmbeddingsE2E, PluginEmbeddingsPersistToVectorAndSql) {
     cfg.pidFile = pid;
     cfg.logFile = log;
     cfg.enableModelProvider = true; // mock provider acceptable
-    cfg.autoLoadPlugins = false;    // rely on mock provider; avoid abi autoload
+    cfg.useMockModelProvider = useMockProvider;
+    cfg.autoLoadPlugins = false; // rely on mock provider; avoid abi autoload
 
     yams::daemon::YamsDaemon daemon(cfg);
     auto started = daemon.start();

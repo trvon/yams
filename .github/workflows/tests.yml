@@ -35,6 +35,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
+          # is not detected by CMake (module mode will pick this up).
+          sudo apt-get install -y --no-install-recommends libboost-all-dev
+          echo "Installed system Boost headers/libs for module-mode fallback"
       - name: Cache Conan packages
         id: cache_conan
         uses: actions/cache@v4
@@ -185,6 +195,7 @@ jobs:
             -DBOOST_ROOT="$GEN_DIR" \
             -DBoost_NO_SYSTEM_PATHS=ON \
             -DBoost_NO_BOOST_CMAKE=OFF \
+            -DBoost_USE_STATIC_LIBS=OFF -DBoost_USE_MULTITHREADED=ON -DBoost_USE_STATIC_RUNTIME=OFF \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage" # Needed for install step if any
           echo "BUILD_DIR=${{ env.BUILD_DIR }}" >> $GITHUB_ENV # Ensure BUILD_DIR is available for subsequent steps
 

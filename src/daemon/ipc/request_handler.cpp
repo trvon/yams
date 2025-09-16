@@ -1356,8 +1356,14 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
         if (write_strand_exec_)
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         auto enq = co_await enqueue_frame(request_id, std::move(framed.value()), false, fsm);
-        if (!enq)
+        if (!enq) {
+            if (enq.error().code == ErrorCode::RateLimited ||
+                enq.error().code == ErrorCode::ResourceExhausted) {
+                co_return co_await write_error_immediate(socket, request_id, enq.error().code,
+                                                         enq.error().message, fsm);
+            }
             co_return enq.error();
+        }
         if (!writer_running_) {
             writer_running_ = true;
             co_await writer_drain(socket, fsm);
@@ -1388,8 +1394,14 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
         if (write_strand_exec_)
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         auto enq = co_await enqueue_frame(request_id, std::move(framed.value()), last_chunk, fsm);
-        if (!enq)
+        if (!enq) {
+            if (enq.error().code == ErrorCode::RateLimited ||
+                enq.error().code == ErrorCode::ResourceExhausted) {
+                co_return co_await write_error_immediate(socket, request_id, enq.error().code,
+                                                         enq.error().message, fsm);
+            }
             co_return enq.error();
+        }
         if (!writer_running_) {
             writer_running_ = true;
             co_await writer_drain(socket, fsm);
@@ -1405,11 +1417,13 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
 boost::asio::awaitable<Result<void>> RequestHandler::enqueue_frame(uint64_t request_id,
                                                                    std::vector<uint8_t> frame,
                                                                    bool last, ConnectionFsm* fsm) {
-    // Enforce caps
+    // Enforce caps with typed errors
     auto& q = rr_queues_[request_id];
-    if (q.size() >= config_.per_request_queue_cap ||
-        total_queued_bytes_ + frame.size() > config_.total_queued_bytes_cap) {
-        co_return Error{ErrorCode::ResourceExhausted, "Server write queue saturated"};
+    if (q.size() >= config_.per_request_queue_cap) {
+        co_return Error{ErrorCode::RateLimited, "per-request queue full"};
+    }
+    if (total_queued_bytes_ + frame.size() > config_.total_queued_bytes_cap) {
+        co_return Error{ErrorCode::ResourceExhausted, "connection queue bytes cap"};
     }
     bool was_empty = q.empty();
     auto sz = frame.size();
@@ -1429,6 +1443,46 @@ boost::asio::awaitable<Result<void>> RequestHandler::enqueue_frame(uint64_t requ
             it->second->frames_enqueued.fetch_add(1, std::memory_order_relaxed);
             it->second->bytes_enqueued.fetch_add(sz, std::memory_order_relaxed);
         }
+    }
+    co_return Result<void>{};
+}
+
+// Immediate, queue-bypass error write used when enqueueing is denied due to caps.
+boost::asio::awaitable<Result<void>>
+RequestHandler::write_error_immediate(boost::asio::local::stream_protocol::socket& socket,
+                                      uint64_t request_id, ErrorCode code,
+                                      const std::string& message, ConnectionFsm* fsm) {
+    using boost::asio::use_awaitable;
+    // Honor write strand if present
+    if (write_strand_exec_) {
+        co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+    }
+    // FSM guard
+    if (fsm) {
+        try {
+            fsm_helpers::require_can_write(*fsm, "write_error_immediate");
+        } catch (const std::exception& ex) {
+            co_return Error{ErrorCode::InternalError,
+                            std::string{"FSM not writeable for immediate error: "} + ex.what()};
+        }
+    }
+    ErrorResponse err;
+    err.code = code;
+    err.message = message;
+    Message m;
+    m.version = PROTOCOL_VERSION;
+    m.requestId = request_id;
+    m.timestamp = std::chrono::steady_clock::now();
+    m.payload = Response(err);
+    auto framed = framer_.frame_message(m);
+    if (!framed) {
+        co_return framed.error();
+    }
+    boost::system::error_code ec;
+    co_await boost::asio::async_write(socket, boost::asio::buffer(framed.value()),
+                                      boost::asio::redirect_error(use_awaitable, ec));
+    if (ec) {
+        co_return Error{ErrorCode::NetworkError, ec.message()};
     }
     co_return Result<void>{};
 }

@@ -39,6 +39,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: recursive
       - name: Cache Conan packages (warm)
         id: cache_conan_warm
         uses: actions/cache@v4
@@ -616,20 +617,14 @@ jobs:
             echo "appimage-builder not found, skipping AppImage generation"
           fi
 
-      - name: Combine release notes with build information (stable only)
+      - name: Prepare release notes from CHANGELOG.md (stable only)
         if: steps.meta.outputs.channel == 'stable'
         shell: bash
         run: |
           COMBINED_NOTES="$BUILD_DIR/combined_release_notes.md"
+          # Use CHANGELOG.md section extract verbatim for release notes
           echo "${{ steps.changelog.outputs.release_notes }}" > "$COMBINED_NOTES"
-          echo "" >> "$COMBINED_NOTES"
-
-          # Add release summary if it exists
-          if [ -f "$BUILD_DIR/release_summary.md" ]; then
-            cat "$BUILD_DIR/release_summary.md" >> "$COMBINED_NOTES"
-          fi
-
-          echo "Combined release notes:"
+          echo "Combined release notes prepared from CHANGELOG.md:"
           cat "$COMBINED_NOTES"
 
       - name: Publish matrix.json (expected platform count)
@@ -803,6 +798,39 @@ jobs:
           echo "Created checksum manifest:" >&2
           cat SHA256SUMS >&2
 
+      - name: Install Wrangler CLI
+        shell: bash
+        run: |
+          npm i -g wrangler
+
+      - name: Upload assets to Cloudflare R2 (Wrangler)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ENDPOINT: ${{ secrets.CLOUDFLARE_ENDPOINT }}
+          R2_PREFIX: ${{ secrets.R2_PREFIX }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          # Derive bucket name from Worker wrangler.toml if not provided via secrets
+          BUCKET=$(sed -n 's/^bucket_name\s*=\s*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
+          if [ -z "$BUCKET" ]; then
+            echo "ERROR: Unable to determine R2 bucket name; set R2_PREFIX or define bucket_name in wrangler.toml" >&2
+            exit 1
+          fi
+          echo "Uploading to R2 bucket: $BUCKET (prefix='${R2_PREFIX:-}')"
+          # Upload distributable assets
+          shopt -s nullglob
+          for f in *.tar.gz *.zip *.deb *.rpm *.AppImage; do
+            [ -f "$f" ] || continue
+            wrangler r2 object put "${BUCKET}/${R2_PREFIX:-}${f}" --file="$f"
+          done
+          # Upload latest.json with JSON content-type
+          if [ -f latest.json ]; then
+            wrangler r2 object put "${BUCKET}/${R2_PREFIX:-}latest.json" --file=latest.json --content-type application/json
+          fi
+
       - name: (Optional) Import GPG key and sign checksums
         if: env.GPG_PRIVATE_KEY && env.GPG_PRIVATE_KEY != ''
         env:
@@ -869,56 +897,44 @@ jobs:
             3. Users run: brew install <you>/yams/yams
           EOF
 
-      - name: Upload Homebrew formula artifact
+      - name: Update Homebrew tap submodule (stable only)
         if: steps.meta.outputs.channel == 'stable'
-        uses: actions/upload-artifact@v4
-        with:
-          name: homebrew-formula
-          path: homebrew/
-          retention-days: 7
-
-      - name: Open Homebrew formula update PR (stable only)
-        if: steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || '' }}
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
-          BRANCH="update/formula-v${VERSION}"
-          # Ensure we are on main for branch base
-          git checkout main || git checkout -B main
-          git pull --ff-only origin main || true
-          # Create/update branch
-          git checkout -B "$BRANCH"
-          # Copy generated formula into repository location (replace placeholder version/sha)
-          if [ -f homebrew/yams.rb ]; then
-            cp homebrew/yams.rb packaging/homebrew/yams.rb
+          TAP_PATH="taps/homebrew-yams"
+          if [ ! -d "$TAP_PATH" ]; then
+            echo "Tap submodule not found at $TAP_PATH; skipping tap update" >&2
+            exit 0
+          fi
+          if [ ! -f "homebrew/yams.rb" ]; then
+            echo "homebrew/yams.rb not found; skipping tap update" >&2
+            exit 0
+          fi
+          git submodule update --init --recursive
+          mkdir -p "$TAP_PATH/Formula"
+          cp homebrew/yams.rb "$TAP_PATH/Formula/yams.rb"
+          pushd "$TAP_PATH" >/dev/null
+          git checkout -B "update/formula-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/yams.rb || true
+          if git diff --cached --quiet; then
+            echo "Tap formula unchanged; skipping push" >&2
+            popd >/dev/null
+            exit 0
+          fi
+          git commit -m "chore(homebrew): update formula to v${VERSION}"
+          if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
+            git push --set-upstream "$REMOTE" "update/formula-v${VERSION}" || echo "Push failed; ensure HOMEBREW_TAP_TOKEN has repo permissions"
           else
-            echo "Generated formula not found; aborting PR step" >&2
-            exit 0
+            echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
-          if git diff --quiet -- packaging/homebrew/yams.rb; then
-            echo "Formula unchanged; skipping PR creation"
-            exit 0
-          fi
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packaging/homebrew/yams.rb
-          git commit -m "chore(homebrew): update formula to v${VERSION}" || true
-          git push --set-upstream origin "$BRANCH" || {
-            echo "Push failed (possibly permissions). Exiting." >&2
-            exit 0
-          }
-          if command -v gh >/dev/null 2>&1; then
-            gh pr create \
-              --title "chore(homebrew): update formula to v${VERSION}" \
-              --body "Automated Homebrew formula update for YAMS ${VERSION}.\nSource tag: v${VERSION}" \
-              --base main \
-              --head "$BRANCH" || echo "PR creation skipped (already exists?)"
-          else
-            echo "gh CLI not installed; PR not created (branch pushed: $BRANCH)" >&2
-          fi
+          popd >/dev/null
 
       - name: Build APT repository metadata (stable only, linux .deb present)
         if: steps.meta.outputs.channel == 'stable'
@@ -1201,16 +1217,13 @@ jobs:
           done
           echo "Collected assets:"
           ls -la assets/
-      - name: Combine release notes
+      - name: Combine release notes (include platform status)
         shell: bash
         run: |
           COMBINED_NOTES="combined_release_notes.md"
 
           if [ "${{ steps.meta.outputs.channel }}" = "stable" ]; then
-            echo "# YAMS ${{ steps.meta.outputs.version }}" > "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            echo "${{ steps.changelog.outputs.release_notes }}" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
+            cp "$BUILD_DIR/combined_release_notes.md" "$COMBINED_NOTES"
 
             # Add platform build status
             echo "## Platform Builds" >> "$COMBINED_NOTES"

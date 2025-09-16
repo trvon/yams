@@ -869,34 +869,40 @@ private:
             } catch (...) {
             }
 
-            // Show resources (memory/cpu) and worker/mux details when available
+            // Show resources (memory/cpu) and worker/mux details. Print conditionally:
+            // if metrics are not yet available, show a concise pending line instead.
             try {
-                if (!st.ready) {
-                    const auto& phase =
-                        (st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState);
-                    if (st.retryAfterMs > 0) {
-                        std::cout << "  Resources:    pending (daemon " << phase << ", retry after "
-                                  << st.retryAfterMs << " ms)" << "\n";
-                    } else {
-                        std::cout << "  Resources:    pending (daemon " << phase << ")" << "\n";
-                    }
-                } else {
-                    std::cout << "  Resources:    RAM=" << std::fixed << std::setprecision(1)
-                              << st.memoryUsageMb << " MB, CPU=" << std::setprecision(0)
-                              << st.cpuUsagePercent << "%\n";
-                }
+                const auto& phase =
+                    (st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState);
+                double ram = st.memoryUsageMb;
+                double cpu = st.cpuUsagePercent;
                 auto wt = st.requestCounts.find("worker_threads");
                 auto wa = st.requestCounts.find("worker_active");
                 auto wq = st.requestCounts.find("worker_queued");
-                if (!st.ready) {
-                    std::cout << "  Workers:      pending\n";
-                } else if (wt != st.requestCounts.end() || wa != st.requestCounts.end() ||
-                           wq != st.requestCounts.end()) {
+                bool haveWorkers = (wt != st.requestCounts.end()) ||
+                                   (wa != st.requestCounts.end()) || (wq != st.requestCounts.end());
+                bool haveResources = (ram > 0.0 || cpu > 0.0);
+                if (haveResources) {
+                    std::cout << "  Resources:    RAM=" << std::fixed << std::setprecision(1) << ram
+                              << " MB, CPU=" << std::setprecision(0) << cpu << "%\n";
+                } else {
+                    if (!phase.empty()) {
+                        if (st.retryAfterMs > 0) {
+                            std::cout << "  Resources:    pending (daemon " << phase
+                                      << ", retry after " << st.retryAfterMs << " ms)\n";
+                        } else {
+                            std::cout << "  Resources:    pending (daemon " << phase << ")\n";
+                        }
+                    }
+                }
+                if (haveWorkers) {
                     size_t threads = wt != st.requestCounts.end() ? wt->second : 0;
                     size_t active = wa != st.requestCounts.end() ? wa->second : 0;
                     size_t queued = wq != st.requestCounts.end() ? wq->second : 0;
                     std::cout << "  Workers:      threads=" << threads << " active=" << active
                               << " queued=" << queued << "\n";
+                } else if (!st.ready) {
+                    std::cout << "  Workers:      pending\n";
                 }
                 if (st.muxQueuedBytes > 0)
                     std::cout << "  Mux queued: " << st.muxQueuedBytes << " bytes\n";
@@ -1235,83 +1241,144 @@ private:
             // Silent: doctor remains best-effort
         }
 
-        // Show currently loaded plugins (via daemon stats) succinctly
+        // Show currently loaded plugins, mirroring `yams plugin list` logic
         try {
             using namespace yams::daemon;
             yams::daemon::ClientConfig cfg;
-            cfg.requestTimeout = std::chrono::milliseconds(1200);
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
+            }
+            cfg.requestTimeout = std::chrono::milliseconds(3000);
+            cfg.enableChunkedResponses = false;
             auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
             if (!leaseRes)
                 throw std::runtime_error(leaseRes.error().message);
             auto leaseHandle = std::move(leaseRes.value());
             auto& client = **leaseHandle;
-            GetStatsRequest sreq;
-            sreq.detailed = false;
-            sreq.showFileTypes = false;
-            auto rr = yams::cli::run_result<GetStatsResponse>(client.getStats(sreq),
-                                                              std::chrono::milliseconds(1300));
-            if (rr) {
-                const auto& gs = rr.value();
-                auto it = gs.additionalStats.find("plugins_json");
-                std::cout << "\nLoaded Plugins\n";
-                std::cout << "---------------\n";
-                if (it != gs.additionalStats.end() && !it->second.empty()) {
+
+            auto sres = yams::cli::run_result<StatusResponse>(client.status(),
+                                                              std::chrono::milliseconds(3000));
+            GetStatsResponse stats{};
+            bool haveStats = false;
+            {
+                GetStatsRequest req;
+                req.detailed = true; // request plugin JSON snapshot too
+                req.showFileTypes = false;
+                auto gres = yams::cli::run_result<GetStatsResponse>(
+                    client.call(req), std::chrono::milliseconds(3000));
+                if (gres) {
+                    stats = gres.value();
+                    haveStats = true;
+                }
+            }
+            // If neither typed providers nor plugins_json are present, ask daemon to scan and wait
+            // briefly
+            try {
+                auto haveTyped = (sres && !sres.value().providers.empty());
+                auto haveJson = false;
+                if (haveStats) {
+                    auto it0 = stats.additionalStats.find("plugins_json");
+                    haveJson = (it0 != stats.additionalStats.end() && !it0->second.empty());
+                }
+                if (!(haveTyped || haveJson)) {
+                    // Request a scan of default search paths
+                    yams::daemon::PluginScanRequest scanReq;
+                    (void)yams::cli::run_result<yams::daemon::PluginScanResponse>(
+                        client.call(scanReq), std::chrono::milliseconds(3000));
+                    // Poll up to ~3s for providers or json to appear
+                    for (int i = 0; i < 6; ++i) {
+                        sres = yams::cli::run_result<StatusResponse>(
+                            client.status(), std::chrono::milliseconds(1500));
+                        if (sres) {
+                            const auto& st = sres.value();
+                            if (!st.providers.empty())
+                                break;
+                            auto itp = st.readinessStates.find("plugins");
+                            if (itp != st.readinessStates.end() && itp->second)
+                                break;
+                            auto itmp = st.readinessStates.find("model_provider");
+                            if (itmp != st.readinessStates.end() && itmp->second)
+                                break;
+                        }
+                        GetStatsRequest req2;
+                        req2.detailed = true;
+                        req2.showFileTypes = false;
+                        auto gres2 = yams::cli::run_result<GetStatsResponse>(
+                            client.call(req2), std::chrono::milliseconds(1500));
+                        if (gres2) {
+                            stats = gres2.value();
+                            auto itj = stats.additionalStats.find("plugins_json");
+                            if (itj != stats.additionalStats.end() && !itj->second.empty())
+                                break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+                }
+            } catch (...) {
+                // best-effort; continue
+            }
+
+            std::cout << "\nLoaded Plugins\n";
+            std::cout << "---------------\n";
+
+            // Prefer typed providers list from StatusResponse
+            if (sres && !sres.value().providers.empty()) {
+                const auto& st = sres.value();
+                for (const auto& p : st.providers) {
+                    std::cout << "- " << p.name;
+                    if (p.isProvider)
+                        std::cout << " [provider]";
+                    if (!p.ready)
+                        std::cout << " [not-ready]";
+                    if (p.degraded)
+                        std::cout << " [degraded]";
+                    if (p.modelsLoaded > 0)
+                        std::cout << " models=" << p.modelsLoaded;
+                    if (!p.error.empty())
+                        std::cout << " error=\"" << p.error << "\"";
+                    std::cout << "\n";
+                }
+            } else if (haveStats) {
+                // Fallback to JSON snapshot embedded in stats
+                auto it = stats.additionalStats.find("plugins_json");
+                if (it != stats.additionalStats.end() && !it->second.empty()) {
                     try {
                         auto j = nlohmann::json::parse(it->second, nullptr, false);
                         if (!j.is_discarded() && j.is_array() && !j.empty()) {
                             for (const auto& rec : j) {
-                                std::string name = rec.contains("name")
-                                                       ? rec["name"].get<std::string>()
-                                                       : std::string("(unknown)");
+                                std::string name = rec.value("name", std::string("(unknown)"));
                                 std::string line = "- " + name;
                                 try {
-                                    if (rec.contains("provider") && rec["provider"].is_boolean() &&
-                                        rec["provider"].get<bool>()) {
+                                    if (rec.value("provider", false))
                                         line += " [provider]";
-                                    }
-                                    if (rec.contains("degraded") && rec["degraded"].is_boolean() &&
-                                        rec["degraded"].get<bool>()) {
+                                    if (rec.value("degraded", false))
                                         line += " [degraded]";
-                                    }
                                     if (rec.contains("models_loaded")) {
+                                        int models = 0;
                                         try {
-                                            int models = rec["models_loaded"].get<int>();
-                                            if (models > 0) {
-                                                line += " models=" + std::to_string(models);
-                                            }
+                                            models = rec["models_loaded"].get<int>();
                                         } catch (...) {
                                         }
+                                        if (models > 0)
+                                            line += " models=" + std::to_string(models);
                                     }
                                     if (rec.contains("error")) {
-                                        try {
-                                            if (rec["error"].is_string()) {
-                                                auto err = rec["error"].get<std::string>();
-                                                if (!err.empty()) {
-                                                    line += " error=\"" + err + "\"";
-                                                }
-                                            } else {
-                                                line += " error=" + rec["error"].dump();
-                                            }
-                                        } catch (...) {
+                                        if (rec["error"].is_string()) {
+                                            auto err = rec["error"].get<std::string>();
+                                            if (!err.empty())
+                                                line += " error=\"" + err + "\"";
+                                        } else {
+                                            line += " error=" + rec["error"].dump();
                                         }
                                     }
                                 } catch (...) {
                                 }
                                 std::cout << line << "\n";
 #ifdef __APPLE__
-                                // macOS diagnostic: if this plugin is degraded and we have a path,
-                                // run `otool -L` to surface DYLIB linkage issues.
+                                // macOS diagnostic: surface DYLIB linkage issues for degraded
                                 try {
-                                    bool __degraded = false;
-                                    std::string __pluginPath;
-                                    try {
-                                        if (rec.contains("degraded") &&
-                                            rec["degraded"].is_boolean())
-                                            __degraded = rec["degraded"].get<bool>();
-                                        if (rec.contains("path") && rec["path"].is_string())
-                                            __pluginPath = rec["path"].get<std::string>();
-                                    } catch (...) {
-                                    }
+                                    bool __degraded = rec.value("degraded", false);
+                                    std::string __pluginPath = rec.value("path", std::string());
                                     if (__degraded && !__pluginPath.empty()) {
                                         std::cout << "  otool -L: " << __pluginPath << "\n";
                                         int __rc = std::system(
@@ -1334,14 +1401,17 @@ private:
                 } else {
                     std::cout << "(none loaded)\n";
                 }
-                {
-                    auto eit = gs.additionalStats.find("plugins_error");
-                    if (eit != gs.additionalStats.end() && !eit->second.empty()) {
-                        std::cout << "(plugins error: " << eit->second << ")\n";
-                    }
+
+                // Show any loader errors captured in stats
+                auto eit = stats.additionalStats.find("plugins_error");
+                if (eit != stats.additionalStats.end() && !eit->second.empty()) {
+                    std::cout << "(plugins error: " << eit->second << ")\n";
                 }
+            } else {
+                std::cout << "(none loaded)\n";
             }
         } catch (...) {
+            // keep doctor resilient
         }
 
         // Emit collected recommendations (text only for now)

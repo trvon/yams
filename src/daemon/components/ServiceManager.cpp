@@ -1,6 +1,8 @@
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <fcntl.h>
@@ -74,6 +76,15 @@ void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
     } catch (...) {
     }
 }
+bool env_truthy(const char* value) {
+    if (!value || !*value) {
+        return false;
+    }
+    std::string v(value);
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
 std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
     try {
         namespace fs = std::filesystem;
@@ -107,13 +118,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         // In test builds, prefer mock embedding provider unless explicitly disabled.
         // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
 #ifdef YAMS_TESTING
-        try {
-            if (const char* mm = std::getenv("YAMS_USE_MOCK_PROVIDER"); !mm || !*mm) {
-                setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);
-                spdlog::debug("YAMS_TESTING: defaulting YAMS_USE_MOCK_PROVIDER=1");
-            }
-        } catch (...) {
-        }
         // Default to auto-embed on AddDocument in tests unless explicitly turned off
         try {
             auto falsy = [](const char* s) {
@@ -1616,8 +1620,8 @@ Result<size_t> ServiceManager::autoloadPluginsNow() {
         // In mock/test mode, skip scanning/loading ABI plugins entirely to avoid
         // platform-specific crashes from dlopen or missing runtimes. The embedding
         // stack will use the mock provider instead.
-        if (const char* m = std::getenv("YAMS_USE_MOCK_PROVIDER"); m && *m) {
-            spdlog::info("Plugin autoload skipped (YAMS_USE_MOCK_PROVIDER set)");
+        if (config_.useMockModelProvider || env_truthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
+            spdlog::info("Plugin autoload skipped (mock provider in use)");
             return Result<size_t>(0);
         }
         if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
@@ -2028,14 +2032,17 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
             embeddingGenerator_.reset();
         }
 
+        const bool preferMockProvider =
+            config_.useMockModelProvider || env_truthy(std::getenv("YAMS_USE_MOCK_PROVIDER"));
+
         // Try to get or create a model provider
         if (!modelProvider_ || !modelProvider_->isAvailable()) {
-            // In mock/test mode, prefer an in-process mock provider and skip plugin loading
-            if (const char* m = std::getenv("YAMS_USE_MOCK_PROVIDER"); m && *m) {
-                spdlog::info("Using mock model provider (env)");
+            // In config-driven mock mode, bypass plugin loading entirely.
+            if (preferMockProvider) {
+                spdlog::info("Using mock model provider (config/env preference)");
                 try {
-                    modelProvider_ = std::shared_ptr<IModelProvider>(
-                        createModelProvider(/*preferredProvider=*/""));
+                    modelProvider_ = std::shared_ptr<IModelProvider>(createModelProvider(
+                        config_.modelPoolConfig, /*preferredProvider=*/"", true));
                     state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
                 } catch (const std::exception& e) {
                     spdlog::warn("Failed to instantiate mock provider: {}", e.what());

@@ -353,6 +353,17 @@ tasks:
         cp -v "$RPM" "${ART_DIR}/yams.rpm"
       fi
       echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
+      # Fallback for CI branches: if no artifacts were collected (packaging gated),
+      # compress the staged install to provide a basic artifact for inspection.
+      if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
+        if [ -d "${REPO_DIR}/${STAGE_DIR}" ]; then
+          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${STAGE_DIR}" >&2
+          tar -C "${REPO_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
+          ls -l "${ART_DIR}" || true
+        else
+          echo "WARNING: Stage dir ${REPO_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
+        fi
+      fi
 
 artifacts:
   # SourceHut interprets artifact names literally (no shell globs). Provide

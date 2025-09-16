@@ -121,6 +121,7 @@ TEST(MultiplexClientTest, BackpressureMaxInflightSaturation) {
     }
 
     int exhausted = 0;
+    int rate_limited = 0;
     int succeeded = 0;
     for (auto& f : futs) {
         auto r = f.get();
@@ -128,11 +129,13 @@ TEST(MultiplexClientTest, BackpressureMaxInflightSaturation) {
             succeeded++;
         } else if (r.error().code == yams::ErrorCode::ResourceExhausted) {
             exhausted++;
+        } else if (r.error().code == yams::ErrorCode::RateLimited) {
+            rate_limited++;
         }
     }
 
     // Expect at least one exhaustion error when N > maxInflight
-    EXPECT_GE(exhausted, 1);
+    EXPECT_GE(exhausted + rate_limited, 1);
     // And at least one success overall
     EXPECT_GE(succeeded, 1);
 }

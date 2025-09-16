@@ -490,6 +490,9 @@ struct MCPGetByNameRequest {
     using RequestType = MCPGetByNameRequest;
 
     std::string name;
+    // New: explicit path-based resolution (supports subpath suffix)
+    std::string path;        // if set, prefer exact path match; fallback to suffix
+    bool subpath = true;     // allow suffix match when exact not found
     bool rawContent = false; // Return raw content without processing
     bool extractText = true; // Apply text extraction for HTML/supported formats
     bool latest = false;     // When ambiguous, select newest
@@ -570,8 +573,19 @@ struct MCPUpdateMetadataRequest {
 
     std::string hash;
     std::string name;
+    // Extended selectors and options (parity with get_by_name)
+    std::string path;               // explicit absolute/relative path
+    std::vector<std::string> names; // batch by names
+    std::string pattern;            // glob-like pattern for batch
+    bool latest = false;            // disambiguation when multiple match
+    bool oldest = false;            // disambiguation when multiple match
     json metadata;
-    std::vector<std::string> tags;
+    std::vector<std::string> tags;       // tags to add
+    std::vector<std::string> removeTags; // tags to remove
+    bool dryRun = false;
+    // Session scoping
+    bool useSession = true;
+    std::string sessionName;
 
     static MCPUpdateMetadataRequest fromJson(const json& j);
     json toJson() const;
@@ -582,6 +596,10 @@ struct MCPUpdateMetadataResponse {
 
     bool success = false;
     std::string message;
+    // Aggregated details for batch updates
+    std::size_t matched = 0;
+    std::size_t updated = 0;
+    std::vector<std::string> updatedHashes;
 
     static MCPUpdateMetadataResponse fromJson(const json& j);
     json toJson() const;

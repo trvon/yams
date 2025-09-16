@@ -15,13 +15,6 @@ public:
     DaemonHarness() {
         namespace fs = std::filesystem;
         // Ensure mock provider and disable ABI plugins for stability
-#ifdef __APPLE__
-        ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);
-        ::setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 0);
-#else
-        setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);
-        setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 0);
-#endif
         // Create temp working dir
         auto id = random_id();
         root_ = fs::temp_directory_path() / (std::string("yams_it_") + id);
@@ -39,6 +32,7 @@ public:
         cfg.logFile = log_;
         cfg.enableModelProvider = true;
         cfg.autoLoadPlugins = false; // stable under mock
+        cfg.useMockModelProvider = true;
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
     }
 

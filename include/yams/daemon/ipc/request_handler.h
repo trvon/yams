@@ -172,6 +172,12 @@ private:
                 uint64_t request_id, bool last_chunk = false, bool flush = true,
                 ConnectionFsm* fsm = nullptr);
 
+    // Bypass path: send a small typed error immediately even under saturation caps.
+    // Writes a classic unary error frame correlated to request_id without using rr_queues_.
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    write_error_immediate(boost::asio::local::stream_protocol::socket& socket, uint64_t request_id,
+                          ErrorCode code, const std::string& message, ConnectionFsm* fsm = nullptr);
+
     // Stream chunks from a processor
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     stream_chunks(boost::asio::local::stream_protocol::socket& socket, const Request& request,

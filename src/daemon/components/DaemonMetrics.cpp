@@ -300,6 +300,14 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
         out.muxActiveHandlers = msnap.activeHandlers;
         out.muxQueuedBytes = msnap.queuedBytes;
         out.muxWriterBudgetBytes = msnap.writerBudgetBytes;
+        // Fallback to a sane non-zero default when snapshot hasn't been initialized yet.
+        if (out.muxWriterBudgetBytes == 0) {
+            try {
+                out.muxWriterBudgetBytes = TuneAdvisor::writerBudgetBytesPerTurn();
+            } catch (...) {
+                out.muxWriterBudgetBytes = 4096; // last-resort default
+            }
+        }
         muxQueuedBytesLocal = msnap.queuedBytes;
     } catch (...) {
     }

@@ -1257,6 +1257,20 @@ public:
         }
 
         try {
+            // If running inside the daemon process, never use the daemon IPC backend to avoid
+            // self-calls and potential deadlocks/crashes. The daemon should use the local backend.
+            if (const char* inproc = std::getenv("YAMS_IN_DAEMON")) {
+                std::string v(inproc);
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                if (!v.empty() && v != "0" && v != "false" && v != "off" && v != "no") {
+                    spdlog::debug("DaemonBackend disabled in-process (YAMS_IN_DAEMON=1); using "
+                                  "local backend only");
+                    initialized_ = true;
+                    return true;
+                }
+            }
+
             // Configure daemon client with socket/auto-start from config
             daemon::ClientConfig dcfg;
             // If socket path is empty, let DaemonClient auto-resolve it

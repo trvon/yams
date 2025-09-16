@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -48,12 +50,19 @@ TEST(DaemonEmbeddingsIT, LiveLoadModel_AddDocument_GeneratesEmbeddings) {
     // can crash or be unavailable. This exercises the daemon/provider plumbing
     // without depending on native ONNX binaries. To use a real ONNX runtime,
     // set YAMS_USE_MOCK_PROVIDER=0 (or any falsey value) before running.
-    if (const char* v = std::getenv("YAMS_USE_MOCK_PROVIDER"); !(v && *v)) {
-        ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);
-    }
-    // Also disable ABI plugin autoload to prevent dlopen of native modules.
-    if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); !(d && *d)) {
-        ::setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 0);
+    auto truthy = [](const char* value) {
+        if (!value || !*value) {
+            return false;
+        }
+        std::string v(value);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    };
+
+    bool useMockProvider = true;
+    if (const char* v = std::getenv("YAMS_USE_MOCK_PROVIDER")) {
+        useMockProvider = truthy(v);
     }
 
     std::string models_root;
@@ -76,6 +85,7 @@ TEST(DaemonEmbeddingsIT, LiveLoadModel_AddDocument_GeneratesEmbeddings) {
     cfg.pidFile = pid;
     cfg.logFile = log;
     cfg.enableModelProvider = true;
+    cfg.useMockModelProvider = useMockProvider;
     // Prefer mock provider in tests; skip plugin autoload to avoid dlopen issues on hosts
     // without a compatible ONNX runtime.
     cfg.autoLoadPlugins = false;

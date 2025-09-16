@@ -720,6 +720,8 @@ json MCPAddDirectoryResponse::toJson() const {
 MCPGetByNameRequest MCPGetByNameRequest::fromJson(const json& j) {
     MCPGetByNameRequest req;
     req.name = j.value("name", std::string{});
+    req.path = j.value("path", std::string{});
+    req.subpath = j.value("subpath", true);
     req.rawContent = j.value("raw_content", false);
     req.extractText = j.value("extract_text", true);
     req.latest = j.value("latest", false);
@@ -729,6 +731,8 @@ MCPGetByNameRequest MCPGetByNameRequest::fromJson(const json& j) {
 
 json MCPGetByNameRequest::toJson() const {
     return json{{"name", name},
+                {"path", path},
+                {"subpath", subpath},
                 {"raw_content", rawContent},
                 {"extract_text", extractText},
                 {"latest", latest},
@@ -835,6 +839,10 @@ MCPUpdateMetadataRequest MCPUpdateMetadataRequest::fromJson(const json& j) {
     MCPUpdateMetadataRequest req;
     req.hash = j.value("hash", std::string{});
     req.name = j.value("name", std::string{});
+    req.path = j.value("path", std::string{});
+    req.pattern = j.value("pattern", std::string{});
+    req.latest = j.value("latest", false);
+    req.oldest = j.value("oldest", false);
 
     if (j.contains("metadata")) {
         req.metadata = j["metadata"];
@@ -848,11 +856,37 @@ MCPUpdateMetadataRequest MCPUpdateMetadataRequest::fromJson(const json& j) {
         }
     }
 
+    if (j.contains("remove_tags") && j["remove_tags"].is_array()) {
+        for (const auto& tag : j["remove_tags"]) {
+            if (tag.is_string()) {
+                req.removeTags.push_back(tag.get<std::string>());
+            }
+        }
+    }
+
+    if (j.contains("names") && j["names"].is_array()) {
+        for (const auto& n : j["names"]) {
+            if (n.is_string()) {
+                req.names.push_back(n.get<std::string>());
+            }
+        }
+    }
+
+    req.dryRun = j.value("dry_run", false);
+    req.useSession = j.value("use_session", true);
+    req.sessionName = j.value("session", std::string{});
+
     return req;
 }
 
 json MCPUpdateMetadataRequest::toJson() const {
-    return json{{"hash", hash}, {"name", name}, {"metadata", metadata}, {"tags", tags}};
+    json j{{"hash", hash},       {"name", name},
+           {"path", path},       {"names", names},
+           {"pattern", pattern}, {"latest", latest},
+           {"oldest", oldest},   {"metadata", metadata},
+           {"tags", tags},       {"remove_tags", removeTags},
+           {"dry_run", dryRun}};
+    return j;
 }
 
 // MCPUpdateMetadataResponse implementation
@@ -860,11 +894,22 @@ MCPUpdateMetadataResponse MCPUpdateMetadataResponse::fromJson(const json& j) {
     MCPUpdateMetadataResponse resp;
     resp.success = j.value("success", false);
     resp.message = j.value("message", std::string{});
+    resp.matched = j.value("matched", std::size_t{0});
+    resp.updated = j.value("updated", std::size_t{0});
+    if (j.contains("updated_hashes") && j["updated_hashes"].is_array()) {
+        for (const auto& h : j["updated_hashes"]) {
+            if (h.is_string())
+                resp.updatedHashes.push_back(h.get<std::string>());
+        }
+    }
     return resp;
 }
 
 json MCPUpdateMetadataResponse::toJson() const {
-    return json{{"success", success}, {"message", message}};
+    json j{{"success", success}, {"message", message}, {"matched", matched}, {"updated", updated}};
+    if (!updatedHashes.empty())
+        j["updated_hashes"] = updatedHashes;
+    return j;
 }
 
 // MCPRestoreCollectionRequest implementation

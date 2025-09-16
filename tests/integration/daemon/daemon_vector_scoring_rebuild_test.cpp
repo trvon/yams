@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -7,13 +8,6 @@ using namespace std::chrono_literals;
 
 TEST(DaemonVectorScoring, RebuildEnablesVectorsWithoutBlocking) {
     // Start daemon with model provider disabled so initial build cannot enable vector scoring
-#ifdef __APPLE__
-    ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
-    ::setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 1);
-#else
-    setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
-    setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 1);
-#endif
     namespace fs = std::filesystem;
     fs::path root = fs::temp_directory_path() / "yams_rebuild_it";
     fs::create_directories(root);
@@ -29,6 +23,7 @@ TEST(DaemonVectorScoring, RebuildEnablesVectorsWithoutBlocking) {
     cfg.pidFile = pidf;
     cfg.logFile = logf;
     cfg.enableModelProvider = false; // key: disable to ensure initial build has no embeddings
+    cfg.useMockModelProvider = true;
     cfg.autoLoadPlugins = false;
 
     yams::daemon::YamsDaemon d(cfg);

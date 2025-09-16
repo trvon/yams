@@ -234,6 +234,16 @@ public:
                     aopts.retries = daemonRetries_;
                     aopts.backoffMs = daemonBackoffMs_;
 
+                    // Auto-detect directory targets and enable recursive ingestion when omitted
+                    if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
+                        if (!aopts.recursive) {
+                            aopts.recursive = true;
+                            spdlog::info(
+                                "'{}' is a directory — enabling recursive ingestion automatically.",
+                                path.string());
+                        }
+                    }
+
                     auto render = [&](const yams::daemon::AddDocumentResponse& resp) -> void {
                         if (resp.documentsAdded == 1) {
                             std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."

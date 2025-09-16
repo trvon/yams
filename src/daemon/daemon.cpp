@@ -162,6 +162,14 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     spdlog::info("  PID file: {}", config_.pidFile.string());
     spdlog::info("  Log file: {}", config_.logFile.string());
 
+    // Let in-process components (e.g., EmbeddingGenerator/HybridBackend) know they are running
+    // inside the daemon so they can avoid creating a DaemonBackend and self-calling the IPC API.
+#ifndef _WIN32
+    ::setenv("YAMS_IN_DAEMON", "1", 1);
+#else
+    _putenv_s("YAMS_IN_DAEMON", "1");
+#endif
+
     if (!config_.socketPath.empty()) {
 #ifndef _WIN32
         ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);

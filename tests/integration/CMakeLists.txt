@@ -54,20 +54,6 @@ if(NOT APPLE)
 endif()
 yams_gtest_discover_tests(daemon_search_multiplex_integration_test PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
 
-
-
-# pooled_request_integration_test removed - API changed with Boost.ASIO migration
-
-# Boundary IPC tests for pool/daemon/client interactions
-## Removed legacy pool tests
-# mcp_downloader_integration_test removed - API changed with Boost.ASIO migration
-
-
-
-
-
-# New comprehensive integration tests: removed for stabilization (will be reintroduced after porting)
-
 # Streaming concurrency test: ensure stream returns while data is being added (always build)
 add_executable(daemon_interleaving_integration_test
     daemon/daemon_interleaving_integration_test.cpp)
@@ -154,6 +140,11 @@ gtest_discover_tests(daemon_writer_budget_integration_test DISCOVERY_TIMEOUT ${Y
 add_executable(daemon_mux_active_handlers_integration_test daemon/daemon_mux_active_handlers_integration_test.cpp)
 target_link_libraries(daemon_mux_active_handlers_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 gtest_discover_tests(daemon_mux_active_handlers_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
+
+# Backpressure/RetryAfter integration coverage
+add_executable(daemon_backpressure_integration_test daemon/daemon_backpressure_integration_test.cpp)
+target_link_libraries(daemon_backpressure_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
+gtest_discover_tests(daemon_backpressure_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
 
 # Prepare session IPC round-trip
 add_executable(daemon_prepare_session_integration_test daemon/daemon_prepare_session_integration_test.cpp)

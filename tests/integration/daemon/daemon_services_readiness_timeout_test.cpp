@@ -16,8 +16,6 @@ namespace fs = std::filesystem;
 
 static void set_default_env() {
     // Stabilize daemon bring-up on CI/macOS
-    ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 0);
-    ::setenv("YAMS_DISABLE_ABI_PLUGINS", "1", 0);
     ::setenv("YAMS_DISABLE_STORE_STATS", "1", 0);
     // Keep search engine build bounded so the daemon surfaces readiness quickly
     ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "2000", 0); // 2s budget
@@ -50,7 +48,8 @@ TEST(DaemonServicesReadiness, ManagedServicesReachReadyWithinTimeouts) {
     cfg.pidFile = pid;
     cfg.logFile = log;
     cfg.enableModelProvider = true; // mock acceptable
-    cfg.autoLoadPlugins = false;    // avoid dlopen
+    cfg.useMockModelProvider = true;
+    cfg.autoLoadPlugins = false; // avoid dlopen
 
     yams::daemon::YamsDaemon daemon(cfg);
     ASSERT_TRUE(daemon.start());

@@ -20,6 +20,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+## [v0.6.35] - 2025-09-16
+
+### Added
+- CLI doctor: proactively triggers a plugin scan when neither typed providers nor
+  `plugins_json` are available, then briefly waits so results appear. Matches
+  `yams plugin list` behavior for faster diagnosis.
+- CLI add: auto-detects directory paths and enables `--recursive` automatically
+  (LLM/UX friendly) with an informational log.
+
+### Changed
+- Doctor plugin listing now prefers daemon typed providers from `status.providers`
+  and falls back to `getStats().additionalStats["plugins_json"]` for parity with
+  `yams plugin list`. Retains macOS `otool -L` hint for degraded plugins.
+- Directory ingestion: daemon dispatcher treats any directory path as directory
+  ingestion (forces recursive=true) even if clients omit the flag.
+
+### Fixed
+- ServiceManager: corrected placement of `env_truthy()` (was nested in another function)
+  and added `<cctype>` include to fix macOS build failures.
+- DocumentService: early, clear error when a directory path is sent to the single-file
+  `store()` path (prevents `file_size: Is a directory`).
+
+
 ## [v0.6.34] - 2025-09-16
 
 ### Fixed

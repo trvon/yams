@@ -341,17 +341,24 @@ std::vector<std::string> getRegisteredProviders() {
     return providers;
 }
 
-std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferredProvider) {
+std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferredProvider,
+                                                    bool forceMockProvider) {
     // Default configuration
     ModelPoolConfig defaultConfig;
-    return createModelProvider(defaultConfig, preferredProvider);
+    return createModelProvider(defaultConfig, preferredProvider, forceMockProvider);
 }
 
 std::unique_ptr<IModelProvider> createModelProvider(const ModelPoolConfig& config,
-                                                    const std::string& preferredProvider) {
+                                                    const std::string& preferredProvider,
+                                                    bool forceMockProvider) {
     auto& registry = getProviderRegistry();
 
     // Check for test/mock mode
+    if (forceMockProvider) {
+        spdlog::info("Using mock model provider (config)");
+        return std::make_unique<MockModelProvider>();
+    }
+
     if (std::getenv("YAMS_USE_MOCK_PROVIDER") != nullptr) {
         spdlog::info("Using mock model provider (YAMS_USE_MOCK_PROVIDER set)");
         return std::make_unique<MockModelProvider>();

@@ -167,6 +167,11 @@ public:
         std::optional<std::filesystem::path> tmpToRemove;
 
         if (!req.path.empty()) {
+            // Defensive: reject directory paths early; callers should use addDirectory
+            if (std::error_code __ec; std::filesystem::is_directory(req.path, __ec)) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Path is a directory; use addDirectory/recursive ingestion"};
+            }
             usePath = req.path;
         } else if (!req.content.empty() && !req.name.empty()) {
             // Write content to a temp file

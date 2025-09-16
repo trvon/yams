@@ -448,7 +448,11 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
-            if (req.recursive && !req.path.empty() && std::filesystem::is_directory(req.path)) {
+            // Be forgiving: if the path is a directory but recursive was not set, treat it as
+            // a directory ingestion with recursive=true to avoid file_size errors sent by clients
+            // that didn't set the flag (common with LLM-driven clients).
+            bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+            if ((req.recursive || isDir) && !req.path.empty() && isDir) {
                 auto indexingService =
                     app::services::makeIndexingService(serviceManager_->getAppContext());
                 app::services::AddDirectoryRequest serviceReq;
@@ -457,7 +461,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 serviceReq.tags = req.tags;
                 serviceReq.includePatterns = req.includePatterns;
                 serviceReq.excludePatterns = req.excludePatterns;
-                serviceReq.recursive = req.recursive;
+                serviceReq.recursive = true; // force recursive when directory detected
                 // Prefer deferred extraction for directories. Keep fast returns and let
                 // PostIngestQueue perform FTS5 indexing. Inline extraction for directories can
                 // be very expensive; retain deferred behavior here.
