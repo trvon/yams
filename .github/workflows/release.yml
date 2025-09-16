@@ -1042,12 +1042,14 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
             CHANNEL="${{ steps.meta.outputs.channel }}"
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          mkdir -p assets
+          cd assets
           if [ ! -f SHA256SUMS ]; then
-            echo "Missing SHA256SUMS file; cannot build manifest" >&2
+            echo "Missing SHA256SUMS file in assets/; cannot build manifest" >&2
+            ls -al >&2 || true
             exit 1
           fi
-          mkdir -p assets
-          # Build assets array JSON using awk (avoid jq dependency)
+          # Build assets array JSON using awk (avoid jq dependency); trim trailing comma
           ASSETS_JSON=$(awk '{printf "{\"name\":\"%s\",\"sha256\":\"%s\"},", $2, $1}' SHA256SUMS | sed 's/,$//')
           cat > latest.json <<LJSON
           {
@@ -1058,8 +1060,7 @@ jobs:
             "assets": [${ASSETS_JSON}]
           }
           LJSON
-          cp latest.json assets/
-          echo "latest.json manifest:" >&2
+          echo "latest.json manifest (assets/latest.json):" >&2
           sed 's/^/  /' latest.json >&2
 
       - name: Check existing release (stable only)

@@ -318,15 +318,27 @@ tasks:
       else
         REPO_DIR="."
       fi
-      # Collect tarballs from REPO_DIR (packaging step writes .. from stage -> REPO_DIR)
+      # Publish a minimal, size-safe artifact set so SourceHut can retain them reliably.
+      # Policy:
+      #  - Tag builds: prefer distro packages (.deb, .rpm) if available; fall back to the tarball.
+      #  - Nightly/weekly: publish only the primary tarball (avoid duplicates and stage archives).
       shopt -s nullglob || true
-      for f in "${REPO_DIR}"/yams-*.tar.gz "${REPO_DIR}"/yams-*-stage.tar.gz "${REPO_DIR}"/yams-*-stage.zip; do
-        [ -f "$f" ] && cp -v "$f" "${ART_DIR}/"
-      done
-      # Collect CPack outputs from build dir
-      for f in "${REPO_DIR}/${BUILD_DIR}"/*.deb "${REPO_DIR}/${BUILD_DIR}"/*.rpm; do
-        [ -f "$f" ] && cp -v "$f" "${ART_DIR}/"
-      done
+      if [[ "${GIT_REF:-}" == refs/tags/* ]]; then
+        # Prefer distro packages on tagged releases
+        if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.deb" > /dev/null; then
+          for f in "${REPO_DIR}/${BUILD_DIR}"/*.deb; do cp -v "$f" "${ART_DIR}/"; done
+        fi
+        if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.rpm" > /dev/null; then
+          for f in "${REPO_DIR}/${BUILD_DIR}"/*.rpm; do cp -v "$f" "${ART_DIR}/"; done
+        fi
+        # Fallback to tarball when packages are missing
+        if ! compgen -G "${ART_DIR}/*" > /dev/null; then
+          for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
+        fi
+      else
+        # Nightly/weekly: publish only the primary tarball
+        for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
+      fi
       echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
 
 artifacts:

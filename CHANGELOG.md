@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
+
+## [v0.6.32] - 2025-09-16
+
+### Fixed
+- Fixing linking errors seen on ubuntu 24.04
+- CI/CD 
+  - Sourcehut: Fixing how packaging is exposed
+  - Github Actions: Fixing test dependency setup and release package steps
+
 ## [v0.6.31] - 2025-09-16
 
 ### Fixed

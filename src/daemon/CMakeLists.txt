@@ -521,6 +521,9 @@ else()
     target_link_libraries(yams-daemon PRIVATE
         "-Wl,--start-group"
             yams::daemon
+            # Force-resolve IPC objects on Linux to satisfy references from both
+            # yams::daemon and yams::daemon_client under lld/--gc-sections
+            "-Wl,--whole-archive" $<TARGET_FILE:yams_daemon_ipc> "-Wl,--no-whole-archive"
             yams::daemon_ipc
             yams::daemon_client
             yams_ipc_proto
