@@ -117,8 +117,9 @@ jobs:
             YAMS_VERSION=${{ steps.version.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_name }}
-          cache-from: type=gha,scope=amd64
-          cache-to: type=gha,mode=max,scope=amd64
+          # Use GitHub Actions cache for BuildKit layers (scoped per arch)
+          cache-from: type=gha,scope=docker-${{ runner.os }}-amd64
+          cache-to: type=gha,mode=max,scope=docker-${{ runner.os }}-amd64
           # Enable BuildKit inline caching and leverage Conan layer reuse; future enhancement could mount host cache
           provenance: false
 
@@ -229,8 +230,9 @@ jobs:
             YAMS_VERSION=${{ steps.version.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_name }}
-          cache-from: type=gha,scope=arm64
-          cache-to: type=gha,mode=max,scope=arm64
+          # Use GitHub Actions cache for BuildKit layers (scoped per arch)
+          cache-from: type=gha,scope=docker-${{ runner.os }}-arm64
+          cache-to: type=gha,mode=max,scope=docker-${{ runner.os }}-arm64
           provenance: false
 
   # Create multi-arch manifest

@@ -1283,7 +1283,7 @@ jobs:
           echo "--- Combined Release Notes (dry-run) ---"
           cat combined_release_notes.md
 
-      - name: Create or update GitHub Release
+      - name: Create or update GitHub Release (draft, upload assets first)
         if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
         uses: softprops/action-gh-release@v2
         with:
@@ -1291,10 +1291,27 @@ jobs:
           name: YAMS ${{ steps.meta.outputs.version }}
           body_path: combined_release_notes.md
           files: assets/*
-          draft: false
+          draft: true
+          allowUpdates: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish GitHub Release (flip draft=false)
+        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "Installing gh CLI to publish release" >&2
+            type -p curl >/dev/null || sudo apt-get update
+            sudo apt-get install -y gh >/dev/null 2>&1 || true
+          fi
+          TAG="${{ steps.meta.outputs.tag }}"
+          # publish the release after assets are uploaded
+          gh release edit "$TAG" --draft=false --notes-file combined_release_notes.md \
+            ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }}
 
       - name: List release assets (post-upload)
         if: ${{ github.actor != 'nektos/act' }}

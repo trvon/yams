@@ -391,7 +391,6 @@ target_link_libraries(yams_daemon
         yams_downloader
         yams_repair
         yams_app_services
-        yams::daemon_ipc
         yams_daemon_client
     PRIVATE
         $<$<AND:$<VERSION_GREATER_EQUAL:${CMAKE_VERSION},3.24>,$<PLATFORM_ID:Linux>>:$<LINK_GROUP:RESCAN,yams_wal>>
@@ -477,9 +476,7 @@ add_executable(yams-daemon
 # On some Linux toolchains with lld and grouped static libs, references from
 # yams_daemon_client back into IPC may still show as undefined at the final
 # link. Add IPC OBJECTS directly to the executable as a safety net.
-if(UNIX AND NOT APPLE)
-    target_sources(yams-daemon PRIVATE $<TARGET_OBJECTS:yams_daemon_ipc_obj>)
-endif()
+# Do not duplicate IPC OBJECTS in the executable; they are already included in yams_daemon
 if(APPLE)
     target_link_libraries(yams-daemon PRIVATE
         yams::daemon
@@ -527,10 +524,6 @@ else()
     target_link_libraries(yams-daemon PRIVATE
         "-Wl,--start-group"
             yams::daemon
-            # Force-resolve IPC objects on Linux to satisfy references from both
-            # yams::daemon and yams::daemon_client under lld/--gc-sections
-            "-Wl,--whole-archive" $<TARGET_FILE:yams_daemon_ipc> "-Wl,--no-whole-archive"
-            yams::daemon_ipc
             yams::daemon_client
             yams_ipc_proto
             yams_config
