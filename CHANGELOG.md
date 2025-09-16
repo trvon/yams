@@ -20,7 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
-## [v0.6.30]
+## [v0.6.31] - 2025-09-16
+
+### Fixed
+- CI/CD
+  - GitHub Actions: tests workflow YAML fixed (indentation of `timeout-minutes` under the job).
+  - Docker workflow: ARM64 builds now use QEMU + Buildx on `ubuntu-latest`; native `ubuntu-24.04-arm`
+    runners no longer required for ARM publishing. Multi-arch manifest unchanged.
+
+## [v0.6.30] - 2025-08-16
 
 ### Fixed
 - Fixed regressions in CLI / MCP UI performance from the introduction of the daemon

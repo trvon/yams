@@ -29,7 +29,7 @@ jobs:
             extra_cmake_flags: "-DYAMS_ENABLE_COVERAGE=OFF -DYAMS_ENABLE_ONNX=OFF"
     runs-on: ${{ matrix.runs_on }}
     # Allow longer time for first-time ARM dependency builds.
-  timeout-minutes: 50
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4

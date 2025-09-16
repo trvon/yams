@@ -124,13 +124,18 @@ jobs:
 
   # Build ARM64 image on native Linux ARM64 runner (no QEMU)
   build-arm64:
-    name: Build Docker Image (linux/arm64)
-    runs-on: ubuntu-24.04-arm64
+    name: Build Docker Image (linux/arm64 via QEMU)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set up QEMU (arm64)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Verify Docker daemon is running
         run: |
@@ -154,6 +159,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver-opts: |
+            image=moby/buildkit:latest
 
       - name: Log in to Container Registry
         if: github.event_name != 'pull_request' && env.ACT != 'true'
