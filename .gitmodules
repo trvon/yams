@@ -1,3 +1,6 @@
 [submodule "plugins/yams-ghidra-plugin"]
 	path = plugins/yams-ghidra-plugin
 	url = git@github.com:trvon/yams-ghidra-plugin.git
+[submodule "homebrew-yams"]
+  path = homebrew-yams
+  url = git@github.com:trvon/homebrew-yams.git
