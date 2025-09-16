@@ -106,7 +106,7 @@ public:
                     } else if (ctx_.metadataRepo) {
                         metadata::DocumentInfo docInfo;
 
-                        // Derive filename, preferring server-suggested name when available
+                        // Derive friendly filename/indexName (server-suggested or URL basename)
                         std::string filename;
                         if (finalResult.suggestedName && !finalResult.suggestedName->empty()) {
                             filename = *finalResult.suggestedName;
@@ -125,8 +125,8 @@ public:
                             }
                         }
 
-                        // Use the filename as filePath to make name-based retrieval work
-                        docInfo.filePath = filename;
+                        // Use the filename as fileName; store actual CAS path in filePath
+                        docInfo.filePath = finalResult.storedPath;
                         docInfo.fileName = filename;
                         docInfo.fileExtension = "";
                         auto dotPos = filename.rfind('.');
@@ -261,6 +261,21 @@ public:
             response.etag = finalResult.etag;
             response.lastModified = finalResult.lastModified;
             response.checksumOk = finalResult.checksumOk;
+            // Friendly retrieval hint for CLI/MCP parity
+            if (finalResult.suggestedName && !finalResult.suggestedName->empty()) {
+                response.indexName = *finalResult.suggestedName;
+            } else {
+                std::string fname = finalResult.url;
+                auto lastSlash = fname.find_last_of('/');
+                if (lastSlash != std::string::npos)
+                    fname = fname.substr(lastSlash + 1);
+                auto q = fname.find('?');
+                if (q != std::string::npos)
+                    fname = fname.substr(0, q);
+                if (fname.empty())
+                    fname = "downloaded_file";
+                response.indexName = std::move(fname);
+            }
 
             return response;
         } catch (const std::exception& e) {

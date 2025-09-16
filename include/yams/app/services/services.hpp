@@ -797,6 +797,8 @@ struct DownloadServiceResponse {
     std::optional<std::string> etag;
     std::optional<std::string> lastModified;
     std::optional<bool> checksumOk;
+    // Friendly retrieval hint: suggested index/name for discovery
+    std::string indexName; // e.g., host/path basename or Content-Disposition filename
 };
 
 class IDownloadService {

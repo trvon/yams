@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
 
 
+## [v0.6.33] - 2025-09-16
+
+### Fixed
+- MCP server 
+  - Improved download logic to improve retrieving content from a retrieved files
+- CI/CD 
+  - Sourcehut: Improving build packaging step 
+  - Github Actions: Improving test.yml configuration step 
+
 ## [v0.6.32] - 2025-09-16
 
 ### Fixed

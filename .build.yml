@@ -339,18 +339,24 @@ tasks:
         # Nightly/weekly: publish only the primary tarball
         for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
       fi
+      # Provide stable filenames expected by SourceHut (no globbing in artifacts list)
+      if compgen -G "${ART_DIR}/*.tar.gz" > /dev/null; then
+        TARBALL=$(ls -1 "${ART_DIR}"/*.tar.gz | head -1)
+        cp -v "$TARBALL" "${ART_DIR}/yams.tar.gz"
+      fi
+      if compgen -G "${ART_DIR}/*.deb" > /dev/null; then
+        DEB=$(ls -1 "${ART_DIR}"/*.deb | head -1)
+        cp -v "$DEB" "${ART_DIR}/yams.deb"
+      fi
+      if compgen -G "${ART_DIR}/*.rpm" > /dev/null; then
+        RPM=$(ls -1 "${ART_DIR}"/*.rpm | head -1)
+        cp -v "$RPM" "${ART_DIR}/yams.rpm"
+      fi
       echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
 
 artifacts:
-  # Files available for download after a successful build. Support both repo layouts.
-  - "artifacts/*"
-  - "yams-*.tar.gz"
-  - "yams-*-stage.tar.gz"
-  - "yams-*-stage.zip"
-  - "build/yams-release/*.deb"
-  - "build/yams-release/*.rpm"
-  - "yams/yams-*.tar.gz"
-  - "yams/yams-*-stage.tar.gz"
-  - "yams/yams-*-stage.zip"
-  - "yams/build/yams-release/*.deb"
-  - "yams/build/yams-release/*.rpm"
+  # SourceHut interprets artifact names literally (no shell globs). Provide
+  # stable filenames in collect_artifacts.
+  - "artifacts/yams.tar.gz"
+  - "artifacts/yams.deb"
+  - "artifacts/yams.rpm"

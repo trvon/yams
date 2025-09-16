@@ -167,7 +167,7 @@ jobs:
           echo "--- Toolchain sanity (first toolchain file if present) ---"
           find ${{ env.BUILD_DIR }} -maxdepth 5 -name conan_toolchain.cmake -print -exec grep -E 'CMAKE_CXX_COMPILER' {} \; | head -20 || true
           # Prepend correct generators dir to CMAKE_PREFIX_PATH to help CMake locate *Config.cmake packages
-          export CMAKE_PREFIX_PATH="${GEN_DIR}:${CMAKE_PREFIX_PATH:-}"
+          export CMAKE_PREFIX_PATH="${GEN_DIR}:${GEN_DIR}/Boost:${GEN_DIR}/boost:${CMAKE_PREFIX_PATH:-}"
           echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
           # Diagnostic: warn if Boost config is still missing
           if ! compgen -G "$GEN_DIR/*Boost*Config*.cmake" > /dev/null && [ ! -f "$GEN_DIR/boost-config.cmake" ]; then
@@ -179,7 +179,12 @@ jobs:
             -DYAMS_ENABLE_SANITIZERS=ON \
             ${{ matrix.extra_cmake_flags }} \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_PREFIX_PATH="$GEN_DIR;$GEN_DIR/Boost;$GEN_DIR/boost" \
             -DBoost_DIR="$GEN_DIR" \
+            -Dboost_DIR="$GEN_DIR" \
+            -DBOOST_ROOT="$GEN_DIR" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DBoost_NO_BOOST_CMAKE=OFF \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage" # Needed for install step if any
           echo "BUILD_DIR=${{ env.BUILD_DIR }}" >> $GITHUB_ENV # Ensure BUILD_DIR is available for subsequent steps
 

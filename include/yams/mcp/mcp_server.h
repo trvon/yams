@@ -76,7 +76,8 @@ public:
     // Set external shutdown flag for non-blocking checks
     void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
 
-    // Peer framing preference auto-detected from inbound (true => ndjson, false => headers)
+    // Peer framing preference auto-detected from inbound (true => ndjson, false => headers).
+    // Default to NDJSON for broader client compatibility; switch to framed when we detect headers.
     bool peerPrefersNdjson() const noexcept { return preferNdjson_.load(); }
 
 private:
@@ -86,7 +87,7 @@ private:
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
-    std::atomic<bool> preferNdjson_{false};
+    std::atomic<bool> preferNdjson_{true};
 
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};

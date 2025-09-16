@@ -281,6 +281,8 @@ public:
                 j["last_modified"] = *resp.lastModified;
             if (resp.checksumOk)
                 j["checksum_ok"] = *resp.checksumOk;
+            if (!resp.indexName.empty())
+                j["index_name"] = resp.indexName;
             if (!tags_.empty())
                 j["tags"] = tags_;
             if (!serviceReq.metadata.empty())
@@ -292,6 +294,13 @@ public:
             std::cout << "  Hash: " << resp.hash << std::endl;
             std::cout << "  Size: " << resp.sizeBytes << " bytes" << std::endl;
             std::cout << "  Stored at: " << resp.storedPath.string() << std::endl;
+            if (!resp.indexName.empty()) {
+                std::cout << "  Name: " << resp.indexName << std::endl;
+                std::cout << "  Tip: yams get --name \"" << resp.indexName << "\" --extract-text"
+                          << std::endl;
+            } else {
+                std::cout << "  Tip: yams get " << resp.hash << std::endl;
+            }
         }
 
         return Result<void>();

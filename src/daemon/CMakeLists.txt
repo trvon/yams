@@ -474,6 +474,12 @@ add_executable(yams-daemon
     daemon_main.cpp
 )
 # IPC OBJECTS are linked into yams_daemon (static lib) above. No need to add to the executable.
+# On some Linux toolchains with lld and grouped static libs, references from
+# yams_daemon_client back into IPC may still show as undefined at the final
+# link. Add IPC OBJECTS directly to the executable as a safety net.
+if(UNIX AND NOT APPLE)
+    target_sources(yams-daemon PRIVATE $<TARGET_OBJECTS:yams_daemon_ipc_obj>)
+endif()
 if(APPLE)
     target_link_libraries(yams-daemon PRIVATE
         yams::daemon

@@ -405,6 +405,8 @@ MessageResult StdioTransport::receive() {
         // Read first non-empty line
         do {
             if (!std::getline(in, line)) {
+                // Client closed stdin (EOF). Treat as normal shutdown; avoid alarming logs.
+                spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
                 state_.store(TransportState::Disconnected);
                 return Error{ErrorCode::NetworkError, "EOF on stdin"};
             }
@@ -438,7 +440,8 @@ MessageResult StdioTransport::receive() {
             std::string val = hdr.substr(pos + 1);
             while (!val.empty() && (val.front() == ' ' || val.front() == '\t'))
                 val.erase(val.begin());
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
             if (key == "content-length") {
                 try {
                     contentLength = static_cast<std::size_t>(std::stoull(val));
@@ -549,6 +552,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         cfg.headerTimeout = std::chrono::milliseconds(5000);
         cfg.bodyTimeout = std::chrono::milliseconds(15000);
         cfg.maxInflight = 128;
+        cfg.autoStart = false; // MCP server should not be responsible for starting the daemon
         daemon_client_config_ = cfg;
         if (auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg); leaseRes) {
             daemon_client_lease_ = leaseRes.value();
@@ -660,31 +664,6 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         }
     } catch (...) {
         // Ignore prompt dir resolution errors; built-ins remain available
-    }
-    // Proactively connect to the daemon (auto-start if configured) so first tool call
-    // doesn’t fail with a transport error when the socket isn’t up yet.
-    {
-        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-        boost::asio::co_spawn(
-            io,
-            [lease = daemon_client_lease_]() -> boost::asio::awaitable<void> {
-                if (!lease) {
-                    co_return;
-                }
-                auto* cli = &(**lease);
-                try {
-                    auto r = co_await cli->connect();
-                    if (!r) {
-                        spdlog::warn("Daemon connect attempt failed: {}", r.error().message);
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::error("Daemon connect coroutine threw: {}", e.what());
-                } catch (...) {
-                    spdlog::error("Daemon connect coroutine threw unknown exception");
-                }
-                co_return;
-            },
-            boost::asio::detached);
     }
     // Ensure the global io_context is running so co_spawn coroutines progress (singleton runner)
     static std::atomic<bool> ioThreadStarted{false};
@@ -1216,6 +1195,12 @@ json MCPServer::initialize(const json& params) {
     bool matched = std::find(kSupported.begin(), kSupported.end(), requested) != kSupported.end();
     if (matched) {
         negotiated = requested;
+    } else if (strictProtocol_) {
+        json error_data = {{"supportedVersions", kSupported}};
+        return {{"_initialize_error", true},
+                {"code", kErrUnsupportedProtocolVersion},
+                {"message", "Unsupported protocol version requested by client"},
+                {"data", error_data}};
     }
 
     // Capture client info if present (tolerant)

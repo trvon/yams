@@ -78,24 +78,29 @@ public:
 #ifndef _WIN32
             std::signal(SIGPIPE, SIG_IGN);
 #endif
-            // Install terminate handler to log uncaught exceptions instead of silent aborts
-            std::set_terminate([]() noexcept {
-                try {
-                    if (auto ep = std::current_exception()) {
-                        try {
-                            std::rethrow_exception(ep);
-                        } catch (const std::exception& e) {
-                            spdlog::critical("std::terminate: uncaught exception: {}", e.what());
-                        } catch (...) {
-                            spdlog::critical("std::terminate: unknown uncaught exception");
+            // Optional: install terminate handler to log uncaught exceptions.
+            // Disabled by default for MCP stdio to avoid noisy messages when the host closes stdin.
+            if (const char* tlog = std::getenv("YAMS_MCP_LOG_TERMINATE");
+                tlog && *tlog && tlog[0] != '0') {
+                std::set_terminate([]() noexcept {
+                    try {
+                        if (auto ep = std::current_exception()) {
+                            try {
+                                std::rethrow_exception(ep);
+                            } catch (const std::exception& e) {
+                                spdlog::critical("std::terminate: uncaught exception: {}",
+                                                 e.what());
+                            } catch (...) {
+                                spdlog::critical("std::terminate: unknown uncaught exception");
+                            }
+                        } else {
+                            spdlog::critical("std::terminate called without active exception");
                         }
-                    } else {
-                        spdlog::critical("std::terminate called without active exception");
+                    } catch (...) {
                     }
-                } catch (...) {
-                }
-                std::_Exit(1);
-            });
+                    std::_Exit(1);
+                });
+            }
 
             // Allow multiple instances. For HTTP mode, binding conflicts will be reported by the
             // OS (EADDRINUSE). For stdio, instances are independent per client.
