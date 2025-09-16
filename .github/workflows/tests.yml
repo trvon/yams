@@ -29,7 +29,7 @@ jobs:
             extra_cmake_flags: "-DYAMS_ENABLE_COVERAGE=OFF -DYAMS_ENABLE_ONNX=OFF"
     runs-on: ${{ matrix.runs_on }}
     # Allow longer time for first-time ARM dependency builds.
-    timeout-minutes: 35
+  timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -161,8 +161,18 @@ jobs:
             -s build_type=Debug \
             -o yams/*:enable_onnx=False \
             --build=missing
+          echo "--- Conan generated files (generators) ---"
+          find ${{ env.BUILD_DIR }}/generators -maxdepth 2 -type f -name '*boost*' -print || true
+          if [ -d "${{ env.BUILD_DIR }}/generators" ]; then ls -1 ${{ env.BUILD_DIR }}/generators | head -50; fi
           echo "--- Toolchain sanity (first toolchain file if present) ---"
           find ${{ env.BUILD_DIR }} -maxdepth 5 -name conan_toolchain.cmake -print -exec grep -E 'CMAKE_CXX_COMPILER' {} \; | head -20 || true
+          # Explicitly prepend generators dir to CMAKE_PREFIX_PATH to help CMake locate boost-config.cmake on ARM
+          export CMAKE_PREFIX_PATH="${{ env.BUILD_DIR }}/generators:${CMAKE_PREFIX_PATH:-}"
+          echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
+          # Fail fast if boost-config.cmake still missing (diagnostic only, don't hard fail yet on first run)
+          if [ ! -f "${{ env.BUILD_DIR }}/generators/boost-config.cmake" ]; then
+            echo "WARNING: boost-config.cmake not found before configure; CMake may fallback and fail" >&2
+          fi
           cmake --preset yams-debug \
             -DYAMS_BUILD_PROFILE=dev \
             -DYAMS_BUILD_TESTS=ON \

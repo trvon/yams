@@ -76,7 +76,11 @@ endif()
 if(TARGET pdfium::pdfium)
   get_target_property(_onnx_link_libs yams_onnx_plugin LINK_LIBRARIES)
   if(_onnx_link_libs MATCHES "pdfium")
-    message(WARNING "yams_onnx_plugin unexpectedly links pdfium::pdfium; please remove this dependency.")
+    if(APPLE)
+      message(FATAL_ERROR "yams_onnx_plugin must not link pdfium::pdfium on macOS. Remove transitive linkage to PDFium.")
+    else()
+      message(WARNING "yams_onnx_plugin unexpectedly links pdfium::pdfium; please remove this dependency.")
+    endif()
   endif()
 endif()
 
@@ -104,6 +108,10 @@ if(APPLE)
     BUILD_RPATH "@loader_path;@rpath"
     INSTALL_RPATH "@loader_path;@rpath"
   )
+  # Aggressively strip any unused dylib dependencies during link to avoid
+  # accidental carry-over of PDFium or other transitive libraries.
+  # (noop on older linkers that ignore this flag)
+  target_link_options(yams_onnx_plugin PRIVATE -Wl,-dead_strip_dylibs)
   # If onnxruntime is a shared library with a known location, add its dir to rpath
   if(TARGET onnxruntime::onnxruntime)
     get_target_property(_ort_type onnxruntime::onnxruntime TYPE)
@@ -131,10 +139,23 @@ if(APPLE)
   # Intentionally do NOT bundle or link PDFium here; PDF handling lives in the
   # separate pdf_extractor plugin. If this plugin ever gains a hard dependency
   # on PDFium, add an explicit target_link_libraries entry + focused bundling.
+  # Validate at build time that no PDFium load command leaked into the module.
+  add_custom_command(TARGET yams_onnx_plugin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E echo "[Verify] Checking that yams_onnx_plugin has no PDFium dependency"
+    COMMAND /bin/sh -c "otool -L '$<TARGET_FILE:yams_onnx_plugin>' | grep -E 'libpdfium\\.dylib' && { echo 'ERROR: libpdfium.dylib found in yams_onnx_plugin'; exit 1; } || echo 'OK: no libpdfium.dylib dependency in yams_onnx_plugin'"
+    VERBATIM
+  )
 endif()
 
 # Backward compatibility alias (legacy name used previously in this directory)
 add_library(yams_onnx ALIAS yams_onnx_plugin)
+
+# On macOS, install an unprefixed plugin filename to reduce duplicate variants.
+if(APPLE)
+  set_target_properties(yams_onnx_plugin PROPERTIES
+    PREFIX ""  # produce 'yams_onnx_plugin.dylib' instead of 'libyams_onnx_plugin.dylib'
+  )
+endif()
 
 install(TARGETS yams_onnx_plugin
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins

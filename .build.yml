@@ -308,8 +308,30 @@ tasks:
         echo "rpmbuild not found; skipping RPM packaging on this image"
       fi
 
+  - collect_artifacts: |
+      set -e
+      ART_DIR="artifacts"
+      rm -rf "${ART_DIR}" && mkdir -p "${ART_DIR}"
+      # Determine repository root
+      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      # Collect tarballs from REPO_DIR (packaging step writes .. from stage -> REPO_DIR)
+      shopt -s nullglob || true
+      for f in "${REPO_DIR}"/yams-*.tar.gz "${REPO_DIR}"/yams-*-stage.tar.gz "${REPO_DIR}"/yams-*-stage.zip; do
+        [ -f "$f" ] && cp -v "$f" "${ART_DIR}/"
+      done
+      # Collect CPack outputs from build dir
+      for f in "${REPO_DIR}/${BUILD_DIR}"/*.deb "${REPO_DIR}/${BUILD_DIR}"/*.rpm; do
+        [ -f "$f" ] && cp -v "$f" "${ART_DIR}/"
+      done
+      echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
+
 artifacts:
   # Files available for download after a successful build. Support both repo layouts.
+  - "artifacts/*"
   - "yams-*.tar.gz"
   - "yams-*-stage.tar.gz"
   - "yams-*-stage.zip"

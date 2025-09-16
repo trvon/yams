@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -405,9 +406,12 @@ public:
             try {
                 using namespace yams::daemon;
                 ClientConfig cfg;
-                cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(3000);
-                DaemonClient client(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    throw std::runtime_error("daemon unavailable");
+                }
+                auto leaseHandle = std::move(leaseRes.value());
                 // Query model status (lists loaded models if any)
                 ModelStatusRequest msr;
                 msr.detailed = true;
@@ -415,7 +419,8 @@ public:
                 auto fut = prom.get_future();
                 boost::asio::co_spawn(
                     boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
+                    [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
+                        auto& client = **leaseHandle;
                         auto r = co_await client.call(msr);
                         prom.set_value(std::move(r));
                         co_return;
@@ -616,16 +621,20 @@ private:
             if (std::string(withd) == "1" || std::string(withd) == "true") {
                 try {
                     yams::daemon::ClientConfig cfg;
-                    cfg.singleUseConnections = true;
                     cfg.requestTimeout = std::chrono::milliseconds(800);
-                    yams::daemon::DaemonClient client(cfg);
+                    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                    if (!leaseRes) {
+                        throw std::runtime_error("daemon unavailable");
+                    }
+                    auto leaseHandle = std::move(leaseRes.value());
                     yams::daemon::ModelStatusRequest msr;
                     msr.detailed = true;
                     std::promise<Result<yams::daemon::ModelStatusResponse>> prom;
                     auto fut = prom.get_future();
                     boost::asio::co_spawn(
                         boost::asio::system_executor{},
-                        [&]() -> boost::asio::awaitable<void> {
+                        [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
+                            auto& client = **leaseHandle;
                             auto r = co_await client.getModelStatus(msr);
                             prom.set_value(std::move(r));
                             co_return;

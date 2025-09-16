@@ -32,6 +32,8 @@ void set_current_thread_name(const std::string& name) {
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/write.hpp>
 
+#include <atomic>
+#include <cstdlib>
 #include <filesystem>
 
 #ifndef _WIN32
@@ -429,14 +431,59 @@ awaitable<void> SocketServer::accept_loop() {
                 break;
             }
 
+            static int einval_streak = 0;
 #if defined(__APPLE__)
             if (e.code().value() == EINVAL) {
-                spdlog::debug("Accept error (EINVAL): {} ({})", e.what(), e.code().message());
-                backoff_ms = std::chrono::milliseconds(50);
+                // On macOS, AF_UNIX accept can enter a bad state returning EINVAL repeatedly
+                // (e.g., after a crash/restart or kqueue race). Rebuild the acceptor after a few
+                // hits.
+                ++einval_streak;
+                spdlog::debug("Accept error (EINVAL): {} (streak={})", e.what(), einval_streak);
+                if (einval_streak >= 3) {
+                    try {
+                        // Close and rebuild acceptor
+                        boost::system::error_code ec;
+                        if (acceptor_)
+                            acceptor_->close(ec);
+                        // Remove any stale socket path
+                        std::filesystem::remove(config_.socketPath, ec);
+                        // Recreate and listen again
+                        acceptor_ = std::make_unique<local::acceptor>(io_context_);
+                        local::endpoint endpoint(config_.socketPath.string());
+                        acceptor_->open(endpoint.protocol());
+                        acceptor_->bind(endpoint);
+                        acceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                        // Mute noisy warnings after the first rebuild; allow opt-in via env
+                        static std::atomic<bool> s_warned_once{false};
+                        static const bool s_quiet = []() {
+                            if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
+                                return *v != '\0' && std::string(v) != "0" &&
+                                       strcasecmp(v, "false") != 0;
+                            }
+                            return true; // default to quiet (debug) after first occurrence
+                        }();
+                        if (!s_quiet && !s_warned_once.exchange(true)) {
+                            spdlog::warn("Rebuilt IPC acceptor after repeated EINVAL on {}",
+                                         config_.socketPath.string());
+                        } else {
+                            spdlog::debug("Rebuilt IPC acceptor after repeated EINVAL on {}",
+                                          config_.socketPath.string());
+                        }
+                        // Bump recovery metric
+                        if (state_) {
+                            state_->stats.ipcEinvalRebuilds.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        einval_streak = 0;
+                    } catch (const std::exception& re) {
+                        spdlog::error("Failed to rebuild IPC acceptor: {}", re.what());
+                    }
+                }
+                backoff_ms = std::chrono::milliseconds(100);
                 need_delay = true;
             } else
 #endif
             {
+                einval_streak = 0;
                 spdlog::warn("Accept error: {} ({})", e.what(), e.code().message());
                 need_delay = true;
             }
@@ -499,6 +546,8 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         // Persistent connections; client may issue multiple requests sequentially
         handlerConfig.close_after_response = false;
         handlerConfig.graceful_half_close = true;
+        // Increase idle read timeout to 5 minutes to avoid dropping persistent CLI connections
+        handlerConfig.read_timeout = std::chrono::seconds(300);
         // More aggressive multiplexing by default; env overrides still apply in RequestHandler
         handlerConfig.max_inflight_per_connection = 1024;
         handlerConfig.writer_budget_bytes_per_turn = TuneAdvisor::writerBudgetBytesPerTurn();

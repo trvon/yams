@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -51,10 +52,16 @@ public:
             using namespace yams::daemon;
             ClientConfig cfg;
             if (cli_)
-                cfg.dataDir = cli_->getDataPath();
-            cfg.singleUseConnections = true;
+                if (cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
             cfg.requestTimeout = std::chrono::milliseconds(60000);
-            DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                co_return leaseRes.error();
+            }
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
 
             GetRequest req;
             req.hash = hash_;

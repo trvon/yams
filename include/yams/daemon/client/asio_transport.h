@@ -8,6 +8,8 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
+#include <yams/daemon/client/asio_connection.h>
+#include <yams/daemon/client/transport_options.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
@@ -18,15 +20,8 @@ namespace yams::daemon {
 // and receive framed responses (unary and streaming).
 class AsioTransportAdapter {
 public:
-    // Multiplexing: per-socket connection shared across requests
-    struct Connection;
-    struct Options {
-        std::filesystem::path socketPath;
-        std::chrono::milliseconds headerTimeout{30000};
-        std::chrono::milliseconds bodyTimeout{60000};
-        std::chrono::milliseconds requestTimeout{5000};
-        std::size_t maxInflight{128};
-    };
+    using Connection = AsioConnection;
+    using Options = TransportOptions;
 
     explicit AsioTransportAdapter(const Options& opts);
 

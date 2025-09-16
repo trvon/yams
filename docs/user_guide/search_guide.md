@@ -510,4 +510,4 @@ request.query = "C\\+\\+ programming";
 - Learn about [Performance Tuning](../admin/performance_tuning.md) for production deployments
 - See [Configuration Guide](../admin/configuration.md) for system setup
 - Check [Troubleshooting Guide](../troubleshooting/search_issues.md) if you encounter issues
-- Explore [Code Examples](../../examples/search_examples.cpp) for implementation details
+- Explore [Code Examples](../examples/search_examples.md) for implementation details

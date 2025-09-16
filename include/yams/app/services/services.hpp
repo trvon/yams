@@ -248,6 +248,12 @@ class ISearchService {
 public:
     virtual ~ISearchService() = default;
     virtual boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) = 0;
+    // Perform a lightweight text extraction + FTS5/fuzzy indexing for a newly-added
+    // document so searches work instantly. Intended for small text-like files.
+    // Skips heavy plugins (e.g., PDF) and large binaries.
+    // Returns ok when indexing was performed or safely skipped.
+    virtual Result<void> lightIndexForHash(const std::string& hash,
+                                           std::size_t maxBytes = 2 * 1024 * 1024) = 0;
 };
 
 // ===========================
@@ -806,6 +812,7 @@ public:
 struct AddDirectoryRequest {
     std::string directoryPath;
     std::string collection;
+    std::vector<std::string> tags; // tags to apply to each stored document
     std::vector<std::string> includePatterns;
     std::vector<std::string> excludePatterns;
     std::unordered_map<std::string, std::string> metadata;

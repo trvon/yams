@@ -12,6 +12,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
@@ -81,20 +82,13 @@ public:
                 // Best-effort stop daemon like doctor command
                 try {
                     yams::daemon::ClientConfig ccfg;
-                    ccfg.singleUseConnections = true;
                     ccfg.requestTimeout = std::chrono::seconds(5);
-                    yams::daemon::DaemonClient shut(ccfg);
-                    std::promise<Result<void>> prom;
-                    auto fut = prom.get_future();
-                    boost::asio::co_spawn(
-                        boost::asio::system_executor{},
-                        [&]() -> boost::asio::awaitable<void> {
-                            auto r = co_await shut.shutdown(true);
-                            prom.set_value(std::move(r));
-                            co_return;
-                        },
-                        boost::asio::detached);
-                    (void)fut.wait_for(std::chrono::seconds(6));
+                    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(ccfg);
+                    if (leaseRes) {
+                        auto leaseHandle = std::move(leaseRes.value());
+                        auto& shut = **leaseHandle;
+                        (void)yams::cli::run_result(shut.shutdown(true), std::chrono::seconds(6));
+                    }
                 } catch (...) {
                 }
             }
@@ -1128,7 +1122,12 @@ private:
                 cfg.requestTimeout = std::chrono::milliseconds(embedTimeoutMs_);
                 cfg.headerTimeout = std::chrono::milliseconds(embedTimeoutMs_);
                 cfg.bodyTimeout = std::chrono::milliseconds(embedTimeoutMs_);
-                yams::daemon::DaemonClient client(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    return Result<void>(leaseRes.error());
+                }
+                auto leaseHandle = std::move(leaseRes.value());
+                auto& client = **leaseHandle;
                 yams::daemon::EmbedDocumentsRequest ereq{};
                 ereq.modelName = chosenModel;
                 ereq.normalize = true;
@@ -1137,24 +1136,13 @@ private:
                 ereq.documentHashes = hashes; // stream a single request with all docs
                 Result<std::vector<yams::daemon::EmbeddingEvent>> evres = Error{ErrorCode::Unknown};
                 for (int attempt = 1; attempt <= std::max(1, embedRetries_); ++attempt) {
-                    std::promise<Result<std::vector<yams::daemon::EmbeddingEvent>>> prom;
-                    auto fut = prom.get_future();
-                    boost::asio::co_spawn(
-                        boost::asio::system_executor{},
-                        [&]() -> boost::asio::awaitable<void> {
-                            auto r = co_await client.callEvents(ereq);
-                            prom.set_value(std::move(r));
-                            co_return;
-                        },
-                        boost::asio::detached);
-                    auto waitRes = fut.wait_for(std::chrono::milliseconds(embedTimeoutMs_ + 10000));
-                    if (waitRes == std::future_status::ready) {
-                        evres = fut.get();
-                        if (evres)
-                            break; // success
-                    } else {
+                    auto req = ereq;
+                    evres = yams::cli::run_result<std::vector<yams::daemon::EmbeddingEvent>>(
+                        client.callEvents(req), std::chrono::milliseconds(embedTimeoutMs_ + 10000));
+                    if (evres)
+                        break; // success
+                    if (!evres)
                         evres = Error{ErrorCode::Timeout, "embedding timeout"};
-                    }
                     if (attempt < std::max(1, embedRetries_)) {
                         std::cout << "  ⚠ Embed RPC retry " << attempt << "/" << embedRetries_
                                   << " after backoff\n";

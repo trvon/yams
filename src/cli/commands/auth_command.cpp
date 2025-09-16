@@ -37,7 +37,7 @@ public:
 
         // List-keys subcommand
         auto* listKeysCmd = cmd->add_subcommand("list-keys", "List authentication keys");
-        listKeysCmd->add_flag("--verbose", verbose_, "Show detailed key information");
+        listKeysCmd->add_flag("-v,--verbose", verbose_, "Show detailed key information");
         listKeysCmd->add_option("--format", format_, "Output format (table, json)")
             ->default_val("table")
             ->check(CLI::IsMember({"table", "json"}));

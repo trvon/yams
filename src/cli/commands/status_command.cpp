@@ -36,12 +36,25 @@ public:
         auto* cmd = app.add_subcommand("status", getDescription());
 
         cmd->add_flag("--json", jsonOutput_, "Output in JSON format");
-        cmd->add_flag("--verbose", verbose_, "Show detailed information");
+        cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
 
         cmd->callback([this]() {
             auto result = execute();
             if (!result) {
                 spdlog::error("Status command failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        // Provide a 'stats' alias that maps to the same implementation
+        // Mirrors flags and behavior to ease migration from the old stats command
+        auto* stats = app.add_subcommand("stats", getDescription());
+        stats->add_flag("--json", jsonOutput_, "Output in JSON format");
+        stats->add_flag("-v,--verbose", verbose_, "Show detailed information");
+        stats->callback([this]() {
+            auto result = execute();
+            if (!result) {
+                spdlog::error("Stats (alias) failed: {}", result.error().message);
                 std::exit(1);
             }
         });
@@ -67,167 +80,195 @@ public:
             // Try daemon-first for quick status snapshot
             {
                 yams::daemon::ClientConfig cfg;
-                cfg.dataDir = cli_->getDataPath();
-                yams::daemon::DaemonClient client(cfg);
-                auto st = co_await client.status();
-                if (st) {
-                    auto s = st.value();
-                    std::string svcSummary;
-                    std::string waitingSummary;
-                    if (jsonOutput_) {
-                        nlohmann::json j;
-                        j["running"] = s.running;
-                        j["ready"] = s.ready;
-                        j["lifecycle_state"] =
-                            s.overallStatus.empty()
-                                ? (s.ready ? "ready" : (s.running ? "starting" : "stopped"))
-                                : s.overallStatus;
-                        j["version"] = s.version;
-                        j["uptimeSeconds"] = s.uptimeSeconds;
-                        j["requestsProcessed"] = s.requestsProcessed;
-                        j["activeConnections"] = s.activeConnections;
-                        j["memoryUsageMb"] = s.memoryUsageMb;
-                        j["cpuUsagePercent"] = s.cpuUsagePercent;
-                        j["fsmTransitions"] = s.fsmTransitions;
-                        j["fsmHeaderReads"] = s.fsmHeaderReads;
-                        j["fsmPayloadReads"] = s.fsmPayloadReads;
-                        j["fsmPayloadWrites"] = s.fsmPayloadWrites;
-                        j["fsmBytesSent"] = s.fsmBytesSent;
-                        j["fsmBytesReceived"] = s.fsmBytesReceived;
-                        j["muxActiveHandlers"] = s.muxActiveHandlers;
-                        j["muxQueuedBytes"] = s.muxQueuedBytes;
-                        j["muxWriterBudgetBytes"] = s.muxWriterBudgetBytes;
-                        if (!s.readinessStates.empty()) {
-                            nlohmann::json rj = nlohmann::json::object();
-                            for (const auto& [k, v] : s.readinessStates)
-                                rj[k] = v;
-                            j["readiness"] = std::move(rj);
-                        }
-                        if (!s.initProgress.empty()) {
-                            nlohmann::json pj = nlohmann::json::object();
-                            for (const auto& [k, v] : s.initProgress)
-                                pj[k] = v;
-                            j["initProgress"] = std::move(pj);
-                        }
-                        if (!s.providers.empty()) {
-                            nlohmann::json pv = nlohmann::json::array();
-                            for (const auto& p : s.providers) {
-                                nlohmann::json rec;
-                                rec["name"] = p.name;
-                                rec["ready"] = p.ready;
-                                rec["degraded"] = p.degraded;
-                                rec["error"] = p.error;
-                                rec["models_loaded"] = p.modelsLoaded;
-                                rec["is_provider"] = p.isProvider;
-                                pv.push_back(std::move(rec));
+                if (cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (leaseRes) {
+                    auto leaseHandle = std::move(leaseRes.value());
+                    auto& client = **leaseHandle;
+                    auto st = co_await client.status();
+                    if (st) {
+                        auto s = st.value();
+                        std::string svcSummary;
+                        std::string waitingSummary;
+                        if (jsonOutput_) {
+                            nlohmann::json j;
+                            j["running"] = s.running;
+                            j["ready"] = s.ready;
+                            j["lifecycle_state"] =
+                                s.overallStatus.empty()
+                                    ? (s.ready ? "ready" : (s.running ? "starting" : "stopped"))
+                                    : s.overallStatus;
+                            j["version"] = s.version;
+                            j["uptimeSeconds"] = s.uptimeSeconds;
+                            j["requestsProcessed"] = s.requestsProcessed;
+                            j["activeConnections"] = s.activeConnections;
+                            j["memoryUsageMb"] = s.memoryUsageMb;
+                            j["cpuUsagePercent"] = s.cpuUsagePercent;
+                            j["fsmTransitions"] = s.fsmTransitions;
+                            j["fsmHeaderReads"] = s.fsmHeaderReads;
+                            j["fsmPayloadReads"] = s.fsmPayloadReads;
+                            j["fsmPayloadWrites"] = s.fsmPayloadWrites;
+                            j["fsmBytesSent"] = s.fsmBytesSent;
+                            j["fsmBytesReceived"] = s.fsmBytesReceived;
+                            j["muxActiveHandlers"] = s.muxActiveHandlers;
+                            j["muxQueuedBytes"] = s.muxQueuedBytes;
+                            j["muxWriterBudgetBytes"] = s.muxWriterBudgetBytes;
+                            if (!s.readinessStates.empty()) {
+                                nlohmann::json rj = nlohmann::json::object();
+                                for (const auto& [k, v] : s.readinessStates)
+                                    rj[k] = v;
+                                j["readiness"] = std::move(rj);
                             }
-                            j["plugins"] = std::move(pv);
-                        }
-                        // Embedding runtime telemetry
-                        {
-                            nlohmann::json er;
-                            er["available"] = s.embeddingAvailable;
-                            er["backend"] = s.embeddingBackend;
-                            er["model"] = s.embeddingModel;
-                            er["path"] = s.embeddingModelPath;
-                            er["dim"] = s.embeddingDim;
-                            er["intra_threads"] = s.embeddingThreadsIntra;
-                            er["inter_threads"] = s.embeddingThreadsInter;
-                            j["embedding"] = std::move(er);
-                        }
-                        // Embedding runtime telemetry (daemon)
-                        {
-                            nlohmann::json er = nlohmann::json::object();
-                            er["available"] = s.embeddingAvailable;
-                            er["backend"] = s.embeddingBackend;
-                            er["model"] = s.embeddingModel;
-                            er["dim"] = s.embeddingDim;
-                            er["intra_threads"] = s.embeddingThreadsIntra;
-                            er["inter_threads"] = s.embeddingThreadsInter;
-                            j["embedding"] = std::move(er);
-                        }
-                        std::cout << j.dump(2) << std::endl;
-                    } else {
-                        std::cout << "== DAEMON STATUS ==\n";
-                        std::cout << "RUN  : " << (s.running ? "yes" : "no") << "\n";
-                        std::cout << "VER  : " << s.version << "\n";
-                        std::cout << "STATE: "
-                                  << (s.overallStatus.empty()
-                                          ? (s.ready ? "Ready"
-                                                     : (s.running ? "Starting" : "Stopped"))
-                                          : s.overallStatus)
-                                  << "\n";
-                        std::cout << "UP   : " << s.uptimeSeconds << "s\n";
-                        std::cout << "REQ  : " << s.requestsProcessed
-                                  << "  ACT: " << s.activeConnections << "\n";
-                        std::cout << "MEM  : " << std::fixed << std::setprecision(1)
-                                  << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
-                                  << "%\n";
-                        if (!s.ready && !waitingSummary.empty()) {
-                            std::cout << "WAIT : " << waitingSummary << "\n";
-                        }
-                        // Short plugins summary (typed providers)
-                        if (!s.providers.empty()) {
-                            std::cout << "PLUG : " << s.providers.size() << " loaded";
-                            // Identify adopted provider and its state
-                            for (const auto& p : s.providers) {
-                                if (p.isProvider) {
-                                    std::cout << ", provider='" << p.name << "'";
-                                    if (!p.ready)
-                                        std::cout << " [not-ready]";
-                                    if (p.degraded)
-                                        std::cout << " [degraded]";
-                                    if (p.modelsLoaded > 0)
-                                        std::cout << ", models=" << p.modelsLoaded;
-                                    if (!p.error.empty())
-                                        std::cout << ", error=\"" << p.error << "\"";
-                                    break;
+                            if (!s.initProgress.empty()) {
+                                nlohmann::json pj = nlohmann::json::object();
+                                for (const auto& [k, v] : s.initProgress)
+                                    pj[k] = v;
+                                j["initProgress"] = std::move(pj);
+                            }
+                            if (!s.providers.empty()) {
+                                nlohmann::json pv = nlohmann::json::array();
+                                for (const auto& p : s.providers) {
+                                    nlohmann::json rec;
+                                    rec["name"] = p.name;
+                                    rec["ready"] = p.ready;
+                                    rec["degraded"] = p.degraded;
+                                    rec["error"] = p.error;
+                                    rec["models_loaded"] = p.modelsLoaded;
+                                    rec["is_provider"] = p.isProvider;
+                                    pv.push_back(std::move(rec));
                                 }
+                                j["plugins"] = std::move(pv);
                             }
+                            // Embedding runtime telemetry
+                            {
+                                nlohmann::json er;
+                                er["available"] = s.embeddingAvailable;
+                                er["backend"] = s.embeddingBackend;
+                                er["model"] = s.embeddingModel;
+                                er["path"] = s.embeddingModelPath;
+                                er["dim"] = s.embeddingDim;
+                                er["intra_threads"] = s.embeddingThreadsIntra;
+                                er["inter_threads"] = s.embeddingThreadsInter;
+                                j["embedding"] = std::move(er);
+                            }
+                            // Embedding runtime telemetry (daemon)
+                            {
+                                nlohmann::json er = nlohmann::json::object();
+                                er["available"] = s.embeddingAvailable;
+                                er["backend"] = s.embeddingBackend;
+                                er["model"] = s.embeddingModel;
+                                er["dim"] = s.embeddingDim;
+                                er["intra_threads"] = s.embeddingThreadsIntra;
+                                er["inter_threads"] = s.embeddingThreadsInter;
+                                j["embedding"] = std::move(er);
+                            }
+                            std::cout << j.dump(2) << std::endl;
+                        } else {
+                            std::cout << "== DAEMON STATUS ==\n";
+                            std::cout << "RUN  : " << (s.running ? "yes" : "no") << "\n";
+                            std::cout << "VER  : " << s.version << "\n";
+                            std::cout
+                                << "STATE: "
+                                << (s.overallStatus.empty()
+                                        ? (s.ready ? "Ready" : (s.running ? "Starting" : "Stopped"))
+                                        : s.overallStatus)
+                                << "\n";
+                            std::cout << "UP   : " << s.uptimeSeconds << "s\n";
+                            std::cout << "REQ  : " << s.requestsProcessed
+                                      << "  ACT: " << s.activeConnections << "\n";
+                            std::cout << "MEM  : " << std::fixed << std::setprecision(1)
+                                      << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
+                                      << "%\n";
+                            if (!s.ready && !waitingSummary.empty()) {
+                                std::cout << "WAIT : " << waitingSummary << "\n";
+                            }
+                            // Short plugins summary (typed providers)
+                            if (!s.providers.empty()) {
+                                std::cout << "PLUG : " << s.providers.size() << " loaded";
+                                // Identify adopted provider and its state
+                                for (const auto& p : s.providers) {
+                                    if (p.isProvider) {
+                                        std::cout << ", provider='" << p.name << "'";
+                                        if (!p.ready)
+                                            std::cout << " [not-ready]";
+                                        if (p.degraded)
+                                            std::cout << " [degraded]";
+                                        if (p.modelsLoaded > 0)
+                                            std::cout << ", models=" << p.modelsLoaded;
+                                        if (!p.error.empty())
+                                            std::cout << ", error=\"" << p.error << "\"";
+                                        break;
+                                    }
+                                }
+                                std::cout << "\n";
+                            }
+                            // Embedding runtime summary (prefer readiness when daemon omits fields)
+                            bool embedAvail = s.embeddingAvailable;
+                            try {
+                                auto it = s.readinessStates.find("vector_embeddings_available");
+                                if (it != s.readinessStates.end())
+                                    embedAvail = it->second;
+                            } catch (...) {
+                            }
+                            std::cout << "EMBED: " << (embedAvail ? "available" : "unavailable");
+                            if (!s.embeddingBackend.empty())
+                                std::cout << ", backend=" << s.embeddingBackend;
+                            if (!s.embeddingModel.empty())
+                                std::cout << ", model='" << s.embeddingModel << "'";
+                            if (!s.embeddingModelPath.empty())
+                                std::cout << ", path='" << s.embeddingModelPath << "'";
+                            if (s.embeddingDim > 0)
+                                std::cout << ", dim=" << s.embeddingDim;
+                            if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0)
+                                std::cout << ", threads=" << s.embeddingThreadsIntra << "/"
+                                          << s.embeddingThreadsInter;
                             std::cout << "\n";
                         }
-                        // Embedding runtime summary
-                        std::cout << "EMBED: "
-                                  << (s.embeddingAvailable ? "available" : "unavailable");
-                        if (!s.embeddingBackend.empty())
-                            std::cout << ", backend=" << s.embeddingBackend;
-                        if (!s.embeddingModel.empty())
-                            std::cout << ", model='" << s.embeddingModel << "'";
-                        if (!s.embeddingModelPath.empty())
-                            std::cout << ", path='" << s.embeddingModelPath << "'";
-                        if (s.embeddingDim > 0)
-                            std::cout << ", dim=" << s.embeddingDim;
-                        if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0)
-                            std::cout << ", threads=" << s.embeddingThreadsIntra << "/"
-                                      << s.embeddingThreadsInter;
-                        std::cout << "\n";
-                    }
-                    // In verbose mode, pull vector DB quick stats (size + rows) from daemon stats
-                    if (!jsonOutput_ && verbose_) {
-                        try {
-                            yams::daemon::ClientConfig scfg;
-                            scfg.dataDir = cli_->getDataPath();
-                            scfg.singleUseConnections = true;
-                            yams::daemon::DaemonClient scli(scfg);
-                            yams::daemon::GetStatsRequest greq;
-                            greq.detailed = true;
-                            auto gs = co_await scli.getStats(greq);
-                            if (gs) {
-                                const auto& resp = gs.value();
-                                std::string line = "VECDB: ";
-                                line += (resp.vectorIndexSize > 0)
-                                            ? ("Initialized - " + formatSize(resp.vectorIndexSize))
-                                            : "Not initialized";
-                                auto it = resp.additionalStats.find("vector_rows");
-                                if (it != resp.additionalStats.end()) {
-                                    line += " (" + it->second + " rows)";
+                        // In verbose mode, pull vector DB quick stats (size + rows) from daemon
+                        // stats
+                        if (!jsonOutput_ && verbose_) {
+                            try {
+                                yams::daemon::ClientConfig scfg;
+                                if (cli_->hasExplicitDataDir()) {
+                                    scfg.dataDir = cli_->getDataPath();
                                 }
-                                std::cout << line << "\n";
+                                auto leaseStats = yams::cli::acquire_cli_daemon_client_shared(scfg);
+                                if (!leaseStats) {
+                                    throw std::runtime_error("daemon unavailable");
+                                }
+                                auto statsLease = std::move(leaseStats.value());
+                                auto& scli = **statsLease;
+                                yams::daemon::GetStatsRequest greq;
+                                greq.detailed = true;
+                                auto gs = co_await scli.getStats(greq);
+                                if (gs) {
+                                    const auto& resp = gs.value();
+                                    std::string line = "VECDB: ";
+                                    bool vecReady = false;
+                                    try {
+                                        auto it = s.readinessStates.find("vector_index");
+                                        if (it != s.readinessStates.end())
+                                            vecReady = it->second;
+                                    } catch (...) {
+                                    }
+                                    if (resp.vectorIndexSize > 0) {
+                                        line += "Initialized - " + formatSize(resp.vectorIndexSize);
+                                    } else {
+                                        line += vecReady ? "Initialized" : "Not initialized";
+                                    }
+                                    auto it = resp.additionalStats.find("vector_rows");
+                                    if (it != resp.additionalStats.end()) {
+                                        line += " (" + it->second + " rows)";
+                                    }
+                                    std::cout << line << "\n";
+                                }
+                            } catch (...) {
                             }
-                        } catch (...) {
                         }
+                        co_return Result<void>();
                     }
-                    co_return Result<void>();
                 }
             }
             auto ensured = cli_->ensureStorageInitialized();
@@ -391,13 +432,14 @@ private:
         info.autoGenerationEnabled = embeddingService && embeddingService->isAvailable();
         info.preferredModel = info.hasModels ? info.availableModels[0] : "none";
 
-        // Pull worker pool metrics from daemon status (best-effort, short timeout)
-        try {
-            yams::daemon::DaemonClient probe{};
+        auto leaseProbe = yams::cli::acquire_cli_daemon_client_shared(yams::daemon::ClientConfig{});
+        if (leaseProbe) {
+            auto leaseHandle = std::move(leaseProbe.value());
             std::promise<Result<yams::daemon::StatusResponse>> promProbe;
             auto futProbe = promProbe.get_future();
-            auto workProbe = [&]() -> boost::asio::awaitable<void> {
-                auto sr = co_await probe.status();
+            auto workProbe = [leaseHandle, &promProbe]() mutable -> boost::asio::awaitable<void> {
+                auto& client = **leaseHandle;
+                auto sr = co_await client.status();
                 promProbe.set_value(std::move(sr));
                 co_return;
             };
@@ -421,7 +463,6 @@ private:
                             static_cast<uint64_t>((100.0 * info.workerActive) / info.workerThreads);
                 }
             }
-        } catch (...) {
         }
 
         // Check vector database status

@@ -6,6 +6,9 @@ include(GoogleTest)
 set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE ${YAMS_GTEST_DISCOVERY_MODE})
 include(${CMAKE_SOURCE_DIR}/cmake/boost_test_shim.cmake)
 
+# Services integration tests (DocumentIngestionService, RetrievalService)
+add_subdirectory(services)
+
 add_executable(daemon_server_multiplex_integration_test daemon/daemon_server_multiplex_integration_test.cpp)
 target_link_libraries(daemon_server_multiplex_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 # Ensure compression objects aren’t GC’d by lld; also support macOS force_load in tests
@@ -157,6 +160,19 @@ add_executable(daemon_prepare_session_integration_test daemon/daemon_prepare_ses
 target_link_libraries(daemon_prepare_session_integration_test PRIVATE test_utils gtest_main yams_cli yams_api spdlog::spdlog Threads::Threads yams::boost_test_shim)
 gtest_discover_tests(daemon_prepare_session_integration_test DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT} PROPERTIES LABELS "daemon;integration;prepare" TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT})
 
+# Basic daemon communication roundtrip (status/ping/list)
+add_executable(daemon_basic_comm_integration_test daemon/daemon_basic_comm_integration_test.cpp)
+target_link_libraries(daemon_basic_comm_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+)
+yams_gtest_discover_tests(daemon_basic_comm_integration_test
+    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
+    PROPERTIES LABELS "daemon;integration"
+    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
+)
+
 # Embeddings pipeline integration test
 add_executable(daemon_embeddings_integration_test daemon/daemon_embeddings_integration_test.cpp)
 
@@ -198,21 +214,7 @@ gtest_discover_tests(daemon_unary_streaming_semantics_test
     TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
 )
 
-# ONNX plugin integration (ABI host) — real plugin, real model (skips if missing)
-add_executable(external_plugin_integration_test external_plugin_integration_test.cpp)
-target_link_libraries(external_plugin_integration_test PRIVATE
-    test_utils
-    gtest_main
-    yams_api
-    spdlog::spdlog
-    Threads::Threads
-    yams::boost_test_shim
-)
-gtest_discover_tests(external_plugin_integration_test
-    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
-    PROPERTIES LABELS "daemon;integration;external"
-    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
-)
+## Removed external_plugin_integration_test (CLI-driven business logic) after service centralization
 
 add_executable(onnx_plugin_integration_test daemon/onnx_plugin_integration_test.cpp)
 target_link_libraries(onnx_plugin_integration_test PRIVATE
@@ -345,19 +347,4 @@ gtest_discover_tests(daemon_plugins_json_fail_safe_test
     TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
 )
 
-# CLI degraded output test (verifies plugin list shows provider/degraded/error)
-add_executable(cli_plugin_degraded_output_test daemon/cli_plugin_degraded_output_test.cpp)
-target_link_libraries(cli_plugin_degraded_output_test PRIVATE
-    test_utils
-    gtest_main
-    yams_cli
-    yams_api
-    spdlog::spdlog
-    Threads::Threads
-    yams::boost_test_shim
-)
-gtest_discover_tests(cli_plugin_degraded_output_test
-    DISCOVERY_TIMEOUT ${YAMS_CTEST_DISCOVERY_TIMEOUT}
-    PROPERTIES LABELS "daemon;integration;cli"
-    TIMEOUT ${YAMS_CTEST_DEFAULT_TEST_TIMEOUT}
-)
+# Removed cli_plugin_degraded_output_test after service centralization

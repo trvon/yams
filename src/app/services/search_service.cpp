@@ -353,6 +353,114 @@ public:
         co_return result;
     }
 
+    Result<void> lightIndexForHash(const std::string& hash,
+                                   std::size_t maxBytes = 2 * 1024 * 1024) override {
+        try {
+            if (!ctx_.metadataRepo) {
+                return Error{ErrorCode::NotInitialized, "metadata repository not available"};
+            }
+            auto di = ctx_.metadataRepo->getDocumentByHash(hash);
+            if (!di) {
+                return di.error();
+            }
+            if (!di.value().has_value()) {
+                return Error{ErrorCode::NotFound, "document not found by hash"};
+            }
+            auto info = *di.value();
+
+            // If already extracted, nothing to do
+            if (info.contentExtracted &&
+                info.extractionStatus == metadata::ExtractionStatus::Success) {
+                return Result<void>();
+            }
+
+            // Only attempt lightweight extraction for text-like types or small files
+            const std::string mime = info.mimeType;
+            const std::string ext = info.fileExtension;
+            const bool looksTextMime = (!mime.empty() && mime.rfind("text/", 0) == 0) ||
+                                       mime == "application/json" || mime == "application/xml";
+            const bool looksTextExt =
+                (!ext.empty() &&
+                 (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv" ||
+                  ext == ".log" || ext == ".xml" || ext == ".yaml" || ext == ".yml" ||
+                  ext == ".toml" || ext == ".html" || ext == ".htm"));
+
+            if (!looksTextMime && !looksTextExt) {
+                // Skip non-text types here; daemon/background can handle richer extraction if
+                // needed.
+                return Result<void>();
+            }
+
+            if (!ctx_.store) {
+                return Error{ErrorCode::NotInitialized, "content store not available"};
+            }
+
+            // Guard: avoid loading very large files in memory for the light path
+            if (info.fileSize > 0 && static_cast<std::size_t>(info.fileSize) > maxBytes) {
+                spdlog::debug("LightIndex: skipping large file {} (size={} > cap={})",
+                              info.fileName, info.fileSize, maxBytes);
+                return Result<void>();
+            }
+
+            auto bytesRes = ctx_.store->retrieveBytes(hash);
+            if (!bytesRes) {
+                return bytesRes.error();
+            }
+            auto& buf = bytesRes.value();
+            if (buf.empty()) {
+                return Result<void>();
+            }
+            if (buf.size() > maxBytes) {
+                spdlog::debug("LightIndex: trimming content {} from {} to {} bytes", info.fileName,
+                              buf.size(), maxBytes);
+            }
+            const std::size_t n = std::min<std::size_t>(buf.size(), maxBytes);
+            std::string text;
+            text.reserve(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                text.push_back(static_cast<char>(buf[i]));
+            }
+
+            // Very light HTML handling: strip tags naively when extension suggests HTML
+            if (ext == ".html" || ext == ".htm" || mime == "text/html") {
+                std::string out;
+                out.reserve(text.size());
+                bool intag = false;
+                for (char c : text) {
+                    if (c == '<') {
+                        intag = true;
+                        continue;
+                    }
+                    if (c == '>') {
+                        intag = false;
+                        continue;
+                    }
+                    if (!intag)
+                        out.push_back(c);
+                }
+                text.swap(out);
+            }
+
+            // Index into FTS5 and fuzzy index
+            (void)ctx_.metadataRepo->indexDocumentContent(info.id, info.fileName, text,
+                                                          mime.empty() ? "text/plain" : mime);
+            (void)ctx_.metadataRepo->updateFuzzyIndex(info.id);
+
+            // Mark extraction success for this light path
+            auto d = ctx_.metadataRepo->getDocument(info.id);
+            if (d && d.value().has_value()) {
+                auto updated = *d.value();
+                updated.contentExtracted = true;
+                updated.extractionStatus = metadata::ExtractionStatus::Success;
+                (void)ctx_.metadataRepo->updateDocument(updated);
+            }
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError, e.what()};
+        }
+    }
+
 private:
     AppContext ctx_;
     bool degraded_{false};
@@ -625,10 +733,15 @@ private:
         //  - content snippet (optional)
         yams::vector::SearchFilter filter;
         if (!scope.name.empty()) {
-            filter.metadata_filters["file_name"] = scope.name;
+            filter.metadata_filters["name"] = scope.name;
         }
         if (!scope.ext.empty()) {
-            filter.metadata_filters["extension"] = scope.ext;
+            std::string ext = scope.ext;
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!ext.empty() && ext.front() == '.')
+                ext.erase(ext.begin());
+            filter.metadata_filters["extension"] = ext;
         }
         if (!scope.mime.empty()) {
             filter.metadata_filters["mime_type"] = scope.mime;

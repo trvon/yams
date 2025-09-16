@@ -41,7 +41,7 @@ public:
             ->default_val(0);
         cmd->add_option("--path-contains", pathFilter_,
                         "Only consider documents whose file_path contains this substring");
-        cmd->add_flag("--verbose", verbose_, "Verbose per-document logging");
+        cmd->add_flag("-v,--verbose", verbose_, "Verbose per-document logging");
 
         cmd->callback([this]() {
             auto result = execute();

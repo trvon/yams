@@ -54,6 +54,8 @@ struct DaemonStats {
     std::chrono::steady_clock::time_point startTime;
     std::atomic<uint64_t> requestsProcessed{0};
     std::atomic<uint64_t> activeConnections{0};
+    // macOS AF_UNIX acceptor recovery counter
+    std::atomic<uint64_t> ipcEinvalRebuilds{0};
 
     // Background repair metrics (idle-only coordinator)
     std::atomic<uint64_t> repairIdleTicks{0};

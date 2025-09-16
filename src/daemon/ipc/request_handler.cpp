@@ -49,11 +49,26 @@ public:
         co_return co_await dispatcher_->dispatch(request);
     }
 
-    bool supports_streaming(const Request& /*request*/) const override {
-        // Unified streaming model: treat all request types as stream-capable.
-        // The StreamingRequestProcessor will synthesize a header and keepalives
-        // and emit a final chunk for singleton responses.
-        return true;
+    bool supports_streaming(const Request& request) const override {
+        // Only enable streaming for request types that benefit from progressive output.
+        // Explicitly disable streaming for chunked transfer control messages and simple unary ops.
+        if (std::holds_alternative<SearchRequest>(request) ||
+            std::holds_alternative<ListRequest>(request) ||
+            std::holds_alternative<GrepRequest>(request) ||
+            std::holds_alternative<AddDocumentRequest>(request) ||
+            std::holds_alternative<BatchEmbeddingRequest>(request) ||
+            std::holds_alternative<EmbedDocumentsRequest>(request) ||
+            std::holds_alternative<GenerateEmbeddingRequest>(request) ||
+            std::holds_alternative<LoadModelRequest>(request)) {
+            return true;
+        }
+        // Never stream chunked get control messages
+        if (std::holds_alternative<GetInitRequest>(request) ||
+            std::holds_alternative<GetChunkRequest>(request) ||
+            std::holds_alternative<GetEndRequest>(request)) {
+            return false;
+        }
+        return false;
     }
 
     boost::asio::awaitable<ResponseChunk> next_chunk() override {

@@ -21,7 +21,7 @@ Content-addressed storage with deduplication and semantic search.
 - [Contributing](developer/contributing.md) - Development workflow
 - [Architecture](developer/architecture/README.md) - System design
 - [API Reference](api/README.md) - Integration guide
-- [Testing](developer/testing/README.md) - Test coverage and strategy
+ - [Testing](testing/coverage_report.md) - Test coverage and strategy
 
 ## Operations
 
@@ -34,7 +34,7 @@ Content-addressed storage with deduplication and semantic search.
 
 - [Content Storage](developer/architecture/README.md) - SHA-256 deduplication
 - [Search](user_guide/search_guide.md) - Full-text and semantic
-- [MCP Server](mcp_websocket_transport.md) - AI agent integration
+- [MCP Server](user_guide/mcp.md) - AI agent integration
 - [REST API](api/README.md) - HTTP interface
 
 ## Plugin System (C‑ABI)

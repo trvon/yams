@@ -113,7 +113,14 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
     }
     lastSkips_.clear();
     std::vector<ScanResult> out;
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    // Collect candidates first to allow de-duplication by base name, preferring non-'lib'
+    // prefix on UNIX-like systems. This keeps Linux and macOS behavior consistent and avoids
+    // duplicate listings like 'libyams_onnx_plugin' and 'yams_onnx_plugin'.
+    std::vector<std::filesystem::directory_entry> entries;
+    for (const auto& entry : std::filesystem::directory_iterator(dir))
+        entries.push_back(entry);
+
+    for (const auto& entry : entries) {
         if (!entry.is_regular_file())
             continue;
         auto p = entry.path();
@@ -137,6 +144,22 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
                 }
                 continue;
             }
+            // Deduplicate by base name: on UNIX, prefer non-'lib' variant when both exist
+#if !defined(_WIN32)
+            try {
+                auto fname = p.filename().string();
+                if (fname.rfind("lib", 0) == 0) {
+                    auto alt = p.parent_path() / fname.substr(3);
+                    if (std::filesystem::exists(alt) && std::filesystem::is_regular_file(alt)) {
+                        lastSkips_.push_back(
+                            SkipInfo{p, "duplicate variant; prefer non-lib prefix"});
+                        continue;
+                    }
+                }
+            } catch (...) {
+            }
+#endif
+
             auto sr = scanTarget(p);
             if (sr) {
                 out.push_back(sr.value());
@@ -260,6 +283,42 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
         }
     } catch (...) {
     }
+    // Normalize provider name to avoid duplicate variants on UNIX (e.g., libyams_foo_plugin vs
+    // yams_foo_plugin). Prefer non-'lib' prefix for user-facing identity.
+#if !defined(_WIN32)
+    try {
+        std::string canonical = hi.info.name;
+        if (canonical.rfind("libyams_", 0) == 0) {
+            canonical = canonical.substr(3);
+        }
+        // If manifest provided a spec-compliant name, keep it; otherwise apply canonical.
+        if (namePolicy_ != NamePolicy::Spec) {
+            hi.info.name = canonical;
+        }
+        // Dedupe if an entry already exists for the canonical name
+        auto itExisting = loaded_.find(hi.info.name);
+        if (itExisting != loaded_.end()) {
+            // Prefer existing if it came from a non-lib path; else replace
+            auto preferExisting = [](const std::filesystem::path& p) {
+                auto fn = p.filename().string();
+                return fn.rfind("lib", 0) != 0; // true if not starting with 'lib'
+            };
+            bool keepExisting = preferExisting(itExisting->second.info.path);
+            if (keepExisting) {
+                // Close newly opened handle and return existing
+                if (host_ctx)
+                    yams_free_host_context(host_ctx);
+                dlclose(handle);
+                return Result<ScanResult>(itExisting->second.info);
+            } else {
+                // Replace existing lib-prefixed variant with this one
+                (void)unload(itExisting->second.info.name);
+            }
+        }
+    } catch (...) {
+    }
+#endif
+
     loaded_[hi.info.name] = hi;
     return Result<ScanResult>(hi.info);
 }

@@ -153,6 +153,85 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
         });
 }
 
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "get_init", [this, req]() -> boost::asio::awaitable<Response> {
+            auto appContext = serviceManager_->getAppContext();
+            auto documentService = app::services::makeDocumentService(appContext);
+            std::string hash = req.hash;
+            if (hash.empty() && req.byName && !req.name.empty()) {
+                auto rh = documentService->resolveNameToHash(req.name);
+                if (!rh) {
+                    co_return ErrorResponse{rh.error().code, rh.error().message};
+                }
+                hash = rh.value();
+            }
+            if (hash.empty()) {
+                co_return ErrorResponse{ErrorCode::InvalidArgument, "hash or name required"};
+            }
+            auto store = serviceManager_->getContentStore();
+            if (!store) {
+                co_return ErrorResponse{ErrorCode::NotInitialized, "content store unavailable"};
+            }
+            // Retrieve bytes (in-memory). For very large content, future improvement: stream from
+            // CAS; for now, bounded by max memory and typical use in tests/CLI.
+            auto rb = store->retrieveBytes(hash);
+            if (!rb) {
+                co_return ErrorResponse{ErrorCode::InternalError,
+                                        std::string("retrieveBytes failed: ") + rb.error().message};
+            }
+            std::vector<std::byte> bytes = std::move(rb.value());
+            auto* rsm = serviceManager_->getRetrievalSessionManager();
+            if (!rsm) {
+                co_return ErrorResponse{ErrorCode::NotInitialized,
+                                        "retrieval session manager unavailable"};
+            }
+            uint32_t chunkSize = req.chunkSize > 0 ? req.chunkSize : (512 * 1024);
+            uint64_t maxBytes = req.maxBytes; // 0 = unlimited
+            uint64_t tid = rsm->create(std::move(bytes), chunkSize, maxBytes);
+            GetInitResponse out;
+            out.transferId = tid;
+            auto s = rsm->get(tid);
+            out.totalSize = s ? s->totalSize : 0;
+            out.chunkSize = chunkSize;
+            out.metadata["hash"] = hash;
+            co_return out;
+        });
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGetChunkRequest(const GetChunkRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "get_chunk", [this, req]() -> boost::asio::awaitable<Response> {
+            auto* rsm = serviceManager_->getRetrievalSessionManager();
+            if (!rsm) {
+                co_return ErrorResponse{ErrorCode::NotInitialized,
+                                        "retrieval session manager unavailable"};
+            }
+            uint64_t remaining = 0;
+            auto data = rsm->chunk(req.transferId, req.offset, req.length, remaining);
+            if (!data) {
+                co_return ErrorResponse{data.error().code, data.error().message};
+            }
+            GetChunkResponse out;
+            out.data = std::move(data.value());
+            out.bytesRemaining = remaining;
+            co_return out;
+        });
+}
+
+boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const GetEndRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "get_end", [this, req]() -> boost::asio::awaitable<Response> {
+            auto* rsm = serviceManager_->getRetrievalSessionManager();
+            if (rsm) {
+                rsm->end(req.transferId);
+            }
+            co_return SuccessResponse{"OK"};
+        });
+}
+
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "list", [this, req]() -> boost::asio::awaitable<Response> {
@@ -375,10 +454,13 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 app::services::AddDirectoryRequest serviceReq;
                 serviceReq.directoryPath = req.path;
                 serviceReq.collection = req.collection;
+                serviceReq.tags = req.tags;
                 serviceReq.includePatterns = req.includePatterns;
                 serviceReq.excludePatterns = req.excludePatterns;
                 serviceReq.recursive = req.recursive;
-                // Defer extraction to daemon post-ingest workers for fast returns
+                // Prefer deferred extraction for directories. Keep fast returns and let
+                // PostIngestQueue perform FTS5 indexing. Inline extraction for directories can
+                // be very expensive; retain deferred behavior here.
                 serviceReq.deferExtraction = true;
                 for (const auto& [key, value] : req.metadata) {
                     serviceReq.metadata[key] = value;
@@ -468,8 +550,27 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 serviceReq.mimeType = req.mimeType;
                 serviceReq.disableAutoMime = req.disableAutoMime;
                 serviceReq.tags = req.tags;
-                // Defer extraction to daemon post-ingest workers for fast returns
-                serviceReq.deferExtraction = true;
+                // Inline extraction/FTS5 for small or content-based adds to avoid requiring
+                // later `yams repair --fts5`. Fall back to deferred for large files.
+                {
+                    bool inlineExtract = false;
+                    if (!req.content.empty()) {
+                        inlineExtract = true; // content provided inline is usually small
+                    } else if (!req.path.empty()) {
+                        std::error_code fsec;
+                        std::filesystem::path p(req.path);
+                        if (std::filesystem::exists(p, fsec) &&
+                            std::filesystem::is_regular_file(p, fsec)) {
+                            auto sz = std::filesystem::file_size(p, fsec);
+                            // Heuristic threshold: 2 MiB for inline extraction
+                            constexpr std::uintmax_t kInlineThreshold = 2ull * 1024ull * 1024ull;
+                            if (!fsec && sz > 0 && sz <= kInlineThreshold) {
+                                inlineExtract = true;
+                            }
+                        }
+                    }
+                    serviceReq.deferExtraction = !inlineExtract;
+                }
                 for (const auto& [key, value] : req.metadata) {
                     serviceReq.metadata[key] = value;
                 }
@@ -500,28 +601,11 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                     }
                 } catch (...) {
                 }
+                // Never block AddDocument on embedding generation. Schedule asynchronously if
+                // policy requires; otherwise just notify listeners that a document was added.
                 try {
                     if (!req.noEmbeddings && serviceManager_ &&
                         serviceManager_->isEmbeddingsAutoOnAdd() && !response.hash.empty()) {
-                        if (serviceManager_->isModelProviderDegraded()) {
-                            co_return response;
-                        }
-                        try {
-                            auto gen = serviceManager_->getEmbeddingGenerator();
-                            auto vecMgr = serviceManager_->getVectorIndexManager();
-                            if (gen && vecMgr && gen->isInitialized() && !req.content.empty()) {
-                                auto emb = gen->generateEmbedding(req.content);
-                                if (!emb.empty()) {
-                                    std::vector<std::string> ids{response.hash};
-                                    std::vector<std::vector<float>> vecs{std::move(emb)};
-                                    std::vector<std::map<std::string, std::string>> meta(1);
-                                    meta[0]["source"] = "AddDocument";
-                                    (void)vecMgr->addVectors(ids, vecs, meta);
-                                    co_return response;
-                                }
-                            }
-                        } catch (...) {
-                        }
                         auto shouldAuto = []() -> bool {
                             using TA = yams::daemon::TuneAdvisor;
                             try {
@@ -533,9 +617,15 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                             return false;
                         }();
                         if (!shouldAuto) {
+                            spdlog::info("[AddDocument] embeddings not scheduled (policy=Never); "
+                                         "hash={} path={}",
+                                         response.hash, response.path);
                             if (daemon_)
                                 daemon_->onDocumentAdded(response.hash, response.path);
                         } else {
+                            spdlog::info("[AddDocument] scheduling embeddings (policy=Always); "
+                                         "hash={} path={}",
+                                         response.hash, response.path);
                             auto ex = getWorkerExecutor();
                             auto signal = getWorkerJobSignal();
                             if (signal)

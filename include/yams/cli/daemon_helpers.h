@@ -494,14 +494,19 @@ public:
         const auto client_id = lease.client_id();
 
         auto is_transient = [](const Error& e) {
+            // Treat transport resets as transient
             if (e.code == ErrorCode::NetworkError)
-                return true; // treat ECONNRESET/EPIPE as transient
+                return true;
+            // Treat startup/initialization as transient
             if (e.code == ErrorCode::InvalidState || e.code == ErrorCode::NotInitialized) {
                 const std::string& m = e.message;
                 return m.find("not ready") != std::string::npos ||
                        m.find("not available") != std::string::npos ||
                        m.find("initializ") != std::string::npos; // initializing/initialization
             }
+            // Backpressure/overload from daemon should be retried with backoff
+            if (e.code == ErrorCode::RateLimited || e.code == ErrorCode::ResourceExhausted)
+                return true;
             return false;
         };
 
@@ -545,11 +550,31 @@ public:
             }
 
             if (attempt < kMaxAttempts && is_transient(last_err)) {
-                // Tiny jittered backoff using non-blocking timer
-                auto jitter = std::chrono::milliseconds{(std::rand() % 21)}; // 0-20ms
-                boost::asio::steady_timer timer(exec, backoff + jitter);
+                // Determine backoff using daemon's retryAfterMs when available
+                std::chrono::milliseconds retry_delay = backoff;
+                // Env override has highest priority
+                if (const char* env_ms = std::getenv("YAMS_RETRY_AFTER_MS")) {
+                    long v = std::strtol(env_ms, nullptr, 10);
+                    if (v > 0)
+                        retry_delay = std::chrono::milliseconds{v};
+                } else {
+                    // Probe daemon status for retryAfterMs hint
+                    yams::daemon::StatusRequest sreq{};
+                    sreq.detailed = false;
+                    if (auto sresp = co_await lease->call<yams::daemon::StatusRequest>(sreq)) {
+                        const auto ms = sresp.value().retryAfterMs;
+                        if (ms > 0)
+                            retry_delay = std::chrono::milliseconds{ms};
+                    }
+                }
+                // Jitter and clamp
+                auto jitter = std::chrono::milliseconds{(std::rand() % 41)}; // 0-40ms
+                auto delay = std::min<std::chrono::milliseconds>(retry_delay + jitter,
+                                                                 std::chrono::milliseconds{2000});
+                boost::asio::steady_timer timer(exec, delay);
                 co_await timer.async_wait(boost::asio::use_awaitable);
-                backoff = std::min(backoff * 2, std::chrono::milliseconds{300});
+                // Exponential backoff floor, but cap growth
+                backoff = std::min(backoff * 2, std::chrono::milliseconds{500});
                 continue;
             }
 
@@ -610,50 +635,70 @@ private:
     std::atomic<size_t> fallbacks_failed_{0};
 };
 
-// ============================================================================
-// Convenience shims
-// ============================================================================
-
-// Async version of daemon_first that can be used with run_sync bridge
-template <typename TRequest, typename TResponse = yams::daemon::ResponseOfT<TRequest>,
-          typename Fallback, typename Render>
-inline boost::asio::awaitable<Result<void>>
-daemon_request_async(const TRequest& req, Fallback&& fallback, Render&& render) {
-    // Static pool with basic defaults. Tunable via env if desired.
-    static DaemonClientPool::Config cfg = [] {
-        DaemonClientPool::Config c;
-        if (const char* s = std::getenv("YAMS_POOL_MAX")) {
-            long v = std::strtol(s, nullptr, 10);
-            if (v > 0)
-                c.max_clients = static_cast<size_t>(v);
-        }
-        if (const char* s = std::getenv("YAMS_POOL_MIN")) {
-            long v = std::strtol(s, nullptr, 10);
-            if (v > 0)
-                c.min_clients = static_cast<size_t>(v);
-        }
-        if (const char* s = std::getenv("YAMS_POOL_VERBOSE")) {
-            c.verbose = (std::string(s) == "1" || std::string(s) == "true");
-        }
-        return c;
-    }();
-
-    static PooledRequestManager<TRequest, TResponse> manager(cfg);
-    co_return co_await manager.execute_async(req, std::forward<Fallback>(fallback),
-                                             std::forward<Render>(render));
+inline bool operator==(const yams::daemon::ClientConfig& lhs,
+                       const yams::daemon::ClientConfig& rhs) {
+    return lhs.socketPath == rhs.socketPath && lhs.dataDir == rhs.dataDir &&
+           lhs.connectTimeout == rhs.connectTimeout && lhs.headerTimeout == rhs.headerTimeout &&
+           lhs.bodyTimeout == rhs.bodyTimeout && lhs.requestTimeout == rhs.requestTimeout &&
+           lhs.maxRetries == rhs.maxRetries && lhs.autoStart == rhs.autoStart &&
+           lhs.enableCircuitBreaker == rhs.enableCircuitBreaker &&
+           lhs.enableChunkedResponses == rhs.enableChunkedResponses &&
+           lhs.maxChunkSize == rhs.maxChunkSize && lhs.maxInflight == rhs.maxInflight &&
+           lhs.progressiveOutput == rhs.progressiveOutput &&
+           lhs.singleUseConnections == rhs.singleUseConnections &&
+           lhs.disableStreamingForLargeQueries == rhs.disableStreamingForLargeQueries;
 }
 
-// Run an awaitable<Result<void>> to completion on the GlobalIOContext and return the Result.
-inline Result<void> run_awaitable(boost::asio::awaitable<Result<void>> aw) {
-    auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-    auto fut = boost::asio::co_spawn(io, std::move(aw), boost::asio::use_future);
-    try {
-        return fut.get();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()};
-    } catch (...) {
-        return Error{ErrorCode::InternalError, "Awaitable threw unknown exception"};
+inline bool operator!=(const yams::daemon::ClientConfig& lhs,
+                       const yams::daemon::ClientConfig& rhs) {
+    return !(lhs == rhs);
+}
+
+inline Result<DaemonClientPool::Lease>
+acquire_cli_daemon_client(const yams::daemon::ClientConfig& cfg, size_t min_clients = 1,
+                          size_t max_clients = 12) {
+    static std::mutex gMutex;
+    static std::unique_ptr<DaemonClientPool> gPool;
+    static yams::daemon::ClientConfig gConfig;
+    static bool initialized = false;
+
+    DaemonClientPool* poolPtr = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(gMutex);
+        if (!initialized || cfg != gConfig) {
+            DaemonClientPool::Config pcfg;
+            // Allow environment overrides to modulate pool pressure under heavy ops
+            size_t env_min = 0, env_max = 0;
+            if (const char* s = std::getenv("YAMS_DAEMON_POOL_MIN")) {
+                long v = std::strtol(s, nullptr, 10);
+                if (v > 0)
+                    env_min = static_cast<size_t>(v);
+            }
+            if (const char* s = std::getenv("YAMS_DAEMON_POOL_MAX")) {
+                long v = std::strtol(s, nullptr, 10);
+                if (v > 0)
+                    env_max = static_cast<size_t>(v);
+            }
+            pcfg.min_clients = std::max<size_t>(1, env_min ? env_min : min_clients);
+            pcfg.max_clients = std::max(pcfg.min_clients, env_max ? env_max : max_clients);
+            pcfg.client_config = cfg;
+            gPool = std::make_unique<DaemonClientPool>(pcfg);
+            gConfig = cfg;
+            initialized = true;
+        }
+        poolPtr = gPool.get();
     }
+
+    return poolPtr->acquire();
+}
+
+inline Result<std::shared_ptr<DaemonClientPool::Lease>>
+acquire_cli_daemon_client_shared(const yams::daemon::ClientConfig& cfg, size_t min_clients = 1,
+                                 size_t max_clients = 12) {
+    auto lease = acquire_cli_daemon_client(cfg, min_clients, max_clients);
+    if (!lease)
+        return lease.error();
+    return std::make_shared<DaemonClientPool::Lease>(std::move(lease.value()));
 }
 
 // Generic runner for any boost::asio::awaitable<Result<T>>. Optional timeout (0 => no timeout).

@@ -6,6 +6,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -38,16 +39,23 @@ private:
         bool hasObj = false, hasDr = false;
         try {
             ClientConfig cfg;
-            cfg.dataDir = cli_->getDataPath();
-            cfg.singleUseConnections = true;
+            if (cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
+            }
             cfg.requestTimeout = std::chrono::milliseconds(4000);
-            DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                spdlog::warn("Unable to contact daemon for DR gate: {}", leaseRes.error().message);
+                return;
+            }
+            auto leaseHandle = std::move(leaseRes.value());
             GetStatsRequest req;
             std::promise<Result<yams::daemon::GetStatsResponse>> prom;
             auto fut = prom.get_future();
             boost::asio::co_spawn(
                 boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
+                [leaseHandle, req, &prom]() mutable -> boost::asio::awaitable<void> {
+                    auto& client = **leaseHandle;
                     auto r = co_await client.call(req);
                     prom.set_value(std::move(r));
                     co_return;

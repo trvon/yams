@@ -75,11 +75,6 @@ public:
     static std::unique_ptr<ICommand> createAuthCommand();
 
     /**
-     * Create stats command
-     */
-    static std::unique_ptr<ICommand> createStatsCommand();
-
-    /**
      * Create status command (quick system overview)
      */
     static std::unique_ptr<ICommand> createStatusCommand();

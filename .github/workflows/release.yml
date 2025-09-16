@@ -3,21 +3,13 @@ name: Release
 on:
   push:
     tags:
-      - "v*"  # Only run automatically for version tags (stable releases)
-  # Manual dispatch retained for ad-hoc nightly/weekly style builds without tagging
+      - "v*"  # Stable releases triggered by version tags
   workflow_dispatch:
     inputs:
       channel:
         description: "Release channel (stable|weekly|nightly)"
         required: false
         default: "nightly"
-  # (Disabled) workflow_run & schedule triggers were removed to avoid accidental untagged releases
-  # workflow_run:
-  #   workflows: ["Tests", "CI"]
-  #   types: [completed]
-  # schedule:
-  #   - cron: "0 2 * * *"
-  #   - cron: "0 3 * * 1"
 
 permissions:
   contents: write
@@ -32,21 +24,25 @@ jobs:
           - os: linux-hosted
             runs_on: ubuntu-latest
             suffix: linux-x86_64
+            hosted: true
           - os: macos-hosted-arm64
             runs_on: macos-15
             suffix: macos-arm64
+            hosted: true
           - os: macos-hosted-x64
             runs_on: macos-15
             suffix: macos-x86_64
+            hosted: true
     runs-on: ${{ matrix.runs_on }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Cache Conan (warm)
+      - name: Cache Conan packages (warm)
         id: cache_conan_warm
         uses: actions/cache@v4
+        continue-on-error: true
         with:
           path: |
             ~/.conan2/p
@@ -54,102 +50,65 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
           restore-keys: |
-            conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            warm-conan2-${{ runner.os }}-
             conan2-${{ runner.os }}-
-            conan-${{ runner.os }}-
-      - name: Conan cache diagnostics (warm)
-        shell: bash
-        run: |
-          echo "Cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}"
-          for d in p r recipes metadata s; do
-            if [ -d "$HOME/.conan2/$d" ]; then
-              echo "Directory $d present: $(find $HOME/.conan2/$d -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') top-level entries" || true
-              du -sh $HOME/.conan2/$d 2>/dev/null || true
-            else
-              echo "Directory $d missing"
-            fi
-          done
       - name: Cache ccache (warm)
         uses: actions/cache@v4
+        continue-on-error: true
         with:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            warm-ccache-${{ runner.os }}-
             ccache-${{ runner.os }}-
-      - name: Install Conan
-        if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
+      - name: Warm summary
         shell: bash
         run: |
-          pipx install conan 2>/dev/null || python3 -m pip install --upgrade conan || python -m pip install --upgrade conan || pip3 install --upgrade conan
-          conan --version
-          mkdir -p ~/.conan2
-          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
-      - name: Detect profile & pre-install (Release)
-        if: |
-          ! (github.event_name == 'workflow_run' && matrix.suffix == 'linux-x86_64')
-        shell: bash
-        run: |
-          set -euo pipefail
-          conan profile detect --force
-          sed -i'' -e 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          HOST_PROFILE="conan/profiles/host-linux-clang"
-          if [ "$RUNNER_OS" = "macOS" ]; then HOST_PROFILE="conan/profiles/host-macos-apple-clang"; fi
-          echo "Warm preinstall executing for $RUNNER_OS (${{ matrix.suffix }}) event=${{ github.event_name }}"
-          conan install . -of build/warm-release -pr:h=$HOST_PROFILE -pr:b=default -s build_type=Release -b missing
-      - name: Skip note (Linux workflow_run)
-        if: github.event_name == 'workflow_run' && matrix.suffix == 'linux-x86_64'
-        run: echo "Skipping Linux warm preinstall (workflow_run; tests workflow already produced Release packages)."
-      - name: Summary
-        run: echo "Warm matrix for ${{ matrix.suffix }} completed" >> $GITHUB_STEP_SUMMARY
+          echo "Conan cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}" || true
+          du -sh ~/.conan2/p 2>/dev/null || true
+          du -sh ~/.cache/ccache 2>/dev/null || true
 
-  build-release: # build job now depends on warm
-    needs: [warm]
-    name: Build and Release (${{ matrix.os }})
-    # Only run on:
-    # - tagged push (stable)
-    # - manual dispatch (nightly/weekly simulation)
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+  build-release:
+    name: Build and Package (matrix)
+    needs: warm
     strategy:
       fail-fast: false
       matrix:
-        # Note: Validation (tests + benchmarks) runs only on linux-hosted
-        # Other platforms do optimized release builds only
         include:
           - os: linux-hosted
-            runs_on: "ubuntu-latest"
-            packaging: tgz
-            cmake_args: ""
+            runs_on: ubuntu-latest
             suffix: linux-x86_64
-            hosted: true
+            packaging: tar
             build_packages: true
+            cmake_args: ""
+            hosted: true
           - os: macos-hosted-arm64
-            runs_on: "macos-15"
-            packaging: zip
-            cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64"
+            runs_on: macos-15
             suffix: macos-arm64
-            hosted: true
-            build_packages: true
-          - os: macos-hosted-x64
-            runs_on: "macos-15"
             packaging: zip
-            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
+            build_packages: false
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES=arm64
+            hosted: true
+          - os: macos-hosted-x64
+            runs_on: macos-15
             suffix: macos-x86_64
+            packaging: zip
+            build_packages: false
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
             hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
-      BUILD_DIR: build/yams-release
       STAGE_DIR: stage
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Ensure tags are available for git describe and version derivation
           fetch-depth: 0
 
       - name: Cache Conan packages (early)
@@ -786,6 +745,11 @@ jobs:
 
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -912,6 +876,49 @@ jobs:
           name: homebrew-formula
           path: homebrew/
           retention-days: 7
+
+      - name: Open Homebrew formula update PR (stable only)
+        if: steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          BRANCH="update/formula-v${VERSION}"
+          # Ensure we are on main for branch base
+          git checkout main || git checkout -B main
+          git pull --ff-only origin main || true
+          # Create/update branch
+          git checkout -B "$BRANCH"
+          # Copy generated formula into repository location (replace placeholder version/sha)
+          if [ -f homebrew/yams.rb ]; then
+            cp homebrew/yams.rb packaging/homebrew/yams.rb
+          else
+            echo "Generated formula not found; aborting PR step" >&2
+            exit 0
+          fi
+          if git diff --quiet -- packaging/homebrew/yams.rb; then
+            echo "Formula unchanged; skipping PR creation"
+            exit 0
+          fi
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packaging/homebrew/yams.rb
+          git commit -m "chore(homebrew): update formula to v${VERSION}" || true
+          git push --set-upstream origin "$BRANCH" || {
+            echo "Push failed (possibly permissions). Exiting." >&2
+            exit 0
+          }
+          if command -v gh >/dev/null 2>&1; then
+            gh pr create \
+              --title "chore(homebrew): update formula to v${VERSION}" \
+              --body "Automated Homebrew formula update for YAMS ${VERSION}.\nSource tag: v${VERSION}" \
+              --base main \
+              --head "$BRANCH" || echo "PR creation skipped (already exists?)"
+          else
+            echo "gh CLI not installed; PR not created (branch pushed: $BRANCH)" >&2
+          fi
 
       - name: Build APT repository metadata (stable only, linux .deb present)
         if: steps.meta.outputs.channel == 'stable'
@@ -1117,11 +1124,6 @@ jobs:
           echo "success_count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
           echo "total_expected=$TOTAL_EXPECTED" >> $GITHUB_OUTPUT
           echo "threshold=$THRESHOLD" >> $GITHUB_OUTPUT
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Extract release notes from CHANGELOG.md (stable only)
         id: changelog

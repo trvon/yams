@@ -66,10 +66,21 @@ target_link_libraries(daemon_download_integration_test PRIVATE
 add_test(NAME daemon_download_integration_test COMMAND daemon_download_integration_test)
 set_tests_properties(daemon_download_integration_test PROPERTIES LABELS "daemon;integration")
 
-# Split tests: daemon add normalization and daemon delete parity
-add_executable(daemon_add_normalization_integration_test
-    daemon_delete_add_integration_test.cpp
+# Basic daemon communication roundtrip (status/ping/list)
+add_executable(daemon_basic_comm_integration_test
+    daemon_basic_comm_integration_test.cpp
 )
+target_link_libraries(daemon_basic_comm_integration_test PRIVATE
+    test_utils
+    gtest_main
+    yams::daemon
+    yams_cli
+)
+add_test(NAME daemon_basic_comm_integration_test COMMAND daemon_basic_comm_integration_test)
+set_tests_properties(daemon_basic_comm_integration_test PROPERTIES LABELS "daemon;integration")
+
+# Split tests: daemon add normalization and daemon delete parity
+## Removed daemon_add_normalization_integration_test after service centralization
 target_link_libraries(daemon_add_normalization_integration_test PRIVATE
     test_utils
     gtest_main
@@ -77,12 +88,9 @@ target_link_libraries(daemon_add_normalization_integration_test PRIVATE
     yams::api
     yams::metadata
 )
-add_test(NAME daemon_add_normalization_integration_test COMMAND daemon_add_normalization_integration_test)
-set_tests_properties(daemon_add_normalization_integration_test PROPERTIES LABELS "daemon;integration")
+## removed targets above
 
-add_executable(daemon_delete_parity_integration_test
-    daemon_delete_add_integration_test.cpp
-)
+## Removed daemon_delete_parity_integration_test after service centralization
 target_link_libraries(daemon_delete_parity_integration_test PRIVATE
     test_utils
     gtest_main
@@ -90,8 +98,7 @@ target_link_libraries(daemon_delete_parity_integration_test PRIVATE
     yams::api
     yams::metadata
 )
-add_test(NAME daemon_delete_parity_integration_test COMMAND daemon_delete_parity_integration_test)
-set_tests_properties(daemon_delete_parity_integration_test PROPERTIES LABELS "daemon;integration")
+## removed targets above
 
 # Pooled request integration test (uses real daemon)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pooled_request_integration_test.cpp")

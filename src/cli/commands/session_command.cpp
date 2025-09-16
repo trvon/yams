@@ -590,14 +590,14 @@ private:
         if (!ensured)
             return ensured;
         // Attempt daemon offload first; fallback to local
-        bool attemptedDaemon = false;
-
         try {
-            yams::cli::DaemonClientPool pool({.min_clients = 1, .max_clients = 1});
-            auto leaseRes = pool.acquire();
+            yams::daemon::ClientConfig cfg;
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
+            }
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg, 1, 1);
             if (leaseRes) {
-                attemptedDaemon = true;
-                auto lease = std::move(leaseRes.value());
+                auto leaseHandle = std::move(leaseRes.value());
                 yams::daemon::PrepareSessionRequest dreq;
                 dreq.sessionName = ""; // use current
                 dreq.cores = budgetCores_;
@@ -608,8 +608,9 @@ private:
                 dreq.snippetLen = static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160);
                 boost::asio::co_spawn(
                     boost::asio::system_executor{},
-                    [l = std::move(lease), dreq]() mutable -> boost::asio::awaitable<void> {
-                        (void)co_await l->call<yams::daemon::PrepareSessionRequest>(dreq);
+                    [leaseHandle, dreq]() mutable -> boost::asio::awaitable<void> {
+                        auto& client = **leaseHandle;
+                        (void)co_await client.call<yams::daemon::PrepareSessionRequest>(dreq);
                         co_return;
                     },
                     boost::asio::detached);

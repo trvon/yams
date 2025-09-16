@@ -30,7 +30,9 @@ struct ClientConfig {
     size_t maxChunkSize = 512 * 1024; // increased default max chunk size
     size_t maxInflight = 128; // multiplexing: cap concurrent in-flight requests per connection
     bool progressiveOutput = true;
-    bool singleUseConnections = true;
+    // Use pooled, multiplexed connections by default. Set to true only for
+    // specialized scenarios (debugging, isolation) where pooling is undesirable.
+    bool singleUseConnections = false;
     bool disableStreamingForLargeQueries = false;
 };
 

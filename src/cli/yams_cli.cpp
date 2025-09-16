@@ -151,6 +151,10 @@ YamsCLI::~YamsCLI() {
     // Cleanup will be handled by smart pointers
 }
 
+bool YamsCLI::hasExplicitDataDir() const {
+    return storageOpt_ && storageOpt_->count() > 0;
+}
+
 int YamsCLI::run(int argc, char* argv[]) {
     try {
         // Pre-scan for verbose help flags before CLI11 handles --help

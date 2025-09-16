@@ -35,12 +35,8 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
             return Error{ErrorCode::FileNotFound, "Plugin file not found: " + pluginPath.string()};
         }
 
-        // Check if already loaded
-        std::string pluginName = pluginPath.stem().string();
-        if (plugins_.find(pluginName) != plugins_.end() && plugins_[pluginName].loaded) {
-            spdlog::debug("Plugin already loaded: {}", pluginName);
-            return Result<void>();
-        }
+        // Note: Do not pre-deduplicate by filename; multiple filenames may provide the
+        // same provider. We'll deduplicate by provider name after dlopen/dlsym.
 
         spdlog::info("Loading plugin: {}", pluginPath.string());
 
@@ -105,10 +101,46 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
             return Error{ErrorCode::InvalidArgument, "Plugin returned invalid provider name"};
         }
 
-        // Register the provider with the factory
         std::string name(providerName);
 
-        // Register using a lambda that captures the function pointer
+        // Decide precedence when the same provider is found in multiple files/dirs.
+        auto scorePath = [](const fs::path& p) -> int {
+            // Lower score means higher priority.
+            int s = 0;
+            auto fname = p.filename().string();
+            if (fname.rfind("lib", 0) == 0) {
+                s += 10; // prefer non-lib prefixed names
+            }
+            std::string str = p.string();
+            if (const char* home = std::getenv("HOME")) {
+                fs::path userDir = fs::path(home) / ".local" / "lib" / "yams" / "plugins";
+                if (str.rfind(userDir.string(), 0) == 0)
+                    s += 0; // highest
+            }
+            if (str.find("/usr/local/lib/yams/plugins") != std::string::npos)
+                s += 5;
+            if (str.find("/usr/lib/yams/plugins") != std::string::npos)
+                s += 8;
+            return s;
+        };
+
+        int newScore = scorePath(pluginPath);
+        auto it = plugins_.find(name);
+        if (it != plugins_.end() && it->second.loaded) {
+            int oldScore = scorePath(it->second.path);
+            if (newScore >= oldScore) {
+                // Existing provider has higher or equal priority; skip this one.
+                dlclose(handle);
+                spdlog::info(
+                    "Skipping duplicate provider '{}' from {} (kept {} with higher priority)", name,
+                    pluginPath.string(), it->second.path.string());
+                return Result<void>();
+            }
+            // Replace with higher-priority implementation
+            (void)unloadPlugin(name);
+        }
+
+        // Register using a lambda that captures the function pointer (after dedup decision)
         registerModelProvider(name, [createProvider]() -> std::unique_ptr<IModelProvider> {
             return std::unique_ptr<IModelProvider>(createProvider());
         });
@@ -121,7 +153,7 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
         info.loaded = true;
         plugins_[name] = info;
 
-        spdlog::info("Successfully loaded {} plugin from {}", name, pluginPath.string());
+        spdlog::info("Successfully loaded provider '{}' from {}", name, pluginPath.string());
         return Result<void>();
 
     } catch (const std::exception& e) {
@@ -158,7 +190,15 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
 
         spdlog::info("Scanning for plugins in: {}", directory.string());
 
+        // First, collect file names to help detect duplicate variants (e.g., 'libfoo.dylib' and
+        // 'foo.dylib' both present). We prefer the non-'lib' prefixed variant on Apple to avoid
+        // stale duplicates from legacy builds.
+        std::vector<fs::directory_entry> entries;
         for (const auto& entry : fs::directory_iterator(directory)) {
+            entries.push_back(entry);
+        }
+
+        for (const auto& entry : entries) {
             if (!entry.is_regular_file()) {
                 continue;
             }
@@ -183,6 +223,19 @@ Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::pat
             if (fs::is_symlink(entry.path())) {
                 continue;
             }
+
+#ifdef __APPLE__
+            // Prefer non-'lib' prefixed variant when both exist (helps avoid legacy duplicates)
+            if (filename.rfind("lib", 0) == 0) {
+                // Candidate without 'lib' prefix
+                std::string alt = filename.substr(3);
+                fs::path altPath = entry.path().parent_path() / alt;
+                if (fs::exists(altPath) && fs::is_regular_file(altPath)) {
+                    spdlog::info("Skipping duplicate plugin '{}' in favor of '{}'", filename, alt);
+                    continue;
+                }
+            }
+#endif
 
             // Try to load the plugin
             auto result = loadPlugin(entry.path());

@@ -2,6 +2,8 @@
 
 set(APP_SERVICES_SOURCES
     document_service.cpp
+    document_ingestion_service.cpp
+    retrieval_service.cpp
     search_service.cpp
     enhanced_search_executor.cpp
     grep_service.cpp
@@ -20,15 +22,12 @@ set_target_properties(yams_app_services PROPERTIES INTERPROCEDURAL_OPTIMIZATION 
 target_link_libraries(yams_app_services
     PUBLIC
         yams_api
+        yams::daemon_client
         yams_metadata
         yams_search
         yams_vector
         yams_downloader
         yams_boost_headers
-    $<$<TARGET_EXISTS:boost::_libboost>:boost::_libboost>
-    $<$<TARGET_EXISTS:Boost::headers>:Boost::headers>
-    $<$<AND:$<NOT:$<TARGET_EXISTS:Boost::headers>>,$<TARGET_EXISTS:Boost::boost>>:Boost::boost>
-    $<$<AND:$<NOT:$<TARGET_EXISTS:Boost::headers>>,$<NOT:$<TARGET_EXISTS:Boost::boost>>,$<TARGET_EXISTS:boost::boost>>:boost::boost>
         nlohmann_json::nlohmann_json
         spdlog::spdlog
 )

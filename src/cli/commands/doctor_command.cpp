@@ -224,10 +224,17 @@ public:
             // Connect to daemon
             ClientConfig cfg;
             if (cli_)
-                cfg.dataDir = cli_->getDataPath();
-            cfg.singleUseConnections = true;
+                if (cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
             cfg.requestTimeout = std::chrono::seconds(10);
-            DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                std::cout << "Daemon unavailable: " << leaseRes.error().message << "\n";
+                return;
+            }
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
             // Updated: run asynchronous daemon client call via generic run_result helper
             auto status = yams::cli::run_result(client.status(), std::chrono::seconds(3));
             if (!status) {
@@ -397,21 +404,16 @@ private:
         try {
             yams::daemon::ClientConfig ccfg;
             if (cli_)
-                ccfg.dataDir = cli_->getDataPath();
-            ccfg.singleUseConnections = true;
+                if (cli_->hasExplicitDataDir()) {
+                    ccfg.dataDir = cli_->getDataPath();
+                }
             ccfg.requestTimeout = std::chrono::seconds(5);
-            yams::daemon::DaemonClient shut(ccfg);
-            std::promise<Result<void>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    auto r = co_await shut.shutdown(true);
-                    prom.set_value(std::move(r));
-                    co_return;
-                },
-                boost::asio::detached);
-            (void)fut.wait_for(std::chrono::seconds(6));
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(ccfg);
+            if (!leaseRes)
+                return;
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& shut = **leaseHandle;
+            (void)yams::cli::run_result(shut.shutdown(true), std::chrono::seconds(6));
         } catch (...) {
         }
     }
@@ -686,8 +688,9 @@ private:
                         {
                             try {
                                 yams::daemon::ClientConfig cfg;
-                                cfg.dataDir = cli_->getDataPath();
-                                cfg.singleUseConnections = true;
+                                if (cli_->hasExplicitDataDir()) {
+                                    cfg.dataDir = cli_->getDataPath();
+                                }
                                 // Configurable RPC timeout (default 60s)
                                 int rpc_ms = 60000;
                                 if (const char* env = std::getenv("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
@@ -697,29 +700,23 @@ private:
                                     }
                                 }
                                 cfg.requestTimeout = std::chrono::milliseconds(rpc_ms);
-                                yams::daemon::DaemonClient client(cfg);
+                                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                                if (!leaseRes) {
+                                    throw std::runtime_error(leaseRes.error().message);
+                                }
+                                auto leaseHandle = std::move(leaseRes.value());
+                                auto& client = **leaseHandle;
                                 yams::daemon::EmbedDocumentsRequest ed;
                                 ed.modelName = ""; // let server/provider decide
                                 ed.documentHashes = missing.value();
                                 ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
                                 ed.skipExisting = rcfg.skipExisting;
-                                std::promise<Result<yams::daemon::EmbedDocumentsResponse>> prom;
-                                auto fut = prom.get_future();
-                                boost::asio::co_spawn(
-                                    boost::asio::system_executor{},
-                                    [&]() -> boost::asio::awaitable<void> {
-                                        auto r = co_await client.streamingEmbedDocuments(ed);
-                                        prom.set_value(std::move(r));
-                                        co_return;
-                                    },
-                                    boost::asio::detached);
                                 // Overall wait limit (2x per-request timeout, minimum 30s)
                                 int overall_ms = std::max(30000, 2 * rpc_ms);
-                                auto er = (fut.wait_for(std::chrono::milliseconds(overall_ms)) ==
-                                           std::future_status::ready)
-                                              ? fut.get()
-                                              : Result<yams::daemon::EmbedDocumentsResponse>(
-                                                    Error{ErrorCode::Timeout, "embed timeout"});
+                                auto er =
+                                    yams::cli::run_result<yams::daemon::EmbedDocumentsResponse>(
+                                        client.streamingEmbedDocuments(ed),
+                                        std::chrono::milliseconds(overall_ms));
                                 if (er) {
                                     std::cout << "  ✓ Daemon embeddings: requested="
                                               << er.value().requested
@@ -830,25 +827,20 @@ private:
         try {
             yams::daemon::ClientConfig cfg;
             if (cli_)
-                cfg.dataDir = cli_->getDataPath();
-            cfg.singleUseConnections = true;
+                if (cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
             cfg.requestTimeout = std::chrono::milliseconds(3000);
-            yams::daemon::DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                std::cout << "Daemon: UNAVAILABLE - " << leaseRes.error().message << "\n";
+                return;
+            }
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
             std::cout << "Daemon: ";
-            std::promise<Result<yams::daemon::StatusResponse>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    auto r = co_await client.status();
-                    prom.set_value(std::move(r));
-                    co_return;
-                },
-                boost::asio::detached);
-            auto s = (fut.wait_for(std::chrono::seconds(3)) == std::future_status::ready)
-                         ? fut.get()
-                         : Result<yams::daemon::StatusResponse>(
-                               Error{ErrorCode::Timeout, "status timeout"});
+            auto s = yams::cli::run_result<yams::daemon::StatusResponse>(client.status(),
+                                                                         std::chrono::seconds(3));
             if (!s) {
                 std::cout << "UNAVAILABLE - " << s.error().message << "\n";
                 return;
@@ -1134,27 +1126,21 @@ private:
                 using namespace yams::daemon;
                 yams::daemon::ClientConfig cfg;
                 if (cli_)
-                    cfg.dataDir = cli_->getDataPath();
-                cfg.singleUseConnections = true;
+                    if (cli_->hasExplicitDataDir()) {
+                        cfg.dataDir = cli_->getDataPath();
+                    }
                 cfg.requestTimeout = std::chrono::milliseconds(4000);
-                yams::daemon::DaemonClient client(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    throw std::runtime_error(leaseRes.error().message);
+                }
+                auto leaseHandle = std::move(leaseRes.value());
+                auto& client = **leaseHandle;
                 PluginLoadRequest req;
                 req.pathOrName = target.string();
                 req.dryRun = true;
-                std::promise<Result<yams::daemon::PluginLoadResponse>> prom2;
-                auto fut2 = prom2.get_future();
-                boost::asio::co_spawn(
-                    boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
-                        auto r2 = co_await client.call(req);
-                        prom2.set_value(std::move(r2));
-                        co_return;
-                    },
-                    boost::asio::detached);
-                auto r = (fut2.wait_for(std::chrono::seconds(4)) == std::future_status::ready)
-                             ? fut2.get()
-                             : Result<yams::daemon::PluginLoadResponse>(
-                                   Error{ErrorCode::Timeout, "load timeout"});
+                auto r = yams::cli::run_result<yams::daemon::PluginLoadResponse>(
+                    client.call(req), std::chrono::seconds(4));
                 if (!r) {
                     std::cout << "  Daemon: DRY-RUN LOAD -> FAIL: " << r.error().message << "\n";
                 } else {
@@ -1181,7 +1167,11 @@ private:
         // Show embedding runtime from daemon status (best-effort)
         try {
             using namespace yams::daemon;
-            DaemonClient client;
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(ClientConfig{});
+            if (!leaseRes)
+                throw std::runtime_error(leaseRes.error().message);
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
             auto st = yams::cli::run_result(client.status(), std::chrono::seconds(3));
             if (st) {
                 const auto& s = st.value();
@@ -1249,25 +1239,17 @@ private:
         try {
             using namespace yams::daemon;
             yams::daemon::ClientConfig cfg;
-            cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(1200);
-            yams::daemon::DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes)
+                throw std::runtime_error(leaseRes.error().message);
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
             GetStatsRequest sreq;
             sreq.detailed = false;
             sreq.showFileTypes = false;
-            std::promise<Result<GetStatsResponse>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    auto rr = co_await client.getStats(sreq);
-                    prom.set_value(std::move(rr));
-                    co_return;
-                },
-                boost::asio::detached);
-            auto rr = (fut.wait_for(std::chrono::milliseconds(1300)) == std::future_status::ready)
-                          ? fut.get()
-                          : Result<GetStatsResponse>(Error{ErrorCode::Timeout, "stats timeout"});
+            auto rr = yams::cli::run_result<GetStatsResponse>(client.getStats(sreq),
+                                                              std::chrono::milliseconds(1300));
             if (rr) {
                 const auto& gs = rr.value();
                 auto it = gs.additionalStats.find("plugins_json");
@@ -1373,9 +1355,12 @@ private:
         try {
             using namespace yams::daemon;
             yams::daemon::ClientConfig cfg;
-            cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(1200);
-            yams::daemon::DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes)
+                throw std::runtime_error(leaseRes.error().message);
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
             // Poll a few times; stop early if nothing changes or no queue
             uint64_t lastGen = 0, lastFail = 0, lastQ = 0, lastBatches = 0;
             bool printedHeader = false;
@@ -1383,20 +1368,8 @@ private:
                 GetStatsRequest req;
                 req.detailed = false;
                 req.showFileTypes = false;
-                std::promise<Result<GetStatsResponse>> prom;
-                auto fut = prom.get_future();
-                boost::asio::co_spawn(
-                    boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
-                        auto rr = co_await client.getStats(req);
-                        prom.set_value(std::move(rr));
-                        co_return;
-                    },
-                    boost::asio::detached);
-                auto r =
-                    (fut.wait_for(std::chrono::milliseconds(1300)) == std::future_status::ready)
-                        ? fut.get()
-                        : Result<GetStatsResponse>(Error{ErrorCode::Timeout, "stats timeout"});
+                auto r = yams::cli::run_result<GetStatsResponse>(client.getStats(req),
+                                                                 std::chrono::milliseconds(1300));
                 if (!r)
                     break;
                 const auto& st = r.value();

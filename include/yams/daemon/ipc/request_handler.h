@@ -81,8 +81,11 @@ public:
         bool auto_detect_streaming = true;      // Auto-detect requests that benefit from streaming
         bool force_streaming = false;           // Force streaming for all responses
         size_t streaming_threshold = 1024 * 1024; // Size threshold for auto-streaming (1MB)
-        bool close_after_response = true; // Close connection after sending complete response
-                                          // (one-request-per-connection)
+        // Close strategy: with multiplexing enabled, prefer persistent connections to
+        // avoid mid-flight truncation that can manifest as EPIPE/ECONNRESET when the
+        // peer queues multiple requests. Default to keep-alive; callers may override.
+        bool close_after_response = false; // Keep connection open by default
+                                           // (safer with multiplexing)
         // Maximum allowed frame size (bytes) for inbound messages; must align with server limits
         size_t max_frame_size = 10 * 1024 * 1024; // 10MB default
         // Multiplexing limits (when enable_multiplexing=true)

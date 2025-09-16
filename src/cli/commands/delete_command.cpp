@@ -201,18 +201,19 @@ public:
                 }
             };
 
-            auto fallback = [&]() -> Result<void> {
-                // Fall back to local execution for complex cases
-                return executeLocal();
-            };
-
             try {
                 yams::daemon::ClientConfig cfg;
-                cfg.dataDir = cli_->getDataPath();
+                if (cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
                 cfg.enableChunkedResponses = false;
-                cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
-                yams::daemon::DaemonClient client(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    co_return leaseRes.error();
+                }
+                auto leaseHandle = std::move(leaseRes.value());
+                auto& client = **leaseHandle;
                 auto result = co_await client.call(dreq);
                 if (result) {
                     auto r = render(result.value());

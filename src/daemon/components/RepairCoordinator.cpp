@@ -123,7 +123,12 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
                                 for (const auto& d : allDocs.value()) {
                                     if (!running_.load(std::memory_order_relaxed))
                                         break;
-                                    if (!vectorDb->hasEmbedding(d.sha256Hash)) {
+                                    const bool missingEmb = !vectorDb->hasEmbedding(d.sha256Hash);
+                                    const bool missingFts =
+                                        (!d.contentExtracted) ||
+                                        (d.extractionStatus !=
+                                         yams::metadata::ExtractionStatus::Success);
+                                    if (missingEmb || missingFts) {
                                         pendingDocuments_.push(d.sha256Hash);
                                         ++enq;
                                     }
@@ -309,6 +314,58 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
                             processed_.fetch_add(inc, std::memory_order_relaxed);
                             update_progress_pct();
                         }
+                    }
+                } else {
+                    // No embedding work performed; still reindex FTS5 for docs lacking extracted
+                    // text
+                    try {
+                        auto store = services_ ? services_->getContentStore() : nullptr;
+                        auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+                        const auto& extractors =
+                            services_ ? services_->getContentExtractors()
+                                      : std::vector<
+                                            std::shared_ptr<yams::extraction::IContentExtractor>>{};
+                        if (store && meta) {
+                            size_t fts_ok = 0, fts_fail = 0;
+                            for (const auto& h : batch) {
+                                auto docRes = meta->getDocumentByHash(h);
+                                if (!docRes || !docRes.value().has_value()) {
+                                    ++fts_fail;
+                                    continue;
+                                }
+                                const auto& d = docRes.value().value();
+                                if (d.contentExtracted &&
+                                    d.extractionStatus ==
+                                        yams::metadata::ExtractionStatus::Success) {
+                                    continue;
+                                }
+                                std::string ext = d.fileExtension;
+                                if (!ext.empty() && ext[0] == '.')
+                                    ext.erase(0, 1);
+                                auto extractedOpt = yams::extraction::util::extractDocumentText(
+                                    store, h, d.mimeType, ext, extractors);
+                                if (!extractedOpt || extractedOpt->empty()) {
+                                    ++fts_fail;
+                                    continue;
+                                }
+                                auto ir = meta->indexDocumentContent(d.id, d.fileName,
+                                                                     *extractedOpt, d.mimeType);
+                                if (ir) {
+                                    (void)meta->updateFuzzyIndex(d.id);
+                                    ++fts_ok;
+                                } else {
+                                    ++fts_fail;
+                                }
+                            }
+                            if (fts_ok + fts_fail > 0) {
+                                spdlog::info(
+                                    "RepairCoordinator: FTS5-only reindex (ok={}, fail={})", fts_ok,
+                                    fts_fail);
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("RepairCoordinator: FTS5-only reindex exception: {}",
+                                      e.what());
                     }
                 }
             }

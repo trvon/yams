@@ -16,8 +16,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.1.x archive: docs/changelogs/v0.1.md
 
 ### Known Issues
+- Daemon may show broken connection with rapid CLI/MCP usage
 - Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
 - We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
+
+## [v0.6.30]
+
+### Fixed
+- Fixed regressions in CLI / MCP UI performance from the introduction of the daemon
+- ARM Build: Boost `find_package` failure resolved via corrected Conan toolchain path and added generator directory visibility during CMake configure.
+
+### Added
+- Packaging: Introduced Homebrew formula templating (`packaging/homebrew/yams.rb.template`) with placeholder substitution for version + sha256 during stable releases.
+- Release workflow: Generates and commits `latest.json` manifest plus Homebrew formula in a single pass; adds commit step guarded to stable channel.
+- Homebrew: Added `livecheck` block for future tap/live version detection.
+- Services
+  - RetrievalService parity for CLI and MCP (get/list/grep) with shared facade.
+  - DocumentIngestionService used by CLI add and MCP add for daemon‑first ingestion.
+- Daemon: Native chunked get protocol handlers (GetInit/GetChunk/GetEnd) backed by in‑memory
+  RetrievalSessionManager, enabling efficient large content retrieval and capped buffers.
+
+### Changed
+- CI/Build
+  - Unpinned Conan across tests and release workflows (allow latest compatible Conan 2.x) while retaining reproducibility via profile + lock hashing.
+  - Updated `CMakePresets.json` toolchain paths (removed incorrect nested `build/Debug` / `build/Release` segments) enabling correct Boost discovery on ARM.
+  - Extended test job timeout to 50 min (ARM warm builds) and added Conan/Boost diagnostics aiding cache hit analysis.
+  - Replaced heredoc inline formula generation with template-driven substitution reducing workflow maintenance surface and diff noise.
+- CLI + MCP: Switched get/list/grep to RetrievalService; add paths to DocumentIngestionService to
+  eliminate bespoke logic and timeouts/hangs divergences.
+- CLI: Guarded `cfg.dataDir` assignment behind `hasExplicitDataDir()` throughout commands per
+  refactor plan. Centralized DaemonClient data‑dir resolution in default constructor (env → config
+  `core.data_dir` → XDG/HOME → `./yams_data`).
+- RetrievalService: `getChunkedBuffer` prefers the native chunked protocol and falls back to unary
+  `Get` only for `NotImplemented/Timeout/NetworkError`. Improved name‑smart get to resolve via
+  filename when hybrid search returns a path (macOS path aliasing resilience).
 
 ## [v0.6.29] - 2025-09-14
 

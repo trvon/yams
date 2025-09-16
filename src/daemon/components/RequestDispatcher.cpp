@@ -210,6 +210,12 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
                     co_return co_await handleSearchRequest(arg);
                 } else if constexpr (std::is_same_v<T, GetRequest>) {
                     co_return co_await handleGetRequest(arg);
+                } else if constexpr (std::is_same_v<T, GetInitRequest>) {
+                    co_return co_await handleGetInitRequest(arg);
+                } else if constexpr (std::is_same_v<T, GetChunkRequest>) {
+                    co_return co_await handleGetChunkRequest(arg);
+                } else if constexpr (std::is_same_v<T, GetEndRequest>) {
+                    co_return co_await handleGetEndRequest(arg);
                 } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
                     co_return co_await handleAddDocumentRequest(arg);
                 } else if constexpr (std::is_same_v<T, ListRequest>) {

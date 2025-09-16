@@ -2760,7 +2760,7 @@ struct StatusResponse {
         ser << contentStoreRoot << contentStoreError;
 
         // Serialize embedding runtime details
-        ser << embeddingAvailable << embeddingBackend << embeddingModel
+        ser << embeddingAvailable << embeddingBackend << embeddingModel << embeddingModelPath
             << static_cast<uint32_t>(embeddingDim) << static_cast<int32_t>(embeddingThreadsIntra)
             << static_cast<int32_t>(embeddingThreadsInter);
     }
@@ -2996,6 +2996,12 @@ struct StatusResponse {
         if (!em)
             return em.error();
         res.embeddingModel = std::move(em.value());
+        // embeddingModelPath (added after embeddingModel)
+        if (auto emp = deser.readString(); emp) {
+            res.embeddingModelPath = std::move(emp.value());
+        } else {
+            return emp.error();
+        }
         auto ed = deser.template read<uint32_t>();
         if (!ed)
             return ed.error();

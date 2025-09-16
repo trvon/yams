@@ -1,3 +1,5 @@
+#include <yams/app/services/document_ingestion_service.h>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
@@ -538,61 +540,22 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize a single multiplexed daemon client (set dataDir for storage parity)
+    // Initialize a single multiplexed daemon client; rely on DaemonClient defaults for dataDir
     {
         yams::daemon::ClientConfig cfg;
-        // Resolve data root (env > config.toml core.data_dir > XDG_DATA_HOME > ~/.local/share/yams)
-        namespace fs = std::filesystem;
-        fs::path dataRoot;
-        try {
-            if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
-                if (envStorage && *envStorage)
-                    dataRoot = fs::path(envStorage);
-            }
-            if (dataRoot.empty()) {
-                fs::path configPath;
-                if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME"))
-                    configPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
-                else if (const char* homeEnv = std::getenv("HOME"))
-                    configPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
-                std::map<std::string, std::map<std::string, std::string>> toml;
-                if (!configPath.empty() && fs::exists(configPath)) {
-                    yams::config::ConfigMigrator migrator;
-                    if (auto parsed = migrator.parseTomlConfig(configPath))
-                        toml = std::move(parsed.value());
-                }
-                if (auto it = toml.find("core"); dataRoot.empty() && it != toml.end()) {
-                    const auto& core = it->second;
-                    if (auto f = core.find("data_dir"); f != core.end() && !f->second.empty()) {
-                        std::string p = f->second;
-                        if (!p.empty() && p.front() == '~') {
-                            if (const char* home = std::getenv("HOME"))
-                                p = std::string(home) + p.substr(1);
-                        }
-                        dataRoot = fs::path(p);
-                    }
-                }
-            }
-            if (dataRoot.empty()) {
-                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME"))
-                    dataRoot = fs::path(xdgDataHome) / "yams";
-                else if (const char* homeEnv = std::getenv("HOME"))
-                    dataRoot = fs::path(homeEnv) / ".local" / "share" / "yams";
-                else
-                    dataRoot = fs::current_path() / "yams_data";
-            }
-        } catch (...) {
-            // leave dataRoot empty on error; daemon will still resolve
-        }
-        cfg.dataDir = dataRoot;
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
-        // Tighter defaults to avoid perceived hangs in MCP tools; env can override in DaemonClient
         cfg.requestTimeout = std::chrono::milliseconds(10000);
         cfg.headerTimeout = std::chrono::milliseconds(5000);
         cfg.bodyTimeout = std::chrono::milliseconds(15000);
         cfg.maxInflight = 128;
-        daemon_client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
+        daemon_client_config_ = cfg;
+        if (auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg); leaseRes) {
+            daemon_client_lease_ = leaseRes.value();
+            daemon_client_ = &(**daemon_client_lease_);
+        } else {
+            spdlog::warn("Failed to acquire daemon client for MCP: {}", leaseRes.error().message);
+        }
     }
     // Legacy pool config removed
 
@@ -704,7 +667,11 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
         boost::asio::co_spawn(
             io,
-            [cli = daemon_client_]() -> boost::asio::awaitable<void> {
+            [lease = daemon_client_lease_]() -> boost::asio::awaitable<void> {
+                if (!lease) {
+                    co_return;
+                }
+                auto* cli = &(**lease);
                 try {
                     auto r = co_await cli->connect();
                     if (!r) {
@@ -749,6 +716,17 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     } catch (...) {
         startThreadPool(4);
     }
+}
+
+Result<void> MCPServer::ensureDaemonClient() {
+    if (daemon_client_)
+        return Result<void>();
+    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
+    if (!leaseRes)
+        return leaseRes.error();
+    daemon_client_lease_ = leaseRes.value();
+    daemon_client_ = &(**daemon_client_lease_);
+    return Result<void>();
 }
 
 MCPServer::~MCPServer() {
@@ -1224,7 +1202,7 @@ MessageResult MCPServer::handleRequest(const json& request) {
 json MCPServer::initialize(const json& params) {
     // Supported protocol versions (latest first)
     static const std::vector<std::string> kSupported = {"2024-11-05", "2025-06-18", "2025-03-26"};
-    const std::string latest = "2024-11-05"; // Use current MCP spec version as default
+    const std::string latest = "2025-06-18"; // Use current MCP spec version as default
 
     // Extract requested version (optional)
     std::string requested = latest;
@@ -1313,8 +1291,15 @@ json MCPServer::readResource(const std::string& uri) {
                                 .dump()}}}}};
     } else if (uri == "yams://status") {
         try {
-            if (!daemon_client_)
-                daemon_client_ = std::make_shared<yams::daemon::DaemonClient>();
+            auto ensure = ensureDaemonClient();
+            if (!ensure) {
+                return {{"contents",
+                         {{{"uri", uri},
+                           {"mimeType", "application/json"},
+                           {"text", json({{"error",
+                                           std::string("status error: ") + ensure.error().message}})
+                                        .dump()}}}}};
+            }
             auto st = yams::cli::run_result(daemon_client_->status(), std::chrono::seconds(3));
             if (!st) {
                 return {{"contents",
@@ -2367,7 +2352,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         if (err.code == ErrorCode::Timeout &&
             err.message.find("Read timeout") != std::string::npos) {
             try {
-                daemon_client_->setHeaderTimeout(std::chrono::milliseconds(60000));
+                daemon_client_config_.headerTimeout = std::chrono::milliseconds(60000);
+                daemon_client_->setHeaderTimeout(daemon_client_config_.headerTimeout);
             } catch (...) {
             }
             auto ur = co_await daemon_client_->call(dreq);
@@ -2500,7 +2486,14 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
         ::setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
         spdlog::debug("[MCP] grep: using session '{}'", __session);
     }
-    auto res = co_await daemon_client_->streamingGrep(dreq);
+    // Use service facade for grep (daemon-first)
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions ropts;
+    ropts.enableStreaming = true;
+    ropts.requestTimeoutMs = 30000;
+    ropts.headerTimeoutMs = 30000;
+    ropts.bodyTimeoutMs = 120000;
+    auto res = rsvc.grep(dreq, ropts);
     // Clear after call
     if (!__session.empty()) {
         ::setenv("YAMS_SESSION_CURRENT", "", 1);
@@ -2511,12 +2504,20 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     out.matchCount = r.totalMatches;
     out.fileCount = r.filesSearched;
     std::ostringstream oss;
+    std::unordered_set<std::string> seenFiles;
     for (const auto& m : r.matches) {
-        if (out.fileCount > 1 || req.withFilename)
-            oss << m.file << ":";
+        if (!m.file.empty())
+            seenFiles.insert(m.file);
+        if (out.fileCount > 1 || req.withFilename) {
+            if (!m.file.empty())
+                oss << m.file << ":";
+        }
         if (req.lineNumbers)
             oss << m.lineNumber << ":";
         oss << m.line << "\n";
+    }
+    if (out.fileCount == 0 && !seenFiles.empty()) {
+        out.fileCount = seenFiles.size();
     }
     out.output = oss.str();
     co_return out;
@@ -2980,6 +2981,7 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
 boost::asio::awaitable<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     // Preflight: require daemon content_store readiness
+    bool modelReadyFlag = true; // track model/embeddings readiness across function
     try {
         auto sres = co_await daemon_client_->status();
         if (!sres)
@@ -2988,12 +2990,27 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         bool csr = false;
         if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
             csr = it->second;
+        // Detect embedding/model provider readiness; when unavailable, force noEmbeddings
+        try {
+            if (auto it = s.readinessStates.find("model_provider"); it != s.readinessStates.end())
+                modelReadyFlag = it->second;
+            // Some builds report 'embeddings' instead of 'model_provider'
+            if (auto it2 = s.readinessStates.find("embeddings"); it2 != s.readinessStates.end())
+                modelReadyFlag = modelReadyFlag && it2->second;
+        } catch (...) {
+            // default to ready if key missing
+        }
         if (!csr) {
             std::string hint = "Content store not ready. Check daemon status and config.";
             if (!s.contentStoreError.empty())
                 hint += std::string(" Error: ") + s.contentStoreError;
             co_return Error{ErrorCode::InvalidState, hint};
         }
+        // If model provider isn't ready, prefer graceful degradation by disabling embeddings.
+        if (!modelReadyFlag) {
+            spdlog::warn("[MCP] Model provider not ready — forcing noEmbeddings for add");
+        }
+        // We will apply the decision below once daemon_req/aopts are constructed.
     } catch (...) {
         co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
     }
@@ -3072,7 +3089,8 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     daemon_req.name = req.name;
     daemon_req.mimeType = req.mimeType;
     daemon_req.disableAutoMime = req.disableAutoMime;
-    daemon_req.noEmbeddings = req.noEmbeddings;
+    // Force noEmbeddings when model provider is not ready (from preflight snapshot)
+    daemon_req.noEmbeddings = req.noEmbeddings || !modelReadyFlag;
     daemon_req.collection = req.collection;
     daemon_req.snapshotId = req.snapshotId;
     daemon_req.snapshotLabel = req.snapshotLabel;
@@ -3087,76 +3105,60 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             daemon_req.metadata[key] = value.dump();
         }
     }
-    // Prefer fast unary call first with short timeouts; fall back to streaming if needed
-    daemon_client_->setHeaderTimeout(std::chrono::seconds(5));
-    daemon_client_->setBodyTimeout(std::chrono::seconds(30));
-    // Validate that the target file path exists and is not a directory. However, if the user
-    // supplied inline content AND the provided path resolves to a directory, we will gracefully
-    // downgrade this to a content-only add instead of returning an error. This improves UX for
-    // MCP clients that may pass their current working directory as a path while also providing
-    // the actual document content inline. If recursive=true, allow directory adds.
-    if (!daemon_req.path.empty()) {
-        std::error_code __ec;
-        if (!std::filesystem::exists(daemon_req.path, __ec)) {
-            co_return Error{ErrorCode::InvalidArgument,
-                            std::string("Path does not exist: ") + daemon_req.path};
-        }
-        if (std::filesystem::is_directory(daemon_req.path, __ec)) {
-            if (daemon_req.recursive && daemon_req.content.empty()) {
-                // Directory add via daemon
-                auto dres_dir = co_await daemon_client_->streamingAddDocument(daemon_req);
-                if (!dres_dir)
-                    co_return dres_dir.error();
-                MCPStoreDocumentResponse out{}; // no single hash for directory
-                co_return out;
+    // Use shared service: daemon-first add with normalization and retries
+    yams::app::services::AddOptions aopts;
+    aopts.path = daemon_req.path;
+    aopts.content = daemon_req.content;
+    aopts.name = daemon_req.name;
+    aopts.mimeType = daemon_req.mimeType;
+    aopts.disableAutoMime = daemon_req.disableAutoMime;
+    aopts.noEmbeddings = daemon_req.noEmbeddings;
+    aopts.collection = daemon_req.collection;
+    aopts.snapshotId = daemon_req.snapshotId;
+    aopts.snapshotLabel = daemon_req.snapshotLabel;
+    aopts.recursive = daemon_req.recursive;
+    aopts.includePatterns = daemon_req.includePatterns;
+    aopts.excludePatterns = daemon_req.excludePatterns;
+    aopts.tags = daemon_req.tags;
+    aopts.metadata = daemon_req.metadata;
+    aopts.timeoutMs = 10000; // keep short caps for MCP responsiveness
+    aopts.retries = 2;
+    aopts.backoffMs = 250;
+
+    {
+        yams::app::services::DocumentIngestionService ing;
+        auto res = ing.addViaDaemon(aopts);
+        if (res) {
+            MCPStoreDocumentResponse out;
+            // Preserve directory-add behavior: return empty hash for recursive dir adds
+            if (aopts.recursive && aopts.content.empty()) {
+                std::error_code ec;
+                if (!aopts.path.empty() && std::filesystem::is_directory(aopts.path, ec)) {
+                    co_return out;
+                }
             }
-            if (!daemon_req.content.empty()) {
-                spdlog::warn("[MCP] add: provided path '{}' is a directory; treating request as "
-                             "content-only add (name='{}')",
-                             daemon_req.path, daemon_req.name);
-                daemon_req.path.clear(); // Force content-mode add
-            } else {
-                co_return Error{ErrorCode::InvalidArgument,
-                                std::string("Path is a directory (use add_directory): ") +
-                                    daemon_req.path};
-            }
+            out.hash = res.value().hash;
+            out.bytesStored = 0;
+            out.bytesDeduped = 0;
+            co_return out;
         }
-    }
-    // 1) Unary call (non-streaming) for single-shot response
-    auto ures = co_await daemon_client_->call(daemon_req);
-    if (ures) {
-        MCPStoreDocumentResponse out;
-        const auto& add = ures.value();
-        out.hash = add.hash;
-        out.bytesStored = 0;
-        out.bytesDeduped = 0;
-        co_return out;
-    }
-    spdlog::warn("[MCP] add: unary path failed ({}); trying streaming", ures.error().message);
-    // 2) Streaming fallback with the same short caps
-    auto dres = co_await daemon_client_->streamingAddDocument(daemon_req);
-    if (dres) {
-        MCPStoreDocumentResponse out;
-        const auto& add = dres.value();
-        out.hash = add.hash;
-        out.bytesStored = 0;
-        out.bytesDeduped = 0;
-        co_return out;
+        spdlog::warn("[MCP] add: daemon path failed ({}). Falling back to local DocumentService.",
+                     res.error().message);
     }
 
     // Daemon path failed (timeout/not ready/unavailable). Fallback to DocumentService.
-    spdlog::warn("[MCP] add: daemon path failed ({}). Falling back to local DocumentService.",
-                 dres.error().message);
     try {
         auto docService = app::services::makeDocumentService(appContext_);
         if (!docService) {
-            co_return dres.error();
+            co_return Error{ErrorCode::InternalError, "DocumentService unavailable"};
         }
         app::services::StoreDocumentRequest sreq;
         sreq.path = daemon_req.path;
         sreq.content = daemon_req.content;
         sreq.name = daemon_req.name;
         sreq.mimeType = daemon_req.mimeType;
+        // Ensure embeddings are disabled in local fallback if daemon embeddings are degraded
+        sreq.noEmbeddings = aopts.noEmbeddings;
         sreq.tags = daemon_req.tags;
         for (const auto& [k, v] : daemon_req.metadata) {
             sreq.metadata[k] = v;
@@ -3170,7 +3172,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         out.bytesDeduped = sres.value().bytesDeduped;
         co_return out;
     } catch (...) {
-        co_return dres.error();
+        co_return Error{ErrorCode::InternalError, "Local fallback failed"};
     }
 }
 
@@ -3184,63 +3186,59 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.graphDepth = req.depth;
     daemon_req.metadataOnly = !req.includeContent;
 
-    // Session-aware name resolution when hash is not provided
-    if (daemon_req.hash.empty() && !req.name.empty()) {
-        // Try app service name -> hash resolution first
-        if (documentService_) {
-            auto rh = documentService_->resolveNameToHash(req.name);
-            if (rh) {
-                daemon_req.hash = rh.value();
-            }
+    // Unified path: use RetrievalService name-smart get when name provided, else direct get
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions ropts;
+    ropts.requestTimeoutMs = 60000;
+    ropts.headerTimeoutMs = 30000;
+    ropts.bodyTimeoutMs = 120000;
+    if (!req.name.empty() && daemon_req.hash.empty()) {
+        auto resolver = [this](const std::string& nm) -> Result<std::string> {
+            if (documentService_)
+                return documentService_->resolveNameToHash(nm);
+            return Error{ErrorCode::NotFound, "resolver unavailable"};
+        };
+        auto dres = rsvc.getByNameSmart(req.name, false /*oldest*/, req.includeContent,
+                                        req.useSession, req.sessionName, ropts, resolver);
+        if (!dres)
+            co_return dres.error();
+        MCPRetrieveDocumentResponse mcp_response;
+        const auto& resp = dres.value();
+        mcp_response.hash = resp.hash;
+        mcp_response.path = resp.path;
+        mcp_response.name = resp.name;
+        mcp_response.size = resp.size;
+        mcp_response.mimeType = resp.mimeType;
+        if (resp.hasContent) {
+            mcp_response.content = resp.content;
         }
-        // Fallback: use session scoping to find a document with matching name
-        if (daemon_req.hash.empty() && req.useSession) {
-            auto sess = app::services::makeSessionService(nullptr);
-            auto pats = sess->activeIncludePatterns(
-                req.sessionName.empty() ? std::optional<std::string>{}
-                                        : std::optional<std::string>{req.sessionName});
-            for (const auto& pat : pats) {
-                yams::daemon::ListRequest lreq;
-                lreq.namePattern = pat;
-                lreq.limit = 200;
-                lreq.pathsOnly = false;
-                auto lres = co_await daemon_client_->list(lreq);
-                if (lres) {
-                    for (const auto& item : lres.value().items) {
-                        if (item.name == req.name && !item.hash.empty()) {
-                            daemon_req.hash = item.hash;
-                            break;
-                        }
-                    }
-                    if (!daemon_req.hash.empty())
-                        break;
-                }
-            }
+        mcp_response.graphEnabled = resp.graphEnabled;
+        for (const auto& rel : resp.related) {
+            json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
+            mcp_response.related.push_back(relatedJson);
         }
-        if (daemon_req.hash.empty()) {
-            co_return Error{ErrorCode::NotFound, "Document not found by name"};
+        co_return mcp_response;
+    } else {
+        auto dres = rsvc.get(daemon_req, ropts);
+        if (!dres)
+            co_return dres.error();
+        MCPRetrieveDocumentResponse mcp_response;
+        const auto& resp = dres.value();
+        mcp_response.hash = resp.hash;
+        mcp_response.path = resp.path;
+        mcp_response.name = resp.name;
+        mcp_response.size = resp.size;
+        mcp_response.mimeType = resp.mimeType;
+        if (resp.hasContent) {
+            mcp_response.content = resp.content;
         }
+        mcp_response.graphEnabled = resp.graphEnabled;
+        for (const auto& rel : resp.related) {
+            json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
+            mcp_response.related.push_back(relatedJson);
+        }
+        co_return mcp_response;
     }
-
-    auto dres = co_await daemon_client_->get(daemon_req);
-    if (!dres)
-        co_return dres.error();
-    MCPRetrieveDocumentResponse mcp_response;
-    const auto& resp = dres.value();
-    mcp_response.hash = resp.hash;
-    mcp_response.path = resp.path;
-    mcp_response.name = resp.name;
-    mcp_response.size = resp.size;
-    mcp_response.mimeType = resp.mimeType;
-    if (resp.hasContent) {
-        mcp_response.content = resp.content;
-    }
-    mcp_response.graphEnabled = resp.graphEnabled;
-    for (const auto& rel : resp.related) {
-        json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
-        mcp_response.related.push_back(relatedJson);
-    }
-    co_return mcp_response;
 }
 
 boost::asio::awaitable<Result<MCPListDocumentsResponse>>
@@ -3283,7 +3281,14 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         ::setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
         spdlog::debug("[MCP] list: using session '{}'", __session);
     }
-    auto dres = co_await daemon_client_->list(daemon_req);
+    // Use service facade for list (daemon-first)
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions ropts;
+    ropts.enableStreaming = true;
+    ropts.requestTimeoutMs = 30000;
+    ropts.headerTimeoutMs = 30000;
+    ropts.bodyTimeoutMs = 120000;
+    auto dres = rsvc.list(daemon_req, ropts);
     // Clear after call
     if (!__session.empty()) {
         ::setenv("YAMS_SESSION_CURRENT", "", 1);
@@ -3387,6 +3392,14 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         bool csr = false;
         if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
             csr = it->second;
+        bool modelReady = true;
+        try {
+            if (auto it = s.readinessStates.find("model_provider"); it != s.readinessStates.end())
+                modelReady = it->second;
+            if (auto it2 = s.readinessStates.find("embeddings"); it2 != s.readinessStates.end())
+                modelReady = modelReady && it2->second;
+        } catch (...) {
+        }
         if (!csr) {
             std::string hint = "Content store not ready. Check daemon status and config.";
             if (!s.contentStoreError.empty())
@@ -3423,6 +3436,25 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
     addReq.snapshotId = req.snapshotId;
     addReq.snapshotLabel = req.snapshotLabel;
     // Preserve tags in metadata (IndexingService consumes tags via metadata in daemon path)
+    // Disable embeddings when model provider is not ready to avoid cascading transport failures
+    addReq.noEmbeddings = false;
+    try {
+        auto sres2 = co_await daemon_client_->status();
+        if (sres2) {
+            const auto& s2 = sres2.value();
+            bool ready = true;
+            if (auto it = s2.readinessStates.find("model_provider"); it != s2.readinessStates.end())
+                ready = ready && it->second;
+            if (auto it2 = s2.readinessStates.find("embeddings"); it2 != s2.readinessStates.end())
+                ready = ready && it2->second;
+            addReq.noEmbeddings = !ready;
+            if (addReq.noEmbeddings) {
+                spdlog::warn(
+                    "[MCP] add_directory: Model provider not ready — forcing noEmbeddings");
+            }
+        }
+    } catch (...) {
+    }
     if (!req.tags.empty()) {
         std::string joined;
         for (size_t i = 0; i < req.tags.size(); ++i) {
@@ -4156,222 +4188,124 @@ void MCPServer::recordEarlyFeatureUse() {
 
 boost::asio::awaitable<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
-    // Prefer fast name -> hash resolution and non-streamed get (CLI parity)
-    MCPGetByNameResponse mcp_response;
+    // Try smart retrieval first, then fallback to base-name list + fuzzy selection
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions ropts;
+    ropts.requestTimeoutMs = 60000;
+    ropts.headerTimeoutMs = 30000;
+    ropts.bodyTimeoutMs = 120000;
+    auto resolver = [this](const std::string& nm) -> Result<std::string> {
+        if (documentService_)
+            return documentService_->resolveNameToHash(nm);
+        return Error{ErrorCode::NotFound, "resolver unavailable"};
+    };
 
-    // First try to resolve name to hash using document service
-    if (documentService_ && !req.name.empty()) {
-        auto rh = documentService_->resolveNameToHash(req.name);
-        if (rh) {
-            yams::daemon::GetRequest greq;
-            greq.hash = rh.value();
-            greq.metadataOnly = false;
-            auto gres = co_await daemon_client_->get(greq);
-            if (gres) {
-                const auto& r = gres.value();
-                mcp_response.size = r.size;
-                mcp_response.hash = r.hash;
-                mcp_response.name = r.name;
-                mcp_response.path = r.path;
-                mcp_response.mimeType = r.mimeType;
-                if (!r.content.empty()) {
-                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                    mcp_response.content =
-                        r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
-                }
-                co_return mcp_response;
-            }
-            // If daemon get failed, fall through to streaming/fuzzy paths below
-        }
-    }
+    auto r = rsvc.getByNameSmart(req.name, req.oldest, true, /*useSession*/ false, std::string{},
+                                 ropts, resolver);
 
-    // Streamed retrieval via GetInit/GetChunk/GetEnd as fallback
-    daemon::GetInitRequest init{};
-    // Normalize name: if a full URL was provided, use its basename for name-based lookup
-    init.name = req.name;
-    try {
-        if (init.name.find("://") != std::string::npos) {
-            auto lastSlash = init.name.find_last_of('/');
-            std::string fname =
-                (lastSlash == std::string::npos) ? init.name : init.name.substr(lastSlash + 1);
-            auto q = fname.find('?');
-            if (q != std::string::npos)
-                fname = fname.substr(0, q);
-            if (!fname.empty())
-                init.name = std::move(fname);
-        }
-    } catch (...) {
-        // keep original name on any error
-    }
-    init.byName = true;
-    // raw/extract flags removed from daemon::GetInitRequest; behavior determined server-side
-
-    auto initCall = co_await daemon_client_->getInit(init);
-    if (!initCall) {
-        // Try disambiguation by listing exact name and selecting newest/oldest when ambiguous
-        if (!init.name.empty()) {
+    yams::daemon::GetResponse gr;
+    if (r) {
+        gr = r.value();
+    } else {
+        // Fallback path: search by base filename using list + simple fuzzy
+        auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
             yams::daemon::ListRequest lreq;
-            lreq.namePattern = init.name;
-            lreq.limit = 200;
+            lreq.namePattern = pat; // SQL LIKE pattern
+            lreq.limit = 500;
             lreq.pathsOnly = false;
-            lreq.sortBy = "indexed";
-            auto lres = co_await daemon_client_->list(lreq);
-            if (lres && !lres.value().items.empty()) {
-                const auto& items = lres.value().items;
-                const auto* chosen = &items.front();
-                if (items.size() > 1) {
-                    if (req.oldest) {
-                        chosen = &*std::min_element(
-                            items.begin(), items.end(),
-                            [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+            auto lres = rsvc.list(lreq, ropts);
+            if (lres && !lres.value().items.empty())
+                return lres.value();
+            return std::nullopt;
+        };
+        auto bestMatch = [&](const std::vector<yams::daemon::ListEntry>& items)
+            -> std::optional<yams::daemon::ListEntry> {
+            if (items.empty())
+                return std::nullopt;
+            if (req.latest || req.oldest) {
+                const yams::daemon::ListEntry* chosen = nullptr;
+                for (const auto& it : items) {
+                    if (!chosen) {
+                        chosen = &it;
+                    } else if (req.oldest) {
+                        if (it.indexed < chosen->indexed)
+                            chosen = &it;
                     } else {
-                        chosen = &*std::max_element(
-                            items.begin(), items.end(),
-                            [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                        if (it.indexed > chosen->indexed)
+                            chosen = &it;
                     }
                 }
-                yams::daemon::GetRequest greq;
-                greq.hash = chosen->hash;
-                greq.metadataOnly = false;
-                auto gres = co_await daemon_client_->get(greq);
-                if (gres) {
-                    const auto& r = gres.value();
-                    mcp_response.size = r.size;
-                    mcp_response.hash = r.hash;
-                    mcp_response.name = r.name;
-                    mcp_response.path = r.path;
-                    mcp_response.mimeType = r.mimeType;
-                    if (!r.content.empty()) {
-                        constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                        mcp_response.content = r.content.size() <= MAX_BYTES
-                                                   ? r.content
-                                                   : r.content.substr(0, MAX_BYTES);
-                    }
-                    co_return mcp_response;
+                return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
+            }
+            auto scoreName = [&](const std::string& base) -> int {
+                if (base == req.name)
+                    return 1000;
+                if (base.size() >= req.name.size() && base.rfind(req.name, 0) == 0)
+                    return 800;
+                if (base.find(req.name) != std::string::npos)
+                    return 600;
+                int dl = static_cast<int>(std::abs((long)(base.size() - req.name.size())));
+                return 400 - std::min(200, dl * 10);
+            };
+            int bestScore = -1;
+            const yams::daemon::ListEntry* chosen = nullptr;
+            for (const auto& it : items) {
+                std::string b;
+                try {
+                    b = std::filesystem::path(it.path).filename().string();
+                } catch (...) {
+                    b = it.name;
+                }
+                int sc = scoreName(b);
+                if (sc > bestScore) {
+                    bestScore = sc;
+                    chosen = &it;
                 }
             }
-        }
-        // Fallback: fuzzy search top match, then fetch by hash/name
-        yams::daemon::SearchRequest sreq;
-        sreq.query = init.name;
-        sreq.fuzzy = true;
-        sreq.similarity = 0.7;
-        sreq.searchType = "hybrid";
-        sreq.limit = 1;
-        sreq.pathsOnly = false;
-        auto sres = co_await daemon_client_->streamingSearch(sreq);
-        if (!sres || sres.value().results.empty()) {
-            co_return initCall.error();
-        }
-        const auto& best = sres.value().results.front();
-        std::string hash;
-        auto it = best.metadata.find("hash");
-        if (it != best.metadata.end())
-            hash = it->second;
+            return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
+        };
 
-        // Retrieve by hash first (preferred), else by name/path
-        if (!hash.empty()) {
-            yams::daemon::GetRequest greq;
-            greq.hash = hash;
-            greq.metadataOnly = false;
-            auto gres = co_await daemon_client_->get(greq);
-            if (!gres)
-                co_return gres.error();
-            const auto& r = gres.value();
-            mcp_response.size = r.size;
-            mcp_response.hash = r.hash;
-            mcp_response.name = r.name;
-            mcp_response.path = r.path;
-            mcp_response.mimeType = r.mimeType;
-            if (!r.content.empty()) {
-                constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                mcp_response.content =
-                    r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+        std::optional<yams::daemon::ListResponse> lr;
+        // Exact base-name
+        lr = tryList(std::string("%/") + req.name);
+        // Stem match
+        if (!lr) {
+            std::string stem = req.name;
+            try {
+                stem = std::filesystem::path(req.name).stem().string();
+            } catch (...) {
             }
-            co_return mcp_response;
-        } else {
-            yams::daemon::GetRequest greq;
-            greq.name = best.path;
-            greq.byName = true;
-            greq.metadataOnly = false;
-            auto gres = co_await daemon_client_->get(greq);
-            if (!gres)
-                co_return gres.error();
-            const auto& r = gres.value();
-            mcp_response.size = r.size;
-            mcp_response.hash = r.hash;
-            mcp_response.name = r.name;
-            mcp_response.path = r.path;
-            mcp_response.mimeType = r.mimeType;
-            if (!r.content.empty()) {
-                constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                mcp_response.content =
-                    r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
-            }
-            co_return mcp_response;
+            lr = tryList(std::string("%/") + stem + "%");
         }
-    }
-    const auto& initVal = initCall.value();
-    // Map GetInitResponse fields and metadata into MCP response
-    mcp_response.size = initVal.totalSize;
-    // Optional metadata keys: hash, path, fileName, mimeType
-    if (auto it = initVal.metadata.find("hash"); it != initVal.metadata.end()) {
-        mcp_response.hash = it->second;
-    }
-    if (auto it = initVal.metadata.find("fileName"); it != initVal.metadata.end()) {
-        mcp_response.name = it->second;
-    }
-    if (auto it = initVal.metadata.find("path"); it != initVal.metadata.end()) {
-        mcp_response.path = it->second;
-    }
-    if (auto it = initVal.metadata.find("mimeType"); it != initVal.metadata.end()) {
-        mcp_response.mimeType = it->second;
+        // Anywhere contains
+        if (!lr)
+            lr = tryList(std::string("%") + req.name + "%");
+
+        if (!lr || lr->items.empty())
+            co_return Error{ErrorCode::NotFound, "document not found by name"};
+        auto cand = bestMatch(lr->items);
+        if (!cand)
+            co_return Error{ErrorCode::NotFound, "document not found by name"};
+        yams::daemon::GetRequest greq;
+        greq.hash = cand->hash;
+        greq.metadataOnly = false;
+        auto grres = rsvc.get(greq, ropts);
+        if (!grres)
+            co_return grres.error();
+        gr = grres.value();
     }
 
-    // Chunked read with cap to avoid huge MCP payloads
-    static constexpr std::size_t CHUNK = 64 * 1024;
-    static constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024; // 1 MiB cap
-    std::string buffer;
-    buffer.reserve(std::min<std::size_t>(MAX_BYTES, static_cast<std::size_t>(initVal.totalSize)));
-
-    std::uint64_t offset = 0;
-
-    while (offset < initVal.totalSize) {
-        daemon::GetChunkRequest c{};
-        c.transferId = initVal.transferId;
-        c.offset = offset;
-        c.length =
-            static_cast<std::uint32_t>(std::min<std::uint64_t>(CHUNK, initVal.totalSize - offset));
-        auto cRes = co_await daemon_client_->getChunk(c);
-        if (!cRes) {
-            // Attempt to close the transfer before returning error
-            daemon::GetEndRequest e{};
-            e.transferId = initVal.transferId;
-            (void)co_await daemon_client_->getEnd(e);
-            co_return cRes.error();
-        }
-        const auto& chunk = cRes.value();
-        if (!chunk.data.empty()) {
-            if (buffer.size() + chunk.data.size() <= MAX_BYTES) {
-                buffer.append(chunk.data.data(), chunk.data.size());
-            } else {
-                auto remaining = MAX_BYTES - buffer.size();
-                buffer.append(chunk.data.data(), remaining);
-                offset += chunk.data.size();
-                break;
-            }
-        }
-        offset += chunk.data.size();
+    MCPGetByNameResponse out;
+    out.size = gr.size;
+    out.hash = gr.hash;
+    out.name = gr.name;
+    out.path = gr.path;
+    out.mimeType = gr.mimeType;
+    if (!gr.content.empty()) {
+        constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+        out.content = gr.content.size() <= MAX_BYTES ? gr.content : gr.content.substr(0, MAX_BYTES);
     }
-
-    // End transfer regardless
-    daemon::GetEndRequest end{};
-    end.transferId = initVal.transferId;
-    (void)co_await daemon_client_->getEnd(end);
-
-    mcp_response.content = std::move(buffer);
-    // If truncated, we simply return the capped content; no extra flags in response type.
-    co_return mcp_response;
+    co_return out;
 }
 
 boost::asio::awaitable<Result<MCPDeleteByNameResponse>>
@@ -4392,96 +4326,35 @@ MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
 
 boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
 yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
-    MCPCatDocumentResponse out;
-    // Disambiguate by name before direct get when hash is not provided
-    if (req.hash.empty() && !req.name.empty()) {
-        yams::daemon::ListRequest lreq;
-        lreq.namePattern = req.name;
-        lreq.limit = 200;
-        lreq.pathsOnly = false;
-        lreq.sortBy = "indexed";
-        auto lres = co_await daemon_client_->list(lreq);
-        if (lres && !lres.value().items.empty()) {
-            const auto& items = lres.value().items;
-            const auto* chosen = &items.front();
-            if (items.size() > 1) {
-                if (req.oldest) {
-                    chosen = &*std::min_element(
-                        items.begin(), items.end(),
-                        [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
-                } else {
-                    chosen = &*std::max_element(
-                        items.begin(), items.end(),
-                        [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
-                }
-            }
-            yams::daemon::GetRequest greq;
-            greq.hash = chosen->hash;
-            greq.metadataOnly = false;
-            auto gres = co_await daemon_client_->get(greq);
-            if (gres) {
-                const auto& r = gres.value();
-                out.size = r.size;
-                out.hash = r.hash;
-                out.name = r.name;
-                if (!r.content.empty()) {
-                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                    out.content =
-                        r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
-                }
-                co_return out;
-            }
-        }
-    }
-    yams::daemon::GetRequest dreq;
-    dreq.hash = req.hash;
-    dreq.name = req.name;
-    dreq.byName = !req.name.empty();
-    dreq.metadataOnly = false;
-    auto dres = co_await daemon_client_->get(dreq);
-    if (!dres) {
-        // Fallback: fuzzy search by provided name, fetch top hit
+    // Use RetrievalService::getByNameSmart for exact parity with CLI
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions ropts;
+    ropts.requestTimeoutMs = 60000;
+    ropts.headerTimeoutMs = 30000;
+    ropts.bodyTimeoutMs = 120000;
+    auto resolver = [this](const std::string& nm) -> Result<std::string> {
+        if (documentService_)
+            return documentService_->resolveNameToHash(nm);
+        return Error{ErrorCode::NotFound, "resolver unavailable"};
+    };
+    // Prefer name when provided; otherwise, fallback to hash-based get
+    Result<yams::daemon::GetResponse> getr_local = [&]() -> Result<yams::daemon::GetResponse> {
         if (!req.name.empty()) {
-            yams::daemon::SearchRequest sreq;
-            sreq.query = req.name;
-            sreq.fuzzy = true;
-            sreq.similarity = 0.7;
-            sreq.searchType = "hybrid";
-            sreq.limit = 1;
-            sreq.pathsOnly = false;
-            auto sres = co_await daemon_client_->streamingSearch(sreq);
-            if (sres && !sres.value().results.empty()) {
-                const auto& best = sres.value().results.front();
-                std::string hash;
-                auto it = best.metadata.find("hash");
-                if (it != best.metadata.end())
-                    hash = it->second;
-                yams::daemon::GetRequest greq;
-                if (!hash.empty()) {
-                    greq.hash = hash;
-                } else {
-                    greq.name = best.path;
-                    greq.byName = true;
-                }
-                greq.metadataOnly = false;
-                auto gres = co_await daemon_client_->get(greq);
-                if (!gres)
-                    co_return gres.error();
-                const auto& r = gres.value();
-                out.size = r.size;
-                out.hash = r.hash;
-                out.name = r.name;
-                if (!r.content.empty()) {
-                    constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                    out.content =
-                        r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
-                }
-                co_return out;
-            }
+            return rsvc.getByNameSmart(req.name, req.oldest, true, false, std::string{}, ropts,
+                                       resolver);
+        } else if (!req.hash.empty()) {
+            yams::daemon::GetRequest dreq;
+            dreq.hash = req.hash;
+            dreq.metadataOnly = false;
+            return rsvc.get(dreq, ropts);
+        } else {
+            return Error{ErrorCode::InvalidArgument, "name or hash required"};
         }
-        co_return dres.error();
-    }
-    const auto& r = dres.value();
+    }();
+    if (!getr_local)
+        co_return getr_local.error();
+    const auto& r = getr_local.value();
+    MCPCatDocumentResponse out;
     out.size = r.size;
     out.hash = r.hash;
     out.name = r.name;

@@ -471,4 +471,4 @@ for (const auto& config : configs) {
 - Review the [API Reference](../api/vector_search_api.md)
 - Explore [Performance Tuning](../admin/vector_search_tuning.md)
 - Check [Architecture Documentation](../architecture/vector_search_architecture.md)
-- Try the [Example Code](../../examples/vector_search_examples.cpp)
+- Try the [Example Code](../examples/vector_search_examples.md)

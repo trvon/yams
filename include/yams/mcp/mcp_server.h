@@ -6,6 +6,7 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/mcp/error_handling.h>
@@ -188,8 +189,10 @@ private:
     mutable std::mutex cancelMutex_;
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelTokens_;
 
-    // Single multiplexed daemon client (replaces legacy pool/managers)
-    std::shared_ptr<yams::daemon::DaemonClient> daemon_client_;
+    // Single multiplexed daemon client lease (shared transport context)
+    std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
+    yams::daemon::DaemonClient* daemon_client_{nullptr};
+    yams::daemon::ClientConfig daemon_client_config_{};
     struct ClientInfo {
         std::string name;
         std::string version;
@@ -229,6 +232,8 @@ private:
     bool shouldAutoInitialize() const;
     // Record that a feature was used prior to client 'initialized'
     void recordEarlyFeatureUse();
+
+    Result<void> ensureDaemonClient();
 
     // YAMS extensions toggle (independent of strict mode which has been removed)
     bool areYamsExtensionsEnabled() const { return enableYamsExtensions_; }
@@ -431,7 +436,7 @@ private:
     ClientInfo clientInfo_;
 
     // Negotiated protocol version (set during initialize)
-    std::string negotiatedProtocolVersion_{"2024-11-05"};
+    std::string negotiatedProtocolVersion_{"2025-06-18"};
 
     // === Thread pool scaffolding for MCP request handling ===
     // Fixed-size worker pool with a task queue

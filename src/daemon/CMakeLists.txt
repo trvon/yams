@@ -30,6 +30,8 @@ endfunction()
 # Daemon Client Library (lightweight, no circular dependencies)
 # ============================================================================
 add_library(yams_daemon_client STATIC
+    client/asio_connection.cpp
+    client/asio_connection_pool.cpp
     client/daemon_client.cpp
     client/asio_transport.cpp
     client/global_io_context.cpp

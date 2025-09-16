@@ -15,7 +15,6 @@ std::unique_ptr<ICommand> createSearchCommand();
 std::unique_ptr<ICommand> createGrepCommand();
 std::unique_ptr<ICommand> createConfigCommand();
 std::unique_ptr<ICommand> createAuthCommand();
-std::unique_ptr<ICommand> createStatsCommand();
 std::unique_ptr<ICommand> createStatusCommand();
 std::unique_ptr<ICommand> createUninstallCommand();
 std::unique_ptr<ICommand> createMigrateCommand();
@@ -50,7 +49,6 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createGrepCommand());
     cli->registerCommand(CommandRegistry::createConfigCommand());
     cli->registerCommand(CommandRegistry::createAuthCommand());
-    cli->registerCommand(CommandRegistry::createStatsCommand());
     cli->registerCommand(CommandRegistry::createStatusCommand());
     cli->registerCommand(CommandRegistry::createUninstallCommand());
     cli->registerCommand(CommandRegistry::createMigrateCommand());
@@ -122,10 +120,6 @@ std::unique_ptr<ICommand> CommandRegistry::createConfigCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createAuthCommand() {
     return ::yams::cli::createAuthCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createStatsCommand() {
-    return ::yams::cli::createStatsCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createStatusCommand() {

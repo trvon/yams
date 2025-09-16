@@ -80,24 +80,25 @@ Result<void> UpdateCommand::execute() {
                 return Result<void>();
             };
 
-            auto fallback = [&]() -> Result<void> {
-                // Fall back to local execution
-                return executeLocal();
-            };
-
             try {
                 yams::daemon::ClientConfig cfg;
-                if (cli_)
+                if (cli_ && cli_->hasExplicitDataDir())
                     cfg.dataDir = cli_->getDataPath();
                 cfg.enableChunkedResponses = false;
-                cfg.singleUseConnections = true;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
-                yams::daemon::DaemonClient client(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    spdlog::warn("Update: unable to acquire daemon client: {}",
+                                 leaseRes.error().message);
+                    throw std::runtime_error("daemon unavailable");
+                }
+                auto leaseHandle = std::move(leaseRes.value());
                 std::promise<Result<yams::daemon::UpdateDocumentResponse>> prom;
                 auto fut = prom.get_future();
                 boost::asio::co_spawn(
                     boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
+                    [leaseHandle, dreq, &prom]() mutable -> boost::asio::awaitable<void> {
+                        auto& client = **leaseHandle;
                         auto r = co_await client.call(dreq);
                         prom.set_value(std::move(r));
                         co_return;
@@ -161,11 +162,17 @@ boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
             if (cli_)
                 cfg.dataDir = cli_->getDataPath();
             cfg.enableChunkedResponses = false;
-            cfg.singleUseConnections = true;
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             cfg.headerTimeout = std::chrono::milliseconds(3000);
             cfg.bodyTimeout = std::chrono::milliseconds(20000);
-            yams::daemon::DaemonClient client(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                spdlog::warn("Update: unable to acquire daemon client: {}",
+                             leaseRes.error().message);
+                co_return executeLocal();
+            }
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
 
             auto result = co_await client.call(dreq);
             if (result) {

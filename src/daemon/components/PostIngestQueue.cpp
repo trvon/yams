@@ -85,7 +85,7 @@ void PostIngestQueue::workerLoop() {
                 if (!info.fileExtension.empty())
                     extension = info.fileExtension;
             }
-            // Extract text
+            // Extract text (heavy path allowed here)
             auto txt = extractDocumentText(store_, task.hash, mime, extension, extractors_);
             if (!txt || txt->empty()) {
                 spdlog::debug("PostIngest: no text extracted for {} (mime={})", task.hash, mime);

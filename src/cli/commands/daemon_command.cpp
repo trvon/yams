@@ -2,8 +2,11 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/system_executor.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -21,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -180,21 +184,9 @@ private:
         }
 
         // Probe status via DaemonClient
-        yams::daemon::DaemonClient client{};
-        std::promise<Result<yams::daemon::StatusResponse>> promStatus;
-        auto futStatus = promStatus.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.status();
-                promStatus.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto statusResult =
-            (futStatus.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
-                ? futStatus.get()
-                : Result<yams::daemon::StatusResponse>(Error{ErrorCode::Timeout, "status timeout"});
+        auto statusResult = runDaemonClient(
+            {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+            std::chrono::seconds(5));
         if (!statusResult) {
             spdlog::warn("Could not get status from running daemon: {}",
                          statusResult.error().message);
@@ -209,21 +201,9 @@ private:
             // Try graceful shutdown via socket first using DaemonClient
             daemon::ShutdownRequest sreq;
             sreq.graceful = true;
-            yams::daemon::DaemonClient shutClient{};
-            std::promise<Result<void>> promShutdown;
-            auto futShutdown = promShutdown.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    auto r = co_await shutClient.shutdown(true);
-                    promShutdown.set_value(std::move(r));
-                    co_return;
-                },
-                boost::asio::detached);
-            auto shutdownResult =
-                (futShutdown.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
-                    ? futShutdown.get()
-                    : Result<void>(Error{ErrorCode::Timeout, "shutdown timeout"});
+            auto shutdownResult = runDaemonClient(
+                {}, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
+                std::chrono::seconds(10));
             bool stopped = false;
 
             if (shutdownResult) {
@@ -485,55 +465,42 @@ private:
 
         // First try graceful shutdown via socket
         if (daemonRunning) {
-            yams::daemon::DaemonClient shut{};
             daemon::ShutdownRequest sreq;
             sreq.graceful = !force_;
-            {
-                std::promise<Result<void>> prom;
-                auto fut = prom.get_future();
-                boost::asio::co_spawn(
-                    boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
-                        auto r = co_await shut.shutdown(sreq.graceful);
-                        prom.set_value(std::move(r));
-                        co_return;
-                    },
-                    boost::asio::detached);
-                auto shutdownResult =
-                    (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
-                        ? fut.get()
-                        : Result<void>(Error{ErrorCode::Timeout, "shutdown timeout"});
-                if (shutdownResult) {
-                    spdlog::info("Sent shutdown request to daemon");
+            auto shutdownResult = runDaemonClient(
+                {},
+                [&](yams::daemon::DaemonClient& client) { return client.shutdown(sreq.graceful); },
+                std::chrono::seconds(10));
+            if (shutdownResult) {
+                spdlog::info("Sent shutdown request to daemon");
 
-                    // Wait for daemon to stop
-                    for (int i = 0; i < 30; i++) {
-                        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                            stopped = true;
-                            spdlog::info("Daemon stopped successfully");
-                            break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    }
-
-                    // If we sent the shutdown successfully, consider it stopped
-                    // even if we can't immediately verify
-                    if (!stopped) {
-                        spdlog::info("Daemon shutdown requested, may take a moment to fully stop");
+                // Wait for daemon to stop
+                for (int i = 0; i < 30; i++) {
+                    if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
                         stopped = true;
+                        spdlog::info("Daemon stopped successfully");
+                        break;
                     }
-                } else {
-                    // Treat common peer-closure/transient errors as potentially-successful if the
-                    // daemon disappears shortly after the request.
-                    spdlog::warn("Socket shutdown encountered: {}", shutdownResult.error().message);
-                    for (int i = 0; i < 30; ++i) {
-                        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                            stopped = true;
-                            spdlog::info("Daemon stopped successfully");
-                            break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+
+                // If we sent the shutdown successfully, consider it stopped
+                // even if we can't immediately verify
+                if (!stopped) {
+                    spdlog::info("Daemon shutdown requested, may take a moment to fully stop");
+                    stopped = true;
+                }
+            } else {
+                // Treat common peer-closure/transient errors as potentially-successful if the
+                // daemon disappears shortly after the request.
+                spdlog::warn("Socket shutdown encountered: {}", shutdownResult.error().message);
+                for (int i = 0; i < 30; ++i) {
+                    if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                        stopped = true;
+                        spdlog::info("Daemon stopped successfully");
+                        break;
                     }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
         }
@@ -696,22 +663,9 @@ private:
                           << "\n";
                 // Fetch detailed readiness and show a short Waiting on: summary
                 try {
-                    yams::daemon::DaemonClient probe{};
-                    std::promise<Result<yams::daemon::StatusResponse>> promProbe;
-                    auto futProbe = promProbe.get_future();
-                    boost::asio::co_spawn(
-                        boost::asio::system_executor{},
-                        [&]() -> boost::asio::awaitable<void> {
-                            auto r = co_await probe.status();
-                            promProbe.set_value(std::move(r));
-                            co_return;
-                        },
-                        boost::asio::detached);
-                    auto sres =
-                        (futProbe.wait_for(std::chrono::seconds(2)) == std::future_status::ready)
-                            ? futProbe.get()
-                            : Result<yams::daemon::StatusResponse>(
-                                  Error{ErrorCode::Timeout, "status timeout"});
+                    auto sres = runDaemonClient(
+                        {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                        std::chrono::seconds(2));
                     if (sres) {
                         const auto& s = sres.value();
                         // Daemon Status - compact format
@@ -1076,23 +1030,9 @@ private:
         if (!detailed_) {
             // Compact, helpful summary without requiring --detailed. Use StatusResponse for
             // lifecycle/readiness plus high-level metrics.
-            yams::daemon::DaemonClient client{};
-            auto sres = [&]() -> Result<yams::daemon::StatusResponse> {
-                std::promise<Result<yams::daemon::StatusResponse>> prom;
-                auto fut = prom.get_future();
-                boost::asio::co_spawn(
-                    boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
-                        auto r = co_await client.status();
-                        prom.set_value(std::move(r));
-                        co_return;
-                    },
-                    boost::asio::detached);
-                if (fut.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
-                    return fut.get();
-                }
-                return Error{ErrorCode::Timeout, "status timeout"};
-            }();
+            auto sres = runDaemonClient(
+                {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                std::chrono::seconds(5));
             if (!sres) {
                 std::cout << "YAMS daemon is running\n";
                 return;
@@ -1140,27 +1080,13 @@ private:
             return;
         }
 
-        // Detailed status via DaemonClient
-        yams::daemon::DaemonClient client{};
+        // Detailed status via DaemonClient (synchronous)
         Error lastErr{};
         for (int attempt = 0; attempt < 5; ++attempt) {
-            // Keep client debug enabled while polling
             setenv("YAMS_CLIENT_DEBUG", detailed_ ? "1" : "0", 1);
-            std::promise<Result<yams::daemon::StatusResponse>> promS;
-            auto futS = promS.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    auto r = co_await client.status();
-                    promS.set_value(std::move(r));
-                    co_return;
-                },
-                boost::asio::detached);
-            auto statusResult =
-                (futS.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
-                    ? futS.get()
-                    : Result<yams::daemon::StatusResponse>(
-                          Error{ErrorCode::Timeout, "status timeout"});
+            auto statusResult = runDaemonClient(
+                {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                std::chrono::seconds(5));
             if (statusResult) {
                 const auto& status = statusResult.value();
                 std::cout << "YAMS Daemon Status:\n";
@@ -1174,6 +1100,45 @@ private:
                 std::cout << "  Active connections: " << status.activeConnections << "\n";
                 std::cout << "  Memory usage: " << status.memoryUsageMb << " MB\n";
                 std::cout << "  CPU usage: " << status.cpuUsagePercent << "%\n";
+                // Multiplexer/backpressure diagnostics (shown in detailed mode)
+                try {
+                    if (detailed_) {
+                        bool anyMux = (status.muxActiveHandlers > 0) ||
+                                      (status.muxQueuedBytes > 0) ||
+                                      (status.muxWriterBudgetBytes > 0);
+                        if (anyMux) {
+                            std::cout << "  Mux:          active_handlers="
+                                      << status.muxActiveHandlers;
+                            std::cout << ", queued_bytes=" << status.muxQueuedBytes;
+                            std::cout << ", writer_budget_bytes=" << status.muxWriterBudgetBytes;
+                            if (status.muxWriterBudgetBytes > 0) {
+                                double pressure = (100.0 * (double)status.muxQueuedBytes) /
+                                                  (double)status.muxWriterBudgetBytes;
+                                if (pressure < 0)
+                                    pressure = 0;
+                                std::cout << ", pressure=" << std::fixed << std::setprecision(1)
+                                          << pressure << "%";
+                            }
+                            std::cout << "\n";
+                        }
+                        // IPC FSM counters
+                        bool anyFsm = (status.fsmTransitions + status.fsmHeaderReads +
+                                       status.fsmPayloadReads + status.fsmPayloadWrites +
+                                       status.fsmBytesSent + status.fsmBytesReceived) > 0;
+                        if (anyFsm) {
+                            std::cout << "  IPC:          transitions=" << status.fsmTransitions
+                                      << ", hdr_reads=" << status.fsmHeaderReads
+                                      << ", pay_reads=" << status.fsmPayloadReads
+                                      << ", pay_writes=" << status.fsmPayloadWrites
+                                      << ", bytes_sent=" << status.fsmBytesSent
+                                      << ", bytes_recv=" << status.fsmBytesReceived << "\n";
+                        }
+                        if (status.retryAfterMs > 0) {
+                            std::cout << "  Retry-After:  " << status.retryAfterMs << " ms\n";
+                        }
+                    }
+                } catch (...) {
+                }
                 if (!status.requestCounts.empty()) {
                     std::cout << "  Requests by type:\n";
                     for (const auto& [k, v] : status.requestCounts) {
@@ -1241,6 +1206,25 @@ private:
         std::exit(1);
     }
 
+    Result<std::shared_ptr<yams::cli::DaemonClientPool::Lease>>
+    acquireDaemonClient(const yams::daemon::ClientConfig& cfg = {}) const {
+        return yams::cli::acquire_cli_daemon_client_shared(cfg);
+    }
+
+    template <typename AwaitableProvider>
+    auto runDaemonClient(const yams::daemon::ClientConfig& cfg, AwaitableProvider&& provider,
+                         std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) const
+        -> decltype(yams::cli::run_result(provider(std::declval<yams::daemon::DaemonClient&>()),
+                                          timeout)) {
+        using ResultType = decltype(yams::cli::run_result(
+            provider(std::declval<yams::daemon::DaemonClient&>()), timeout));
+        auto leaseRes = acquireDaemonClient(cfg);
+        if (!leaseRes)
+            return ResultType{leaseRes.error()};
+        auto leaseHandle = std::move(leaseRes.value());
+        return yams::cli::run_result(provider(**leaseHandle), timeout);
+    }
+
     void restartDaemon() {
         // Resolve socket path (do not persist unless explicitly provided)
         const std::string effectiveSocket =
@@ -1250,30 +1234,13 @@ private:
         // Stop daemon if running
         if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
             spdlog::info("Stopping YAMS daemon...");
-            yams::daemon::DaemonClient client{};
-            daemon::ShutdownRequest sreq;
-            sreq.graceful = true;
-            {
-                std::promise<Result<void>> prom;
-                auto fut = prom.get_future();
-                boost::asio::co_spawn(
-                    boost::asio::system_executor{},
-                    [&]() -> boost::asio::awaitable<void> {
-                        auto r = co_await client.shutdown(true);
-                        prom.set_value(std::move(r));
-                        co_return;
-                    },
-                    boost::asio::detached);
-                if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
-                    (void)fut.get();
-                }
-            }
+            (void)runDaemonClient(
+                {}, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
+                std::chrono::seconds(10));
 
-            // Wait for daemon to stop
             for (int i = 0; i < 10; i++) {
-                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket))
                     break;
-                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         }
@@ -1282,14 +1249,12 @@ private:
         spdlog::info("Starting YAMS daemon...");
 
         daemon::ClientConfig config;
-        if (!socketPath_.empty()) {
+        if (!socketPath_.empty())
             config.socketPath = socketPath_;
-        }
-        if (!dataDir_.empty()) {
+        if (!dataDir_.empty())
             config.dataDir = dataDir_;
-        } else if (cli_) {
+        else if (cli_)
             config.dataDir = cli_->getDataPath();
-        }
 
         auto result = daemon::DaemonClient::startDaemon(config);
         if (!result) {

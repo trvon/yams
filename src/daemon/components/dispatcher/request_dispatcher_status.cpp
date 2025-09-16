@@ -48,6 +48,16 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             res.muxActiveHandlers = snap.muxActiveHandlers;
             res.muxQueuedBytes = snap.muxQueuedBytes;
             res.muxWriterBudgetBytes = snap.muxWriterBudgetBytes;
+            // Vector DB snapshot (best-effort)
+            res.vectorDbInitAttempted = snap.vectorDbInitAttempted;
+            res.vectorDbReady = snap.vectorDbReady;
+            res.vectorDbDim = snap.vectorDbDim;
+            // Embedding runtime details (best-effort)
+            res.embeddingAvailable = snap.embeddingAvailable;
+            res.embeddingBackend = snap.embeddingBackend;
+            res.embeddingModel = snap.embeddingModel;
+            res.embeddingModelPath = snap.embeddingModelPath;
+            res.embeddingDim = snap.embeddingDim;
             res.requestCounts["worker_threads"] = snap.workerThreads;
             res.requestCounts["worker_active"] = snap.workerActive;
             res.requestCounts["worker_queued"] = snap.workerQueued;
@@ -264,7 +274,26 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         }
         response.additionalStats["not_ready"] =
             notReady ? std::string{"true"} : std::string{"false"};
-        (void)req; // unused in minimal implementation
+        // IPC acceptor recovery counter (macOS AF_UNIX EINVAL recovery)
+        try {
+            if (state_) {
+                auto v = state_->stats.ipcEinvalRebuilds.load(std::memory_order_relaxed);
+                response.additionalStats["einval_rebuilds"] = std::to_string(v);
+            }
+        } catch (...) {
+        }
+        // Populate vector metrics from DaemonMetrics snapshot when available
+        try {
+            if (metrics_) {
+                metrics_->refresh();
+                auto snap = metrics_->getSnapshot();
+                response.vectorIndexSize = snap.vectorDbSizeBytes;
+                if (snap.vectorRowsExact > 0)
+                    response.additionalStats["vector_rows"] = std::to_string(snap.vectorRowsExact);
+            }
+        } catch (...) {
+        }
+        (void)req; // unused otherwise
         co_return response;
     } catch (...) {
         GetStatsResponse response;

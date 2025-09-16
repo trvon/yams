@@ -7,6 +7,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/system_executor.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -192,43 +193,31 @@ void PluginCommand::listPlugins() {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.enableChunkedResponses = false;
-        cfg.singleUseConnections = false; // keep connection for multiple calls
         cfg.requestTimeout = std::chrono::milliseconds(10000);
         cfg.autoStart = true; // start a managed daemon if not running
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
 
-        auto fetch_status = [&]() -> Result<StatusResponse> {
-            std::promise<Result<StatusResponse>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    prom.set_value(co_await client.status());
-                    co_return;
-                },
-                boost::asio::detached);
-            if (fut.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
-                return Error{ErrorCode::Timeout, "status timeout"};
-            return fut.get();
+        auto fetch_status = [leaseHandle]() -> Result<StatusResponse> {
+            auto& client = **leaseHandle;
+            return yams::cli::run_result<StatusResponse>(client.status(),
+                                                         std::chrono::milliseconds(10000));
         };
 
-        auto fetch_stats = [&]() -> Result<GetStatsResponse> {
+        auto fetch_stats = [leaseHandle]() -> Result<GetStatsResponse> {
+            auto& client = **leaseHandle;
             GetStatsRequest req;
             req.detailed = true;
-            std::promise<Result<GetStatsResponse>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    prom.set_value(co_await client.call(req));
-                    co_return;
-                },
-                boost::asio::detached);
-            if (fut.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
-                return Error{ErrorCode::Timeout, "stats timeout"};
-            return fut.get();
+            return yams::cli::run_result<GetStatsResponse>(client.call(req),
+                                                           std::chrono::milliseconds(10000));
         };
 
         // Try once
@@ -240,16 +229,9 @@ void PluginCommand::listPlugins() {
         bool need_scan = !(have_typed || have_json);
         if (need_scan) {
             PluginScanRequest scan; // empty -> server uses configured search paths
-            std::promise<Result<PluginScanResponse>> prom;
-            auto fut = prom.get_future();
-            boost::asio::co_spawn(
-                boost::asio::system_executor{},
-                [&]() -> boost::asio::awaitable<void> {
-                    prom.set_value(co_await client.call(scan));
-                    co_return;
-                },
-                boost::asio::detached);
-            (void)fut.wait_for(std::chrono::seconds(10)); // best-effort
+            auto& client = **leaseHandle;
+            (void)yams::cli::run_result<PluginScanResponse>(client.call(scan),
+                                                            std::chrono::milliseconds(10000));
             // Wait up to ~3s for plugin readiness/providers
             for (int i = 0; i < 6; ++i) {
                 sres = fetch_status();
@@ -353,27 +335,22 @@ void PluginCommand::showPluginInfo(const std::string& name) {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.enableChunkedResponses = false;
-        cfg.singleUseConnections = true;
         cfg.requestTimeout = std::chrono::milliseconds(10000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         GetStatsRequest req;
         req.detailed = true; // ensure plugin details are included
-        std::promise<Result<yams::daemon::GetStatsResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<yams::daemon::GetStatsResponse>(
-                             Error{ErrorCode::Timeout, "stats timeout"});
+        auto res = yams::cli::run_result<yams::daemon::GetStatsResponse>(
+            client.call(req), std::chrono::milliseconds(10000));
         if (!res) {
             std::cout << "Failed to query daemon stats for plugins\n";
             return;
@@ -409,27 +386,22 @@ void PluginCommand::scanPlugins(const std::string& dir, const std::string& targe
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
-        cfg.singleUseConnections = true;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.requestTimeout = std::chrono::milliseconds(15000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         PluginScanRequest req;
         req.dir = dir;
         req.target = target;
-        std::promise<Result<yams::daemon::PluginScanResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(15)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<yams::daemon::PluginScanResponse>(
-                             Error{ErrorCode::Timeout, "scan timeout"});
+        auto res = yams::cli::run_result<yams::daemon::PluginScanResponse>(
+            client.call(req), std::chrono::milliseconds(15000));
         if (!res) {
             std::cout << "Scan failed: " << res.error().message << "\n";
             return;
@@ -459,27 +431,23 @@ void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJso
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
-        cfg.singleUseConnections = true;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.requestTimeout = std::chrono::milliseconds(20000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         PluginLoadRequest req;
         req.pathOrName = arg;
         req.configJson = cfgJson;
         req.dryRun = dryRun;
-        std::promise<Result<PluginLoadResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(20)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<PluginLoadResponse>(Error{ErrorCode::Timeout, "load timeout"});
+        auto res = yams::cli::run_result<PluginLoadResponse>(client.call(req),
+                                                             std::chrono::milliseconds(20000));
         if (!res) {
             std::cout << "Load failed: " << res.error().message << "\n";
             return;
@@ -498,25 +466,21 @@ void PluginCommand::unloadPlugin(const std::string& name) {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
-        cfg.singleUseConnections = true;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.requestTimeout = std::chrono::milliseconds(10000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         PluginUnloadRequest req;
         req.name = name;
-        std::promise<Result<SuccessResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<SuccessResponse>(Error{ErrorCode::Timeout, "unload timeout"});
+        auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
+                                                          std::chrono::milliseconds(10000));
         if (!res) {
             std::cout << "Unload failed: " << res.error().message << "\n";
             return;
@@ -531,25 +495,20 @@ void PluginCommand::trustList() {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
-        cfg.singleUseConnections = true;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.requestTimeout = std::chrono::milliseconds(8000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         PluginTrustListRequest req;
-        std::promise<Result<PluginTrustListResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res =
-            (fut.wait_for(std::chrono::seconds(8)) == std::future_status::ready)
-                ? fut.get()
-                : Result<PluginTrustListResponse>(Error{ErrorCode::Timeout, "trust list timeout"});
+        auto res = yams::cli::run_result<PluginTrustListResponse>(client.call(req),
+                                                                  std::chrono::milliseconds(8000));
         if (!res) {
             std::cout << "Trust list failed: " << res.error().message << "\n";
             return;
@@ -567,25 +526,21 @@ void PluginCommand::trustAdd(const std::string& path) {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
-        cfg.singleUseConnections = true;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.requestTimeout = std::chrono::milliseconds(8000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         PluginTrustAddRequest req;
         req.path = path;
-        std::promise<Result<SuccessResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(8)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<SuccessResponse>(Error{ErrorCode::Timeout, "trust add timeout"});
+        auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
+                                                          std::chrono::milliseconds(8000));
         if (!res) {
             std::cout << "Trust add failed: " << res.error().message << "\n";
             return;
@@ -600,25 +555,21 @@ void PluginCommand::trustRemove(const std::string& path) {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
-        cfg.dataDir = cli_->getDataPath();
-        cfg.singleUseConnections = true;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
         cfg.requestTimeout = std::chrono::milliseconds(8000);
-        DaemonClient client(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         PluginTrustRemoveRequest req;
         req.path = path;
-        std::promise<Result<SuccessResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            boost::asio::system_executor{},
-            [&]() -> boost::asio::awaitable<void> {
-                auto r = co_await client.call(req);
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        auto res = (fut.wait_for(std::chrono::seconds(8)) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<SuccessResponse>(Error{ErrorCode::Timeout, "trust remove timeout"});
+        auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
+                                                          std::chrono::milliseconds(8000));
         if (!res) {
             std::cout << "Trust remove failed: " << res.error().message << "\n";
             return;

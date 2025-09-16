@@ -20,7 +20,6 @@ set(CLI_SOURCES
     commands/migrate_command.cpp
     commands/delete_command.cpp
     commands/list_command.cpp
-    commands/stats_command.cpp
     commands/status_command.cpp
     commands/update_command.cpp
     commands/session_command.cpp

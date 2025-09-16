@@ -397,9 +397,9 @@ public:
             clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
-            clientConfig.singleUseConnections = false; // reuse connection within process
-            // Ensure daemon auto-starts with the same storage as the CLI
-            if (cli_) {
+            clientConfig.singleUseConnections = false;
+            // Ensure daemon uses explicit CLI storage only when user overrode it
+            if (cli_ && cli_->hasExplicitDataDir()) {
                 auto dp = cli_->getDataPath();
                 if (!dp.empty()) {
                     clientConfig.dataDir = dp;
@@ -876,13 +876,19 @@ public:
         clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
         clientConfig.progressiveOutput = true;
         clientConfig.maxChunkSize = chunkSize_;
-        clientConfig.singleUseConnections = false;
+        clientConfig.singleUseConnections = true;
         if (cli_) {
             auto dp = cli_->getDataPath();
             if (!dp.empty())
                 clientConfig.dataDir = dp;
         }
-        yams::daemon::DaemonClient client(clientConfig);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(clientConfig);
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
         client.setStreamingEnabled(clientConfig.enableChunkedResponses);
 
         // Request + render
@@ -1016,8 +1022,9 @@ public:
             // Launch streaming
             boost::asio::co_spawn(
                 boost::asio::system_executor{},
-                [&, decided, prom]() -> boost::asio::awaitable<void> {
-                    auto sr = co_await client.streamingSearch(dreq);
+                [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
+                    auto& cliRef = **leaseHandle;
+                    auto sr = co_await cliRef.streamingSearch(dreq);
                     if (!decided->exchange(true))
                         prom->set_value(std::move(sr));
                     co_return;
@@ -1027,12 +1034,13 @@ public:
             // Launch delayed unary fallback (2 seconds after start)
             boost::asio::co_spawn(
                 boost::asio::system_executor{},
-                [&, decided, prom]() -> boost::asio::awaitable<void> {
+                [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
                     boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
                     t.expires_after(std::chrono::seconds(2));
                     co_await t.async_wait(boost::asio::use_awaitable);
                     if (!decided->load()) {
-                        auto ur = co_await client.call(dreq);
+                        auto& cliRef = **leaseHandle;
+                        auto ur = co_await cliRef.call(dreq);
                         if (!decided->exchange(true))
                             prom->set_value(std::move(ur));
                     }

@@ -29,6 +29,8 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
+// Retrieval facade for daemon-first grep
+#include <yams/app/services/retrieval_service.h>
 
 namespace yams::cli {
 
@@ -420,104 +422,29 @@ public:
                     return Result<void>();
                 };
 
-                // Simple direct daemon client (no pool) for reliability
-                yams::daemon::ClientConfig cfg;
-                // Align storage with CLI data path (parity with SearchCommand)
-                if (cli_) {
-                    auto dp = cli_->getDataPath();
-                    if (!dp.empty()) {
-                        cfg.dataDir = dp;
-#ifndef _WIN32
-                        ::setenv("YAMS_STORAGE", cfg.dataDir.string().c_str(), 1);
-                        ::setenv("YAMS_DATA_DIR", cfg.dataDir.string().c_str(), 1);
-#endif
-                    }
+                // Use RetrievalService facade (daemon-first)
+                yams::app::services::RetrievalService rsvc;
+                yams::app::services::RetrievalOptions ropts;
+                if (cli_ && cli_->hasExplicitDataDir()) {
+                    ropts.explicitDataDir = cli_->getDataPath();
                 }
-                // Configure timeouts similar to search for reliability on large scans
-                cfg.headerTimeout = std::chrono::milliseconds(30000);
-                cfg.bodyTimeout = std::chrono::milliseconds(120000);
-                yams::daemon::DaemonClient::setTimeoutEnvVars(cfg.headerTimeout, cfg.bodyTimeout);
-                cfg.enableChunkedResponses = !disableStreaming_;
-                cfg.singleUseConnections = false;
-                cfg.requestTimeout = std::chrono::milliseconds(30000);
-                yams::daemon::DaemonClient client(cfg);
-                client.setStreamingEnabled(cfg.enableChunkedResponses);
-                // Fully asynchronous path using a single top-level co_spawn
-                std::promise<Result<void>> done;
-                auto fut = done.get_future();
-                auto work = [&, dreq,
-                             disableStreaming =
-                                 disableStreaming_]() -> boost::asio::awaitable<void> {
-                    auto finish = [&](Result<yams::daemon::GrepResponse> result) {
-                        if (result) {
-                            auto r = render(result.value());
-                            if (!r) {
-                                done.set_value(r.error());
-                                return;
-                            }
-                            done.set_value(Result<void>());
-                        } else {
-                            done.set_value(result.error());
-                        }
-                    };
-                    if (disableStreaming) {
-                        auto ur = co_await client.call(dreq);
-                        finish(std::move(ur));
-                        co_return;
+                ropts.enableStreaming = !disableStreaming_;
+                ropts.headerTimeoutMs = 30000;
+                ropts.bodyTimeoutMs = 120000;
+                ropts.requestTimeoutMs = 30000;
+                auto gres = rsvc.grep(dreq, ropts);
+                if (!gres) {
+                    if (gres.error().code == ErrorCode::Timeout) {
+                        spdlog::warn(
+                            "grep: daemon call timed out; falling back to local execution");
+                        return executeLocal();
                     }
-                    // Guard: race streaming vs delayed unary (2s)
-                    std::shared_ptr<std::atomic_bool> decided =
-                        std::make_shared<std::atomic_bool>(false);
-                    std::shared_ptr<std::promise<Result<yams::daemon::GrepResponse>>> p =
-                        std::make_shared<std::promise<Result<yams::daemon::GrepResponse>>>();
-                    auto fut2 = p->get_future();
-
-                    // Streaming path
-                    boost::asio::co_spawn(
-                        boost::asio::system_executor{},
-                        [&, decided, p, dreq]() -> boost::asio::awaitable<void> {
-                            auto sr = co_await client.streamingGrep(dreq);
-                            if (!decided->exchange(true))
-                                p->set_value(std::move(sr));
-                            co_return;
-                        },
-                        boost::asio::detached);
-
-                    // Delayed unary path (2s after start)
-                    boost::asio::co_spawn(
-                        boost::asio::system_executor{},
-                        [&, decided, p, dreq]() -> boost::asio::awaitable<void> {
-                            boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
-                            t.expires_after(std::chrono::seconds(2));
-                            co_await t.async_wait(boost::asio::use_awaitable);
-                            if (!decided->load()) {
-                                auto ur = co_await client.call(dreq);
-                                if (!decided->exchange(true))
-                                    p->set_value(std::move(ur));
-                            }
-                            co_return;
-                        },
-                        boost::asio::detached);
-
-                    // Wait up to body timeout (120s default here) for winner
-                    auto wait = std::chrono::milliseconds(120000);
-                    if (fut2.wait_for(wait) == std::future_status::ready) {
-                        finish(fut2.get());
-                    } else {
-                        done.set_value(Error{ErrorCode::Timeout, "Grep timed out"});
-                    }
-                    co_return;
-                };
-                boost::asio::co_spawn(boost::asio::system_executor{}, work(),
-                                      boost::asio::detached);
-                if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
-                    spdlog::warn("grep: daemon call timed out; falling back to local execution");
-                    return executeLocal();
+                    return gres.error();
                 }
-                auto rv = fut.get();
-                if (rv)
-                    return Result<void>();
-                return rv.error();
+                auto rr = render(gres.value());
+                if (!rr)
+                    return rr.error();
+                return Result<void>();
             }
 
             // Fall back to local execution if daemon failed

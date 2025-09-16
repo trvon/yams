@@ -39,6 +39,8 @@ nav:
       - Architecture:
           - Search System: architecture/search_system.md
           - Vector Search Architecture: architecture/vector_search_architecture.md
+          - Daemon and Services: architecture/daemon_architecture.md
+          - Plugin and Content Extraction: architecture/plugin_architecture.md
       - Reference:
           - Developer:
               - Setup: developer/setup.md

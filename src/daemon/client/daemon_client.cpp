@@ -1,3 +1,4 @@
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -85,6 +86,18 @@ public:
     CircuitBreaker breaker_;
     std::chrono::milliseconds headerTimeout_{30000}; // 30s default
     std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
+    TransportOptions transportOptions_;
+    std::shared_ptr<AsioConnectionPool> pool_;
+
+    void refresh_transport() {
+        transportOptions_.socketPath = config_.socketPath;
+        transportOptions_.headerTimeout = headerTimeout_;
+        transportOptions_.bodyTimeout = bodyTimeout_;
+        transportOptions_.requestTimeout = config_.requestTimeout;
+        transportOptions_.maxInflight = config_.maxInflight;
+        transportOptions_.poolEnabled = !config_.singleUseConnections;
+        pool_ = AsioConnectionPool::get_or_create(transportOptions_);
+    }
 };
 
 // DaemonClient implementation
@@ -92,6 +105,108 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
     if (pImpl->config_.socketPath.empty()) {
         pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
+    // Normalize dataDir for all CLI/MCP callers: env > config.toml(core.data_dir) > XDG/HOME > cwd
+    if (pImpl->config_.dataDir.empty()) {
+        namespace fs = std::filesystem;
+        auto expand_tilde = [](std::string p) -> std::string {
+            if (!p.empty() && p.front() == '~') {
+                if (const char* home = std::getenv("HOME"))
+                    return std::string(home) + p.substr(1);
+            }
+            return p;
+        };
+        try {
+            // 1) Explicit environment override
+            if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
+                if (*envStorage)
+                    pImpl->config_.dataDir = fs::path(envStorage);
+            }
+            if (pImpl->config_.dataDir.empty()) {
+                if (const char* envData = std::getenv("YAMS_DATA_DIR")) {
+                    if (*envData)
+                        pImpl->config_.dataDir = fs::path(envData);
+                }
+            }
+
+            // 2) core.data_dir from config.toml
+            if (pImpl->config_.dataDir.empty()) {
+                fs::path cfgPath;
+                if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
+                    cfgPath = fs::path(cfgEnv);
+                } else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+                    cfgPath = fs::path(xdg) / "yams" / "config.toml";
+                } else if (const char* home = std::getenv("HOME")) {
+                    cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
+                }
+
+                if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                    std::ifstream f(cfgPath);
+                    std::string line;
+                    bool in_core = false;
+                    while (std::getline(f, line)) {
+                        // strip leading/trailing spaces
+                        auto ltrim = [](std::string& s) {
+                            s.erase(s.begin(),
+                                    std::find_if(s.begin(), s.end(), [](unsigned char ch) {
+                                        return !std::isspace(ch);
+                                    }));
+                        };
+                        auto rtrim = [](std::string& s) {
+                            s.erase(std::find_if(s.rbegin(), s.rend(),
+                                                 [](unsigned char ch) { return !std::isspace(ch); })
+                                        .base(),
+                                    s.end());
+                        };
+                        ltrim(line);
+                        rtrim(line);
+                        if (line.empty() || line[0] == '#')
+                            continue;
+                        if (line.front() == '[') {
+                            // section header like [core]
+                            in_core = (line == "[core]" || line == "[ core ]");
+                            continue;
+                        }
+                        // support both flattened and sectioned forms
+                        auto pos = line.find('=');
+                        if (pos == std::string::npos)
+                            continue;
+                        std::string key = line.substr(0, pos);
+                        std::string val = line.substr(pos + 1);
+                        ltrim(key);
+                        rtrim(key);
+                        ltrim(val);
+                        rtrim(val);
+                        if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') ||
+                                                (val.front() == '\'' && val.back() == '\''))) {
+                            val = val.substr(1, val.size() - 2);
+                        }
+                        if (key == "core.data_dir" || (in_core && key == "data_dir")) {
+                            val = expand_tilde(val);
+                            if (!val.empty()) {
+                                pImpl->config_.dataDir = fs::path(val);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3) XDG/HOME defaults
+            if (pImpl->config_.dataDir.empty()) {
+                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+                    pImpl->config_.dataDir = fs::path(xdgDataHome) / "yams";
+                } else if (const char* homeEnv = std::getenv("HOME")) {
+                    pImpl->config_.dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
+                } else {
+                    pImpl->config_.dataDir = fs::current_path() / "yams_data";
+                }
+            }
+        } catch (...) {
+            // Best-effort only; leave empty if something unexpected happened
+        }
+    }
+    pImpl->refresh_transport();
+
     // In test builds, default to no auto-start to avoid forking child daemons
 #ifdef YAMS_TESTING
     pImpl->config_.autoStart = false;
@@ -143,6 +258,9 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
         pImpl->bodyTimeout_ = std::chrono::milliseconds(120000);
     }
     spdlog::debug("DaemonClient init: resolved socket='{}'", pImpl->config_.socketPath.string());
+    if (!pImpl->config_.dataDir.empty()) {
+        spdlog::debug("DaemonClient init: resolved dataDir='{}'", pImpl->config_.dataDir.string());
+    }
 }
 
 DaemonClient::~DaemonClient() = default;
@@ -153,12 +271,14 @@ DaemonClient& DaemonClient::operator=(DaemonClient&&) noexcept = default;
 void DaemonClient::setHeaderTimeout(std::chrono::milliseconds timeout) {
     if (pImpl) {
         pImpl->headerTimeout_ = timeout;
+        pImpl->refresh_transport();
     }
 }
 
 void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
     if (pImpl) {
         pImpl->bodyTimeout_ = timeout;
+        pImpl->refresh_transport();
     }
 }
 
@@ -454,13 +574,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
 
-    AsioTransportAdapter::Options opts;
-    opts.socketPath = pImpl->config_.socketPath;
-    opts.headerTimeout = pImpl->headerTimeout_;
-    opts.bodyTimeout = pImpl->bodyTimeout_;
-    opts.requestTimeout = pImpl->config_.requestTimeout;
-    opts.maxInflight = pImpl->config_.maxInflight;
-    AsioTransportAdapter adapter(opts);
+    AsioTransportAdapter adapter(pImpl->transportOptions_);
     auto r = co_await adapter.send_request(req);
     if (!r)
         co_return r.error();
@@ -810,13 +924,6 @@ DaemonClient::sendRequestStreaming(const Request& req,
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
 
-    AsioTransportAdapter::Options opts;
-    opts.socketPath = pImpl->config_.socketPath;
-    opts.headerTimeout = pImpl->headerTimeout_;
-    opts.bodyTimeout = pImpl->bodyTimeout_;
-    opts.requestTimeout = pImpl->config_.requestTimeout;
-    opts.maxInflight = pImpl->config_.maxInflight;
-
     auto onHeader = [handler](const Response& r) { handler->onHeaderReceived(r); };
     auto onChunk = [handler](const Response& r, bool last) {
         // Pretty-print progress events if present, then forward to handler
@@ -844,7 +951,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
 
-    AsioTransportAdapter adapter(opts);
+    AsioTransportAdapter adapter(pImpl->transportOptions_);
     spdlog::debug("DaemonClient::sendRequestStreaming calling adapter.send_request_streaming");
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
     if (!res)

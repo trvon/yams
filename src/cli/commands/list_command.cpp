@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/app/services/factory.hpp>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -247,12 +248,27 @@ public:
                 return Result<void>();
             };
 
-            auto fallback = [&]() -> Result<void> { return executeWithServices(); };
+            // Use RetrievalService (daemon-first). On failure, fallback to service path
+            {
+                yams::app::services::RetrievalService rsvc;
+                yams::app::services::RetrievalOptions ropts;
+                if (cli_->hasExplicitDataDir()) {
+                    ropts.explicitDataDir = cli_->getDataPath();
+                }
+                ropts.enableStreaming = true;
+                ropts.progressiveOutput = false;
+                ropts.singleUseConnections = false;
+                ropts.requestTimeoutMs = 30000;
+                ropts.headerTimeoutMs = 30000;
+                ropts.bodyTimeoutMs = 120000;
+                auto res = rsvc.list(dreq, ropts);
+                if (res) {
+                    return render(res.value());
+                }
+                spdlog::warn("list: daemon path failed ({}); using local services",
+                             res.error().message);
+            }
 
-            if (auto d = run_awaitable(daemon_request_async(dreq, fallback, render)); d)
-                return Result<void>();
-
-            // Fallback to service-based approach
             return executeWithServices();
 
         } catch (const std::exception& e) {

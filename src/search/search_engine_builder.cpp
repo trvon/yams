@@ -96,9 +96,19 @@ MetadataKeywordAdapter::search(const std::string& query, size_t k,
 
         // Populate lightweight metadata for downstream fusion/explanations
         kr.metadata["title"] = item.document.fileName;
+        kr.metadata["name"] = item.document.fileName;
         kr.metadata["path"] = item.document.filePath;
         kr.metadata["hash"] = item.document.sha256Hash;
         kr.metadata["mime_type"] = item.document.mimeType;
+        if (!item.document.fileExtension.empty()) {
+            std::string ext = item.document.fileExtension;
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!ext.empty() && ext.front() == '.')
+                ext.erase(ext.begin());
+            if (!ext.empty())
+                kr.metadata["extension"] = std::move(ext);
+        }
 
         out.push_back(std::move(kr));
         if (out.size() >= k) {

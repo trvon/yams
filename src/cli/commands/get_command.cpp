@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -216,6 +217,27 @@ public:
                 return Result<void>();
             };
 
+            // Primary path: RetrievalService via daemon
+            {
+                yams::app::services::RetrievalService rsvc;
+                yams::app::services::RetrievalOptions ropts;
+                if (cli_->hasExplicitDataDir()) {
+                    ropts.explicitDataDir = cli_->getDataPath();
+                }
+                ropts.requestTimeoutMs = 60000; // allow reasonable time for extraction
+                ropts.headerTimeoutMs = 30000;
+                ropts.bodyTimeoutMs = 120000;
+                auto gres = rsvc.get(dreq, ropts);
+                if (gres) {
+                    auto rr = render(gres.value());
+                    if (!rr)
+                        return rr.error();
+                    return Result<void>();
+                }
+                spdlog::warn("get: daemon path failed ({}); falling back to local services",
+                             gres.error().message);
+            }
+
             // Define service fallback using DocumentService
             auto fallback = [&]() -> Result<void> {
                 spdlog::debug("GetCommand: Using service fallback");
@@ -336,8 +358,8 @@ public:
                 return render(daemonResp);
             };
 
-            // Execute daemon request via awaitable pathway
-            return run_awaitable(daemon_request_async(dreq, fallback, render));
+            // Fallback to local services when daemon path failed
+            return fallback();
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};

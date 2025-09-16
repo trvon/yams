@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -778,6 +779,16 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                         const auto& doc = docResult.value().value();
                         record.metadata["name"] = doc.fileName;
                         record.metadata["mime_type"] = doc.mimeType;
+                        if (!doc.fileExtension.empty()) {
+                            std::string ext = doc.fileExtension;
+                            std::transform(
+                                ext.begin(), ext.end(), ext.begin(),
+                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            if (!ext.empty() && ext.front() == '.')
+                                ext.erase(ext.begin());
+                            if (!ext.empty())
+                                record.metadata["extension"] = std::move(ext);
+                        }
                     }
                     // Track model used for embedding
                     record.metadata["model"] = selectedModel;

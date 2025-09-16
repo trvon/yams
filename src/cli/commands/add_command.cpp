@@ -18,6 +18,8 @@
 #include <yams/vector/embedding_service.h>
 // App services for service-based architecture
 #include <yams/app/services/services.hpp>
+// Service façade for daemon-first document ingestion
+#include <yams/app/services/document_ingestion_service.h>
 // Daemon client API for daemon-first add
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -124,7 +126,9 @@ public:
                     yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
                 if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
                     yams::daemon::ClientConfig startCfg;
-                    startCfg.dataDir = cli_->getDataPath();
+                    if (cli_->hasExplicitDataDir()) {
+                        startCfg.dataDir = cli_->getDataPath();
+                    }
                     if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
                         return Error{ErrorCode::InternalError,
                                      std::string("Failed to start daemon: ") + r.error().message};
@@ -144,17 +148,24 @@ public:
                     }
                 }
 
-                // Actively wait for daemon readiness state (not just socket up)
+                // Connectivity probe only: a successful Status call indicates dispatcher is up.
+                // Do not block on full readiness; add path can operate while daemon is degraded.
                 {
                     yams::daemon::ClientConfig cfg;
-                    cfg.dataDir = cli_->getDataPath();
+                    if (cli_->hasExplicitDataDir()) {
+                        cfg.dataDir = cli_->getDataPath();
+                    }
                     cfg.enableChunkedResponses = false;
-                    cfg.singleUseConnections = true;
                     cfg.requestTimeout = std::chrono::milliseconds(2000);
-                    yams::daemon::DaemonClient client(cfg);
+                    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                    if (!leaseRes) {
+                        return leaseRes.error();
+                    }
+                    auto leaseHandle = std::move(leaseRes.value());
+                    auto& client = **leaseHandle;
 
                     auto start = std::chrono::steady_clock::now();
-                    while (true) {
+                    for (;;) {
                         yams::daemon::StatusRequest sreq;
                         sreq.detailed = true;
                         std::promise<Result<yams::daemon::StatusResponse>> prom;
@@ -170,18 +181,13 @@ public:
                             std::future_status::ready) {
                             auto st = fut.get();
                             if (st) {
-                                const auto& sr = st.value();
-                                if (sr.overallStatus == "ready" || sr.overallStatus == "degraded" ||
-                                    sr.ready) {
-                                    break;
-                                }
+                                break; // dispatcher reachable; proceed with add
                             }
                         }
                         if (std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - start)
                                 .count() >= daemonReadyTimeoutMs_) {
-                            return Error{ErrorCode::Timeout,
-                                         "Daemon is running but not ready yet (timed out)"};
+                            break; // best-effort: proceed; daemon may return StatusResponse
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
@@ -197,33 +203,36 @@ public:
                         continue; // handled later via services path (stdin)
                     }
 
-                    // Build daemon request
-                    yams::daemon::AddDocumentRequest dreq;
-                    // Use canonical absolute path to satisfy daemon's exact path requirement
-                    std::error_code canon_ec;
-                    auto abs = std::filesystem::absolute(path, canon_ec);
-                    auto canon = std::filesystem::weakly_canonical(abs, canon_ec);
-                    dreq.path = (canon.empty() ? abs : canon).string();
-                    dreq.name = documentName_;
-                    dreq.tags = tags_;
+                    // Build daemon add options
+                    yams::app::services::AddOptions aopts;
+                    aopts.path = path.string();
+                    aopts.name = documentName_;
+                    aopts.tags = tags_;
                     for (const auto& kv : metadata_) {
                         auto pos = kv.find('=');
                         if (pos != std::string::npos) {
                             std::string key = kv.substr(0, pos);
                             std::string value = kv.substr(pos + 1);
-                            dreq.metadata[key] = value;
+                            aopts.metadata[key] = value;
                         }
                     }
-                    dreq.recursive = recursive_;
-                    dreq.includePatterns = includePatterns_;
-                    dreq.excludePatterns = excludePatterns_;
-                    dreq.collection = collection_;
-                    dreq.snapshotId = snapshotId_;
-                    dreq.snapshotLabel = snapshotLabel_;
+                    aopts.recursive = recursive_;
+                    aopts.includePatterns = includePatterns_;
+                    aopts.excludePatterns = excludePatterns_;
+                    aopts.collection = collection_;
+                    aopts.snapshotId = snapshotId_;
+                    aopts.snapshotLabel = snapshotLabel_;
                     if (!mimeType_.empty()) {
-                        dreq.mimeType = mimeType_;
+                        aopts.mimeType = mimeType_;
                     }
-                    dreq.disableAutoMime = disableAutoMime_;
+                    aopts.disableAutoMime = disableAutoMime_;
+                    aopts.noEmbeddings = noEmbeddings_;
+                    if (cli_->hasExplicitDataDir()) {
+                        aopts.explicitDataDir = cli_->getDataPath();
+                    }
+                    aopts.timeoutMs = daemonTimeoutMs_;
+                    aopts.retries = daemonRetries_;
+                    aopts.backoffMs = daemonBackoffMs_;
 
                     auto render = [&](const yams::daemon::AddDocumentResponse& resp) -> void {
                         if (resp.documentsAdded == 1) {
@@ -233,62 +242,29 @@ public:
                             std::cout << "Added " << resp.documentsAdded << " documents"
                                       << std::endl;
                         }
+                        // After a successful single-file add, perform lightweight
+                        // text extraction + FTS index so search works immediately.
+                        if (resp.documentsAdded == 1) {
+                            if (auto appContext = cli_->getAppContext()) {
+                                auto searchService = app::services::makeSearchService(*appContext);
+                                if (searchService) {
+                                    (void)searchService->lightIndexForHash(resp.hash);
+                                }
+                            }
+                        }
                     };
 
                     // Retry with exponential backoff on transient failures
                     bool success = false;
                     std::string lastError;
-                    for (int attempt = 0; attempt <= daemonRetries_; ++attempt) {
-                        try {
-                            yams::daemon::ClientConfig cfg;
-                            cfg.dataDir = cli_->getDataPath();
-                            cfg.enableChunkedResponses = false; // small unary response
-                            cfg.singleUseConnections = true;
-                            cfg.requestTimeout = std::chrono::milliseconds(daemonTimeoutMs_);
-                            yams::daemon::DaemonClient client(cfg);
-                            std::promise<Result<yams::daemon::AddDocumentResponse>> prom;
-                            auto fut = prom.get_future();
-                            auto work = [&, dreq]() -> boost::asio::awaitable<void> {
-                                auto res = co_await client.streamingAddDocument(dreq);
-                                prom.set_value(std::move(res));
-                                co_return;
-                            };
-                            boost::asio::co_spawn(boost::asio::system_executor{}, work(),
-                                                  boost::asio::detached);
-                            Result<yams::daemon::AddDocumentResponse> result =
-                                Error{ErrorCode::Timeout, "AddDocument timed out"};
-                            if (fut.wait_for(std::chrono::milliseconds(daemonTimeoutMs_)) ==
-                                std::future_status::ready) {
-                                result = fut.get();
-                            } else {
-                                // keep default timeout error
-                            }
-                            if (result) {
-                                render(result.value());
-                                success = true;
-                                break;
-                            } else {
-                                // If daemon not fully ready, error may surface as missing stream
-                                // response; treat as transient
-                                lastError = result.error().message;
-                            }
-                        } catch (const std::exception& e) {
-                            lastError = e.what();
-                        } catch (...) {
-                            lastError = "unknown error";
-                        }
-
-                        if (attempt < daemonRetries_) {
-                            // Normalize certain errors to improve backoff decisions
-                            std::string low = lastError;
-                            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-                            bool likelyNotReady =
-                                low.find("missing adddocumentresponse") != std::string::npos ||
-                                low.find("not ready") != std::string::npos;
-                            auto delay = daemonBackoffMs_ * (1 << attempt);
-                            if (likelyNotReady && delay < 500)
-                                delay = 500; // allow readiness to settle
-                            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                    {
+                        yams::app::services::DocumentIngestionService ing;
+                        auto result = ing.addViaDaemon(aopts);
+                        if (result) {
+                            render(result.value());
+                            success = true;
+                        } else {
+                            lastError = result.error().message;
                         }
                     }
 
@@ -436,6 +412,8 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
+        // Keep fallback fast and resilient: defer extraction to background tooling
+        req.deferExtraction = true;
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -459,6 +437,13 @@ private:
 
         // Output result
         outputServiceResult(result.value());
+        // Immediate light index so search can find it
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto searchService = app::services::makeSearchService(*appContext2);
+            if (searchService) {
+                (void)searchService->lightIndexForHash(result.value().hash);
+            }
+        }
         return Result<void>();
     }
 
@@ -477,6 +462,8 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
+        // Defer extraction for fast CLI fallback and to avoid plugin-related crashes
+        req.deferExtraction = true;
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -500,6 +487,13 @@ private:
 
         // Output result
         outputServiceResult(result.value());
+        // Immediate light index so search can find it
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto searchService = app::services::makeSearchService(*appContext2);
+            if (searchService) {
+                (void)searchService->lightIndexForHash(result.value().hash);
+            }
+        }
         return Result<void>();
     }
 
@@ -522,6 +516,8 @@ private:
         req.includePatterns = includePatterns_;
         req.excludePatterns = excludePatterns_;
         req.recursive = recursive_;
+        // Match daemon behavior: directory ingestion defers extraction
+        req.deferExtraction = true;
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -570,6 +566,18 @@ private:
             std::cout << "Added " << resp.filesIndexed << " files from directory"
                       << " (" << resp.filesSkipped << " skipped, " << resp.filesFailed << " failed)"
                       << std::endl;
+        }
+
+        // Perform light indexing for each successfully added file
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto searchService = app::services::makeSearchService(*appContext2);
+            if (searchService) {
+                for (const auto& f : resp.results) {
+                    if (f.success && !f.hash.empty()) {
+                        (void)searchService->lightIndexForHash(f.hash);
+                    }
+                }
+            }
         }
 
         return Result<void>();

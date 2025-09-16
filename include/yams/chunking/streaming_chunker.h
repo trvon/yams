@@ -85,7 +85,13 @@ public:
         constexpr size_t BUFFER_SIZE = 64 * 1024; // 64KB buffer
         std::vector<std::byte> buffer(BUFFER_SIZE);
 
-        while (stream.good()) {
+        // Some streambuf implementations (e.g., custom segmenting buffers used in tests)
+        // may cause std::istream::read to set failbit when fewer than BUFFER_SIZE bytes are
+        // available, even though some bytes were read. Rely exclusively on gcount() and
+        // continue reading until it returns 0. Clear stream state between iterations.
+        while (true) {
+            // Ensure previous fail/eof state doesn't prevent the next read
+            stream.clear();
             stream.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE);
             const std::streamsize readCount = stream.gcount();
             size_t bytesRead = readCount > 0 ? static_cast<size_t>(readCount) : 0u;

@@ -92,6 +92,9 @@ public:
      */
     std::filesystem::path getDataPath() const { return dataPath_; }
 
+    // True if user explicitly provided --data-dir/--storage on this run
+    bool hasExplicitDataDir() const;
+
     /**
      * Set the data directory path
      */

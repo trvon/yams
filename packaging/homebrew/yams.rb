@@ -1,8 +1,9 @@
 class Yams < Formula
   desc "Yet Another Memory System - High-performance content-addressed storage"
   homepage "https://github.com/trvon/yams"
-  url "https://github.com/trvon/yams/archive/v0.1.2.tar.gz"
-  sha256 "SHA256_TO_BE_CALCULATED"
+  version "0.0.0" # placeholder; release workflow will update
+  url "https://github.com/trvon/yams/archive/refs/tags/v#{version}.tar.gz"
+  sha256 "SHA256_PLACEHOLDER" # replaced in release workflow
   license "MIT"
   head "https://github.com/trvon/yams.git", branch: "main"
 
@@ -15,6 +16,11 @@ class Yams < Formula
 
   on_linux do
     depends_on "gcc@11" if ENV.compiler == :clang
+  end
+
+  livecheck do
+    url :stable
+    regex(/^v?(\d+(?:\.\d+)+)$/i)
   end
 
   def install

@@ -38,8 +38,9 @@ public:
 
             // Parallel processing with bounded workers
             std::atomic<size_t> idx{0};
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            size_t workers = std::min(hw, entries.size() > 0 ? entries.size() : size_t{1});
+            // Note: Underlying store and extraction paths may not be fully thread-safe across
+            // platforms/tests. Process serially to ensure correctness and avoid races.
+            size_t workers = 1;
             std::mutex respMutex;
             auto workerFn = [&]() {
                 while (true) {
@@ -100,6 +101,9 @@ private:
             StoreDocumentRequest storeReq;
             storeReq.path = filePath;
             storeReq.metadata = req.metadata;
+            // Propagate collection and tags to each stored file
+            storeReq.collection = req.collection;
+            storeReq.tags = req.tags;
             if (!req.collection.empty()) {
                 storeReq.metadata["collection"] = req.collection;
             }
