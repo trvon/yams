@@ -65,6 +65,25 @@ packages:
   - libprotobuf-dev
 
 tasks:
+  - normalize_submodules: |
+      set -e
+      # On SourceHut, SSH-based submodule URLs fail. Rewrite to HTTPS before any submodule ops.
+      if [ -f .gitmodules ]; then
+        sed -i 's#git@github.com:#https://github.com/#g' .gitmodules || true
+        git submodule sync --recursive || true
+      fi
+      # Prevent automatic submodule recursion from causing failures
+      git config --global submodule.recurse false || true
+      # If submodules were initialized by the runner, deinit private ones to avoid fetch attempts
+      if git config -f .gitmodules --get-regexp '^submodule\..*\.url' >/dev/null 2>&1; then
+        while read -r name url; do
+          case "$url" in
+            *homebrew-yams*|*yams-ghidra-plugin*)
+              git submodule deinit -f "$(echo "$name" | sed -E 's/^submodule\.([^.]*)\.url/\1/')" || true ;;
+          esac
+        done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.url')
+      fi
+
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.
   - compute_version: |
       set -e

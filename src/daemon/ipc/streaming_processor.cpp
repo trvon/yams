@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 
@@ -50,19 +51,25 @@ StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per
                              : 256;
     auto snap = MuxMetricsRegistry::instance().snapshot();
     const int64_t q = snap.queuedBytes;
-    if (q > static_cast<int64_t>(256ull * 1024ull * 1024ull)) {
-        target /= 4; // heavy backlog: smaller pages
-    } else if (q > static_cast<int64_t>(128ull * 1024ull * 1024ull)) {
-        target /= 2;
-    } else if (q < static_cast<int64_t>(8ull * 1024ull * 1024ull)) {
-        target *= 3; // very light: triple page size
-    } else if (q < static_cast<int64_t>(32ull * 1024ull * 1024ull)) {
-        target *= 2; // light: double page size
-    } else if (q < static_cast<int64_t>(64ull * 1024ull * 1024ull)) {
-        target += (target / 2); // moderately light: +50%
+    if (q > static_cast<int64_t>(TuneAdvisor::streamMuxVeryHighBytes())) {
+        target = static_cast<std::size_t>(static_cast<double>(target) *
+                                          TuneAdvisor::streamPageFactorVeryHighDiv());
+    } else if (q > static_cast<int64_t>(TuneAdvisor::streamMuxHighBytes())) {
+        target = static_cast<std::size_t>(static_cast<double>(target) *
+                                          TuneAdvisor::streamPageFactorHighDiv());
+    } else if (q < static_cast<int64_t>(TuneAdvisor::streamMuxLight1Bytes())) {
+        target = static_cast<std::size_t>(static_cast<double>(target) *
+                                          TuneAdvisor::streamPageFactorLight1Mul());
+    } else if (q < static_cast<int64_t>(TuneAdvisor::streamMuxLight2Bytes())) {
+        target = static_cast<std::size_t>(static_cast<double>(target) *
+                                          TuneAdvisor::streamPageFactorLight2Mul());
+    } else if (q < static_cast<int64_t>(TuneAdvisor::streamMuxLight3Bytes())) {
+        target = static_cast<std::size_t>(static_cast<double>(target) *
+                                          TuneAdvisor::streamPageFactorLight3Mul());
     }
-    // Widen clamps to allow much larger pages under light load and smaller under heavy load
-    target = std::clamp<std::size_t>(target, 5, 50000);
+    // Clamps
+    target = std::clamp<std::size_t>(target, TuneAdvisor::streamPageClampMin(),
+                                     TuneAdvisor::streamPageClampMax());
     return target;
 }
 

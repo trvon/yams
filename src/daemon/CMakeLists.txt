@@ -84,7 +84,6 @@ add_library(yams_daemon_ipc_obj OBJECT
     ipc/retrieval_session.cpp
     ipc/thread_pool.cpp
     ipc/socket_utils.cpp
-    ipc/resource_tuner.cpp
     components/PoolManager.cpp
 )
 
@@ -352,6 +351,7 @@ add_library(yams_daemon STATIC
     components/ServiceManager.cpp
     components/PostIngestQueue.cpp
     components/PoolManager.cpp
+    components/TuningManager.cpp
     components/WorkerPool.cpp
     components/RepairCoordinator.cpp
     components/SocketServer.cpp

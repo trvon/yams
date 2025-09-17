@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include "IComponent.h"
 #include <yams/core/types.h>
@@ -38,6 +39,9 @@ private:
     bool readPidFromFile(pid_t& outPid) const;
     Result<void> terminateProcess(pid_t pid) const;
     static bool aggressiveModeEnabled();
+
+    bool requestExistingDaemonShutdown(pid_t pid) const;
+    bool waitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) const;
 
     YamsDaemon* daemon_; // Non-owning pointer to the main daemon class to signal shutdown
     std::filesystem::path pidFile_;

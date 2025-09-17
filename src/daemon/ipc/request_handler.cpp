@@ -219,7 +219,8 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             if (fsm.backpressured()) {
                 using namespace boost::asio;
                 steady_timer bp_timer(co_await this_coro::executor);
-                bp_timer.expires_after(std::chrono::milliseconds(5));
+                bp_timer.expires_after(
+                    std::chrono::milliseconds(TuneAdvisor::backpressureReadPauseMs()));
                 co_await bp_timer.async_wait(use_awaitable);
                 continue;
             }
@@ -1511,32 +1512,31 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
         const size_t active = rr_active_.size();
         const size_t queued_bytes = total_queued_bytes_;
         const size_t queued_cap = config_.total_queued_bytes_cap;
-        // Adaptive scaling (more aggressive):
-        // - Under low load and low backlog, push harder to reduce latency
-        // - Under high concurrency or high backlog, also raise budget to keep throughput
-        if (active <= 2 && queued_bytes < (queued_cap / 8)) {
-            budget = budget * 2; // very low contention
-        } else if (active <= 4 && queued_bytes < (queued_cap / 4)) {
-            budget = budget + (budget / 2); // +50%
+        // Adaptive scaling via TuneAdvisor thresholds
+        if (active <= TuneAdvisor::writerActiveLow1Threshold() && queued_bytes < (queued_cap / 8)) {
+            budget = static_cast<size_t>(static_cast<double>(budget) *
+                                         TuneAdvisor::writerScaleActiveLow1Mul());
+        } else if (active <= TuneAdvisor::writerActiveLow2Threshold() &&
+                   queued_bytes < (queued_cap / 4)) {
+            budget = static_cast<size_t>(static_cast<double>(budget) *
+                                         TuneAdvisor::writerScaleActiveLow2Mul());
         }
-        if (active > 8)
-            budget = budget * 2; // earlier ramp
-        if (active > 32)
-            budget = budget * 2; // ramp more
-        if (queued_bytes > (queued_cap * 3) / 4)
-            budget = budget * 2;
-        else if (queued_bytes > (queued_cap / 2))
-            budget = budget + (budget / 2);
-        // Cap budget to a safe maximum (env override)
-        size_t max_budget = 8 * 1024 * 1024; // 8MB per turn default
-        if (const char* mb = std::getenv("YAMS_SERVER_WRITER_BUDGET_MAX")) {
-            try {
-                auto v = static_cast<size_t>(std::stoul(mb));
-                if (v >= 4096)
-                    max_budget = v;
-            } catch (...) {
-            }
-        }
+        if (active > TuneAdvisor::writerActiveHigh1Threshold())
+            budget = static_cast<size_t>(static_cast<double>(budget) *
+                                         TuneAdvisor::writerScaleActiveHigh1Mul());
+        if (active > TuneAdvisor::writerActiveHigh2Threshold())
+            budget = static_cast<size_t>(static_cast<double>(budget) *
+                                         TuneAdvisor::writerScaleActiveHigh2Mul());
+        const double halfFrac = TuneAdvisor::writerQueuedHalfThresholdFraction();
+        const double threeQFrac = TuneAdvisor::writerQueuedThreeQuarterThresholdFraction();
+        if (queued_bytes > static_cast<size_t>(queued_cap * threeQFrac))
+            budget = static_cast<size_t>(static_cast<double>(budget) *
+                                         TuneAdvisor::writerScaleQueuedThreeQuarterMul());
+        else if (queued_bytes > static_cast<size_t>(queued_cap * halfFrac))
+            budget = static_cast<size_t>(static_cast<double>(budget) *
+                                         TuneAdvisor::writerScaleQueuedHalfMul());
+        // Cap budget to a safe maximum (centralized via TuneAdvisor)
+        size_t max_budget = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
         if (budget > max_budget)
             budget = max_budget;
         // Reflect dynamic budget in mux metrics for observability

@@ -2159,6 +2159,11 @@ private:
     bool dedupeVerbose_{false};
     Result<void> repairGraph();
     void runDedupe();
+    // Tuning helpers
+    Result<void> applyTuningBaseline(bool apply);
+    std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
+    std::filesystem::path getConfigPath() const;
+    Result<void> writeConfigValue(const std::string& key, const std::string& value);
 };
 
 // Factory
@@ -2233,6 +2238,146 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
                  "Allow deletion even when differing hashes (treat as duplicates)");
     dd->add_flag("-v,--verbose", dedupeVerbose_, "Verbose listing of each group");
     dd->callback([this]() { runDedupe(); });
+
+    // Auto-tuning baseline
+    auto* tsub =
+        doctor->add_subcommand("tuning", "Auto-configure [tuning] based on system baseline");
+    bool apply = false;
+    tsub->add_flag("--apply", apply, "Write suggestions to config.toml [tuning] section");
+    tsub->callback([this, &apply]() {
+        auto r = applyTuningBaseline(apply);
+        if (!r) {
+            spdlog::error("Doctor tuning failed: {}", r.error().message);
+            std::exit(1);
+        }
+    });
+}
+
+// --- Minimal TOML helpers (duplicated from config_command for simplicity) ---
+std::map<std::string, std::string>
+DoctorCommand::parseSimpleToml(const std::filesystem::path& path) const {
+    std::map<std::string, std::string> config;
+    std::ifstream file(path);
+    if (!file)
+        return config;
+    std::string line;
+    std::string currentSection;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (line[0] == '[') {
+            size_t end = line.find(']');
+            if (end != std::string::npos) {
+                currentSection = line.substr(1, end - 1);
+                if (!currentSection.empty())
+                    currentSection += ".";
+            }
+            continue;
+        }
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+            std::string key = line.substr(0, eq);
+            std::string value = line.substr(eq + 1);
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
+                value = value.substr(1, value.size() - 2);
+            }
+            size_t comment = value.find('#');
+            if (comment != std::string::npos) {
+                value = value.substr(0, comment);
+                value.erase(value.find_last_not_of(" \t") + 1);
+            }
+            config[currentSection + key] = value;
+        }
+    }
+    return config;
+}
+
+std::filesystem::path DoctorCommand::getConfigPath() const {
+    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
+    const char* homeEnv = std::getenv("HOME");
+    std::filesystem::path configHome = xdgConfigHome
+                                           ? std::filesystem::path(xdgConfigHome)
+                                           : (homeEnv ? std::filesystem::path(homeEnv) / ".config"
+                                                      : std::filesystem::path("~/.config"));
+    return configHome / "yams" / "config.toml";
+}
+
+Result<void> DoctorCommand::writeConfigValue(const std::string& key, const std::string& value) {
+    try {
+        auto configPath = getConfigPath();
+        std::filesystem::create_directories(configPath.parent_path());
+        auto config = parseSimpleToml(configPath);
+        config[key] = value;
+        std::ofstream file(configPath);
+        if (!file)
+            return Error{ErrorCode::WriteError, "Cannot write config: " + configPath.string()};
+        std::map<std::string, std::map<std::string, std::string>> sections;
+        for (const auto& [fullKey, val] : config) {
+            size_t dot = fullKey.find('.');
+            if (dot != std::string::npos) {
+                std::string section = fullKey.substr(0, dot);
+                std::string subkey = fullKey.substr(dot + 1);
+                sections[section][subkey] = val;
+            } else {
+                sections[""][fullKey] = val;
+            }
+        }
+        for (const auto& [section, values] : sections) {
+            if (!section.empty())
+                file << "\n[" << section << "]\n";
+            for (const auto& [k, v] : values) {
+                file << k << " = \"" << v << "\"\n";
+            }
+        }
+        return Result<void>();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, e.what()};
+    }
+}
+
+Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
+    try {
+        // Simple baseline heuristic
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0)
+            hc = 4;
+        uint32_t ipcMax = std::min<unsigned>(32, hc);
+        uint32_t ioMax = std::min<unsigned>(32, std::max<unsigned>(1, hc / 2));
+        std::map<std::string, std::string> suggestions{
+            {"tuning.backpressure_read_pause_ms", "5"},
+            {"tuning.worker_poll_ms", "150"},
+            {"tuning.idle_cpu_pct", "10.0"},
+            {"tuning.idle_mux_low_bytes", "4194304"},
+            {"tuning.idle_shrink_hold_ms", "5000"},
+            {"tuning.pool_cooldown_ms", "500"},
+            {"tuning.pool_scale_step", "1"},
+            {"tuning.pool_ipc_min", "1"},
+            {"tuning.pool_ipc_max", std::to_string(ipcMax)},
+            {"tuning.pool_io_min", "1"},
+            {"tuning.pool_io_max", std::to_string(ioMax)},
+        };
+        std::cout << "Doctor tuning baseline (proposed):\n";
+        for (const auto& [k, v] : suggestions) {
+            std::cout << "  " << k << " = " << v << "\n";
+        }
+        if (apply) {
+            for (const auto& [k, v] : suggestions) {
+                auto r = writeConfigValue(k, v);
+                if (!r)
+                    return r;
+            }
+            std::cout << "✓ Applied tuning baseline to [tuning] in config.toml\n";
+        } else {
+            std::cout << "Use 'yams doctor tuning --apply' to write these values.\n";
+        }
+        return Result<void>();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, e.what()};
+    }
 }
 
 // Build/repair knowledge graph using tags/metadata (non-destructive)

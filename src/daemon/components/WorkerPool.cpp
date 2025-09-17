@@ -2,6 +2,11 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
+#if defined(TRACY_ENABLE)
+#include <tracy/Tracy.hpp>
+#endif
 #include <boost/asio/executor_work_guard.hpp>
 
 namespace yams::daemon {
@@ -47,6 +52,9 @@ void WorkerPool::stop() {
 void WorkerPool::run_thread(yams::compat::stop_token st) {
     using namespace std::chrono_literals;
     try {
+#if defined(TRACY_ENABLE)
+        ZoneScopedN("WorkerPool::run_thread");
+#endif
         for (;;) {
             if (st.stop_requested())
                 break;
@@ -55,14 +63,9 @@ void WorkerPool::run_thread(yams::compat::stop_token st) {
             if (act > target && target > 0) {
                 break; // shrink: allow this thread to exit
             }
-#if defined(BOOST_ASIO_HAS_CO_AWAIT) || 1
-            // Attempt timed run to periodically check exit conditions.
-            // Use a longer wait to minimize idle CPU wakeups.
-            io_.run_for(250ms);
-#else
-            io_.poll_one();
-            std::this_thread::sleep_for(250ms);
-#endif
+            // Use run_for to process events efficiently for a short duration
+            // without busy-waiting, then re-check stop conditions.
+            io_.run_for(100ms);
         }
     } catch (const std::exception& e) {
         spdlog::warn("WorkerPool thread exited: {}", e.what());

@@ -210,6 +210,28 @@ worker_threads = 0
 max_memory_gb = 0
 # Log level for daemon background service (trace|debug|info|warn|error)
 log_level = "info"
+# Prefer centralized tuning (TuningManager); set to true only if you need legacy in-loop tuner
+# use_legacy_tuner = false
+
+# Centralized tuning knobs (advanced): defaults are safe; uncomment to override
+[tuning]
+# backpressure_read_pause_ms = 5
+# worker_poll_ms = 150
+# idle_cpu_pct = 10.0
+# idle_mux_low_bytes = 4194304
+# idle_shrink_hold_ms = 5000
+# aggressive_idle_shrink = false
+# pool_cooldown_ms = 500
+# pool_scale_step = 1
+# pool_ipc_min = 1
+# pool_ipc_max = 32
+# pool_io_min = 1
+# pool_io_max = 32
+# stream_mux_very_high_bytes = 268435456   # 256 MiB
+# stream_mux_high_bytes = 134217728        # 128 MiB
+# stream_mux_light1_bytes = 8388608        # 8 MiB
+# stream_mux_light2_bytes = 33554432       # 32 MiB
+# stream_mux_light3_bytes = 67108864       # 64 MiB
 
 # Notes:
 # - When [embeddings].enable = false, the daemon automatically disables the model provider

@@ -2565,6 +2565,9 @@ struct StatusResponse {
     int64_t muxQueuedBytes = 0;
     uint64_t muxWriterBudgetBytes = 0;
     uint32_t retryAfterMs = 0; // optional backpressure hint
+    // Centralized tuning pool sizes (from FSM metrics via TuningManager)
+    uint32_t ipcPoolSize{0};
+    uint32_t ioPoolSize{0};
     std::map<std::string, size_t> requestCounts;
 
     // Readiness state tracking (new fields)
@@ -2763,6 +2766,9 @@ struct StatusResponse {
         ser << embeddingAvailable << embeddingBackend << embeddingModel << embeddingModelPath
             << static_cast<uint32_t>(embeddingDim) << static_cast<int32_t>(embeddingThreadsIntra)
             << static_cast<int32_t>(embeddingThreadsInter);
+
+        // Serialize centralized tuning pool sizes
+        ser << static_cast<uint32_t>(ipcPoolSize) << static_cast<uint32_t>(ioPoolSize);
     }
 
     template <typename Deserializer>
@@ -3014,6 +3020,16 @@ struct StatusResponse {
         if (!ej)
             return ej.error();
         res.embeddingThreadsInter = ej.value();
+
+        // Centralized tuning pool sizes
+        auto ipcSz = deser.template read<uint32_t>();
+        if (!ipcSz)
+            return ipcSz.error();
+        res.ipcPoolSize = ipcSz.value();
+        auto ioSz = deser.template read<uint32_t>();
+        if (!ioSz)
+            return ioSz.error();
+        res.ioPoolSize = ioSz.value();
 
         return res;
     }

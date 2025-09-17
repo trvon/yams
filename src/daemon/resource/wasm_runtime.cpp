@@ -87,7 +87,16 @@ WasmRuntime::WasmRuntime() : pImpl_(std::make_unique<Impl>()) {
                     pImpl_->epoch_counter.fetch_add(1, std::memory_order_relaxed);
                 } catch (...) {
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // Use centralized tuning cadence to avoid CPU busy-wait
+                uint32_t ms = 0;
+                try {
+                    // Worker poll cadence is a reasonable low-overhead default for epoch ticks
+                    ms = yams::daemon::TuneAdvisor::workerPollMs();
+                } catch (...) {
+                }
+                if (ms == 0)
+                    ms = 50; // conservative fallback
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
             }
         });
     } catch (...) {

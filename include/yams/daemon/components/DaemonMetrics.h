@@ -47,6 +47,9 @@ struct MetricsSnapshot {
     int64_t muxQueuedBytes{0};
     uint64_t muxWriterBudgetBytes{0};
     uint32_t retryAfterMs{0};
+    // Tuning pool sizes (via FSM metrics)
+    uint32_t ipcPoolSize{0};
+    uint32_t ioPoolSize{0};
 
     // Worker pool
     std::size_t workerThreads{0};

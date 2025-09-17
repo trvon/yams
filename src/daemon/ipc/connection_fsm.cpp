@@ -1,6 +1,6 @@
 // Adapter implementation kept private; headers remain minimal and 3P-free.
 #include <yams/daemon/ipc/connection_fsm.h>
-#include <yams/daemon/ipc/resource_tuner.h>
+
 #include <yams/daemon/ipc/socket_utils.h>
 
 #include <spdlog/spdlog.h>
@@ -586,8 +586,6 @@ void ConnectionFsm::on_timeout(Operation op) {
     }
     // Retry policy: if operation timer armed and retries left, re-arm and continue in-place
     if (auto* impl = impl_.get()) {
-        // Notify resource tuner of timeout
-        ResourceTuner::instance().onTimeout("ipc");
         if (impl->op_armed && impl->retries < static_cast<int>(impl->cfg.max_retries)) {
             impl->retries++;
             impl->metrics.retries_total++;
@@ -737,9 +735,6 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
             spdlog::debug("ConnectionFsm: backpressure {} (bytes={}, cap={}, state={})",
                           impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
                           to_string(state_));
-            ResourceTuner::instance().onBackpressureFlip("ipc", impl->backpressured);
-            // Also signal a distinct IO component for SocketServer autoscaling
-            ResourceTuner::instance().onBackpressureFlip("ipc_io", impl->backpressured);
         }
     }
 }
@@ -764,8 +759,6 @@ void ConnectionFsm::on_write_flushed(std::size_t bytes) noexcept {
             spdlog::debug("ConnectionFsm: backpressure {} after flush (bytes={}, cap={}, state={})",
                           impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
                           to_string(state_));
-            ResourceTuner::instance().onBackpressureFlip("ipc", impl->backpressured);
-            ResourceTuner::instance().onBackpressureFlip("ipc_io", impl->backpressured);
         }
     }
 }

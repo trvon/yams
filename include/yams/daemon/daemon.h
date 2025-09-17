@@ -24,6 +24,7 @@ class RequestDispatcher;
 class DaemonMetrics;
 class RepairCoordinator;
 class SocketServer;
+class TuningManager; // centralized tuner (moved from ServiceManager)
 // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
 
 struct DaemonConfig {
@@ -114,6 +115,8 @@ public:
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
     std::unique_ptr<RepairCoordinator> repairCoordinator_;
+    // Tuning manager now owned by YamsDaemon to start early in lifecycle
+    std::unique_ptr<TuningManager> tuningManager_;
 
     // Lifecycle FSM (authoritative lifecycle state)
     DaemonLifecycleFsm lifecycleFsm_{};

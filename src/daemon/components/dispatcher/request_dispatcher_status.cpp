@@ -48,6 +48,9 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             res.muxActiveHandlers = snap.muxActiveHandlers;
             res.muxQueuedBytes = snap.muxQueuedBytes;
             res.muxWriterBudgetBytes = snap.muxWriterBudgetBytes;
+            // Pool sizes via FSM metrics (in DaemonMetrics snapshot)
+            res.ipcPoolSize = snap.ipcPoolSize;
+            res.ioPoolSize = snap.ioPoolSize;
             // Vector DB snapshot (best-effort)
             res.vectorDbInitAttempted = snap.vectorDbInitAttempted;
             res.vectorDbReady = snap.vectorDbReady;
@@ -206,6 +209,13 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
                     res.muxActiveHandlers = msnap.activeHandlers;
                     res.muxQueuedBytes = msnap.queuedBytes;
                     res.muxWriterBudgetBytes = msnap.writerBudgetBytes;
+                    // Pool sizes via FSM metrics
+                    try {
+                        auto fs = FsmMetricsRegistry::instance().snapshot();
+                        res.ipcPoolSize = fs.ipcPoolSize;
+                        res.ioPoolSize = fs.ioPoolSize;
+                    } catch (...) {
+                    }
                 }
             } catch (...) {
             }

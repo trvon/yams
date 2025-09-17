@@ -14,9 +14,10 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/connection_fsm.h>
-#include <yams/daemon/ipc/resource_tuner.h>
+
 #include <yams/daemon/resource/plugin_loader.h>
 
 #ifdef __linux__
@@ -154,6 +155,13 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get());
     requestDispatcher_ =
         std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_, metrics_.get());
+    // Prepare centralized tuning manager early; start it in start() before sockets/services
+    try {
+        tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_);
+        spdlog::debug("TuningManager constructed early in YamsDaemon");
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to construct TuningManager early: {}", e.what());
+    }
     state_.stats.startTime = std::chrono::steady_clock::now();
 
     spdlog::info("Daemon configuration resolved:");
@@ -219,6 +227,18 @@ Result<void> YamsDaemon::start() {
     if (auto result = lifecycleManager_->initialize(); !result) {
         running_ = false;
         return result;
+    }
+
+    // Start centralized tuning BEFORE accepting connections or initializing services
+    try {
+        if (tuningManager_) {
+            tuningManager_->start();
+            spdlog::info("TuningManager started (early)");
+        } else {
+            spdlog::warn("TuningManager not available; skipping start");
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to start TuningManager early: {}", e.what());
     }
 
     // Transition to Initializing as soon as core lifecycle is bootstrapped,
@@ -296,9 +316,10 @@ Result<void> YamsDaemon::start() {
         spdlog::debug("Daemon main loop started.");
         // Drive lifecycle FSM periodically
         lifecycleFsm_.tick();
-        // Allow tuning of the main loop tick for metrics refresh and readiness nudges
-        uint32_t tick_ms = TuneAdvisor::statusTickMs();
         while (!token.stop_requested() && !stopRequested_.load()) {
+            // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
+            // Read each iteration so env changes take effect without restart.
+            uint32_t tick_ms = TuneAdvisor::statusTickMs();
             std::unique_lock<std::mutex> lock(stop_mutex_);
             if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
                                   [&] { return stopRequested_.load(); })) {
@@ -310,20 +331,6 @@ Result<void> YamsDaemon::start() {
             try {
                 if (metrics_) {
                     metrics_->refresh();
-                    // Feed ResourceTuner with centralized metrics to adjust pools
-                    auto snap = metrics_->getSnapshot();
-                    std::uint64_t workerThreads = 0;
-                    try {
-                        workerThreads = static_cast<std::uint64_t>(
-                            serviceManager_ ? serviceManager_->getWorkerThreads() : 0);
-                    } catch (...) {
-                    }
-                    ResourceTuner::instance().updateLoadHints(
-                        snap.cpuUsagePercent,
-                        static_cast<std::uint64_t>(snap.muxQueuedBytes >= 0 ? snap.muxQueuedBytes
-                                                                            : 0),
-                        static_cast<std::uint64_t>(snap.workerQueued), workerThreads,
-                        static_cast<std::uint64_t>(snap.activeConnections));
                 }
             } catch (...) {
             }
@@ -472,6 +479,15 @@ Result<void> YamsDaemon::stop() {
         socketServer_->stop();
         socketServer_.reset();
         state_.readiness.ipcServerReady = false;
+    }
+
+    // Stop tuning manager to cease pool adjustments before tearing down services
+    if (tuningManager_) {
+        try {
+            tuningManager_->stop();
+        } catch (...) {
+        }
+        tuningManager_.reset();
     }
 
     stopRequested_ = true;

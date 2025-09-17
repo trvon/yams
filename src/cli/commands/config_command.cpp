@@ -342,11 +342,25 @@ private:
                 }
             }
 
-            // For now, just display what would be set
-            std::cout << "Would set " << key_ << " = " << value_ << "\n";
-            std::cout << "Note: Config modification not yet fully implemented.\n";
-            std::cout << "Please edit " << configPath << " manually.\n";
+            // Basic numeric validation for tuning keys where applicable
+            if (key_.starts_with("tuning.")) {
+                auto k = key_.substr(std::string("tuning.").size());
+                auto is_number = [&](const std::string& s) {
+                    if (s.empty())
+                        return false;
+                    char* end = nullptr;
+                    std::strtod(s.c_str(), &end);
+                    return end && *end == '\0';
+                };
+                if (!is_number(value_)) {
+                    return Error{ErrorCode::InvalidArgument, "tuning value must be numeric"};
+                }
+            }
 
+            auto res = writeConfigValue(key_, value_);
+            if (!res)
+                return res;
+            std::cout << "✓ Updated " << key_ << " = " << value_ << " in " << configPath << "\n";
             return Result<void>();
 
         } catch (const std::exception& e) {

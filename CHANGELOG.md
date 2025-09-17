@@ -17,8 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 - Daemon may show broken connection with rapid CLI/MCP usage
-- Embeddings generation consumes all of daemon IPC bandwidth. This will become immediately apparent after the onnx plugin is loaded with `yams plugin load onnx`. The system will attempt to generate all missing embeddings.
-- We have noticed high CPU usage of the daemon when idling. We will continue to investigate and optimize this issue.
+
+## [v0.6.37] - 2025-09-17
+
+### Hotfixes
+- **Daemon Stability:** Fixed a critical race condition in the SHA256 hasher that could cause the daemon to crash with a `SIGSEGV` during concurrent file ingestion.
+- Bounded IO pool (`ipc_io`) to prevent CPU spikes on initial activity:
+  - Growth gate now requires either high mux backlog OR `activeConn > ioThreads * ioConnPerThread`.
+  - Dynamic max: `ipc_io.max = min([tuning].pool_io_max, TuneAdvisor::recommendedThreads(0.5))`.
+  - StatusResponse now includes `ipcPoolSize` and `ioPoolSize` for quick verification.
+- Early tuner start: `TuningManager` now starts before sockets/services to avoid the race where
+  the daemon accepted work without centralized tuning active.
+- Tracy zones: added lightweight zones around TuningManager loop/tick, WorkerPool threads, and
+  SocketServer accept/connection to profile remaining hotspots on demand.
+- Portability: snapshot registries switched to `atomic_load/store` free functions for `shared_ptr`
+  to fix libc++ build errors (no `std::atomic<std::shared_ptr<...>>`).
+
+### Updated Config guidance
+- Suggested `[tuning]` while validating:
+  - `pool_io_max = 4`, `io_conn_per_thread = 16`, `pool_cooldown_ms >= 750`.
+  - Validate using `ipcPoolSize`/`ioPoolSize` in status; pools should grow gradually and shrink at idle.
+  - Capture a 5–10s trace with Tracy to identify any remaining hot loops.
 
 ## [v0.6.36] - 2025-09-16
 

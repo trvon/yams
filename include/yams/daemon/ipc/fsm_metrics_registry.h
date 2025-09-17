@@ -45,6 +45,9 @@ public:
         uint64_t payloadWrites{0};
         uint64_t bytesSent{0};
         uint64_t bytesReceived{0};
+        uint32_t ipcPoolSize{0};
+        uint32_t ioPoolSize{0};
+        uint64_t writerBudgetBytes{0};
 
         // Merge another snapshot into this one
         inline void merge(const Snapshot& other) noexcept {
@@ -54,6 +57,9 @@ public:
             payloadWrites += other.payloadWrites;
             bytesSent += other.bytesSent;
             bytesReceived += other.bytesReceived;
+            ipcPoolSize = other.ipcPoolSize; // last-writer wins (snapshots are periodic)
+            ioPoolSize = other.ioPoolSize;
+            writerBudgetBytes = other.writerBudgetBytes;
         }
     };
 
@@ -114,6 +120,9 @@ public:
             out.bytesSent += s.bytesSent.load(std::memory_order_acquire);
             out.bytesReceived += s.bytesReceived.load(std::memory_order_acquire);
         }
+        out.ipcPoolSize = ipcPoolSize_.load(std::memory_order_acquire);
+        out.ioPoolSize = ioPoolSize_.load(std::memory_order_acquire);
+        out.writerBudgetBytes = writerBudgetBytes_.load(std::memory_order_acquire);
         return out;
     }
 
@@ -127,6 +136,20 @@ public:
             s.bytesSent.store(0, std::memory_order_release);
             s.bytesReceived.store(0, std::memory_order_release);
         }
+        ipcPoolSize_.store(0, std::memory_order_release);
+        ioPoolSize_.store(0, std::memory_order_release);
+        writerBudgetBytes_.store(0, std::memory_order_release);
+    }
+
+    // Tuning/Pool stats exposed to FSM consumers (status/doctor)
+    inline void setIpcPoolSize(uint32_t n) noexcept {
+        ipcPoolSize_.store(n, std::memory_order_relaxed);
+    }
+    inline void setIoPoolSize(uint32_t n) noexcept {
+        ioPoolSize_.store(n, std::memory_order_relaxed);
+    }
+    inline void setWriterBudgetBytes(uint64_t n) noexcept {
+        writerBudgetBytes_.store(n, std::memory_order_relaxed);
     }
 
 private:
@@ -171,6 +194,9 @@ private:
 private:
     std::atomic<bool> enabled_;
     std::array<Shard, kDefaultShards> shards_{};
+    std::atomic<uint32_t> ipcPoolSize_{0};
+    std::atomic<uint32_t> ioPoolSize_{0};
+    std::atomic<uint64_t> writerBudgetBytes_{0};
 };
 
 } // namespace daemon

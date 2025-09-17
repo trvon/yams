@@ -12,6 +12,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -20,6 +21,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #ifdef YAMS_USE_ONNX_RUNTIME
 #include <onnxruntime_cxx_api.h>
@@ -1225,23 +1227,50 @@ private:
 // Local awaitable bridge (build-only) to await daemon calls without legacy async_bridge
 template <typename T, typename MakeAwaitable>
 static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
-    std::promise<yams::Result<T>> prom;
-    auto fut = prom.get_future();
+    auto shared_promise = std::make_shared<std::promise<yams::Result<T>>>();
+    auto fut = shared_promise->get_future();
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+
     boost::asio::co_spawn(
         boost::asio::system_executor{},
-        [m = std::forward<MakeAwaitable>(make), &prom]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await m();
-            prom.set_value(std::move(r));
+        [state = shared_promise, completed,
+         maker = std::forward<MakeAwaitable>(make)]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto result = co_await maker();
+                if (!completed->exchange(true)) {
+                    state->set_value(std::move(result));
+                }
+            } catch (const std::exception& ex) {
+                if (!completed->exchange(true)) {
+                    state->set_value(yams::Error{yams::ErrorCode::Unknown,
+                                                 std::string("await exception: ") + ex.what()});
+                }
+            } catch (...) {
+                if (!completed->exchange(true)) {
+                    state->set_value(yams::Error{yams::ErrorCode::Unknown, "await exception"});
+                }
+            }
             co_return;
         },
         boost::asio::detached);
+
     if (timeout.count() > 0) {
-        if (fut.wait_for(timeout) != std::future_status::ready) {
+        const auto status = fut.wait_for(timeout);
+        if (status != std::future_status::ready) {
+            if (!completed->exchange(true)) {
+                try {
+                    shared_promise->set_value(
+                        yams::Error{yams::ErrorCode::Timeout, "await timeout"});
+                } catch (...) {
+                    // ignore double set_value races
+                }
+            }
             return yams::Error{yams::ErrorCode::Timeout, "await timeout"};
         }
     } else {
         fut.wait();
     }
+
     return fut.get();
 }
 
@@ -1793,7 +1822,7 @@ public:
         }
 
         try {
-            // Initialize concurrency cap from environment once per process
+            // Initialize concurrency cap once per process (TuneAdvisor-aware)
             ConcurrencyGuard::init_from_env_once();
             if (!backend_) {
                 setError("No backend configured");
@@ -1957,15 +1986,23 @@ private:
         static void init_from_env_once() {
             static std::once_flag once;
             std::call_once(once, []() {
-                int def = std::max(2u, std::thread::hardware_concurrency());
-                int cap = def;
+                int cap = 0;
+                // Prefer centralized TuneAdvisor when available
                 try {
-                    if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
-                        int v = std::stoi(s);
-                        if (v > 0 && v < 1024)
-                            cap = v;
-                    }
+                    cap = static_cast<int>(yams::daemon::TuneAdvisor::embedMaxConcurrency());
                 } catch (...) {
+                }
+                if (cap <= 0) {
+                    int def = std::max(2u, std::thread::hardware_concurrency());
+                    cap = def;
+                    try {
+                        if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
+                            int v = std::stoi(s);
+                            if (v > 0 && v < 1024)
+                                cap = v;
+                        }
+                    } catch (...) {
+                    }
                 }
                 g_max_concurrency_.store(cap, std::memory_order_relaxed);
                 spdlog::info("EmbeddingGenerator: max concurrency set to {}", cap);

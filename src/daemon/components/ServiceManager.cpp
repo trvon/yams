@@ -38,6 +38,7 @@
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/plugin_loader.h>
+#include <yams/detection/file_type_detector.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -134,6 +135,20 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         } catch (...) {
         }
 #endif
+        // Initialize worker pool early at a conservative minimum; TuningManager will scale up.
+        try {
+            if (!workerPool_) {
+                auto threads = static_cast<std::size_t>(TuneAdvisor::poolMinSizeIpc());
+                if (threads < 1)
+                    threads = 1;
+                workerPool_ = std::make_shared<WorkerPool>(threads);
+                poolThreads_ = threads;
+                spdlog::info("WorkerPool initialized with {} threads", threads);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to initialize WorkerPool: {} (will use system executor)",
+                         e.what());
+        }
         // Initialize plugin hosts early so that environment-driven trust (YAMS_PLUGIN_DIR)
         // can be applied before autoload attempts. Previously abiHost_ was never constructed,
         // causing autoloadPluginsNow() to scan zero ABI roots and load 0 plugins.
@@ -278,6 +293,13 @@ yams::Result<void> ServiceManager::initialize() {
     } catch (...) {
     }
 
+    // Ensure file type detector is initialized once before background workers start.
+    try {
+        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+    } catch (...) {
+        // Non-fatal: detector will remain with built-in fallbacks
+    }
+
     // Start background resource initialization (coroutine-based)
     initThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
         spdlog::info("Starting async resource initialization (coroutine)...");
@@ -302,6 +324,35 @@ yams::Result<void> ServiceManager::initialize() {
     // Wait a short time for critical services to come up
     // This ensures the daemon can at least respond to status requests
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Configure PoolManager defaults from TuneAdvisor for known components
+    try {
+        PoolManager::Config ipcCfg{};
+        ipcCfg.min_size = TuneAdvisor::poolMinSizeIpc();
+        ipcCfg.max_size = TuneAdvisor::poolMaxSizeIpc();
+        ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
+        ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
+        ipcCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
+        PoolManager::instance().configure("ipc", ipcCfg);
+
+        PoolManager::Config ioCfg{};
+        ioCfg.min_size = TuneAdvisor::poolMinSizeIpcIo();
+        // Bound IO max by both configured max and a dynamic cap from CPU budget
+        try {
+            auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
+            ioCfg.max_size = std::min(TuneAdvisor::poolMaxSizeIpcIo(), dynCap);
+        } catch (...) {
+            ioCfg.max_size = TuneAdvisor::poolMaxSizeIpcIo();
+        }
+        ioCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
+        ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
+        ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
+        PoolManager::instance().configure("ipc_io", ioCfg);
+        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}]",
+                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
+    } catch (const std::exception& e) {
+        spdlog::debug("PoolManager configure error: {}", e.what());
+    }
 
     // Sanity check: if dependencies are ready but searchExecutor_ not initialized
     if (state_.readiness.databaseReady.load() && state_.readiness.metadataRepoReady.load() &&
@@ -877,9 +928,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Phase: Connection pool + repo
     if (db_ok) {
         metadata::ConnectionPoolConfig dbPoolCfg;
-        size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-        dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(4, hw / 2), 16);
-        dbPoolCfg.maxConnections = 64;
+        // Size DB pool based on centralized tuning (avoid large bursts at startup)
+        size_t rec = 4;
+        try {
+            rec = std::max<size_t>(1, yams::daemon::TuneAdvisor::recommendedThreads(0.25));
+        } catch (...) {
+            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+            rec = std::max<size_t>(1, hw / 2);
+        }
+        dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(2, rec), 8);
+        dbPoolCfg.maxConnections = 32;
         if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
             try {
                 auto v = static_cast<size_t>(std::stoul(envMax));
@@ -933,9 +991,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             taThreads = TA::postIngestThreads();
         } catch (...) {
         }
-        unsigned hw = std::thread::hardware_concurrency();
         std::size_t threads = taThreads ? static_cast<std::size_t>(taThreads)
-                                        : std::clamp<std::size_t>(hw ? (hw / 8u) : 1u, 1u, 4u);
+                                        : static_cast<std::size_t>(TA::postIngestThreads());
         // Initialize KG store on daemon side using connection pool if available
         std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
         try {
@@ -1615,6 +1672,28 @@ boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
     return boost::asio::system_executor();
 }
 
+bool ServiceManager::resizeWorkerPool(std::size_t target) {
+    try {
+        if (target == 0)
+            target = 1;
+        if (!workerPool_) {
+            workerPool_ = std::make_shared<WorkerPool>(target);
+            poolThreads_ = target;
+            spdlog::info("WorkerPool created with {} threads", target);
+            return true;
+        }
+        bool changed = workerPool_->resize(target);
+        if (changed) {
+            poolThreads_ = target;
+            spdlog::info("WorkerPool resized to {} threads", target);
+        }
+        return changed;
+    } catch (const std::exception& e) {
+        spdlog::warn("resizeWorkerPool error: {}", e.what());
+        return false;
+    }
+}
+
 Result<size_t> ServiceManager::autoloadPluginsNow() {
     try {
         // In mock/test mode, skip scanning/loading ABI plugins entirely to avoid
@@ -2175,6 +2254,23 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
         }
 
         clearModelProviderError();
+        // Ensure only the selected model remains loaded in the provider
+        try {
+            if (modelProvider_) {
+                auto loaded = modelProvider_->getLoadedModels();
+                for (const auto& name : loaded) {
+                    if (name != preferred) {
+                        auto ur = modelProvider_->unloadModel(name);
+                        if (!ur) {
+                            spdlog::debug("Unload extra model '{}' failed: {}", name,
+                                          ur.error().message);
+                        }
+                    }
+                }
+            }
+        } catch (...) {
+        }
+
         // Create and initialize embedding generator, bound to the provider-loaded model via daemon
         // backend. Use provider-reported dimensions to ensure downstream vector DB/index alignment.
         try {
@@ -2210,6 +2306,13 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
                     embeddingGenerator_.reset();
                     return Error{ErrorCode::InternalError,
                                  "Failed to initialize embedding generator"};
+                }
+            }
+            // Gracefully shutdown any previous generator before replacement
+            if (embeddingGenerator_) {
+                try {
+                    embeddingGenerator_->shutdown();
+                } catch (...) {
                 }
             }
             embeddingGenerator_ = std::move(eg);
@@ -2248,6 +2351,21 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorFor(const std::string& mode
             }
         } catch (...) {
         }
+        // Ensure only the selected model remains loaded in the provider
+        try {
+            auto loaded = modelProvider_->getLoadedModels();
+            for (const auto& name : loaded) {
+                if (name != modelName) {
+                    auto ur = modelProvider_->unloadModel(name);
+                    if (!ur) {
+                        spdlog::debug("Unload extra model '{}' failed: {}", name,
+                                      ur.error().message);
+                    }
+                }
+            }
+        } catch (...) {
+        }
+
         vector::EmbeddingConfig ecfg;
         ecfg.backend = vector::EmbeddingConfig::Backend::Daemon;
         ecfg.model_name = modelName;
@@ -2261,6 +2379,13 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorFor(const std::string& mode
             modelProviderDegraded_.store(true, std::memory_order_relaxed);
             lastModelError_ = "embedding_generator_init_failed";
             return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
+        }
+        // Gracefully shutdown any previous generator before replacement
+        if (embeddingGenerator_) {
+            try {
+                embeddingGenerator_->shutdown();
+            } catch (...) {
+            }
         }
         embeddingGenerator_ = std::move(eg);
         clearModelProviderError();

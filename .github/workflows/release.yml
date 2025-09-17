@@ -10,6 +10,10 @@ on:
         description: "Release channel (stable|weekly|nightly)"
         required: false
         default: "nightly"
+      upload_r2:
+        description: "Also upload built assets to Cloudflare R2 via Wrangler"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -799,32 +803,51 @@ jobs:
           cat SHA256SUMS >&2
 
       - name: Install Wrangler CLI
+        if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' }}
         shell: bash
         run: |
           npm i -g wrangler
 
       - name: Upload assets to Cloudflare R2 (Wrangler)
+        if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ENDPOINT: ${{ secrets.CLOUDFLARE_ENDPOINT }}
           R2_PREFIX: ${{ secrets.R2_PREFIX }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         shell: bash
         run: |
           set -euo pipefail
           cd assets
-          # Derive bucket name from Worker wrangler.toml if not provided via secrets
-          BUCKET=$(sed -n 's/^bucket_name\s*=\s*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
+          # Resolve bucket name: prefer secret R2_BUCKET, else parse wrangler.toml if present
+          BUCKET="${R2_BUCKET:-}"
+          if [ -z "$BUCKET" ] && [ -f "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" ]; then
+            BUCKET=$(sed -n 's/^bucket_name\s*=\s*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
+          fi
           if [ -z "$BUCKET" ]; then
-            echo "ERROR: Unable to determine R2 bucket name; set R2_PREFIX or define bucket_name in wrangler.toml" >&2
-            exit 1
+            echo "Skipping R2 upload: no R2_BUCKET secret and wrangler.toml missing or without bucket_name." >&2
+            exit 0
           fi
           echo "Uploading to R2 bucket: $BUCKET (prefix='${R2_PREFIX:-}')"
           # Upload distributable assets
           shopt -s nullglob
           for f in *.tar.gz *.zip *.deb *.rpm *.AppImage; do
             [ -f "$f" ] || continue
-            wrangler r2 object put "${BUCKET}/${R2_PREFIX:-}${f}" --file="$f"
+            case "$f" in
+              *.deb)
+                DEST="${BUCKET}/${R2_PREFIX:-}apt/${f}"
+                wrangler r2 object put "$DEST" --file="$f" --content-type application/vnd.debian.binary-package
+                ;;
+              *.rpm)
+                DEST="${BUCKET}/${R2_PREFIX:-}yum/${f}"
+                wrangler r2 object put "$DEST" --file="$f" --content-type application/x-rpm
+                ;;
+              *)
+                DEST="${BUCKET}/${R2_PREFIX:-}${f}"
+                wrangler r2 object put "$DEST" --file="$f"
+                ;;
+            esac
           done
           # Upload latest.json with JSON content-type
           if [ -f latest.json ]; then

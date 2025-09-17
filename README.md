@@ -64,7 +64,7 @@ echo hello | yams add - --tags demo
 yams search hello --limit 5
 
 # get
-yams list --format minimal --limit 1 | xargs yams get
+yams list --format minimal --limit 1 
 ```
 
 ## CLI Cheat Sheet
@@ -73,25 +73,13 @@ yams list --format minimal --limit 1 | xargs yams get
 yams --data-dir /tmp/yams add -
 
 # list (minimal for pipes)
-yams list --format minimal | head -3
+yams list --format minimal
 
 # fuzzy search
 yams search database --fuzzy --similarity 0.8
 
 # delete preview
 yams delete --pattern "*.log" --dry-run
-```
-
-## LLM‑Friendly Patterns
-```bash
-# cache web content
-curl -s https://example.com | yams add - --tags web,cache --name example.html
-
-# stash code diffs
-git diff | yams add - --tags git,diff,$(date +%Y%m%d)
-
-# chain search -> get
-hash=$(yams search "topic" --format minimal | head -1); yams get "$hash"
 ```
 
 ## Plugins (ONNX Provider)

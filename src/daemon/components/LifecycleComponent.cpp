@@ -1,12 +1,75 @@
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <csignal>
+#include <future>
+#include <thread>
 #include <unistd.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
 
-namespace yams::daemon {
+namespace {
+
+using yams::Error;
+using yams::ErrorCode;
+using yams::Result;
+using yams::daemon::ClientConfig;
+using yams::daemon::DaemonClient;
+using yams::daemon::GlobalIOContext;
+
+Result<void> sendShutdownRequest(const ClientConfig& cfg, std::chrono::milliseconds timeout) {
+    auto promise = std::make_shared<std::promise<Result<void>>>();
+    auto future = promise->get_future();
+
+    try {
+        auto& io = GlobalIOContext::instance().get_io_context();
+        boost::asio::co_spawn(
+            io,
+            [cfg, promise]() -> boost::asio::awaitable<void> {
+                try {
+                    DaemonClient client(cfg);
+                    auto connected = co_await client.connect();
+                    if (!connected) {
+                        promise->set_value(connected.error());
+                        co_return;
+                    }
+                    auto result = co_await client.shutdown(true);
+                    promise->set_value(result);
+                } catch (const std::exception& e) {
+                    promise->set_value(Error{ErrorCode::InternalError,
+                                             std::string("Shutdown RPC exception: ") + e.what()});
+                } catch (...) {
+                    promise->set_value(
+                        Error{ErrorCode::InternalError, "Shutdown RPC threw unknown exception"});
+                }
+                co_return;
+            },
+            boost::asio::detached);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to dispatch shutdown RPC: ") + e.what()};
+    }
+
+    if (timeout.count() > 0) {
+        if (future.wait_for(timeout) != std::future_status::ready) {
+            return Error{ErrorCode::Timeout, "Shutdown request timed out"};
+        }
+    } else {
+        future.wait();
+    }
+    return future.get();
+}
+
+} // namespace
+
+namespace yams {
+namespace daemon {
 
 // Initialize static member for signal handler
 LifecycleComponent* LifecycleComponent::instance_ = nullptr;
@@ -21,29 +84,48 @@ LifecycleComponent::~LifecycleComponent() {
 
 Result<void> LifecycleComponent::initialize() {
     if (isAnotherInstanceRunning()) {
-        // If aggressive mode is enabled, try to terminate the other process and continue.
-        if (aggressiveModeEnabled()) {
-            spdlog::warn("Another daemon instance detected. Aggressive mode enabled, attempting to "
-                         "terminate it.");
-            pid_t pid{};
-            if (readPidFromFile(pid) && pid > 0) {
-                if (auto term = terminateProcess(pid); !term) {
-                    return term; // propagate error
+        pid_t existingPid = 0;
+        bool havePid = readPidFromFile(existingPid);
+        bool anotherStopped = false;
+        if (havePid && existingPid > 0) {
+            anotherStopped = requestExistingDaemonShutdown(existingPid);
+        } else {
+            spdlog::warn("Could not read PID from file '{}' while checking existing daemon.",
+                         pidFile_.string());
+        }
+
+        if (!anotherStopped) {
+            if (aggressiveModeEnabled()) {
+                spdlog::warn(
+                    "Another daemon instance detected. Aggressive mode enabled, attempting to "
+                    "terminate it.");
+                if (!havePid || existingPid <= 0) {
+                    havePid = readPidFromFile(existingPid);
+                }
+                if (havePid && existingPid > 0) {
+                    if (auto term = terminateProcess(existingPid); !term) {
+                        return term; // propagate error
+                    }
+                } else {
+                    spdlog::warn(
+                        "Could not read PID from file '{}', will attempt to remove stale file.",
+                        pidFile_.string());
+                }
+
+                // Remove PID file if present (stale or after termination)
+                if (auto rm = removePidFile(); !rm) {
+                    return rm;
                 }
             } else {
-                spdlog::warn(
-                    "Could not read PID from file '{}', will attempt to remove stale file.",
-                    pidFile_.string());
+                return Error{ErrorCode::InvalidState,
+                             "Another daemon instance is already running, check PID file: " +
+                                 pidFile_.string()};
             }
-
-            // Remove PID file if present (stale or after termination)
+        } else {
+            // Ensure stale PID file is cleared before continuing.
             if (auto rm = removePidFile(); !rm) {
                 return rm;
             }
-        } else {
-            return Error{ErrorCode::InvalidState,
-                         "Another daemon instance is already running, check PID file: " +
-                             pidFile_.string()};
         }
     }
 
@@ -106,8 +188,18 @@ bool LifecycleComponent::isAnotherInstanceRunning() const {
     flock(fd, LOCK_UN);
     close(fd);
 
-    if (pid > 0 && kill(pid, 0) == 0) {
-        return true; // Process with that PID exists.
+    if (pid > 0) {
+        if (kill(pid, 0) == 0) {
+            return true; // Process with that PID exists.
+        }
+
+        if (errno == EPERM) {
+            // Process exists but we lack permission to signal it; treat as running.
+            spdlog::warn("PID {} appears to be running but is owned by another user (EPERM)."
+                         " Leaving PID file in place.",
+                         pid);
+            return true;
+        }
     }
 
     // If we are here, the PID file is stale.
@@ -223,21 +315,21 @@ bool LifecycleComponent::readPidFromFile(pid_t& outPid) const {
 }
 
 Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
-    // Try graceful shutdown first
+    if (pid <= 0) {
+        return Result<void>();
+    }
+
     if (kill(pid, SIGTERM) == -1) {
         if (errno == ESRCH) {
-            return Result<void>(); // already gone
+            return Result<void>();
         }
         spdlog::warn("Failed to send SIGTERM to PID {}: {}", pid, strerror(errno));
-    }
-    // Wait up to ~2 seconds for process to exit
-    constexpr int max_attempts = 20;
-    for (int i = 0; i < max_attempts; ++i) {
-        if (kill(pid, 0) == -1 && errno == ESRCH) {
-            return Result<void>(); // exited
+    } else {
+        if (waitForProcessExit(pid, std::chrono::seconds(3))) {
+            return Result<void>();
         }
-        usleep(100 * 1000); // 100ms
     }
+
     spdlog::warn("Process {} did not exit after SIGTERM, sending SIGKILL.", pid);
     if (kill(pid, SIGKILL) == -1) {
         if (errno == ESRCH) {
@@ -246,14 +338,56 @@ Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
         return Error{ErrorCode::InvalidState,
                      std::string("Failed to SIGKILL PID: ") + strerror(errno)};
     }
-    // Wait briefly to ensure it is gone
-    for (int i = 0; i < 10; ++i) {
-        if (kill(pid, 0) == -1 && errno == ESRCH) {
-            return Result<void>();
-        }
-        usleep(50 * 1000);
+
+    if (waitForProcessExit(pid, std::chrono::seconds(8))) {
+        return Result<void>();
     }
-    return Result<void>();
+
+    return Error{ErrorCode::Timeout, std::string("Failed to terminate PID ") + std::to_string(pid) +
+                                         ": still running after SIGKILL"};
+}
+
+bool LifecycleComponent::requestExistingDaemonShutdown(pid_t pid) const {
+    if (pid <= 0) {
+        return true;
+    }
+
+    ClientConfig cfg;
+    cfg.socketPath = daemon_->config_.socketPath;
+    cfg.autoStart = false;
+    cfg.connectTimeout = std::chrono::milliseconds(750);
+    cfg.requestTimeout = std::chrono::milliseconds(5000);
+    cfg.maxRetries = 1;
+
+    auto res = sendShutdownRequest(cfg, std::chrono::seconds(5));
+    if (!res) {
+        spdlog::warn("Existing daemon {} did not respond to shutdown request: {}", pid,
+                     res.error().message);
+        return false;
+    }
+
+    if (!waitForProcessExit(pid, std::chrono::seconds(10))) {
+        spdlog::warn("Daemon {} remained alive after shutdown RPC", pid);
+        return false;
+    }
+
+    spdlog::info("Existing daemon {} stopped gracefully via shutdown request", pid);
+    return true;
+}
+
+bool LifecycleComponent::waitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) const {
+    if (pid <= 0) {
+        return true;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (kill(pid, 0) == -1 && errno == ESRCH) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return (kill(pid, 0) == -1 && errno == ESRCH);
 }
 
 bool LifecycleComponent::aggressiveModeEnabled() {
@@ -271,4 +405,5 @@ bool LifecycleComponent::aggressiveModeEnabled() {
     return true;
 }
 
-} // namespace yams::daemon
+} // namespace daemon
+} // namespace yams

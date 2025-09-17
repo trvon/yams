@@ -11,6 +11,7 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/plugin_loader.h>
 
 // POSIX headers for daemonization
@@ -230,6 +231,72 @@ int main(int argc, char* argv[]) {
                     "Daemon configuration section not found in config file, using defaults");
                 // Enable model provider by default if plugins will be loaded
                 config.enableModelProvider = config.autoLoadPlugins;
+            }
+
+            // Apply [tuning] overrides to TuneAdvisor if present
+            if (tomlConfig.find("tuning") != tomlConfig.end()) {
+                const auto& tune = tomlConfig.at("tuning");
+                auto as_int = [&](const char* k) -> std::optional<int> {
+                    auto it = tune.find(k);
+                    if (it == tune.end())
+                        return std::nullopt;
+                    try {
+                        return std::stoi(it->second);
+                    } catch (...) {
+                        return std::nullopt;
+                    }
+                };
+                auto as_u64 = [&](const char* k) -> std::optional<std::uint64_t> {
+                    auto it = tune.find(k);
+                    if (it == tune.end())
+                        return std::nullopt;
+                    try {
+                        return static_cast<std::uint64_t>(std::stoull(it->second));
+                    } catch (...) {
+                        return std::nullopt;
+                    }
+                };
+                auto as_dbl = [&](const char* k) -> std::optional<double> {
+                    auto it = tune.find(k);
+                    if (it == tune.end())
+                        return std::nullopt;
+                    try {
+                        return std::stod(it->second);
+                    } catch (...) {
+                        return std::nullopt;
+                    }
+                };
+                if (auto v = as_int("backpressure_read_pause_ms"))
+                    yams::daemon::TuneAdvisor::setBackpressureReadPauseMs(
+                        static_cast<uint32_t>(*v));
+                if (auto v = as_int("worker_poll_ms"))
+                    yams::daemon::TuneAdvisor::setWorkerPollMs(static_cast<uint32_t>(*v));
+                if (auto v = as_dbl("idle_cpu_pct"))
+                    yams::daemon::TuneAdvisor::setIdleCpuThresholdPercent(*v);
+                if (auto v = as_u64("idle_mux_low_bytes"))
+                    yams::daemon::TuneAdvisor::setIdleMuxLowBytes(*v);
+                if (auto v = as_int("idle_shrink_hold_ms"))
+                    yams::daemon::TuneAdvisor::setIdleShrinkHoldMs(static_cast<uint32_t>(*v));
+                if (auto v = as_int("pool_cooldown_ms"))
+                    yams::daemon::TuneAdvisor::setPoolCooldownMs(static_cast<uint32_t>(*v));
+                if (auto v = as_int("pool_scale_step"))
+                    yams::daemon::TuneAdvisor::setPoolScaleStep(*v);
+                if (auto v = as_int("pool_ipc_min"))
+                    yams::daemon::TuneAdvisor::setPoolMinSizeIpc(static_cast<uint32_t>(*v));
+                if (auto v = as_int("pool_ipc_max"))
+                    yams::daemon::TuneAdvisor::setPoolMaxSizeIpc(static_cast<uint32_t>(*v));
+                if (auto v = as_int("pool_io_min"))
+                    yams::daemon::TuneAdvisor::setPoolMinSizeIpcIo(static_cast<uint32_t>(*v));
+                if (auto v = as_int("pool_io_max"))
+                    yams::daemon::TuneAdvisor::setPoolMaxSizeIpcIo(static_cast<uint32_t>(*v));
+                if (auto it = tune.find("aggressive_idle_shrink"); it != tune.end()) {
+                    const auto& s = it->second;
+                    std::string v = s;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    bool en = (v == "1" || v == "true" || v == "on");
+                    yams::daemon::TuneAdvisor::setAggressiveIdleShrinkEnabled(en);
+                }
             }
 
             // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
@@ -525,10 +592,15 @@ int main(int argc, char* argv[]) {
 
     // Coerce workers to a safe minimum if zero was configured
     if (config.workerThreads == 0) {
-        // Choose a reasonable default based on hardware, but never less than 1
-        auto hc = std::thread::hardware_concurrency();
-        config.workerThreads = (hc > 0 ? static_cast<size_t>(hc) : static_cast<size_t>(4));
-        spdlog::warn("--workers was 0; using {} worker thread(s) instead", config.workerThreads);
+        // Prefer centralized, hardware-aware recommendation (IO-friendly background factor)
+        try {
+            auto rec = yams::daemon::TuneAdvisor::recommendedThreads(0.25 /*backgroundFactor*/);
+            config.workerThreads = static_cast<size_t>(std::max(1u, rec));
+        } catch (...) {
+            auto hc = std::thread::hardware_concurrency();
+            config.workerThreads = (hc > 0 ? static_cast<size_t>(hc) : static_cast<size_t>(4));
+        }
+        spdlog::warn("--workers was 0; using {} IO worker thread(s) instead", config.workerThreads);
     }
 
     // Daemonize if not running in foreground

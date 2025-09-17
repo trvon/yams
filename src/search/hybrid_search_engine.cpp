@@ -517,6 +517,19 @@ public:
         }
         effective.normalizeWeights();
 
+        const size_t request_limit = std::max<size_t>(1, k);
+        const size_t baseline_final = std::max<size_t>(effective.final_top_k, request_limit);
+        const size_t desired_final = std::max(request_limit, baseline_final);
+        auto computeTopK = [&](size_t base) {
+            size_t scaled = std::max(base, desired_final * 3);
+            const size_t cap = desired_final + 500;
+            if (scaled > cap)
+                scaled = cap;
+            return std::max(scaled, desired_final);
+        };
+        const size_t vector_limit = computeTopK(effective.vector_top_k);
+        const size_t keyword_limit = computeTopK(effective.keyword_top_k);
+
         std::future<Result<std::vector<vector::SearchResult>>> vector_future;
         std::future<Result<std::vector<KeywordSearchResult>>> keyword_future;
 
@@ -528,22 +541,23 @@ public:
             // Launch searches in parallel honoring gates
             if (vector_enabled) {
                 auto nq = std::string(normalizedQuery);
-                auto flt = filter; // copy
-                vector_future = pool_.submit([this, nq, flt]() {
+                auto flt = filter;         // copy
+                auto limit = vector_limit; // copy for lambda capture
+                vector_future = pool_.submit([this, nq, flt, limit]() {
                     auto query_vector = generateQueryEmbedding(nq);
                     if (query_vector.empty()) {
                         return Result<std::vector<vector::SearchResult>>(
                             std::vector<vector::SearchResult>{});
                     }
-                    return vector_index_->search(query_vector, config_.vector_top_k, flt);
+                    return vector_index_->search(query_vector, limit, flt);
                 });
             }
             if (!env_disable_keyword) {
                 auto eq = std::string(expanded_query);
-                auto flt = filter; // copy
-                keyword_future = pool_.submit([this, eq, flt]() {
-                    return keyword_engine_->search(eq, config_.keyword_top_k, &flt);
-                });
+                auto flt = filter;          // copy
+                auto limit = keyword_limit; // copy for lambda capture
+                keyword_future = pool_.submit(
+                    [this, eq, flt, limit]() { return keyword_engine_->search(eq, limit, &flt); });
             }
         }
 
@@ -570,8 +584,7 @@ public:
                 // Generate embedding for normalized query
                 auto query_vector = generateQueryEmbedding(normalizedQuery);
                 if (!query_vector.empty()) {
-                    auto vector_result =
-                        vector_index_->search(query_vector, config_.vector_top_k, filter);
+                    auto vector_result = vector_index_->search(query_vector, vector_limit, filter);
                     if (vector_result.has_value()) {
                         vector_results = vector_result.value();
                     }
@@ -579,7 +592,7 @@ public:
             }
             if (!env_disable_keyword) {
                 auto keyword_result =
-                    keyword_engine_->search(expanded_query, config_.keyword_top_k, &filter);
+                    keyword_engine_->search(expanded_query, keyword_limit, &filter);
                 if (keyword_result.has_value()) {
                     keyword_results = keyword_result.value();
                 }
@@ -782,8 +795,8 @@ public:
                 if (config.enable_kg) {
                     auto it = last_kg_scores_.find(r.id);
                     if (it != last_kg_scores_.end()) {
-                        r.kg_entity_score = it->second.entity;
-                        r.structural_score = it->second.structural;
+                        r.kg_entity_score = std::clamp(it->second.entity, 0.0f, 1.0f);
+                        r.structural_score = std::clamp(it->second.structural, 0.0f, 1.0f);
                     }
                 }
                 // Merge metadata
@@ -811,12 +824,32 @@ public:
         std::unordered_map<std::string, HybridSearchResult> result_map;
         result_map.reserve(vector_results.size() + keyword_results.size());
 
+        std::unordered_map<std::string, float> normalized_vector_scores;
+        if (!vector_results.empty()) {
+            std::vector<float> raw_scores;
+            raw_scores.reserve(vector_results.size());
+            for (const auto& vr : vector_results) {
+                raw_scores.push_back(vr.similarity);
+            }
+            auto normalized = fusion::normalizeScores(raw_scores);
+            normalized_vector_scores.reserve(vector_results.size());
+            for (size_t i = 0; i < vector_results.size(); ++i) {
+                normalized_vector_scores.emplace(vector_results[i].id, normalized[i]);
+            }
+        }
+
         // Process vector results
         for (size_t i = 0; i < vector_results.size(); ++i) {
             const auto& vr = vector_results[i];
             auto& result = result_map[vr.id];
             result.id = vr.id;
-            result.vector_score = vr.similarity;
+            if (!normalized_vector_scores.empty()) {
+                auto itNorm = normalized_vector_scores.find(vr.id);
+                result.vector_score =
+                    itNorm != normalized_vector_scores.end() ? itNorm->second : vr.similarity;
+            } else {
+                result.vector_score = vr.similarity;
+            }
             result.vector_rank = i;
             result.found_by_vector = true;
             result.metadata = vr.metadata;
@@ -848,8 +881,8 @@ public:
             if (config.enable_kg) {
                 auto it = last_kg_scores_.find(id);
                 if (it != last_kg_scores_.end()) {
-                    result.kg_entity_score = it->second.entity;
-                    result.structural_score = it->second.structural;
+                    result.kg_entity_score = std::clamp(it->second.entity, 0.0f, 1.0f);
+                    result.structural_score = std::clamp(it->second.structural, 0.0f, 1.0f);
                 }
             }
 

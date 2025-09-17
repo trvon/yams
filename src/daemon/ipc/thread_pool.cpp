@@ -1,12 +1,18 @@
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/thread_pool.h>
 
 namespace yams::daemon {
 
 ThreadPool::ThreadPool(size_t num_threads) : state_(std::make_shared<ThreadPoolState>()) {
     if (num_threads == 0) {
-        num_threads = std::thread::hardware_concurrency();
-        if (num_threads == 0) {
-            num_threads = 4; // Fallback to 4 threads
+        // Prefer centralized, hardware-aware recommendation
+        try {
+            num_threads = static_cast<size_t>(yams::daemon::TuneAdvisor::recommendedThreads());
+        } catch (...) {
+            // Fallback to hardware_concurrency with a sane floor
+            num_threads = std::thread::hardware_concurrency();
+            if (num_threads == 0)
+                num_threads = 4; // conservative default
         }
     }
 

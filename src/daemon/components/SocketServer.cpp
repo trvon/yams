@@ -4,10 +4,14 @@
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
+#if defined(TRACY_ENABLE)
+#include <tracy/Tracy.hpp>
+#endif
 
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -120,6 +124,16 @@ Result<void> SocketServer::start() {
         // Start accept loop before spawning worker threads to ensure pending work exists
         co_spawn(io_context_, accept_loop(), detached);
 
+        // Clamp worker thread count to centralized recommendation to avoid oversubscription
+        try {
+            auto rec = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
+            if (rec > 0) {
+                config_.workerThreads = std::max<std::size_t>(
+                    1, std::min<std::size_t>(config_.workerThreads, static_cast<std::size_t>(rec)));
+            }
+        } catch (...) {
+        }
+
         // Start worker threads (exit-aware)
         for (size_t i = 0; i < config_.workerThreads; ++i) {
             auto flag = std::make_shared<std::atomic<bool>>(false);
@@ -128,20 +142,11 @@ Result<void> SocketServer::start() {
             w.th = std::thread([this, i, flag] {
                 set_current_thread_name("yams-ipc-worker-" + std::to_string(i));
                 try {
-                    // Periodically check for exit signal while processing IO
                     while (!stopping_.load(std::memory_order_relaxed) &&
                            !flag->load(std::memory_order_relaxed)) {
-                        // Process at least one handler, but wake up periodically
-                        // to observe the exit flag.
-                        // Post a no-op timer to bound the wait if idle.
-                        boost::asio::steady_timer timer(io_context_);
-                        timer.expires_after(std::chrono::milliseconds(100));
-                        timer.async_wait([](const boost::system::error_code&) {});
-                        io_context_.run_one();
-                        // Cancel timer if other work has advanced the loop
-                        boost::system::error_code ec;
-                        (void)ec;
-                        timer.cancel(ec);
+                        // Use run_for to efficiently process events for a short duration
+                        // before re-checking the stop flag. This avoids busy-spinning.
+                        io_context_.run_for(std::chrono::milliseconds(100));
                     }
                 } catch (const std::exception& e) {
                     spdlog::error("Worker thread exception: {}", e.what());
@@ -275,7 +280,16 @@ void SocketServer::start_io_reconciler() {
                                     while (!stopping_.load(std::memory_order_relaxed) &&
                                            !flag->load(std::memory_order_relaxed)) {
                                         boost::asio::steady_timer timer(io_context_);
-                                        timer.expires_after(std::chrono::milliseconds(100));
+                                        uint32_t poll_ms = 100;
+                                        try {
+                                            if (auto snap =
+                                                    TuningSnapshotRegistry::instance().get())
+                                                poll_ms = snap->workerPollMs;
+                                            else
+                                                poll_ms = TuneAdvisor::workerPollMs();
+                                        } catch (...) {
+                                        }
+                                        timer.expires_after(std::chrono::milliseconds(poll_ms));
                                         timer.async_wait([](const boost::system::error_code&) {});
                                         io_context_.run_one();
                                         boost::system::error_code ec;
@@ -332,6 +346,9 @@ awaitable<void> SocketServer::accept_loop() {
     spdlog::debug("Accept loop started");
 
     while (running_ && !stopping_) {
+#if defined(TRACY_ENABLE)
+        ZoneScopedN("SocketServer::accept_loop");
+#endif
         bool need_delay = false;
         auto backoff_ms = config_.acceptBackoffMs;
 
@@ -513,6 +530,9 @@ awaitable<void> SocketServer::accept_loop() {
 }
 
 awaitable<void> SocketServer::handle_connection(local::socket socket) {
+#if defined(TRACY_ENABLE)
+    ZoneScopedN("SocketServer::handle_connection");
+#endif
     // Ensure cleanup on exit
     struct CleanupGuard {
         SocketServer* server;
@@ -548,8 +568,8 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         handlerConfig.graceful_half_close = true;
         // Increase idle read timeout to 5 minutes to avoid dropping persistent CLI connections
         handlerConfig.read_timeout = std::chrono::seconds(300);
-        // More aggressive multiplexing by default; env overrides still apply in RequestHandler
-        handlerConfig.max_inflight_per_connection = 1024;
+        // Keep in sync with centralized serverMaxInflightPerConn
+        handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
         handlerConfig.writer_budget_bytes_per_turn = TuneAdvisor::writerBudgetBytesPerTurn();
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestDispatcher* disp = nullptr;

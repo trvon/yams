@@ -44,6 +44,7 @@ class AbiPluginLoader;
 class IModelProvider;
 class RetrievalSessionManager;
 class WorkerPool;
+class TuningManager;
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -80,6 +81,8 @@ public:
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return workerPool_; }
+    // Resize the worker pool to a target size; creates pool on demand.
+    bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
     void enqueuePostIngest(const std::string& hash, const std::string& mime) {
         if (postIngest_)

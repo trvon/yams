@@ -376,6 +376,16 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
 }
 
 Result<void> FileTypeDetector::initializeWithMagicNumbers() {
+    // Serialize initialization across threads and make it idempotent on success.
+    // We want to avoid concurrent initialize() calls (which reset internal state and may
+    // touch libmagic) while still allowing retries if a previous attempt failed.
+    static std::mutex initMutex;
+    static bool initialized = false;
+    std::lock_guard<std::mutex> lk(initMutex);
+    if (initialized) {
+        return Result<void>();
+    }
+
     // Find the magic_numbers.json file
     auto magicNumbersPath = findMagicNumbersFile();
 
@@ -383,11 +393,9 @@ Result<void> FileTypeDetector::initializeWithMagicNumbers() {
     FileTypeDetectorConfig config;
 
     if (!magicNumbersPath.empty()) {
-        // Initializing FileTypeDetector with magic_numbers.json
         config.patternsFile = magicNumbersPath;
         config.useCustomPatterns = true;
     } else {
-        // magic_numbers.json not found, using built-in patterns only
         config.useCustomPatterns = false;
     }
 
@@ -397,7 +405,11 @@ Result<void> FileTypeDetector::initializeWithMagicNumbers() {
     config.cacheSize = 1000;
 
     // Initialize the singleton instance
-    return instance().initialize(config);
+    auto res = instance().initialize(config);
+    if (res) {
+        initialized = true;
+    }
+    return res;
 }
 
 std::filesystem::path FileTypeDetector::findMagicNumbersFile() {

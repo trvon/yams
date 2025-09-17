@@ -10,10 +10,12 @@ namespace yamsfmt = fmt;
 #endif
 #include <array>
 #include <fstream>
+#include <mutex>
 
 namespace yams::crypto {
 
 struct SHA256Hasher::Impl {
+    std::mutex mtx;
     EVP_MD_CTX* ctx = nullptr;
     ProgressCallback progressCallback;
 
@@ -49,6 +51,7 @@ struct SHA256Hasher::Impl {
 };
 
 SHA256Hasher::SHA256Hasher() : pImpl(std::make_unique<Impl>()) {
+    std::lock_guard<std::mutex> lock(pImpl->mtx);
     if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
         throw std::runtime_error("Failed to initialize SHA256");
     }
@@ -60,18 +63,21 @@ SHA256Hasher::SHA256Hasher(SHA256Hasher&&) noexcept = default;
 SHA256Hasher& SHA256Hasher::operator=(SHA256Hasher&&) noexcept = default;
 
 void SHA256Hasher::init() {
+    std::lock_guard<std::mutex> lock(pImpl->mtx);
     if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
         throw std::runtime_error("Failed to initialize SHA256");
     }
 }
 
 void SHA256Hasher::update(std::span<const std::byte> data) {
+    std::lock_guard<std::mutex> lock(pImpl->mtx);
     if (EVP_DigestUpdate(pImpl->ctx, data.data(), data.size()) != 1) {
         throw std::runtime_error("Failed to update SHA256");
     }
 }
 
 std::string SHA256Hasher::finalize() {
+    std::lock_guard<std::mutex> lock(pImpl->mtx);
     std::array<unsigned char, EVP_MAX_MD_SIZE> hash{};
     unsigned int hashLen = 0;
 
@@ -89,18 +95,23 @@ std::string SHA256Hasher::finalize() {
     }
 
     // Reset for potential reuse
-    init();
+    if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
+        throw std::runtime_error("Failed to re-initialize SHA256 after finalize");
+    }
 
     return result;
 }
 
 std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(pImpl->mtx);
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         throw std::runtime_error(yamsfmt::format("Failed to open file: {}", path.string()));
     }
 
-    init();
+    if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
+        throw std::runtime_error("Failed to initialize SHA256 for hashFile");
+    }
 
     constexpr size_t bufferSize = DEFAULT_BUFFER_SIZE;
     std::vector<std::byte> buffer(bufferSize);
@@ -113,7 +124,9 @@ std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
         auto bytesRead = file.gcount();
 
         if (bytesRead > 0) {
-            update(std::span{buffer.data(), static_cast<size_t>(bytesRead)});
+            if (EVP_DigestUpdate(pImpl->ctx, buffer.data(), static_cast<size_t>(bytesRead)) != 1) {
+                throw std::runtime_error("Failed to update SHA256 for hashFile");
+            }
             processed += static_cast<uint64_t>(bytesRead);
 
             if (pImpl->progressCallback) {
@@ -122,7 +135,19 @@ std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
         }
     }
 
-    return finalize();
+    std::array<unsigned char, EVP_MAX_MD_SIZE> hash{};
+    unsigned int hashLen = 0;
+    if (EVP_DigestFinal_ex(pImpl->ctx, hash.data(), &hashLen) != 1) {
+        throw std::runtime_error("Failed to finalize SHA256 for hashFile");
+    }
+
+    std::string result;
+    result.reserve(static_cast<std::string::size_type>(hashLen) * 2);
+    for (unsigned int i = 0; i < hashLen; ++i) {
+        result += yamsfmt::format("{:02x}", hash[i]);
+    }
+
+    return result;
 }
 
 std::future<Result<std::string>> SHA256Hasher::hashFileAsync(const std::filesystem::path& path) {
@@ -137,6 +162,7 @@ std::future<Result<std::string>> SHA256Hasher::hashFileAsync(const std::filesyst
 }
 
 void SHA256Hasher::setProgressCallback(ProgressCallback callback) {
+    std::lock_guard<std::mutex> lock(pImpl->mtx);
     pImpl->progressCallback = std::move(callback);
 }
 

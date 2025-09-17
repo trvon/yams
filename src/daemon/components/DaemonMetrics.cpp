@@ -3,6 +3,7 @@
 #include <sstream>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -292,6 +293,12 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
         out.fsmPayloadWrites = fsnap.payloadWrites;
         out.fsmBytesSent = fsnap.bytesSent;
         out.fsmBytesReceived = fsnap.bytesReceived;
+        // Tuning pool sizes
+        try {
+            out.ipcPoolSize = fsnap.ipcPoolSize;
+            out.ioPoolSize = fsnap.ioPoolSize;
+        } catch (...) {
+        }
     } catch (...) {
     }
     int64_t muxQueuedBytesLocal = 0;
@@ -594,6 +601,11 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
         std::lock_guard<std::mutex> lk(cacheMutex_);
         cached_ = out;
         lastUpdate_ = std::chrono::steady_clock::now();
+    }
+    // Publish as shared snapshot for zero-copy readers
+    try {
+        MetricsSnapshotRegistry::instance().set(std::make_shared<const MetricsSnapshot>(out));
+    } catch (...) {
     }
     return out;
 }

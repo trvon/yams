@@ -85,7 +85,7 @@ struct HybridSearchConfig {
     size_t num_threads = 0;      // 0 = auto-detect
     // Guard embedding generation so vector path never stalls queries. When the
     // timeout elapses, fall back to keyword-only for that query.
-    std::chrono::milliseconds embed_timeout_ms{100};
+    std::chrono::milliseconds embed_timeout_ms{350};
 
     // Validate configuration
     bool isValid() const {

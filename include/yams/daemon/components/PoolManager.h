@@ -57,6 +57,7 @@ private:
     const Entry* entry_for_const(const std::string& component) const;
 
 private:
+    mutable std::mutex mutex_;
     std::vector<std::pair<std::string, Entry>> pools_;
 };
 

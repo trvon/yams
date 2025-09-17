@@ -64,6 +64,7 @@ PoolManager::Stats PoolManager::stats(const std::string& component) const {
 }
 
 PoolManager::Entry& PoolManager::entry_for(const std::string& component) {
+    std::lock_guard<std::mutex> lock(mutex_);
     for (auto& kv : pools_) {
         if (kv.first == component)
             return kv.second;
@@ -77,7 +78,8 @@ PoolManager::Entry& PoolManager::entry_for(const std::string& component) {
 }
 
 const PoolManager::Entry* PoolManager::entry_for_const(const std::string& component) const {
-    for (auto& kv : pools_) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& kv : pools_) {
         if (kv.first == component)
             return &kv.second;
     }
