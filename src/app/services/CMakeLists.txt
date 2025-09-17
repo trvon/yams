@@ -3,6 +3,7 @@
 set(APP_SERVICES_SOURCES
     document_service.cpp
     document_ingestion_service.cpp
+    list_input_resolver.cpp
     retrieval_service.cpp
     search_service.cpp
     enhanced_search_executor.cpp

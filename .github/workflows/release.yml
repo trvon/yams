@@ -803,13 +803,13 @@ jobs:
           cat SHA256SUMS >&2
 
       - name: Install Wrangler CLI
-        if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != ''
         shell: bash
         run: |
           npm i -g wrangler
 
       - name: Upload assets to Cloudflare R2 (Wrangler)
-        if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != ''
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

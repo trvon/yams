@@ -77,6 +77,7 @@
       "toolchainFile": "${sourceDir}/build/${presetName}/build/Debug/generators/conan_toolchain.cmake",
       "cacheVariables": {
         "YAMS_USE_CONAN": "ON",
+        "YAMS_FORCE_TRACY": "ON",
         "YAMS_ENABLE_ONNX": "ON",
         "CMAKE_C_CLANG_TIDY": "",
         "CMAKE_CXX_CLANG_TIDY": "",
@@ -101,6 +102,7 @@
       "inherits": ["debug-common", "ccache", "lld"],
       "cacheVariables": {
         "YAMS_USE_CONAN": "OFF",
+        "YAMS_FORCE_TRACY": "ON",
         "CMAKE_C_CLANG_TIDY": "",
         "CMAKE_CXX_CLANG_TIDY": "",
         "CMAKE_UNITY_BUILD": "OFF",

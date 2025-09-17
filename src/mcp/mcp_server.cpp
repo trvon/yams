@@ -34,10 +34,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <regex>
+#include <sstream>
 #include <unordered_set>
 
 // Platform-specific includes for non-blocking I/O
@@ -3230,7 +3232,13 @@ boost::asio::awaitable<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
-    daemon_req.namePattern = req.name.empty() ? req.pattern : req.name;
+    // Detect if MCP caller passed a concrete local file path; normalize to exact path pattern
+    if (!req.name.empty()) {
+        auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
+        daemon_req.namePattern = resolved.pattern.empty() ? req.name : resolved.pattern;
+    } else {
+        daemon_req.namePattern = req.pattern;
+    }
     if (req.useSession && daemon_req.namePattern.empty()) {
         auto sess = app::services::makeSessionService(nullptr);
         auto pats = sess->activeIncludePatterns(req.sessionName.empty()
@@ -3293,6 +3301,81 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         docJson["created"] = item.created;
         docJson["modified"] = item.modified;
         docJson["indexed"] = item.indexed;
+        // Synthetic tag when caller provided a concrete local file and it matches by suffix
+        if (!req.name.empty()) {
+            auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
+            if (resolved.isLocalFile && !item.path.empty()) {
+                // If item.path ends with local abs path's filename, annotate
+                try {
+                    std::string base = std::filesystem::path(*resolved.absPath).filename().string();
+                    if (std::filesystem::path(item.path).filename().string() == base) {
+                        docJson["local_input_file"] = *resolved.absPath;
+                    }
+                } catch (...) {
+                }
+            }
+        }
+        // Optional diff block when caller asked for it and provided a local file path
+        if (req.includeDiff && !req.name.empty()) {
+            auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
+            if (resolved.isLocalFile && resolved.absPath.has_value()) {
+                try {
+                    // Read local content (limit ~1MB)
+                    std::ifstream ifs(*resolved.absPath);
+                    if (ifs) {
+                        std::string local((std::istreambuf_iterator<char>(ifs)),
+                                          std::istreambuf_iterator<char>());
+                        // Get indexed content
+                        yams::daemon::GetRequest greq;
+                        greq.hash = item.hash;
+                        greq.metadataOnly = false;
+                        auto gr = rsvc.get(greq, ropts);
+                        if (gr) {
+                            const auto& resp = gr.value();
+                            auto toLines = [](const std::string& s) {
+                                std::vector<std::string> lines;
+                                std::stringstream ss(s);
+                                std::string line;
+                                while (std::getline(ss, line))
+                                    lines.push_back(line);
+                                return lines;
+                            };
+                            auto a = toLines(local);
+                            auto b = toLines(resp.content);
+                            std::vector<std::string> added;
+                            std::vector<std::string> removed;
+                            size_t i = 0, j = 0, shown = 0, maxShown = 200;
+                            while ((i < a.size() || j < b.size()) && shown < maxShown) {
+                                const std::string* la = (i < a.size()) ? &a[i] : nullptr;
+                                const std::string* lb = (j < b.size()) ? &b[j] : nullptr;
+                                if (la && lb && *la == *lb) {
+                                    ++i;
+                                    ++j;
+                                    continue;
+                                }
+                                if (la) {
+                                    removed.push_back(*la);
+                                    ++i;
+                                    ++shown;
+                                }
+                                if (lb && shown < maxShown) {
+                                    added.push_back(*lb);
+                                    ++j;
+                                    ++shown;
+                                }
+                            }
+                            bool truncated = (i < a.size() || j < b.size());
+                            if (!added.empty() || !removed.empty()) {
+                                docJson["diff"] = json{{"added", added},
+                                                       {"removed", removed},
+                                                       {"truncated", truncated}};
+                            }
+                        }
+                    }
+                } catch (...) {
+                }
+            }
+        }
         out.documents.push_back(std::move(docJson));
     }
     co_return out;
@@ -3395,27 +3478,49 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         // If status fails unexpectedly, return a clear error instead of attempting local work
         co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
     }
+
+    // Normalize and validate the directory path
+    std::filesystem::path dir_path;
+    try {
+        std::string path_str = req.directoryPath;
+        if (path_str.rfind("file://", 0) == 0) {
+            path_str = path_str.substr(7);
+        }
+        if (!path_str.empty() && path_str.front() == '~') {
+            if (const char* home = std::getenv("HOME")) {
+                path_str = std::string(home) + path_str.substr(1);
+            }
+        }
+        dir_path = std::filesystem::path(path_str);
+        if (dir_path.is_relative()) {
+            dir_path = std::filesystem::current_path() / dir_path;
+        }
+        dir_path = std::filesystem::weakly_canonical(dir_path);
+    } catch (const std::exception& e) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        std::string("Invalid directory path: ") + e.what()};
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir_path, ec) || ec) {
+        co_return Error{
+            ErrorCode::InvalidArgument,
+            "Path is not a valid directory. Use the 'add' tool for single files. Path: " +
+                dir_path.string()};
+    }
+
     // Prefer daemon-side directory add to ensure post-ingest queue and graph/indexing are engaged.
     // Build a daemon AddDocumentRequest targeting the directory with recursive patterns.
     daemon::AddDocumentRequest addReq;
-    // Normalize directory path similar to add() path normalization
-    std::string path = req.directoryPath;
-    if (!path.empty() && path.rfind("file://", 0) == 0)
-        path = path.substr(7);
-    if (!path.empty() && path.front() == '~') {
-        if (const char* home = std::getenv("HOME"))
-            path = std::string(home) + path.substr(1);
+    addReq.path = dir_path.string();
+    addReq.recursive = true; // This tool should always be recursive for directories.
+
+    if (req.includePatterns.empty()) {
+        addReq.includePatterns.push_back("*");
+    } else {
+        addReq.includePatterns = req.includePatterns;
     }
-    if (!path.empty() && path.front() != '/') {
-        std::filesystem::path base = std::filesystem::current_path();
-        std::filesystem::path cand = base / path;
-        std::error_code ec;
-        auto canon = std::filesystem::weakly_canonical(cand, ec);
-        path = (!ec && !canon.empty()) ? canon.string() : cand.string();
-    }
-    addReq.path = path;
-    addReq.recursive = req.recursive;
-    addReq.includePatterns = req.includePatterns;
+
     addReq.excludePatterns = req.excludePatterns;
     addReq.collection = req.collection;
     addReq.snapshotId = req.snapshotId;
@@ -3559,6 +3664,162 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         daemon::UpdateDocumentRequest daemon_req;
         daemon_req.hash = req.hash;
         daemon_req.name = req.name;
+        daemon_req.addTags = req.tags;
+        daemon_req.removeTags = req.removeTags;
+        for (const auto& [key, value] : req.metadata.items()) {
+            if (value.is_string())
+                daemon_req.metadata[key] = value.get<std::string>();
+            else
+                daemon_req.metadata[key] = value.dump();
+        }
+        auto dres = co_await daemon_client_->updateDocument(daemon_req);
+        if (!dres)
+            co_return dres.error();
+        MCPUpdateMetadataResponse out;
+        const auto& ur = dres.value();
+        out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
+        out.updated = out.success ? 1 : 0;
+        out.matched = 1;
+        if (!ur.hash.empty())
+            out.updatedHashes.push_back(ur.hash);
+        out.message = out.success ? "Update successful" : "No changes applied";
+        co_return out;
+    }
+
+    // Name-first single-target path: reuse robust name resolution from get_by_name.
+    // When a single name is provided (without other selectors), resolve to a single document
+    // using RetrievalService::getByNameSmart and then perform a hash-based update via daemon.
+    if (req.hash.empty() && !req.name.empty() && req.path.empty() && req.pattern.empty() &&
+        req.names.empty()) {
+        // Resolve name -> hash using the same strategy as handleGetByName (smart + fallback).
+        yams::app::services::RetrievalService rsvc;
+        yams::app::services::RetrievalOptions ropts;
+        ropts.requestTimeoutMs = 60000;
+        ropts.headerTimeoutMs = 30000;
+        ropts.bodyTimeoutMs = 120000;
+        auto resolver = [this](const std::string& nm) -> Result<std::string> {
+            if (documentService_)
+                return documentService_->resolveNameToHash(nm);
+            return Error{ErrorCode::NotFound, "resolver unavailable"};
+        };
+
+        // Prefer latest when disambiguating unless caller explicitly asked for oldest.
+        const bool pickOldest = req.oldest;
+        auto grr = rsvc.getByNameSmart(req.name, pickOldest, /*allowFuzzy*/ true,
+                                       /*useSession*/ false, std::string{}, ropts, resolver);
+        if (!grr) {
+            // Fall back to simple basename-list matching similar to handleGetByName
+            auto tryList =
+                [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
+                yams::daemon::ListRequest lreq;
+                lreq.namePattern = pat;
+                lreq.limit = 500;
+                lreq.pathsOnly = false;
+                auto lres = rsvc.list(lreq, ropts);
+                if (lres && !lres.value().items.empty())
+                    return lres.value();
+                return std::nullopt;
+            };
+            auto bestMatch = [&](const std::vector<yams::daemon::ListEntry>& items)
+                -> std::optional<yams::daemon::ListEntry> {
+                if (items.empty())
+                    return std::nullopt;
+                if (req.latest || req.oldest) {
+                    const yams::daemon::ListEntry* chosen = nullptr;
+                    for (const auto& it : items) {
+                        if (!chosen) {
+                            chosen = &it;
+                        } else if (req.oldest) {
+                            if (it.indexed < chosen->indexed)
+                                chosen = &it;
+                        } else {
+                            if (it.indexed > chosen->indexed)
+                                chosen = &it;
+                        }
+                    }
+                    return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
+                }
+                auto scoreName = [&](const std::string& base) -> int {
+                    if (base == req.name)
+                        return 1000;
+                    if (base.size() >= req.name.size() && base.rfind(req.name, 0) == 0)
+                        return 800;
+                    if (base.find(req.name) != std::string::npos)
+                        return 600;
+                    int dl = static_cast<int>(std::abs((long)(base.size() - req.name.size())));
+                    return 400 - std::min(200, dl * 10);
+                };
+                int bestScore = -1;
+                const yams::daemon::ListEntry* chosen = nullptr;
+                for (const auto& it : items) {
+                    std::string b;
+                    try {
+                        b = std::filesystem::path(it.path).filename().string();
+                    } catch (...) {
+                        b = it.name;
+                    }
+                    int sc = scoreName(b);
+                    if (sc > bestScore) {
+                        bestScore = sc;
+                        chosen = &it;
+                    }
+                }
+                return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
+            };
+
+            std::optional<yams::daemon::ListResponse> lr;
+            lr = tryList(std::string("%/") + req.name);
+            if (!lr) {
+                std::string stem = req.name;
+                try {
+                    stem = std::filesystem::path(req.name).stem().string();
+                } catch (...) {
+                }
+                lr = tryList(std::string("%/") + stem + "%");
+            }
+            if (!lr)
+                lr = tryList(std::string("%") + req.name + "%");
+            if (!lr || lr->items.empty()) {
+                co_return Error{ErrorCode::NotFound, "No matching documents"};
+            }
+            auto cand = bestMatch(lr->items);
+            if (!cand)
+                co_return Error{ErrorCode::NotFound, "No matching documents"};
+            // Build a synthetic GetResponse equivalent
+            yams::daemon::GetRequest greq;
+            greq.hash = cand->hash;
+            greq.metadataOnly = true;
+            auto grres = rsvc.get(greq, ropts);
+            if (!grres)
+                co_return grres.error();
+            // Use resolved hash for daemon fast update
+            daemon::UpdateDocumentRequest daemon_req;
+            daemon_req.hash = cand->hash;
+            daemon_req.addTags = req.tags;
+            daemon_req.removeTags = req.removeTags;
+            for (const auto& [key, value] : req.metadata.items()) {
+                if (value.is_string())
+                    daemon_req.metadata[key] = value.get<std::string>();
+                else
+                    daemon_req.metadata[key] = value.dump();
+            }
+            auto dres = co_await daemon_client_->updateDocument(daemon_req);
+            if (!dres)
+                co_return dres.error();
+            MCPUpdateMetadataResponse out;
+            const auto& ur = dres.value();
+            out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
+            out.updated = out.success ? 1 : 0;
+            out.matched = 1;
+            if (!ur.hash.empty())
+                out.updatedHashes.push_back(ur.hash);
+            out.message = out.success ? "Update successful" : "No changes applied";
+            co_return out;
+        }
+
+        const auto& gr = grr.value();
+        daemon::UpdateDocumentRequest daemon_req;
+        daemon_req.hash = gr.hash;
         daemon_req.addTags = req.tags;
         daemon_req.removeTags = req.removeTags;
         for (const auto& [key, value] : req.metadata.items()) {
@@ -4012,6 +4273,10 @@ void MCPServer::initializeToolRegistry() {
                {"paths_only",
                 {{"type", "boolean"},
                  {"description", "Output only file paths"},
+                 {"default", false}}},
+               {"include_diff",
+                {{"type", "boolean"},
+                 {"description", "Include structured diff when 'name' is a local file"},
                  {"default", false}}},
                {"limit",
                 {{"type", "integer"},

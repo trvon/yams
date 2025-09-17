@@ -6,10 +6,6 @@
     {
       "id": "content_extractor_v1",
       "version": 1
-    },
-    {
-      "id": "search_provider_v1",
-      "version": 1
     }
   ],
   "capabilities": [],

@@ -227,6 +227,9 @@ log_level = "info"
 # pool_ipc_max = 32
 # pool_io_min = 1
 # pool_io_max = 32
+# io_conn_per_thread = 8          # grow IO pool only when activeConn > ioThreads * value
+# post_ingest_threads = 0         # 0 = auto (recommend ~12.5% CPU budget, hard max 4)
+# post_ingest_queue_max = 1000    # bounded queue; producers block when full (backpressure)
 # stream_mux_very_high_bytes = 268435456   # 256 MiB
 # stream_mux_high_bytes = 134217728        # 128 MiB
 # stream_mux_light1_bytes = 8388608        # 8 MiB

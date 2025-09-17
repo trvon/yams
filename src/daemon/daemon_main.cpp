@@ -289,6 +289,12 @@ int main(int argc, char* argv[]) {
                     yams::daemon::TuneAdvisor::setPoolMinSizeIpcIo(static_cast<uint32_t>(*v));
                 if (auto v = as_int("pool_io_max"))
                     yams::daemon::TuneAdvisor::setPoolMaxSizeIpcIo(static_cast<uint32_t>(*v));
+                if (auto v = as_int("io_conn_per_thread"))
+                    yams::daemon::TuneAdvisor::setIoConnPerThread(static_cast<uint32_t>(*v));
+                if (auto v = as_int("post_ingest_threads"))
+                    yams::daemon::TuneAdvisor::setPostIngestThreads(static_cast<uint32_t>(*v));
+                if (auto v = as_int("post_ingest_queue_max"))
+                    yams::daemon::TuneAdvisor::setPostIngestQueueMax(static_cast<uint32_t>(*v));
                 if (auto it = tune.find("aggressive_idle_shrink"); it != tune.end()) {
                     const auto& s = it->second;
                     std::string v = s;

@@ -390,21 +390,21 @@ awaitable<void> SocketServer::accept_loop() {
                 bool bp_conn = (maxActiveConn > 0 && activeConn > maxActiveConn);
 
                 if (bp_worker || bp_mux || bp_conn) {
-                    uint32_t base = 50;
+                    // Pre-accept backpressure: clamp to a very small delay to reduce ECONNREFUSED
+                    // and prefer post-accept handling in the request path.
+                    uint32_t base = 5;
                     uint32_t extra = 0;
                     if (bp_worker)
-                        extra += static_cast<uint32_t>(
-                            std::min<uint64_t>(queued - maxWorkerQueue, 1000));
-                    if (bp_mux) {
-                        uint64_t over = static_cast<uint64_t>(muxQueued) > maxMuxBytes
-                                            ? static_cast<uint64_t>(muxQueued) - maxMuxBytes
-                                            : 0;
-                        extra +=
-                            static_cast<uint32_t>(std::min<uint64_t>(over / (256 * 1024), 4000));
-                    }
+                        extra += 5;
+                    if (bp_mux)
+                        extra += 5;
                     if (bp_conn)
-                        extra += 200;
-                    delay_ms = base + extra;
+                        extra += 5;
+                    delay_ms = std::min<uint32_t>(base + extra, 20);
+                    if (state_) {
+                        state_->stats.acceptBackpressureDelays.fetch_add(1,
+                                                                         std::memory_order_relaxed);
+                    }
                 }
 
                 if (delay_ms > 0) {
@@ -418,9 +418,12 @@ awaitable<void> SocketServer::accept_loop() {
             }
             // Check connection limit
             if (activeConnections_.load() >= config_.maxConnections) {
-                // Brief delay when at capacity
+                // Brief, clamped delay when at capacity
+                if (state_) {
+                    state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
+                }
                 boost::asio::steady_timer timer(io_context_);
-                timer.expires_after(std::chrono::milliseconds(100));
+                timer.expires_after(std::chrono::milliseconds(20));
                 co_await timer.async_wait(use_awaitable);
                 continue;
             }

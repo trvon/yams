@@ -1582,555 +1582,71 @@ private:
     void checkEmbeddingDimMismatch() {
         namespace fs = std::filesystem;
         printHeader("Vectors Database");
-        std::vector<StepResult> summary;
 
-        // Resolve vectors.db under data path
-        fs::path dataDir = cli_ ? cli_->getDataPath() : fs::path{};
-        if (dataDir.empty()) {
-            std::cout << "Data directory not configured; skipping DB dimension check.\n";
-            return;
-        }
-        fs::path dbPath = dataDir / "vectors.db";
-        // We no longer use a maintenance lock; we stop the daemon during writes
-        std::error_code ec;
-        if (!fs::exists(dbPath, ec)) {
-            auto __r = resolveEmbeddingDim();
-            size_t __dim = __r.first;
-            std::string __src = __r.second;
-            printStatusLine("Path", dbPath.string());
-            std::cout << "No vectors.db found.\n";
-            if (__dim == 0) {
-                std::cout << "Could not resolve embedding dimension from config/model.\n";
+        // Get daemon status
+        daemon::StatusResponse status;
+        try {
+            yams::daemon::ClientConfig cfg;
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
+            }
+            cfg.requestTimeout = std::chrono::seconds(5);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                printError("Daemon unavailable: " + leaseRes.error().message);
                 return;
             }
-            if (yams::cli::prompt_yes_no(std::string("Create a new vectors.db now using dim=") +
-                                             std::to_string(__dim) + " (source: " + __src +
-                                             ")? [y/N]: ",
-                                         yams::cli::YesNoOptions{.defaultYes = false})) {
-                // Ensure parent directory exists
-                try {
-                    fs::create_directories(dbPath.parent_path());
-                } catch (...) {
-                }
-                // Stop daemon if running (best-effort)
-                ensureDaemonStopped();
-
-                // Step 1: Touch the DB file first (separate from SQLite open)
-                try {
-                    if (!fs::exists(dbPath)) {
-                        std::ofstream f(dbPath);
-                        f.flush();
-                        f.close();
-                    }
-                    if (!fs::exists(dbPath)) {
-                        std::cout << "\n✗ Failed to create file at " << dbPath << "\n";
-                        return;
-                    }
-                    summary.push_back({"Create file", true, dbPath.string()});
-                } catch (const std::exception& e) {
-                    std::cout << "\n✗ File create error: " << e.what() << "\n";
-                    return;
-                }
-
-                int timeout_ms = 30000; // default 30s for creation
-                if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
-                    try {
-                        timeout_ms = std::max(500, std::stoi(env));
-                    } catch (...) {
-                    }
-                }
-
-                // Nudge backend timeouts higher than spinner to avoid double timeouts
-                int init_ms = std::max(1000, timeout_ms - 3000);
-                setEnvIfUnset("YAMS_SQLITE_VEC_INIT_TIMEOUT_MS", init_ms);
-                setEnvIfUnset("YAMS_SQLITE_BUSY_TIMEOUT_MS", 10000);
-
-                // For fast creation: skip vec init during open; load vec explicitly next
-                setEnvIfUnset("YAMS_SQLITE_VEC_SKIP_INIT", 1);
-                setEnvIfUnset("YAMS_SQLITE_MINIMAL_PRAGMAS", 1);
-                yams::vector::SqliteVecBackend be;
-                auto openOpt = runWithSpinner(
-                    "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
-                    timeout_ms);
-                if (!openOpt) {
-                    std::cout << "\n⚠ Timeout opening DB after " << timeout_ms << " ms";
-                    if (yams::cli::prompt_yes_no(" — temporarily stop daemon to proceed? [y/N]: ",
-                                                 yams::cli::YesNoOptions{.defaultYes = false})) {
-                        std::cout << "Stopping daemon...\n";
-                        ensureDaemonStopped();
-                        openOpt = runWithSpinner(
-                            "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
-                            timeout_ms);
-                        if (!openOpt) {
-                            printError("Timeout opening DB after daemon stop");
-                            printSummary("Vector DB Setup", summary);
-                            return;
-                        }
-                    } else {
-                        printSummary("Vector DB Setup", summary);
-                        return;
-                    }
-                }
-                if (!(*openOpt)) {
-                    printError(std::string("Open failed: ") + openOpt->error().message);
-                    printSummary("Vector DB Setup", summary);
-                    return;
-                }
-                summary.push_back({"Open database", true, {}});
-                auto vecOpt = runWithSpinner(
-                    "Initializing sqlite-vec", [&]() { return be.ensureVecLoaded(); }, timeout_ms);
-                if (!vecOpt) {
-                    be.close();
-                    printError(std::string("Timeout initializing sqlite-vec after ") +
-                               std::to_string(timeout_ms) + " ms");
-                    printSummary("Vector DB Setup", summary);
-                    return;
-                }
-                if (!(*vecOpt)) {
-                    printError(std::string("sqlite-vec init failed: ") + vecOpt->error().message);
-                    be.close();
-                    printSummary("Vector DB Setup", summary);
-                    return;
-                }
-                summary.push_back({"Load sqlite-vec", true, {}});
-
-                auto createOpt = runWithSpinner(
-                    "Creating vector tables", [&]() { return be.createTables(__dim); }, timeout_ms);
-                if (!createOpt) {
-                    be.close();
-                    printError(std::string("Timeout creating tables after ") +
-                               std::to_string(timeout_ms) + " ms");
-                    printSummary("Vector DB Setup", summary);
-                    return;
-                }
-                if (!(*createOpt)) {
-                    printError(std::string("Create failed: ") + createOpt->error().message);
-                    be.close();
-                    printSummary("Vector DB Setup", summary);
-                    return;
-                }
-                summary.push_back(
-                    {"Create vec schema", true, std::string("dim=") + std::to_string(__dim)});
-                be.close();
-                printSuccess(std::string("Created vectors.db (dim=") + std::to_string(__dim) + ")");
-                printStatusLine("Next", "yams repair --embeddings");
-                printSummary("Vector DB Setup", summary);
-            }
-            return;
-        }
-
-        // Read vec0 table DDL to infer stored dimension
-        auto readDbDim = [&](const fs::path& p) -> std::optional<size_t> {
-            sqlite3* db = nullptr;
-            if (sqlite3_open(p.string().c_str(), &db) != SQLITE_OK) {
-                if (db)
-                    sqlite3_close(db);
-                return std::nullopt;
-            }
-            const char* sql = "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
-            sqlite3_stmt* stmt = nullptr;
-            std::optional<size_t> out{};
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                if (sqlite3_step(stmt) == SQLITE_ROW) {
-                    const unsigned char* txt = sqlite3_column_text(stmt, 0);
-                    if (txt) {
-                        std::string ddl(reinterpret_cast<const char*>(txt));
-                        auto pos = ddl.find("float[");
-                        if (pos != std::string::npos) {
-                            auto end = ddl.find(']', pos);
-                            if (end != std::string::npos && end > pos + 6) {
-                                std::string num = ddl.substr(pos + 6, end - (pos + 6));
-                                try {
-                                    size_t dim = static_cast<size_t>(std::stoul(num));
-                                    out = dim;
-                                } catch (...) {
-                                }
-                            }
-                        }
-                    }
-                }
-                sqlite3_finalize(stmt);
-            }
-            sqlite3_close(db);
-            return out;
-        };
-
-        auto dbDim = readDbDim(dbPath);
-        if (!dbDim) {
-            // Existing DB file but no vector tables yet — offer to initialize tables
-            auto resolved0 = resolveEmbeddingDim();
-            size_t initDim = resolved0.first;
-            std::string initSrc = resolved0.second;
-            if (initDim == 0) {
-                // Fallback to generator if available
-                try {
-                    auto emb = cli_ ? cli_->getEmbeddingGenerator() : nullptr;
-                    if (emb) {
-                        initDim = emb->getEmbeddingDimension();
-                        initSrc = emb->getConfig().model_name;
-                    }
-                } catch (...) {
-                }
-            }
-            std::cout << "No vector tables found in existing DB (" << dbPath << ").\n";
-            if (initDim == 0) {
-                std::cout << "Unable to resolve target dimension to initialize tables.\n";
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
+            auto statusRes = yams::cli::run_result(client.status(), std::chrono::seconds(5));
+            if (!statusRes) {
+                printError("Failed to get daemon status: " + statusRes.error().message);
                 return;
             }
-
-            if (yams::cli::prompt_yes_no(std::string("Initialize vector tables now using dim=") +
-                                             std::to_string(initDim) + " (source: " + initSrc +
-                                             ")? [y/N]: ",
-                                         yams::cli::YesNoOptions{.defaultYes = false})) {
-                int timeout_ms = 15000;
-                if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
-                    try {
-                        timeout_ms = std::max(500, std::stoi(env));
-                    } catch (...) {
-                    }
-                }
-                int init_ms = std::max(1000, timeout_ms - 3000);
-                setEnvIfUnset("YAMS_SQLITE_VEC_INIT_TIMEOUT_MS", init_ms);
-                setEnvIfUnset("YAMS_SQLITE_BUSY_TIMEOUT_MS", 10000);
-                setEnvIfUnset("YAMS_SQLITE_VEC_SKIP_INIT", 1);
-                setEnvIfUnset("YAMS_SQLITE_MINIMAL_PRAGMAS", 1);
-                yams::vector::SqliteVecBackend be;
-                auto openOpt = runWithSpinner(
-                    "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
-                    timeout_ms);
-                if (!openOpt) {
-                    std::cout << "\n⚠ Timeout opening DB after " << timeout_ms << " ms";
-                    if (yams::cli::prompt_yes_no(" — temporarily stop daemon to proceed? [y/N]: ",
-                                                 yams::cli::YesNoOptions{.defaultYes = false})) {
-                        ensureDaemonStopped();
-                        openOpt = runWithSpinner(
-                            "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
-                            timeout_ms);
-                        if (!openOpt) {
-                            std::cout << "\n✗ Timeout opening DB after daemon stop\n";
-                            return;
-                        }
-                    } else {
-                        return;
-                    }
-                }
-                if (!(*openOpt)) {
-                    std::cout << "\n✗ Open failed: " << openOpt->error().message << "\n";
-                    return;
-                }
-                auto vecOpt = runWithSpinner(
-                    "Initializing sqlite-vec", [&]() { return be.ensureVecLoaded(); }, timeout_ms);
-                if (!vecOpt) {
-                    be.close();
-                    std::cout << "\n✗ Timeout initializing sqlite-vec after " << timeout_ms
-                              << " ms\n";
-                    return;
-                }
-                if (!(*vecOpt)) {
-                    std::cout << "\n✗ sqlite-vec init failed: " << vecOpt->error().message << "\n";
-                    be.close();
-                    return;
-                }
-                auto createOpt = runWithSpinner(
-                    "Creating vector tables", [&]() { return be.createTables(initDim); },
-                    timeout_ms);
-                if (!createOpt) {
-                    be.close();
-                    std::cout << "\n✗ Timeout creating tables after " << timeout_ms << " ms\n";
-                    return;
-                }
-                if (!(*createOpt)) {
-                    std::cout << "\n✗ Create failed: " << createOpt->error().message << "\n";
-                    be.close();
-                    return;
-                }
-                be.close();
-                std::cout << "\n✓ Initialized vector tables (dim=" << initDim
-                          << ").\nNext: yams repair --embeddings\n";
-            }
+            status = statusRes.value();
+        } catch (const std::exception& e) {
+            printError(std::string("Failed to get daemon status: ") + e.what());
             return;
         }
 
-        // Determine target dimension for comparison (prefer config/env, fallback to generator)
-        // Trigger app context creation to ensure EmbeddingGenerator is provisioned
-        (void)(cli_ ? cli_->getAppContext() : nullptr);
+        bool dbReady = status.vectorDbReady;
+        size_t dbDim = status.vectorDbDim;
+
+        if (!dbReady) {
+            std::cout << "Vector database is not ready according to the daemon." << std::endl;
+            // The logic to offer DB creation can be adapted here to call a new daemon command.
+            return;
+        }
+
         auto resolved = resolveEmbeddingDim();
         size_t targetDim = resolved.first;
         std::string targetSrc = resolved.second;
-        if (targetDim == 0) {
-            try {
-                auto emb = cli_ ? cli_->getEmbeddingGenerator() : nullptr;
-                if (emb) {
-                    targetDim = emb->getEmbeddingDimension();
-                    targetSrc = emb->getConfig().model_name;
-                }
-            } catch (...) {
-            }
+        if (targetDim == 0 && status.embeddingAvailable && status.embeddingDim > 0) {
+            targetDim = status.embeddingDim;
+            targetSrc = "daemon_provider";
         }
 
         if (targetDim == 0) {
-            std::cout
-                << "DB dimension: " << *dbDim
-                << ". Unable to resolve target dimension — ensure a model/config is available.\n";
-            std::cout << "Hint: yams model download --apply-config <name> --hf <org/name>\n";
+            std::cout << "DB dimension: " << dbDim
+                      << ". Unable to resolve target embedding dimension from config or models."
+                      << std::endl;
             return;
         }
 
-        std::cout << "DB dimension: " << *dbDim << ", Target ('resolved') dimension: " << targetDim
-                  << "\n";
+        std::cout << "DB dimension: " << dbDim << ", Target ('" << targetSrc
+                  << "') dimension: " << targetDim << std::endl;
 
-        // Warn if installed models imply a different dimension than the DB
-        try {
-            const char* home = std::getenv("HOME");
-            if (home) {
-                namespace fs = std::filesystem;
-                fs::path models = fs::path(home) / ".yams" / "models";
-                std::error_code ec;
-                bool hasMiniLM = fs::exists(models / "all-MiniLM-L6-v2" / "model.onnx", ec);
-                bool hasMpnet = fs::exists(models / "all-mpnet-base-v2" / "model.onnx", ec);
-                if (*dbDim == 384 && hasMpnet && !hasMiniLM) {
-                    std::cout
-                        << "⚠ Installed 768-dim model 'all-mpnet-base-v2' found, but DB is 384.\n"
-                        << "  Install 'all-MiniLM-L6-v2' or recreate vectors.db at 768 to use "
-                           "mpnet.\n";
-                } else if (*dbDim == 768 && hasMiniLM && !hasMpnet) {
-                    std::cout
-                        << "⚠ Installed 384-dim model 'all-MiniLM-L6-v2' found, but DB is 768.\n"
-                        << "  Install 'all-mpnet-base-v2' or recreate vectors.db at 384 to use "
-                           "MiniLM.\n";
-                }
-            }
-        } catch (...) {
-        }
-
-        // Non-interactive fixes via flags
-        if (stopDaemon_) {
-            ensureDaemonStopped();
-        }
-        if (fixConfigDims_) {
-            auto cfgPath2 = resolveConfigPath();
-            if (writeOrReplaceConfigDims(cfgPath2, targetDim)) {
-                printSuccess("Updated config dims");
-            } else {
-                printError("Failed to update config dims");
-            }
-        }
-
-        // (Removed unconditional prompts; alignment/recreation prompts now only offered when
-        // a mismatch is detected later.)
-        if (recreateVectors_) {
-            int timeout_ms2 = 15000;
-            if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
-                try {
-                    timeout_ms2 = std::max(500, std::stoi(env));
-                } catch (...) {
-                }
-            }
-            int init_ms2 = std::max(1000, timeout_ms2 - 3000);
-            setEnvIfUnset("YAMS_SQLITE_VEC_INIT_TIMEOUT_MS", init_ms2);
-            setEnvIfUnset("YAMS_SQLITE_BUSY_TIMEOUT_MS", 10000);
-            setEnvIfUnset("YAMS_SQLITE_VEC_SKIP_INIT", 1);
-            setEnvIfUnset("YAMS_SQLITE_MINIMAL_PRAGMAS", 1);
-            yams::vector::SqliteVecBackend be2;
-            auto openOpt2 = runWithSpinner(
-                "Opening vectors.db", [&]() { return be2.initialize(dbPath.string()); },
-                timeout_ms2);
-            if (openOpt2 && *openOpt2) {
-                (void)be2.ensureVecLoaded();
-                size_t useDim = recreateDim_ ? *recreateDim_ : targetDim;
-                (void)runWithSpinner(
-                    "Dropping existing vector tables", [&]() { return be2.dropTables(); },
-                    timeout_ms2);
-                (void)runWithSpinner(
-                    "Creating vector tables", [&]() { return be2.createTables(useDim); },
-                    timeout_ms2);
-                be2.close();
-                // Align config dims to new target
-                try {
-                    auto cfgPathNI = resolveConfigPath();
-                    if (writeOrReplaceConfigDims(cfgPathNI, useDim)) {
-                        printSuccess("Updated config dims to match recreated schema");
-                    } else {
-                        printWarn("Config dims update skipped (write failed)");
-                    }
-                } catch (...) {
-                    printWarn("Config dims update skipped (exception)");
-                }
-                // Write sentinel for daemon to acknowledge recent realign
-                try {
-                    if (cli_)
-                        writeVectorSentinel(cli_->getDataPath(), useDim);
-                } catch (...) {
-                }
-                printSuccess(std::string("Recreated vector tables (dim=") + std::to_string(useDim) +
-                             ")");
-                return; // Non-interactive path completes here
-            } else {
-                printError("Failed to open vectors.db for recreation");
-            }
-        }
-        // Audit config and offer to align dims
-        auto cfgPath = resolveConfigPath();
-        auto cfgDims = readConfigDims(cfgPath);
-        bool cfgMismatch = (cfgDims.embeddings && *cfgDims.embeddings != targetDim) ||
-                           (cfgDims.vector_db && *cfgDims.vector_db != targetDim) ||
-                           (cfgDims.index && *cfgDims.index != targetDim);
-        if (cfgMismatch) {
-            printWarn("Config dims differ from target dimension");
-            printStatusLine("Config path", cfgPath.string());
-            if (cfgDims.embeddings)
-                printStatusLine("embeddings.embedding_dim", std::to_string(*cfgDims.embeddings));
-            if (cfgDims.vector_db)
-                printStatusLine("vector_database.embedding_dim",
-                                std::to_string(*cfgDims.vector_db));
-            if (cfgDims.index)
-                printStatusLine("vector_index.dimension", std::to_string(*cfgDims.index));
-            if (yams::cli::prompt_yes_no(std::string("Align all config dims to target ( ") +
-                                             std::to_string(targetDim) + ")? [y/N]: ",
-                                         yams::cli::YesNoOptions{.defaultYes = false})) {
-                if (writeOrReplaceConfigDims(cfgPath, targetDim)) {
-                    printSuccess("Updated config dims");
-                } else {
-                    printError("Failed to update config dims");
-                }
-            }
-        }
-
-        if (*dbDim != targetDim) {
+        if (dbDim != targetDim) {
             std::cout << "\n⚠ Embedding dimension mismatch detected.\n";
-            std::cout << "- Stored vectors are " << *dbDim << "-d but target requires " << targetDim
+            std::cout << "- Stored vectors are " << dbDim << "-d but target requires " << targetDim
                       << "-d.\n";
-            // Structured recommendation for dimension mismatch (still interactive afterwards)
-            yams::cli::RecommendationBuilder rb;
-            rb.warning("DOCTOR_VEC_DIM_MISMATCH",
-                       std::string("Vector DB dimension ") + std::to_string(*dbDim) +
-                           " differs from target " + std::to_string(targetDim) +
-                           " — recreate or repair embeddings",
-                       "Mismatched dims degrade semantic search recall");
-            yams::cli::printRecommendationsText(rb, std::cout);
-
-            if (yams::cli::prompt_yes_no(
-                    "\nRecreate vectors.db now with the correct dimension? [y/N]: ",
-                    yams::cli::YesNoOptions{.defaultYes = false})) {
-                int timeout_ms = 15000;
-                if (const char* env = std::getenv("YAMS_DOCTOR_VEC_TIMEOUT_MS")) {
-                    try {
-                        timeout_ms = std::max(500, std::stoi(env));
-                    } catch (...) {
-                    }
-                }
-                int init_ms = std::max(1000, timeout_ms - 3000);
-                setEnvIfUnset("YAMS_SQLITE_VEC_INIT_TIMEOUT_MS", init_ms);
-                setEnvIfUnset("YAMS_SQLITE_BUSY_TIMEOUT_MS", 10000);
-
-                setEnvIfUnset("YAMS_SQLITE_VEC_SKIP_INIT", 1);
-                setEnvIfUnset("YAMS_SQLITE_MINIMAL_PRAGMAS", 1);
-                yams::vector::SqliteVecBackend be;
-                auto openOpt = runWithSpinner(
-                    "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
-                    timeout_ms);
-                if (!openOpt) {
-                    std::cout << "\n⚠ Timeout opening DB after " << timeout_ms << " ms";
-                    if (yams::cli::prompt_yes_no(" — temporarily stop daemon to proceed? [y/N]: ",
-                                                 yams::cli::YesNoOptions{.defaultYes = false})) {
-                        ensureDaemonStopped();
-                        openOpt = runWithSpinner(
-                            "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); },
-                            timeout_ms);
-                        if (!openOpt) {
-                            std::cout << "\n✗ Timeout opening DB after daemon stop\n";
-                            return;
-                        }
-                    } else {
-                        return;
-                    }
-                }
-                if (!(*openOpt)) {
-                    std::cout << "\n✗ Open failed: " << openOpt->error().message << "\n";
-                    return;
-                }
-                auto vecOpt = runWithSpinner(
-                    "Initializing sqlite-vec", [&]() { return be.ensureVecLoaded(); }, timeout_ms);
-                if (!vecOpt) {
-                    be.close();
-                    std::cout << "\n✗ Timeout initializing sqlite-vec after " << timeout_ms
-                              << " ms\n";
-                    return;
-                }
-                if (!(*vecOpt)) {
-                    std::cout << "\n✗ sqlite-vec init failed: " << vecOpt->error().message << "\n";
-                    be.close();
-                    return;
-                }
-                auto dropOpt = runWithSpinner(
-                    "Dropping existing vector tables", [&]() { return be.dropTables(); },
-                    timeout_ms);
-                if (!dropOpt) {
-                    be.close();
-                    std::cout << "\n✗ Timeout dropping tables after " << timeout_ms << " ms\n";
-                    return;
-                }
-                if (!(*dropOpt)) {
-                    std::cout << "\n✗ Drop failed: " << dropOpt->error().message << "\n";
-                    be.close();
-                    return;
-                }
-                auto createOpt = runWithSpinner(
-                    "Creating vector tables", [&]() { return be.createTables(targetDim); },
-                    timeout_ms);
-                if (!createOpt) {
-                    be.close();
-                    std::cout << "\n✗ Timeout creating tables after " << timeout_ms << " ms\n";
-                    return;
-                }
-                if (!(*createOpt)) {
-                    std::cout << "\n✗ Create failed: " << createOpt->error().message << "\n";
-                    be.close();
-                    return;
-                }
-                be.close();
-
-                // Align config dims to new target to avoid subsequent mismatch warnings
-                try {
-                    auto cfgPath3 = resolveConfigPath();
-                    if (writeOrReplaceConfigDims(cfgPath3, targetDim)) {
-                        printSuccess("Updated config dims to match recreated schema");
-                    } else {
-                        printWarn("Config dims update skipped (write failed)");
-                    }
-                } catch (...) {
-                    printWarn("Config dims update skipped (exception)");
-                }
-                // Write sentinel to signal recent realign
-                try {
-                    if (cli_)
-                        writeVectorSentinel(cli_->getDataPath(), targetDim);
-                } catch (...) {
-                }
-
-                std::cout << "\n✓ Recreated vector tables in existing DB (dim=" << targetDim
-                          << ").\nNext: yams repair --embeddings\n";
-                // Offer to restart daemon now to avoid stale in-memory dims
-                if (yams::cli::prompt_yes_no("Restart daemon now to apply changes? [y/N]: ",
-                                             yams::cli::YesNoOptions{.defaultYes = false})) {
-                    ensureDaemonStopped();
-                    try {
-                        yams::daemon::ClientConfig cfg;
-                        if (cli_)
-                            cfg.dataDir = cli_->getDataPath();
-                        auto sr = yams::daemon::DaemonClient::startDaemon(cfg);
-                        if (!sr)
-                            printWarn(std::string("Daemon restart failed: ") + sr.error().message);
-                        else
-                            printSuccess("Daemon restarted");
-                    } catch (const std::exception& e) {
-                        printWarn(std::string("Daemon restart exception: ") + e.what());
-                    }
-                }
-            } else {
-                std::cout << "- Then re-generate embeddings:\n"
-                          << "    yams doctor repair --embeddings\n";
-            }
+            std::cout << "- This will cause vector search to fail or return incorrect results.\n";
+            std::cout << "\nTo fix this, you can either:\n";
+            std::cout << "  1. Change your model/config to match the database (" << dbDim
+                      << "-d).\n";
+            std::cout << "  2. Recreate the vector database with the new dimension (" << targetDim
+                      << "-d).\n";
+            std::cout << "     (This will require re-running 'yams repair --embeddings')\n";
         } else {
             std::cout << "✓ Embedding dimension matches model.\n";
         }

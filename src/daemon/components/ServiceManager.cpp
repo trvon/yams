@@ -348,8 +348,18 @@ yams::Result<void> ServiceManager::initialize() {
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
         PoolManager::instance().configure("ipc_io", ioCfg);
-        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}]",
-                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
+        // Post-ingest pool (background CPU) — conservative defaults
+        PoolManager::Config piCfg{};
+        piCfg.min_size = 1;
+        piCfg.max_size = 4;
+        piCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
+        piCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
+        piCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
+        PoolManager::instance().configure("post_ingest", piCfg);
+        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}] "
+                     "post_ingest[min={},max={}]",
+                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size,
+                     piCfg.min_size, piCfg.max_size);
     } catch (const std::exception& e) {
         spdlog::debug("PoolManager configure error: {}", e.what());
     }
@@ -2570,6 +2580,20 @@ void ServiceManager::alignVectorComponentDimensions() {
         }
     } catch (const std::exception& e) {
         spdlog::warn("Error aligning vector dimensions: {}", e.what());
+    }
+}
+
+} // namespace yams::daemon
+
+namespace yams::daemon {
+
+bool ServiceManager::resizePostIngestThreads(std::size_t target) {
+    try {
+        if (!postIngest_)
+            return false;
+        return postIngest_->resize(target);
+    } catch (...) {
+        return false;
     }
 }
 

@@ -56,6 +56,9 @@ struct DaemonStats {
     std::atomic<uint64_t> activeConnections{0};
     // macOS AF_UNIX acceptor recovery counter
     std::atomic<uint64_t> ipcEinvalRebuilds{0};
+    // Accept loop backpressure metrics
+    std::atomic<uint64_t> acceptBackpressureDelays{0};
+    std::atomic<uint64_t> acceptCapacityDelays{0};
 
     // Background repair metrics (idle-only coordinator)
     std::atomic<uint64_t> repairIdleTicks{0};

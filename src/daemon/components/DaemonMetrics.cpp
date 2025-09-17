@@ -13,6 +13,11 @@
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
+#ifdef __APPLE__
+#include <unistd.h>
+#include <mach/mach.h>
+#endif
+
 namespace yams::daemon {
 
 namespace {
@@ -41,6 +46,11 @@ static std::uint64_t readPssKb() {
 // Read Resident Set Size (VmRSS) in kB (Linux), else 0 on unsupported platforms
 static std::uint64_t readRssKb() {
 #ifdef __APPLE__
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        return info.resident_size / 1024;
+    }
     return 0;
 #else
     std::ifstream status("/proc/self/status");
@@ -62,7 +72,10 @@ static std::uint64_t readRssKb() {
 
 [[maybe_unused]] double readMemoryUsageMb() {
 #ifdef __APPLE__
-    // Best-effort: not implementing macOS path here; return 0
+    // On macOS, PSS is not easily available, so we rely on RSS.
+    std::uint64_t rss_kb = readRssKb();
+    if (rss_kb > 0)
+        return static_cast<double>(rss_kb) / 1024.0;
     return 0.0;
 #else
     // Prefer PSS if available (more accurate for shared pages), otherwise RSS
@@ -81,7 +94,49 @@ static std::uint64_t readRssKb() {
 // core on a 4-core system will be ~25%.
 double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTotalJiffies) {
 #ifdef __APPLE__
-    return 0.0;
+    // Process CPU time
+    task_thread_times_info_data_t thread_info;
+    mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
+    uint64_t procJiffies = 0;
+    if (task_info(mach_task_self(), TASK_THREAD_TIMES_INFO, (task_info_t)&thread_info, &count) ==
+        KERN_SUCCESS) {
+        procJiffies =
+            (thread_info.user_time.seconds + thread_info.system_time.seconds) * 100 +
+            (thread_info.user_time.microseconds + thread_info.system_time.microseconds) / 10000;
+    }
+
+    // Total CPU time
+    host_cpu_load_info_data_t cpu_info;
+    count = HOST_CPU_LOAD_INFO_COUNT;
+    uint64_t totalJiffies = 0;
+    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&cpu_info, &count) ==
+        KERN_SUCCESS) {
+        totalJiffies = cpu_info.cpu_ticks[CPU_STATE_USER] + cpu_info.cpu_ticks[CPU_STATE_SYSTEM] +
+                       cpu_info.cpu_ticks[CPU_STATE_NICE] + cpu_info.cpu_ticks[CPU_STATE_IDLE];
+    }
+
+    if (lastProcJiffies == 0 || lastTotalJiffies == 0 || procJiffies < lastProcJiffies ||
+        totalJiffies < lastTotalJiffies) {
+        // Initialize baseline
+        lastProcJiffies = procJiffies;
+        lastTotalJiffies = totalJiffies;
+        return 0.0;
+    }
+
+    uint64_t dProc = procJiffies - lastProcJiffies;
+    uint64_t dTotal = totalJiffies - lastTotalJiffies;
+    lastProcJiffies = procJiffies;
+    lastTotalJiffies = totalJiffies;
+
+    if (dTotal == 0) {
+        return 0.0;
+    }
+
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nprocs < 1)
+        nprocs = 1;
+    return std::clamp(pct, 0.0, 100.0 * static_cast<double>(nprocs));
 #else
     // Read process jiffies from /proc/self/stat (utime + stime)
     std::ifstream pstat("/proc/self/stat");

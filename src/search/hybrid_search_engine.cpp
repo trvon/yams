@@ -917,15 +917,9 @@ public:
                     break;
 
                 default: {
-                    // Default to linear combination with optional KG weights
-                    float base =
-                        fusion::linearCombination(result.vector_score, result.keyword_score,
-                                                  config.vector_weight, config.keyword_weight);
-                    if (config.enable_kg) {
-                        base += result.kg_entity_score * config.kg_entity_weight;
-                        base += result.structural_score * config.structural_weight;
-                    }
-                    result.hybrid_score = base;
+                    // Default to Reciprocal Rank Fusion
+                    result.hybrid_score = fusion::reciprocalRankFusion(
+                        result.vector_rank, result.keyword_rank, config.rrf_k);
                     if (config.normalize_scores) {
                         if (result.hybrid_score < 0.0f)
                             result.hybrid_score = 0.0f;

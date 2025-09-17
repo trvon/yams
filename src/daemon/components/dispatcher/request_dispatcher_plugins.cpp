@@ -244,25 +244,37 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                     ok = true;
             if (!ok)
                 co_return ErrorResponse{ErrorCode::Unknown, "Trust add failed"};
+
+            // Offload potentially expensive scan/load to background to avoid client timeouts
             try {
-                std::filesystem::path p = req.path;
-                if (std::filesystem::is_directory(p)) {
-                    if (abi)
-                        if (auto r = abi->scanDirectory(p))
-                            for (const auto& d : r.value())
-                                (void)abi->load(d.path, "");
-                    if (wasm)
-                        if (auto r = wasm->scanDirectory(p))
-                            for (const auto& d : r.value())
-                                (void)wasm->load(d.path, "");
-                } else if (std::filesystem::is_regular_file(p)) {
-                    if (abi)
-                        (void)abi->load(p, "");
-                    if (wasm && p.extension() == ".wasm")
-                        (void)wasm->load(p, "");
-                }
-                if (serviceManager_)
-                    (void)serviceManager_->adoptModelProviderFromHosts();
+                auto sm = serviceManager_;
+                auto path = std::filesystem::path(req.path);
+                boost::asio::co_spawn(
+                    boost::asio::system_executor(),
+                    [abi, wasm, sm, path]() -> boost::asio::awaitable<void> {
+                        try {
+                            if (std::filesystem::is_directory(path)) {
+                                if (abi)
+                                    if (auto r = abi->scanDirectory(path))
+                                        for (const auto& d : r.value())
+                                            (void)abi->load(d.path, "");
+                                if (wasm)
+                                    if (auto r = wasm->scanDirectory(path))
+                                        for (const auto& d : r.value())
+                                            (void)wasm->load(d.path, "");
+                            } else if (std::filesystem::is_regular_file(path)) {
+                                if (abi)
+                                    (void)abi->load(path, "");
+                                if (wasm && path.extension() == ".wasm")
+                                    (void)wasm->load(path, "");
+                            }
+                            if (sm)
+                                (void)sm->adoptModelProviderFromHosts();
+                        } catch (...) {
+                        }
+                        co_return;
+                    },
+                    boost::asio::detached);
             } catch (...) {
             }
             co_return SuccessResponse{"ok"};

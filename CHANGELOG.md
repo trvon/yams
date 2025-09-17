@@ -18,6 +18,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Known Issues
 - Daemon may show broken connection with rapid CLI/MCP usage
 
+## [v0.6.38] - 2025-09-17
+
+### Added
+- List input resolver service shared by CLI and MCP (`resolveNameToPatternIfLocalFile`) to detect
+  when users pass a local file path and normalize it to an exact path pattern for the list tool.
+- CLI `list`: when `--name` points to a local file, prints a concise line-based diff against the
+  indexed content after the listing (non-disruptive; no mutations).
+- MCP `list` tool: new opt-in flag `include_diff` to attach a structured diff block per matching
+  document when `name` is a local file. Response annotates `local_input_file` for traceability.
+
+### Changed
+- The hybrid search engine now defaults to Reciprocal Rank Fusion (RRF) instead of a linear combination of weights. This provides more robust and balanced search results out-of-the-box and simplifies tuning.
+- Build/Deps: Bumped Tracy profiler to 0.12.2 (from 0.12.1); enabled by default in yams-debug preset.
+ - List command parity: CLI and MCP now share the same local-file detection and path normalization
+   for `list`, reducing surprises between surfaces.
+
+### Connection Handling
+- SocketServer: pre-accept backpressure now clamped to a very small delay (≤20ms) to avoid kernel backlog saturation and spurious `ECONNREFUSED`. Added overload counters to daemon stats (`acceptBackpressureDelays`, `acceptCapacityDelays`).
+- RequestHandler: persistent connections are no longer closed on benign read timeouts; unified closure logs with explicit reasons (EOF, invalid frame, parse error, FSM not alive).
+- Client transport/pool: clearer error messages that distinguish `ECONNREFUSED` from timeouts and include socket path with actionable hints.
+
+### Fixed
+- The `add_directory` tool now correctly validates that the input path is a directory and handles path normalization more robustly, fixing an issue where it would fail to index any files.
+- Corrected the `if` condition syntax in the `release.yml` workflow to resolve a parsing error related to the `secrets` context.
+
 ## [v0.6.37] - 2025-09-17
 
 ### Hotfixes
@@ -32,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SocketServer accept/connection to profile remaining hotspots on demand.
 - Portability: snapshot registries switched to `atomic_load/store` free functions for `shared_ptr`
   to fix libc++ build errors (no `std::atomic<std::shared_ptr<...>>`).
+ - PostIngestQueue:
+   - Introduced dynamic worker resize with PoolManager("post_ingest") integration.
+   - Implemented bounded queue with backpressure (default capacity 1000; env `YAMS_POST_INGEST_QUEUE_MAX`).
+   - TuningManager now scales post_ingest up on backlog when idle and down when busy.
 
 ### Updated Config guidance
 - Suggested `[tuning]` while validating:

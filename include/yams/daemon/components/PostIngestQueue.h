@@ -35,7 +35,8 @@ public:
     PostIngestQueue(std::shared_ptr<api::IContentStore> store,
                     std::shared_ptr<metadata::MetadataRepository> meta,
                     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
-                    std::shared_ptr<metadata::KnowledgeGraphStore> kg, std::size_t threads = 2);
+                    std::shared_ptr<metadata::KnowledgeGraphStore> kg, std::size_t threads = 2,
+                    std::size_t capacity = 1000);
     ~PostIngestQueue();
 
     void enqueue(Task t);
@@ -46,6 +47,10 @@ public:
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
 
+    // Dynamically resize the worker thread pool (grow or shrink)
+    // Returns true if a change was applied.
+    bool resize(std::size_t target);
+
 private:
     void workerLoop();
 
@@ -53,11 +58,16 @@ private:
     std::shared_ptr<metadata::MetadataRepository> meta_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
-    std::vector<std::thread> threads_;
+    struct Worker {
+        std::thread th;
+        std::shared_ptr<std::atomic<bool>> exit;
+    };
+    std::vector<Worker> threads_;
     mutable std::mutex mtx_;
     std::condition_variable cv_;
     std::queue<Task> q_;
     std::unordered_set<std::string> inflight_;
+    std::size_t capacity_{1000};
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};

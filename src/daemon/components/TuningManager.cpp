@@ -127,6 +127,36 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
+    // Post-ingest tuning (gated on core service readiness)
+    try {
+        bool servicesReady = false;
+        try {
+            servicesReady = state_->readiness.databaseReady.load() &&
+                            state_->readiness.metadataRepoReady.load() &&
+                            state_->readiness.contentStoreReady.load();
+        } catch (...) {
+        }
+        if (servicesReady) {
+            std::size_t pqDepth = 0;
+            try {
+                if (auto* pq = sm_->getPostIngestQueue())
+                    pqDepth = pq->size();
+            } catch (...) {
+            }
+            if (activeConns > 0) {
+                pm.apply_delta({"post_ingest", -1, "busy", TuneAdvisor::poolCooldownMs()});
+            } else if (pqDepth > 0) {
+                pm.apply_delta({"post_ingest", +1, "backlog", TuneAdvisor::poolCooldownMs()});
+            } else {
+                pm.apply_delta({"post_ingest", -1, "idle", TuneAdvisor::poolCooldownMs()});
+            }
+            auto piStats = pm.stats("post_ingest");
+            if (piStats.current_size > 0)
+                (void)sm_->resizePostIngestThreads(piStats.current_size);
+        }
+    } catch (...) {
+    }
+
     // Writer budget observability: ensure a non-zero budget is published
     std::size_t writerBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
     if (writerBudget == 0)
@@ -160,6 +190,70 @@ void TuningManager::tick_once() {
         s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
         s->writerBudgetBytesPerTurn = writerBudget;
         TuningSnapshotRegistry::instance().set(std::move(s));
+    } catch (...) {
+    }
+
+    // RepairCoordinator tuning (tokens/batch) centralized here
+    try {
+        if (setRepair_) {
+            using clock = std::chrono::steady_clock;
+            auto now = clock::now();
+            const uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
+            const bool isBusy = (activeConns >= busyThresh);
+            if (isBusy) {
+                if (repairBusySince_.time_since_epoch().count() == 0)
+                    repairBusySince_ = now;
+                repairReadySince_ = {};
+            } else {
+                if (repairReadySince_.time_since_epoch().count() == 0)
+                    repairReadySince_ = now;
+                repairBusySince_ = {};
+            }
+            const uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
+            const uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
+            const bool busyHeld =
+                isBusy && repairBusySince_.time_since_epoch().count() != 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - repairBusySince_)
+                        .count() >= degradeHold;
+            const bool idleHeld =
+                !isBusy && repairReadySince_.time_since_epoch().count() != 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
+                        .count() >= readyHold;
+
+            uint32_t tokens =
+                busyHeld ? TuneAdvisor::repairTokensBusy() : TuneAdvisor::repairTokensIdle();
+            uint32_t batch = TuneAdvisor::repairMaxBatch();
+
+            // Rate limiting: cap batches per second; if exceeded, force tokens=0 this window
+            uint32_t maxPerSec = TuneAdvisor::repairMaxBatchesPerSec();
+            if (maxPerSec > 0) {
+                uint64_t curBatches = 0;
+                try {
+                    curBatches = state_->stats.repairBatchesAttempted.load();
+                } catch (...) {
+                }
+                if (repairRateWindowStart_.time_since_epoch().count() == 0) {
+                    repairRateWindowStart_ = now;
+                    repairBatchesAtWindowStart_ = curBatches;
+                } else {
+                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         now - repairRateWindowStart_)
+                                         .count();
+                    auto produced = (curBatches >= repairBatchesAtWindowStart_)
+                                        ? (curBatches - repairBatchesAtWindowStart_)
+                                        : 0;
+                    if (elapsedMs < 1000) {
+                        if (produced >= maxPerSec)
+                            tokens = 0;
+                    } else {
+                        repairRateWindowStart_ = now;
+                        repairBatchesAtWindowStart_ = curBatches;
+                    }
+                }
+            }
+
+            setRepair_(tokens, batch);
+        }
     } catch (...) {
     }
 }

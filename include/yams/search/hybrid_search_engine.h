@@ -47,7 +47,7 @@ struct HybridSearchConfig {
         CASCADE,            // Use vector search to rerank keyword results
         HYBRID_CASCADE      // Two-stage: keyword filter then vector rerank
     };
-    FusionStrategy fusion_strategy = FusionStrategy::LINEAR_COMBINATION;
+    FusionStrategy fusion_strategy = FusionStrategy::RECIPROCAL_RANK;
 
     // Reciprocal Rank Fusion parameter
     float rrf_k = 60.0f; // RRF constant (typically 60)

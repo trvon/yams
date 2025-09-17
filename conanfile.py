@@ -84,7 +84,9 @@ class YamsConan(ConanFile):
             self.test_requires("benchmark/1.8.3")
         # Add Tracy profiler for Debug builds
         if self.settings.build_type == "Debug":
-            self.requires("tracy/0.12.1")
+            # Tracy profiler for Debug builds (profiling and zones)
+            # Note: Conan Center currently provides up to 0.12.2
+            self.requires("tracy/0.12.2")
 
     def configure(self):
         # SQLite3 configuration - enable FTS5 for full-text search

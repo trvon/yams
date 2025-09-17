@@ -51,10 +51,12 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             *socket, boost::asio::buffer(batch), boost::asio::redirect_error(use_awaitable, ec));
         if (ec) {
             writing = false;
+            alive = false;
             co_return Error{ErrorCode::NetworkError, ec.message()};
         }
         if (result != batched) {
             writing = false;
+            alive = false;
             co_return Error{ErrorCode::NetworkError, "Short write on transport socket"};
         }
     }

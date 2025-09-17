@@ -99,9 +99,21 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
                                         timer.async_wait(use_awaitable));
         if (connect_result.index() == 1) {
             socket->close();
-            co_return Error{ErrorCode::Timeout, "Connection timeout"};
+            co_return Error{ErrorCode::Timeout,
+                            yams::format("Connection timeout (socket='{}')", path.string())};
         }
         co_return std::move(socket);
+    } catch (const boost::system::system_error& e) {
+        const auto ec = e.code();
+        if (ec == boost::asio::error::connection_refused ||
+            ec == make_error_code(boost::system::errc::connection_refused)) {
+            co_return Error{ErrorCode::NetworkError,
+                            yams::format("Connection refused (socket='{}'). Is the daemon running? "
+                                         "Try 'yams daemon start' or verify daemon.socket_path.",
+                                         path.string())};
+        }
+        co_return Error{ErrorCode::NetworkError,
+                        yams::format("Connection failed ({}): {}", ec.message(), e.what())};
     } catch (const std::exception& e) {
         co_return Error{ErrorCode::NetworkError, yams::format("Connection failed: {}", e.what())};
     }

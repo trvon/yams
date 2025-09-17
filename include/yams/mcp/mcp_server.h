@@ -5,6 +5,7 @@
 #include <boost/asio/strand.hpp>
 #include <yams/api/content_store.h>
 #include <yams/app/services/factory.hpp>
+#include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/core/types.h>

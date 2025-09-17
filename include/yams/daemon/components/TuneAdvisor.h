@@ -402,6 +402,24 @@ public:
     static void setPostIngestThreads(uint32_t n) {
         postIngestThreads_.store(n, std::memory_order_relaxed);
     }
+    // Post-ingest queue capacity (bounded queue). Env override: YAMS_POST_INGEST_QUEUE_MAX
+    static uint32_t postIngestQueueMax() {
+        uint32_t ov = postIngestQueueMaxOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_INGEST_QUEUE_MAX")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 1'000'000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1000;
+    }
+    static void setPostIngestQueueMax(uint32_t v) {
+        postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
+    }
     static uint32_t mcpWorkerThreads() { return mcpWorkerThreads_.load(std::memory_order_relaxed); }
     static void setMcpWorkerThreads(uint32_t n) {
         mcpWorkerThreads_.store(n, std::memory_order_relaxed);
@@ -731,6 +749,9 @@ public:
     // IO: desired average connections per thread before scaling up IO pool.
     // Default 8; override via YAMS_IO_CONN_PER_THREAD (range 1..1024).
     static uint32_t ioConnPerThread() {
+        uint32_t ov = ioConnPerThreadOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
         uint32_t def = 8;
         if (const char* s = std::getenv("YAMS_IO_CONN_PER_THREAD")) {
             try {
@@ -741,6 +762,9 @@ public:
             }
         }
         return def;
+    }
+    static void setIoConnPerThread(uint32_t v) {
+        ioConnPerThreadOverride_.store(v, std::memory_order_relaxed);
     }
 
 private:
@@ -777,6 +801,8 @@ private:
     static inline std::atomic<uint32_t> poolLowWatermarkPctOverride_{0};
     static inline std::atomic<uint32_t> poolHighWatermarkPctOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
+    static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
+    static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
 };
 
 } // namespace yams::daemon

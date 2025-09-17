@@ -72,9 +72,20 @@ async_connect_with_timeout(const TransportOptions& opts) {
                                         timer.async_wait(use_awaitable));
         if (connect_result.index() == 1) {
             socket->close();
-            co_return Error{ErrorCode::Timeout, "Connection timeout"};
+            co_return Error{ErrorCode::Timeout, "Connection timeout (pool connect)"};
         }
         co_return std::move(socket);
+    } catch (const boost::system::system_error& e) {
+        const auto ec = e.code();
+        if (ec == boost::asio::error::connection_refused ||
+            ec == make_error_code(boost::system::errc::connection_refused)) {
+            co_return Error{ErrorCode::NetworkError,
+                            std::string("Connection refused. Is the daemon running? Try 'yams "
+                                        "daemon start' or verify daemon.socket_path (pool). ") +
+                                ec.message()};
+        }
+        co_return Error{ErrorCode::NetworkError,
+                        std::string("Connection failed (pool): ") + ec.message()};
     } catch (const std::exception& e) {
         co_return Error{ErrorCode::NetworkError, e.what()};
     }
@@ -141,7 +152,8 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
         std::lock_guard<std::mutex> lk(mutex_);
         existing = cached_.lock();
     }
-    if (existing && existing->alive.load(std::memory_order_relaxed)) {
+    if (existing && existing->alive.load(std::memory_order_relaxed) && existing->socket &&
+        existing->socket->is_open()) {
         co_return existing;
     }
     auto fresh = co_await create_connection();

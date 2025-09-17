@@ -510,6 +510,7 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     req.sortBy = j.value("sort_by", std::string{"modified"});
     req.sortOrder = j.value("sort_order", std::string{"desc"});
     req.pathsOnly = j.value("paths_only", false);
+    req.includeDiff = j.value("include_diff", false);
     req.useSession = j.value("use_session", true);
     req.sessionName = j.value("session", std::string{});
     return req;

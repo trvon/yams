@@ -84,6 +84,8 @@ public:
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
+    // Resize PostIngestQueue worker threads; returns false if unchanged/missing.
+    bool resizePostIngestThreads(std::size_t target);
     void enqueuePostIngest(const std::string& hash, const std::string& mime) {
         if (postIngest_)
             postIngest_->enqueue(PostIngestQueue::Task{hash, mime, {}});

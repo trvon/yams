@@ -228,18 +228,29 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             std::array<uint8_t, 4096> buf{};
             spdlog::debug("About to co_await socket.async_read");
             // FSM guard: ensure reads are allowed before attempting to read from the socket
+            bool can_read = true;
+            std::string guard_err;
             try {
                 fsm_helpers::require_can_read(fsm, "handle_connection:before_async_read");
             } catch (const std::exception& ex) {
-                spdlog::error("FSM read guard failed before async_read: {}", ex.what());
-                // Attempt to recover the FSM to a readable state for persistent connections
-                fsm.on_response_complete(config_.close_after_response);
-                if (config_.close_after_response) {
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
-                    break;
+                can_read = false;
+                guard_err = ex.what();
+            }
+            if (!can_read) {
+                // FSM not ready to read (e.g., mid-response). Avoid tight loop/log spam.
+                static std::atomic<uint64_t> s_guard_fail_count{0};
+                auto count = s_guard_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (count % 1000 == 1) {
+                    spdlog::warn("FSM not ready for read — backing off (occurrences={}): {}", count,
+                                 guard_err);
+                } else {
+                    spdlog::debug("FSM not ready for read: {}", guard_err);
                 }
-                // In persistent mode, continue loop to try reading next request
+                using namespace boost::asio;
+                steady_timer wait(co_await this_coro::executor);
+                wait.expires_after(
+                    std::chrono::milliseconds(TuneAdvisor::backpressureReadPauseMs()));
+                co_await wait.async_wait(use_awaitable);
                 continue;
             }
 
@@ -257,28 +268,28 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
 
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
-                // Idle persistent connection; downgrade to debug to avoid noisy logs
+                // Idle persistent connection; keep connection open and continue
                 spdlog::debug(
-                    "Read timeout on socket {} after {} ms", sock->native_handle(),
+                    "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
+                    sock->native_handle(),
                     std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout)
                         .count());
                 fsm.on_timeout(ConnectionFsm::Operation::Read);
-                break;
+                continue;
             } else {
                 // Header/payload bytes became available
                 bytes_read = std::get<0>(read_or_timeout);
                 spdlog::debug("socket.async_read returned {} bytes", bytes_read);
                 if (bytes_read == 0) {
-                    spdlog::debug("Connection closed by peer (EOF)");
+                    spdlog::debug("Closing connection: peer sent EOF");
                     fsm.on_close_request();
                     break;
                 }
             }
 
             if (bytes_read == 0) {
-                // Handle EOF with 0 bytes - this shouldn't happen with async_read
-                // but we handle it defensively
-                spdlog::debug("Connection closed by peer (EOF)");
+                // Defensive EOF handling
+                spdlog::debug("Closing connection: peer sent EOF (0 bytes)");
                 fsm.on_close_request();
                 break;
             }
@@ -287,7 +298,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             if (fsm.alive()) {
                 fsm.on_readable(static_cast<size_t>(bytes_read));
             } else {
-                spdlog::debug("FSM not alive during read; closing connection");
+                spdlog::debug("Closing connection: FSM not alive during read");
                 boost::system::error_code ignore_ec;
                 sock->close(ignore_ec);
                 break;
@@ -323,7 +334,8 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             while (reader.has_frame()) {
                 auto frame_result = reader.get_frame();
                 if (!frame_result) {
-                    spdlog::error("Failed to get frame: {}", frame_result.error().message);
+                    spdlog::error("Closing connection: failed to get frame: {}",
+                                  frame_result.error().message);
                     (void)co_await send_error(*sock, ErrorCode::SerializationError,
                                               "Failed to get frame");
                     boost::system::error_code ignore_ec;
@@ -335,7 +347,8 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 // Parse the frame
                 auto message_result = framer_.parse_frame(frame_result.value());
                 if (!message_result) {
-                    spdlog::error("Failed to parse frame: {}", message_result.error().message);
+                    spdlog::error("Closing connection: failed to parse frame: {}",
+                                  message_result.error().message);
                     // Map parse/serialization errors to ErrorResponse at server boundary.
                     // Try to recover request_id from header for correlation; if unavailable, use 0.
                     uint64_t correlated_id = 0;
@@ -364,7 +377,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 const auto& message = message_result.value();
                 auto* request_ptr = std::get_if<Request>(&message.payload);
                 if (!request_ptr) {
-                    spdlog::error("Received non-request message");
+                    spdlog::error("Closing connection: received non-request message");
                     // Correlate error with the observed message requestId and close
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Expected request message", message.requestId);

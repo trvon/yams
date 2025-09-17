@@ -498,7 +498,7 @@ void PluginCommand::trustList() {
         if (cli_->hasExplicitDataDir()) {
             cfg.dataDir = cli_->getDataPath();
         }
-        cfg.requestTimeout = std::chrono::milliseconds(8000);
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
@@ -508,7 +508,7 @@ void PluginCommand::trustList() {
         auto& client = **leaseHandle;
         PluginTrustListRequest req;
         auto res = yams::cli::run_result<PluginTrustListResponse>(client.call(req),
-                                                                  std::chrono::milliseconds(8000));
+                                                                  std::chrono::milliseconds(15000));
         if (!res) {
             std::cout << "Trust list failed: " << res.error().message << "\n";
             return;
@@ -529,7 +529,7 @@ void PluginCommand::trustAdd(const std::string& path) {
         if (cli_->hasExplicitDataDir()) {
             cfg.dataDir = cli_->getDataPath();
         }
-        cfg.requestTimeout = std::chrono::milliseconds(8000);
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
@@ -540,12 +540,13 @@ void PluginCommand::trustAdd(const std::string& path) {
         PluginTrustAddRequest req;
         req.path = path;
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
-                                                          std::chrono::milliseconds(8000));
+                                                          std::chrono::milliseconds(15000));
         if (!res) {
             std::cout << "Trust add failed: " << res.error().message << "\n";
             return;
         }
-        std::cout << "Trusted: " << path << "\n";
+        std::cout << "Trusted: " << path
+                  << " (scan/load queued in background; run 'yams plugin list' shortly)\n";
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";
     }
@@ -558,7 +559,7 @@ void PluginCommand::trustRemove(const std::string& path) {
         if (cli_->hasExplicitDataDir()) {
             cfg.dataDir = cli_->getDataPath();
         }
-        cfg.requestTimeout = std::chrono::milliseconds(8000);
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
@@ -569,7 +570,7 @@ void PluginCommand::trustRemove(const std::string& path) {
         PluginTrustRemoveRequest req;
         req.path = path;
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
-                                                          std::chrono::milliseconds(8000));
+                                                          std::chrono::milliseconds(15000));
         if (!res) {
             std::cout << "Trust remove failed: " << res.error().message << "\n";
             return;

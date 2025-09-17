@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/app/services/factory.hpp>
+#include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
@@ -21,8 +22,10 @@ namespace yamsfmt = fmt;
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -176,8 +179,12 @@ public:
             dreq.filterTags = filterTags_;
             dreq.matchAllTags = false; // Use filterTags for actual filtering
 
-            // Name pattern filtering
-            dreq.namePattern = namePattern_;
+            // Name pattern filtering (detect local file path and normalize)
+            if (!namePattern_.empty()) {
+                auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(namePattern_);
+                dreq.namePattern = resolved.pattern;
+                resolvedLocalFilePath_ = resolved.isLocalFile ? resolved.absPath : std::nullopt;
+            }
 
             auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
                 // Handle paths-only output
@@ -263,7 +270,12 @@ public:
                 ropts.bodyTimeoutMs = 120000;
                 auto res = rsvc.list(dreq, ropts);
                 if (res) {
-                    return render(res.value());
+                    auto r = render(res.value());
+                    if (!r)
+                        return r;
+                    // If a concrete file path was provided, try to show a diff against indexed
+                    (void)printPathDiffIfApplicable();
+                    return Result<void>();
                 }
                 spdlog::warn("list: daemon path failed ({}); using local services",
                              res.error().message);
@@ -277,6 +289,8 @@ public:
     }
 
 private:
+    // Track normalized local file path if user passed a concrete file via --name
+    std::optional<std::string> resolvedLocalFilePath_;
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();
@@ -303,8 +317,13 @@ private:
                 serviceReq.recent = recentCount_;
             }
 
-            // Name pattern filter
-            serviceReq.pattern = namePattern_;
+            // Name pattern filter (reuse normalized path if detected)
+            if (!namePattern_.empty()) {
+                auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(namePattern_);
+                serviceReq.pattern = resolved.pattern;
+                if (!resolvedLocalFilePath_.has_value())
+                    resolvedLocalFilePath_ = resolved.isLocalFile ? resolved.absPath : std::nullopt;
+            }
 
             // File type filters
             serviceReq.type = fileType_;
@@ -416,6 +435,9 @@ private:
             } else {
                 outputTable(documents);
             }
+
+            // If a concrete file path was provided, try to show a diff against indexed
+            (void)printPathDiffIfApplicable();
 
             return Result<void>();
 
@@ -617,6 +639,140 @@ private:
         }
 
         std::cout << "\nTotal: " << documents.size() << " document(s)\n";
+    }
+
+    // Attempt to show a simple line diff between local file content and indexed content
+    // when the user provided a concrete file path via --name.
+    Result<void> printPathDiffIfApplicable() {
+        try {
+            if (!resolvedLocalFilePath_.has_value())
+                return Result<void>();
+            fs::path p{*resolvedLocalFilePath_};
+            if (!fs::exists(p) || !fs::is_regular_file(p))
+                return Result<void>();
+
+            // Resolve absolute path and attempt to find corresponding indexed document
+            std::error_code ec;
+            fs::path abs = fs::weakly_canonical(p, ec);
+            if (ec) {
+                std::error_code ec2;
+                fs::path tmp = fs::absolute(p, ec2);
+                abs = ec2 ? p : tmp;
+            }
+
+            auto appContext = cli_->getAppContext();
+            if (!appContext)
+                return Result<void>();
+            auto documentService = app::services::makeDocumentService(*appContext);
+            if (!documentService)
+                return Result<void>();
+
+            auto findByPattern =
+                [&](const std::string& pat) -> std::vector<app::services::DocumentEntry> {
+                app::services::ListDocumentsRequest req;
+                req.pattern = pat;
+                req.limit = 1000;
+                req.pathsOnly = false;
+                auto lr = documentService->list(req);
+                if (lr && !lr.value().documents.empty())
+                    return lr.value().documents;
+                return {};
+            };
+
+            std::vector<app::services::DocumentEntry> matches;
+            // Try exact path first
+            matches = findByPattern(abs.string());
+            // Try suffix match if empty
+            if (matches.empty()) {
+                matches = findByPattern(std::string("%/") + abs.string());
+            }
+            // Try basename anywhere as last resort
+            if (matches.empty()) {
+                matches = findByPattern(std::string("%") + abs.filename().string() + "%");
+            }
+            if (matches.empty())
+                return Result<void>();
+
+            // Pick newest by indexed time
+            const app::services::DocumentEntry* chosen = &matches.front();
+            for (const auto& d : matches) {
+                if (d.indexed > chosen->indexed)
+                    chosen = &d;
+            }
+
+            // Retrieve indexed content
+            yams::app::services::RetrievalService rsvc;
+            yams::app::services::RetrievalOptions ropts;
+            if (cli_->hasExplicitDataDir())
+                ropts.explicitDataDir = cli_->getDataPath();
+            yams::daemon::GetRequest greq;
+            greq.hash = chosen->hash;
+            greq.metadataOnly = false;
+            auto gr = rsvc.get(greq, ropts);
+            if (!gr)
+                return Result<void>();
+            auto indexed = gr.value();
+
+            // Read local file (limit size for safety)
+            std::ifstream ifs(abs);
+            if (!ifs)
+                return Result<void>();
+            std::string localContent((std::istreambuf_iterator<char>(ifs)),
+                                     std::istreambuf_iterator<char>());
+
+            // If identical, print a short note and return
+            if (indexed.content == localContent) {
+                if (!cli_->getJsonOutput()) {
+                    std::cout << "\nNo differences: local file matches indexed content ("
+                              << abs.string() << ")\n";
+                }
+                return Result<void>();
+            }
+
+            // Produce a simple line-based diff (first 200 differing lines)
+            auto toLines = [](const std::string& s) {
+                std::vector<std::string> lines;
+                std::stringstream ss(s);
+                std::string line;
+                while (std::getline(ss, line))
+                    lines.push_back(line);
+                return lines;
+            };
+            auto a = toLines(localContent);
+            auto b = toLines(indexed.content);
+            size_t i = 0, j = 0;
+            size_t shown = 0, maxShown = 200;
+            if (!cli_->getJsonOutput()) {
+                std::cout << "\n=== Diff (local vs indexed) for: " << abs.string() << " ===\n";
+            }
+            while ((i < a.size() || j < b.size()) && shown < maxShown) {
+                const std::string* la = (i < a.size()) ? &a[i] : nullptr;
+                const std::string* lb = (j < b.size()) ? &b[j] : nullptr;
+                if (la && lb && *la == *lb) {
+                    ++i;
+                    ++j;
+                    continue;
+                }
+                if (la) {
+                    if (!cli_->getJsonOutput())
+                        std::cout << "- " << *la << "\n";
+                    ++shown;
+                    ++i;
+                }
+                if (lb && shown < maxShown) {
+                    if (!cli_->getJsonOutput())
+                        std::cout << "+ " << *lb << "\n";
+                    ++shown;
+                    ++j;
+                }
+            }
+            if (!cli_->getJsonOutput() && (i < a.size() || j < b.size())) {
+                std::cout << "... (diff truncated)\n";
+            }
+            return Result<void>();
+        } catch (...) {
+            return Result<void>();
+        }
     }
 
     void outputDiffTags(const std::vector<EnhancedDocumentInfo>& documents) {

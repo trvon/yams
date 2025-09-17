@@ -151,6 +151,8 @@ endif()
 ## Kept above in unified C++20 configuration
 
 # Tracy profiler integration (Debug or tests via generator expressions)
+# Allow forcing Tracy on via cache option (useful for debug presets)
+option(YAMS_FORCE_TRACY "Force enable Tracy profiling (TRACY_ENABLE, TRACY_ON_DEMAND)" OFF)
 add_library(yams_profiling INTERFACE)
 
 find_package(tracy QUIET)
@@ -159,14 +161,17 @@ if(tracy_FOUND)
     # Enable profiling target properties only for Debug or when tests are built
     set(YAMS_ENABLE_PROFILING ON)
     # Disable Tracy when sanitizers are enabled to avoid conflicts
+    # Enable defines when forced, in Debug, or when tests are built (unless sanitizers are on)
     target_compile_definitions(yams_profiling INTERFACE
-        $<$<AND:$<OR:$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>,$<NOT:$<BOOL:${YAMS_ENABLE_SANITIZERS}>>>:TRACY_ENABLE;TRACY_ON_DEMAND>
+        $<$<AND:$<OR:$<BOOL:${YAMS_FORCE_TRACY}>,$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>,$<NOT:$<BOOL:${YAMS_ENABLE_SANITIZERS}>>>:TRACY_ENABLE;TRACY_ON_DEMAND>
     )
+    # Link Tracy client when forced, Debug, or tests
     target_link_libraries(yams_profiling INTERFACE
-        $<$<OR:$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>:Tracy::TracyClient>
+        $<$<OR:$<BOOL:${YAMS_FORCE_TRACY}>,$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>:Tracy::TracyClient>
     )
+    # Helpful debug flags when profiling on UNIX
     target_compile_options(yams_profiling INTERFACE
-        $<$<AND:$<OR:$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>,$<BOOL:${UNIX}>>:-g -fno-omit-frame-pointer>
+        $<$<AND:$<OR:$<BOOL:${YAMS_FORCE_TRACY}>,$<CONFIG:Debug>,$<BOOL:${YAMS_BUILD_TESTS}>>,$<BOOL:${UNIX}>>:-g -fno-omit-frame-pointer>
     )
     message(STATUS "Tracy profiler available; enabled for Debug or tests")
 else()
@@ -1450,20 +1455,19 @@ if(YAMS_ENABLE_PDF)
 
             if(APPLE)
                 # Ensure consumers load PDFium via @rpath; installed binaries use @loader_path/../lib
-                install(CODE [=[execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib "${CMAKE_INSTALL_FULL_LIBDIR}/libpdfium.dylib")]=])
+                # Use normal quoted string so paths are expanded at configure time, not at install time.
+                install(CODE "execute_process(COMMAND install_name_tool -id @rpath/libpdfium.dylib \"${CMAKE_INSTALL_FULL_LIBDIR}/libpdfium.dylib\")")
 
                 # Patch installed executables to reference @rpath/libpdfium.dylib and ensure rpath includes ../lib
-                install(CODE [=[
-                set(_bins yams yams-mcp-server)
-                foreach(_bin IN LISTS _bins)
-                    set(_path "${CMAKE_INSTALL_FULL_BINDIR}/${_bin}")
-                    if(EXISTS "${_path}")
-                        execute_process(COMMAND install_name_tool -change libpdfium.dylib @rpath/libpdfium.dylib "${_path}")
-                        execute_process(COMMAND install_name_tool -change ./libpdfium.dylib @rpath/libpdfium.dylib "${_path}")
-                        execute_process(COMMAND install_name_tool -add_rpath "@loader_path/../lib" "${_path}")
+                install(CODE "
+                set(_bins \"${CMAKE_INSTALL_FULL_BINDIR}/yams\" \"${CMAKE_INSTALL_FULL_BINDIR}/yams-mcp-server\")
+                foreach(_path IN LISTS _bins)
+                    if(EXISTS \"${_path}\")
+                        execute_process(COMMAND install_name_tool -change libpdfium.dylib @rpath/libpdfium.dylib \"${_path}\")
+                        execute_process(COMMAND install_name_tool -change ./libpdfium.dylib @rpath/libpdfium.dylib \"${_path}\")
+                        execute_process(COMMAND install_name_tool -add_rpath \"@loader_path/../lib\" \"${_path}\")
                     endif()
-                endforeach()
-            ]=])
+                endforeach()")
             endif()
 
             message(STATUS "PDFium ${PDFIUM_PLATFORM} successfully configured")

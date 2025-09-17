@@ -40,7 +40,23 @@ set_target_properties(yams_pdf_extractor PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
+# macOS: ensure the plugin can locate libpdfium.dylib installed into ${CMAKE_INSTALL_LIBDIR}
+# Plugin installs to ${CMAKE_INSTALL_LIBDIR}/yams/plugins, so two levels up is the lib dir.
+if(APPLE)
+    set_target_properties(yams_pdf_extractor PROPERTIES
+        MACOSX_RPATH ON
+        BUILD_WITH_INSTALL_RPATH ON
+        INSTALL_RPATH "@loader_path/../.."
+    )
+    # Also keep link-time rpath for build-tree testing where applicable
+    set_property(TARGET yams_pdf_extractor APPEND PROPERTY BUILD_RPATH "@loader_path/../..")
+endif()
+
 # Install the plugin
 install(TARGETS yams_pdf_extractor
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins
 )
+
+# Optionally install the plugin manifest alongside sources for reference (not required at runtime)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/plugin_manifest.json
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins)

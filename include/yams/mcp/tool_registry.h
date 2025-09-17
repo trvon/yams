@@ -281,6 +281,7 @@ struct MCPListDocumentsRequest {
     std::string sortBy = "modified";
     std::string sortOrder = "desc";
     bool pathsOnly = false;
+    bool includeDiff = false; // include structured diff when name is a local file
     // Session scoping
     bool useSession = true;
     std::string sessionName;

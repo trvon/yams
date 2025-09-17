@@ -159,6 +159,16 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     try {
         tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_);
         spdlog::debug("TuningManager constructed early in YamsDaemon");
+        // Bridge repair control into TuningManager (centralized tokens/batch)
+        tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
+            try {
+                if (repairCoordinator_) {
+                    repairCoordinator_->setMaintenanceTokens(tokens);
+                    repairCoordinator_->setMaxBatch(batch);
+                }
+            } catch (...) {
+            }
+        });
     } catch (const std::exception& e) {
         spdlog::warn("Failed to construct TuningManager early: {}", e.what());
     }
@@ -355,78 +365,41 @@ Result<void> YamsDaemon::start() {
                     }
                 }
             }
-            // Live-tune RepairCoordinator scheduling using TuneAdvisor and load
+            // RepairCoordinator tokens are tuned by TuningManager. Keep FSM signaling only.
             if (repairCoordinator_) {
                 size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
                 uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
-                // Hysteresis on busy/idle
                 auto now = std::chrono::steady_clock::now();
+                static std::chrono::steady_clock::time_point rcBusySince{};
+                static std::chrono::steady_clock::time_point rcReadySince{};
                 bool isBusy = (active >= busyThresh);
                 if (isBusy) {
-                    if (repairBusySince_.time_since_epoch().count() == 0)
-                        repairBusySince_ = now;
-                    repairReadySince_ = {};
+                    if (rcBusySince.time_since_epoch().count() == 0)
+                        rcBusySince = now;
+                    rcReadySince = {};
                 } else {
-                    if (repairReadySince_.time_since_epoch().count() == 0)
-                        repairReadySince_ = now;
-                    repairBusySince_ = {};
+                    if (rcReadySince.time_since_epoch().count() == 0)
+                        rcReadySince = now;
+                    rcBusySince = {};
                 }
                 uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
                 uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
                 bool busyHeld =
-                    isBusy && repairBusySince_.time_since_epoch().count() != 0 &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - repairBusySince_)
+                    isBusy && rcBusySince.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcBusySince)
                             .count() >= degradeHold;
                 bool idleHeld =
-                    !isBusy && repairReadySince_.time_since_epoch().count() != 0 &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
+                    !isBusy && rcReadySince.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcReadySince)
                             .count() >= readyHold;
-
-                uint32_t tokens =
-                    busyHeld ? TuneAdvisor::repairTokensBusy() : TuneAdvisor::repairTokensIdle();
-                uint32_t batch = TuneAdvisor::repairMaxBatch();
-                repairCoordinator_->setMaintenanceTokens(tokens);
-                repairCoordinator_->setMaxBatch(batch);
-
-                // Rate limiting: cap batches per second by temporarily disabling tokens
-                uint32_t maxPerSec = TuneAdvisor::repairMaxBatchesPerSec();
-                if (maxPerSec > 0) {
-                    auto curBatches = state_.stats.repairBatchesAttempted.load();
-                    if (repairRateWindowStart_.time_since_epoch().count() == 0) {
-                        repairRateWindowStart_ = now;
-                        repairBatchesAtWindowStart_ = curBatches;
-                    } else {
-                        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             now - repairRateWindowStart_)
-                                             .count();
-                        auto produced = (curBatches >= repairBatchesAtWindowStart_)
-                                            ? (curBatches - repairBatchesAtWindowStart_)
-                                            : 0;
-                        if (elapsedMs < 1000) {
-                            if (produced >= maxPerSec) {
-                                // Pause new batches this window
-                                repairCoordinator_->setMaintenanceTokens(0);
-                            }
-                        } else {
-                            // reset window
-                            repairRateWindowStart_ = now;
-                            repairBatchesAtWindowStart_ = curBatches;
-                        }
-                    }
-                }
-
-                // FSM signaling: mark Degraded when repairs pending and system sustained busy with
-                // no tokens
                 bool pending = state_.stats.repairQueueDepth.load() > 0;
                 auto snap = lifecycleFsm_.snapshot();
                 if (snap.state == LifecycleState::Ready) {
-                    if (pending && busyHeld && tokens == 0) {
+                    if (pending && busyHeld)
                         lifecycleFsm_.dispatch(DegradedEvent{});
-                    }
                 } else if (snap.state == LifecycleState::Degraded) {
-                    if (!pending || idleHeld) {
+                    if (!pending || idleHeld)
                         lifecycleFsm_.dispatch(HealthyEvent{});
-                    }
                 }
             }
             // Periodic tasks can be added here
