@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Known Issues
 - Daemon may show broken connection with rapid CLI/MCP usage
 
+## [v0.6.39] - 2025-09-17
+
+### CI Bump
+
 ## [v0.6.38] - 2025-09-17
 
 ### Added

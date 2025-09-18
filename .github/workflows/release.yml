@@ -1,6 +1,8 @@
+---
+# yamllint disable rule:line-length
 name: Release
 
-on:
+'on':
   push:
     tags:
       - "v*"  # Stable releases triggered by version tags
@@ -685,6 +687,12 @@ jobs:
     permissions:
       contents: write
       actions: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ENDPOINT: ${{ secrets.CLOUDFLARE_ENDPOINT }}
+      R2_PREFIX: ${{ secrets.R2_PREFIX }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
       - name: Determine release channel and version/tag
         id: meta
@@ -803,13 +811,13 @@ jobs:
           cat SHA256SUMS >&2
 
       - name: Install Wrangler CLI
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != ''
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
         shell: bash
         run: |
           npm i -g wrangler
 
       - name: Upload assets to Cloudflare R2 (Wrangler)
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != ''
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -1041,7 +1049,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y createrepo-c
           fi
-            
+
           createrepo_c "$YUM_ROOT"
           if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
             echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
