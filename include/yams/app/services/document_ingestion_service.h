@@ -31,6 +31,10 @@ struct AddOptions {
     std::vector<std::string> tags;
     std::map<std::string, std::string> metadata;
 
+    // Post-add verification
+    bool verify{false};        // verify hash/size for single-file adds
+    bool verifyIndexes{false}; // optional: verify index presence (future)
+
     // Daemon behavior
     std::optional<std::filesystem::path> explicitDataDir; // set only when caller overrides
     int timeoutMs{30000};

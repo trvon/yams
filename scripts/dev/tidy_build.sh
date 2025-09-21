@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # tidy_build.sh
-# Unified developer helper for YAMS
-# - Mode 1 (default): build + (optional) test + conveniences (NEW)
-# - Mode 2: clang-tidy focused run (legacy behavior via --tidy)
+# Unified developer helper for YAMS (Meson-first)
+# - Mode 1 (default): Meson build + (optional) test + conveniences
+# - Mode 2: clang-tidy focused run (legacy behavior via --tidy, CMake-based)
 #
 # This replaces the earlier single‑purpose clang‑tidy wrapper by adding:
 #   * Optional clean of build preset
@@ -20,11 +20,14 @@ set -euo pipefail
 #   scripts/dev/tidy_build.sh --tidy [preset]      # legacy clang-tidy mode
 #
 # Common Options (build+test mode):
-#   -p, --preset NAME     CMake preset (default: yams-debug)
+#   -p, --preset NAME     Build preset: yams-debug|yams-release (default: yams-debug)
 #       --release         Shortcut for --preset yams-release
 #   -c, --clean           Remove build/<preset> before configure
 #       --no-conan        Skip conan install
-#   -r, --regex REGEX     ctest -R REGEX
+#       --no-strict       Do NOT pass -Dwerror=true and highest warning level
+#       --strict          Force -Dwerror=true and warning level 3 (default)
+#       --no-tests        Alias of --no-test (deprecated)
+#   -r, --regex REGEX     GTest filter (mapped to --test-args --gtest_filter=REGEX)
 #       --no-test         Skip running tests
 #       --mock            Enable mock embedding/provider env (YAMS_USE_MOCK_PROVIDER=1 etc.)
 #   -j, --jobs N          Parallel build jobs override
@@ -45,6 +48,8 @@ log() { echo "$(color 1; color 34 [tidy]) $*"; }
 warn() { echo "$(color 33 [tidy]) $*" >&2; }
 err() { echo "$(color 31 [tidy]) $*" >&2; }
 
+# NOTE: The --tidy path remains CMake-based for now and is intended only for
+# ad-hoc static analysis runs. The primary build path below uses Meson.
 if [[ ${1:-} == "--tidy" ]]; then
   shift || true
   preset="${1:-yams-debug}"; shift || true
@@ -78,11 +83,14 @@ clean=0
 jobs=""
 run_conan=1
 run_tests=1
+enable_tests=1
 mock=0
+strict=1
 extra_ctest=()
 
 usage() { grep '^# ' "$0" | sed 's/^# //'; exit 2; }
 
+suite="smoke"  # default fast suite; use --full to run all
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -p|--preset) preset="$2"; shift 2;;
@@ -91,45 +99,102 @@ while [[ $# -gt 0 ]]; do
     -c|--clean) clean=1; shift;;
     -j|--jobs) jobs="$2"; shift 2;;
     --no-conan) run_conan=0; shift;;
-    --no-test) run_tests=0; shift;;
+    --no-test) run_tests=0; enable_tests=0; shift;;
+    --no-tests) run_tests=0; enable_tests=0; shift;;
     --mock) mock=1; shift;;
+    --full) suite=""; shift;;
+    --with-lzma) export YAMS_ENABLE_LZMA=1; shift;;
+    --no-strict) strict=0; shift;;
+    --strict) strict=1; shift;;
     -h|--help) usage;;
     --) shift; extra_ctest+=("$@"); break;;
     *) err "Unknown option: $1"; usage;;
   esac
 done
 
-build_dir="build/${preset}"
+# Map preset to Meson build dir and build type
+build_dir="build/${preset/yams-/}"
+bt="Debug"; [[ $preset == *release* ]] && bt="Release"
+bt_meson=$(printf '%s' "${bt}" | tr '[:upper:]' '[:lower:]')
+
 if [[ $clean -eq 1 ]]; then
   log "Cleaning ${build_dir}"
   rm -rf "${build_dir}"
 fi
 
 if [[ $run_conan -eq 1 ]]; then
-  bt="Debug"; [[ $preset == *release* ]] && bt="Release"
   log "Conan install (build_type=${bt})"
-  conan install . -of "build/${preset}" -s build_type="${bt}" -b missing ${YAMS_TIDY_CONAN_OPTS:-}
+  conan install . -of "${build_dir}" -s build_type="${bt}" -b missing ${YAMS_TIDY_CONAN_OPTS:-}
 fi
 
-log "Configure (preset=${preset})"
-cmake --preset "${preset}"
-
-log "Build"
-if [[ -n $jobs ]]; then
-  cmake --build --preset "${preset}" -j "$jobs"
+log "Configure (Meson: ${build_dir}, strict=${strict})"
+# Resolve Conan Meson native toolchain file robustly across layouts.
+# Preferred (current Conan 2 Meson toolchain):
+#   - ${build_dir}/build-${bt_meson}/conan/conan_meson_native.ini
+# Historical/alternative layouts (fallbacks):
+#   - ${build_dir}/build-${bt_meson}/generators/conan_meson_native.ini
+#   - ${build_dir}/build/${bt}/generators/conan_meson_native.ini
+#   - ${build_dir}/build/${bt_meson}/generators/conan_meson_native.ini
+#   - ${build_dir}/build-${bt_meson}/${bt}/generators/conan_meson_native.ini
+# Finally: search within ${build_dir}
+candidate_native_inis=(
+  "${build_dir}/build-${bt_meson}/conan/conan_meson_native.ini"
+  "${build_dir}/build-${bt_meson}/generators/conan_meson_native.ini"
+  "${build_dir}/build/${bt}/generators/conan_meson_native.ini"
+  "${build_dir}/build/${bt_meson}/generators/conan_meson_native.ini"
+  "${build_dir}/build-${bt_meson}/${bt}/generators/conan_meson_native.ini"
+)
+native_ini=""
+for cand in "${candidate_native_inis[@]}"; do
+  if [[ -f "${cand}" ]]; then
+    native_ini="${cand}"
+    break
+  fi
+done
+if [[ -z "${native_ini}" ]]; then
+  # Last-resort search (depth-limited for speed)
+  native_ini=$(find "${build_dir}" -maxdepth 5 -type f -name 'conan_meson_native.ini' 2>/dev/null | head -n1 || true)
+fi
+if [[ -z "${native_ini}" ]]; then
+  err "Could not locate conan_meson_native.ini under ${build_dir}. Did Conan install succeed?"
+  err "Try: conan install . -of '${build_dir}' -s build_type='${bt}' -b missing"
+  exit 1
+fi
+log "Using native file: ${native_ini}"
+meson_args=("${build_dir}" "--native-file" "${native_ini}" "--buildtype=${bt_meson}")
+if [[ ${enable_tests} -eq 1 ]]; then
+  meson_args+=("-Dbuild-tests=true")
 else
-  cmake --build --preset "${preset}"
+  meson_args+=("-Dbuild-tests=false")
 fi
+# LZMA enablement (Option A): default 'auto'; allow forcing on via --with-lzma
+if [[ ${YAMS_ENABLE_LZMA:-0} -eq 1 ]]; then
+  meson_args+=("-Denable-lzma=true")
+fi
+mkdir -p "${build_dir}"
+if [[ $strict -eq 1 ]]; then
+  meson_args+=("-Dwerror=true")
+  # Use highest Meson warning level (0-3). Project default is 2; raise to 3 here.
+  meson_args+=("-Dwarning_level=3")
+fi
+if [[ ! -d "${build_dir}/meson-private" ]]; then
+  meson setup "${meson_args[@]}"
+else
+  meson setup --reconfigure "${meson_args[@]}"
+fi
+
+log "Build (Meson)"
+if [[ -n $jobs ]]; then
+  MESON_BUILD_ARGS=("-j" "$jobs")
+else
+  MESON_BUILD_ARGS=()
+fi
+meson compile -C "${build_dir}" ${MESON_BUILD_ARGS[@]:-}
 
 if [[ $run_tests -eq 0 ]]; then
   log "Skipping tests (--no-test)"
   exit 0
 fi
-
-pushd "${build_dir}" >/dev/null || { err "Cannot enter ${build_dir}"; exit 1; }
-ctest_args=(--output-on-failure)
-[[ -n $regex ]] && ctest_args+=(-R "$regex")
-[[ ${#extra_ctest[@]} -gt 0 ]] && ctest_args+=("${extra_ctest[@]}")
 
 # Standardize test mode
 export YAMS_TESTING=${YAMS_TESTING:-1}
@@ -140,11 +205,27 @@ if [[ $mock -eq 1 ]]; then
   log "Mock embedding/provider mode enabled"
 fi
 
-log "Run tests: ctest ${ctest_args[*]} ${YAMS_TIDY_CTEST_OPTS:-}"
-if ! ctest ${ctest_args[@]} ${YAMS_TIDY_CTEST_OPTS:-}; then
+# Map regex to gtest filter via --test-args
+test_args=()
+if [[ -n $regex ]]; then
+  test_args+=("--test-args" "--gtest_filter=${regex}")
+fi
+
+if [[ -z "${suite}" && -z "${regex}" ]]; then
+  log "Test suite: full"
+  run_cmd=(meson test -C "${build_dir}" ${test_args[@]:-} ${YAMS_TIDY_CTEST_OPTS:-} --print-errorlogs)
+elif [[ -n "${suite}" && -z "${regex}" ]]; then
+  log "Test suite: ${suite} (default). Use --full for all or -r to filter."
+  run_cmd=(meson test -C "${build_dir}" --suite "${suite}" ${YAMS_TIDY_CTEST_OPTS:-} --print-errorlogs)
+else
+  log "Test selection via regex: ${regex}"
+  run_cmd=(meson test -C "${build_dir}" ${test_args[@]:-} ${YAMS_TIDY_CTEST_OPTS:-} --print-errorlogs)
+fi
+
+log "Run: ${run_cmd[*]}"
+if ! "${run_cmd[@]}"; then
   err "Tests failed"
-  err "Hint: re-run single test -> ctest -R <name> -V"
+  err "Hint: re-run single test -> meson test -C ${build_dir} --test-args --gtest_filter=<name> -v"
   exit 1
 fi
 log "All tests passed"
-popd >/dev/null

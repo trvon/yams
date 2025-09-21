@@ -8,7 +8,7 @@
     "label": "Debug yams-daemon",
     "adapter": "CodeLLDB",
     "request": "launch",
-    "program": "${workspaceFolder}/build/yams-debug/src/daemon/yams-daemon",
+    "program": "${workspaceFolder}/build/debug/src/daemon/yams-daemon",
     "args": [
       "--log-level",
       "debug",

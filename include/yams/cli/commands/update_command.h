@@ -51,6 +51,9 @@ private:
     std::string name_;
     std::vector<std::string> metadata_;
     bool verbose_ = false;
+    bool latest_ = false;
+    bool oldest_ = false;
+    bool noSession_ = false;
 
     // Dependencies for testing
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
@@ -58,6 +61,7 @@ private:
 
     Result<metadata::MetadataValue> parseMetadataValue(const std::string& value);
     Result<metadata::DocumentInfo> resolveNameToDocument(const std::string& name);
+    Result<std::string> resolveNameToHashSmart(const std::string& name);
 };
 
 // Factory function

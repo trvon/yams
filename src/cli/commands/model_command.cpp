@@ -402,7 +402,7 @@ public:
         // model provider: print active backend and default/preferred model
         auto* sub_provider =
             cmd->add_subcommand("provider", "Show active model provider and preferred model");
-        sub_provider->callback([this]() {
+        sub_provider->callback([]() {
             try {
                 using namespace yams::daemon;
                 ClientConfig cfg;

@@ -14,9 +14,9 @@
 
 // Forward declaration for ONNX Runtime
 namespace Ort {
-class Env;
-class Session;
-class SessionOptions;
+struct Env;
+struct Session;
+struct SessionOptions;
 } // namespace Ort
 
 namespace yams::daemon {

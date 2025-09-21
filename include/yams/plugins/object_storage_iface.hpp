@@ -118,9 +118,10 @@ public:
                                                               std::optional<int> maxKeys) = 0;
 
     // Optional ops
-    virtual std::variant<PutResult, ErrorInfo> compose(std::string_view target,
-                                                       const std::vector<std::string>& sources,
-                                                       const PutOptions& opts) {
+    virtual std::variant<PutResult, ErrorInfo>
+    compose([[maybe_unused]] std::string_view target,
+            [[maybe_unused]] const std::vector<std::string>& sources,
+            [[maybe_unused]] const PutOptions& opts) {
         return ErrorInfo{ErrorInfo::Category::Terminal, 501,         std::nullopt, 0,
                          "compose not implemented",     std::nullopt};
     }

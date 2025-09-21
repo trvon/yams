@@ -11,7 +11,7 @@ namespace yams::daemon {
 struct TuningSnapshot {
     // Cadence and timers
     uint32_t workerPollMs{150};
-    uint32_t backpressureReadPauseMs{5};
+    uint32_t backpressureReadPauseMs{10};
 
     // Idle/pressure thresholds
     double idleCpuPct{10.0};

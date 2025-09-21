@@ -62,27 +62,27 @@ document.addEventListener('DOMContentLoaded', function () {
 docker run --rm -it ghcr.io/trvon/yams:latest --version
 ```
 
-### Build from Source
+### Build from Source (Meson)
 
 ```bash
-# Install Conan
-pip install conan
+# 1. Install dependencies (Debug)
+conan install . -of build/debug -s build_type=Debug -b missing
 
-# One-time: create default Conan profile
-conan profile detect --force
+# 2. Configure (first time)
+meson setup build/debug \
+  --prefix /usr/local \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
 
-# Build with Conan (recommended - this is what creates the release binaries)
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing -o yams/*:enable_onnx=True
-cmake --preset yams-release
-cmake --build --preset yams-release -j
-sudo cmake --install build/yams-release
+# Reconfigure (later changes)
+meson setup build/debug --reconfigure \
+  --prefix /usr/local \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
 
-# GenAI headers auto-fetch: if your ONNX Runtime package lacks GenAI C++ headers
-# YAMS will transparently download the extension headers (v0.9.1) during configure.
+# 3. Build
+meson compile -C build/debug
 
-See also:
-- Quick GCC guide: `docs/BUILD-GCC.md`
-- Developer build system: `docs/developer/build_system.md`
+# 4. Install (optional)
+sudo meson install -C build/debug
 ```
 
 ## Quick start

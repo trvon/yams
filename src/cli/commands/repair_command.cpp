@@ -70,7 +70,21 @@ public:
         cmd->callback([this]() {
             auto result = execute();
             if (!result) {
-                spdlog::error("Repair failed: {}", result.error().message);
+                // Add targeted hints for common DB/FTS issues, avoid duplication
+                std::string msg = result.error().message;
+                auto add_hint = [&](std::string_view h) {
+                    if (msg.find("hint:") == std::string::npos &&
+                        msg.find(h) == std::string::npos) {
+                        msg += std::string(" (") + std::string(h) + ")";
+                    }
+                };
+                if (msg.find("FTS5") != std::string::npos ||
+                    msg.find("tokenize") != std::string::npos) {
+                    add_hint("hint: run 'yams repair --fts5'");
+                } else if (msg.find("constraint failed") != std::string::npos) {
+                    add_hint("hint: try 'yams repair --orphans' or 'yams doctor --fix'");
+                }
+                spdlog::error("Repair failed: {}", msg);
                 std::exit(1);
             }
         });
@@ -131,6 +145,14 @@ public:
             std::cout << "═══════════════════════════════════════════════════════════\n";
             std::cout << "                    YAMS Storage Repair                    \n";
             std::cout << "═══════════════════════════════════════════════════════════\n\n";
+
+            // Surface the effective data directory so operators can verify the storage path
+            try {
+                auto dd = cli_->getDataPath();
+                std::cout << "Using data directory: " << dd.string() << "\n\n";
+            } catch (...) {
+                // non-fatal
+            }
 
             if (dryRun_) {
                 std::cout << "[DRY RUN MODE] No changes will be made\n\n";
@@ -783,7 +805,7 @@ private:
     }
 
     Result<void>
-    generateMissingEmbeddings(std::shared_ptr<api::IContentStore> store,
+    generateMissingEmbeddings([[maybe_unused]] std::shared_ptr<api::IContentStore> store,
                               std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
         std::cout << "Generating Missing Embeddings\n";
         std::cout << "─────────────────────────────\n";
@@ -1103,8 +1125,8 @@ private:
                     return Result<void>();
                 }
 
-                // Configure batch size
-                size_t batchSize = 32; // safe default
+                // Configure batch size (placeholder; used by daemon request builder below)
+                [[maybe_unused]] size_t batchSize = 32; // safe default
                 if (const char* envBatch = std::getenv("YAMS_EMBED_BATCH")) {
                     try {
                         unsigned long v = std::stoul(std::string(envBatch));

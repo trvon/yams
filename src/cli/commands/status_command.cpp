@@ -6,6 +6,12 @@
 #include <vector>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#ifdef __unix__
+#include <sys/stat.h>
+#endif
+#include <atomic>
+#include <chrono>
+#include <future>
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -37,6 +43,8 @@ public:
 
         cmd->add_flag("--json", jsonOutput_, "Output in JSON format");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
+        cmd->add_flag("--no-physical", noPhysical_,
+                      "Skip physical size fallback scan; use daemon stats only");
 
         cmd->callback([this]() {
             auto result = execute();
@@ -51,6 +59,8 @@ public:
         auto* stats = app.add_subcommand("stats", getDescription());
         stats->add_flag("--json", jsonOutput_, "Output in JSON format");
         stats->add_flag("-v,--verbose", verbose_, "Show detailed information");
+        stats->add_flag("--no-physical", noPhysical_,
+                        "Skip physical size fallback scan; use daemon stats only");
         stats->callback([this]() {
             auto result = execute();
             if (!result) {
@@ -87,7 +97,11 @@ public:
                 if (leaseRes) {
                     auto leaseHandle = std::move(leaseRes.value());
                     auto& client = **leaseHandle;
-                    auto st = co_await client.status();
+                    // Always request non-detailed status to avoid any daemon-side
+                    // physical scanning. Verbose mode will format these same fields.
+                    yams::daemon::StatusRequest sreq;
+                    sreq.detailed = false;
+                    auto st = co_await client.call(sreq);
                     if (st) {
                         auto s = st.value();
                         std::string svcSummary;
@@ -106,6 +120,8 @@ public:
                             j["activeConnections"] = s.activeConnections;
                             j["memoryUsageMb"] = s.memoryUsageMb;
                             j["cpuUsagePercent"] = s.cpuUsagePercent;
+                            if (s.retryAfterMs > 0)
+                                j["retryAfterMs"] = s.retryAfterMs;
                             j["fsmTransitions"] = s.fsmTransitions;
                             j["fsmHeaderReads"] = s.fsmHeaderReads;
                             j["fsmPayloadReads"] = s.fsmPayloadReads;
@@ -141,6 +157,48 @@ public:
                                 }
                                 j["plugins"] = std::move(pv);
                             }
+                            // Include storage stats: render only daemon-provided counts (no local
+                            // scans)
+                            try {
+                                auto getU64 = [&](const char* key) -> uint64_t {
+                                    auto it = s.requestCounts.find(key);
+                                    return it != s.requestCounts.end() ? it->second : 0ULL;
+                                };
+                                // Prefer authoritative metadata counts; fallback to storage object
+                                // count
+                                uint64_t docs = getU64("documents_total");
+                                if (docs == 0)
+                                    docs = getU64("storage_documents");
+                                uint64_t idxDocs = getU64("documents_indexed");
+                                uint64_t logical = getU64("storage_logical_bytes");
+                                // Prefer aggregated physical total if available
+                                uint64_t physical = getU64("physical_total_bytes");
+                                if (physical == 0)
+                                    physical = getU64("storage_physical_bytes");
+                                uint64_t dedupSaved = getU64("cas_dedup_saved_bytes");
+
+                                if (docs > 0)
+                                    j["totalDocuments"] = docs;
+                                if (idxDocs > 0)
+                                    j["indexedDocuments"] = idxDocs;
+                                j["logicalBytes"] = logical;
+                                if (physical > 0)
+                                    j["physicalBytes"] = physical;
+                                // Only compute savings when physical is known
+                                if (physical > 0 && logical > 0) {
+                                    uint64_t spaceSaved =
+                                        (logical > physical) ? (logical - physical) : 0ULL;
+                                    double spaceSavedPct = static_cast<double>(spaceSaved) * 100.0 /
+                                                           static_cast<double>(logical);
+                                    if (spaceSaved > 0)
+                                        j["spaceSavingsBytes"] = spaceSaved;
+                                    j["spaceSavingsPercent"] = spaceSavedPct;
+                                }
+                                if (dedupSaved > 0)
+                                    j["deduplicatedBytes"] = dedupSaved;
+                            } catch (...) {
+                            }
+
                             // Embedding runtime telemetry
                             {
                                 nlohmann::json er;
@@ -164,6 +222,21 @@ public:
                                 er["inter_threads"] = s.embeddingThreadsInter;
                                 j["embedding"] = std::move(er);
                             }
+                            // Post-ingest gauges (from requestCounts)
+                            {
+                                auto getU64 = [&](const char* key) -> uint64_t {
+                                    auto it = s.requestCounts.find(key);
+                                    return it != s.requestCounts.end() ? it->second : 0;
+                                };
+                                nlohmann::json pj;
+                                pj["threads"] = getU64("post_ingest_threads");
+                                pj["queued"] = getU64("post_ingest_queued");
+                                pj["inflight"] = getU64("post_ingest_inflight");
+                                pj["capacity"] = getU64("post_ingest_capacity");
+                                pj["rate_sec_ema"] = getU64("post_ingest_rate_sec_ema");
+                                pj["latency_ms_ema"] = getU64("post_ingest_latency_ms_ema");
+                                j["post_ingest"] = std::move(pj);
+                            }
                             std::cout << j.dump(2) << std::endl;
                         } else {
                             std::cout << "== DAEMON STATUS ==\n";
@@ -178,12 +251,68 @@ public:
                             std::cout << "UP   : " << s.uptimeSeconds << "s\n";
                             std::cout << "REQ  : " << s.requestsProcessed
                                       << "  ACT: " << s.activeConnections << "\n";
+                            if (s.retryAfterMs > 0) {
+                                std::cout << "BACK : retry-after=" << s.retryAfterMs << "ms\n";
+                            }
                             std::cout << "MEM  : " << std::fixed << std::setprecision(1)
                                       << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
                                       << "%\n";
                             if (!s.ready && !waitingSummary.empty()) {
                                 std::cout << "WAIT : " << waitingSummary << "\n";
                             }
+                            // Storage stats (daemon metrics only; no local scans)
+                            {
+                                try {
+                                    uint64_t docs = 0, logical = 0, physical = 0;
+                                    auto itDocs = s.requestCounts.find("storage_documents");
+                                    if (itDocs != s.requestCounts.end())
+                                        docs = itDocs->second;
+                                    auto itLogical = s.requestCounts.find("storage_logical_bytes");
+                                    if (itLogical != s.requestCounts.end())
+                                        logical = itLogical->second;
+                                    auto itPhysical =
+                                        s.requestCounts.find("storage_physical_bytes");
+                                    if (itPhysical != s.requestCounts.end())
+                                        physical = itPhysical->second;
+
+                                    bool storageOk = (physical > 0 || logical > 0 || docs > 0);
+
+                                    auto humanSize = [&](uint64_t b) {
+                                        const char* u[] = {"B", "KB", "MB", "GB", "TB"};
+                                        double v = static_cast<double>(b);
+                                        int i = 0;
+                                        while (v >= 1024.0 && i < 4) {
+                                            v /= 1024.0;
+                                            ++i;
+                                        }
+                                        std::ostringstream os;
+                                        os << std::fixed << std::setprecision(v < 10 ? 1 : 0) << v
+                                           << u[i];
+                                        return os.str();
+                                    };
+
+                                    uint64_t saved = 0ULL;
+                                    int pct = 0;
+                                    if (physical > 0 && logical > 0) {
+                                        saved = (logical > physical) ? (logical - physical) : 0ULL;
+                                        if (logical > 0)
+                                            pct = static_cast<int>((saved * 100.0) / logical);
+                                    }
+                                    std::cout << "STOR : " << (storageOk ? "ok" : "unknown")
+                                              << ", docs=" << docs
+                                              << ", logical=" << humanSize(logical);
+                                    if (physical > 0) {
+                                        std::cout << ", physical=" << humanSize(physical)
+                                                  << ", saved=" << humanSize(saved) << " (" << pct
+                                                  << "%)";
+                                    }
+                                    std::cout << "\n";
+
+                                } catch (...) {
+                                    std::cout << "STOR : error reading stats\n";
+                                }
+                            }
+
                             // Short plugins summary (typed providers)
                             if (!s.providers.empty()) {
                                 std::cout << "PLUG : " << s.providers.size() << " loaded";
@@ -229,42 +358,102 @@ public:
                         // In verbose mode, pull vector DB quick stats (size + rows) from daemon
                         // stats
                         if (!jsonOutput_ && verbose_) {
+                            std::cout << "\n== VERBOSE STATS ==\n";
                             try {
-                                yams::daemon::ClientConfig scfg;
-                                if (cli_->hasExplicitDataDir()) {
-                                    scfg.dataDir = cli_->getDataPath();
-                                }
-                                auto leaseStats = yams::cli::acquire_cli_daemon_client_shared(scfg);
-                                if (!leaseStats) {
-                                    throw std::runtime_error("daemon unavailable");
-                                }
-                                auto statsLease = std::move(leaseStats.value());
-                                auto& scli = **statsLease;
-                                yams::daemon::GetStatsRequest greq;
-                                greq.detailed = true;
-                                auto gs = co_await scli.getStats(greq);
-                                if (gs) {
-                                    const auto& resp = gs.value();
-                                    std::string line = "VECDB: ";
-                                    bool vecReady = false;
-                                    try {
-                                        auto it = s.readinessStates.find("vector_index");
-                                        if (it != s.readinessStates.end())
-                                            vecReady = it->second;
-                                    } catch (...) {
+                                auto getU64 = [&](const std::string& key) -> uint64_t {
+                                    auto it = s.requestCounts.find(key);
+                                    return it != s.requestCounts.end() ? it->second : 0;
+                                };
+
+                                auto humanSize = [&](uint64_t b) {
+                                    const char* u[] = {"B", "KB", "MB", "GB", "TB"};
+                                    double v = static_cast<double>(b);
+                                    int i = 0;
+                                    while (v >= 1024.0 && i < 4) {
+                                        v /= 1024.0;
+                                        ++i;
                                     }
-                                    if (resp.vectorIndexSize > 0) {
-                                        line += "Initialized - " + formatSize(resp.vectorIndexSize);
-                                    } else {
-                                        line += vecReady ? "Initialized" : "Not initialized";
-                                    }
-                                    auto it = resp.additionalStats.find("vector_rows");
-                                    if (it != resp.additionalStats.end()) {
-                                        line += " (" + it->second + " rows)";
-                                    }
-                                    std::cout << line << "\n";
+                                    std::ostringstream os;
+                                    os << std::fixed << std::setprecision(v < 10 ? 1 : 0) << v
+                                       << u[i];
+                                    return os.str();
+                                };
+
+                                // Post-ingest pipeline
+                                {
+                                    uint64_t pit = getU64("post_ingest_threads");
+                                    uint64_t piq = getU64("post_ingest_queued");
+                                    uint64_t pii = getU64("post_ingest_inflight");
+                                    uint64_t pic = getU64("post_ingest_capacity");
+                                    uint64_t pil = getU64("post_ingest_latency_ms_ema");
+                                    uint64_t pir = getU64("post_ingest_rate_sec_ema");
+                                    std::cout << "POST : threads=" << pit << ", queued=" << piq
+                                              << ", inflight=" << pii << ", cap=" << pic
+                                              << ", rate=" << pir << "/s, lat=" << pil << "ms\n";
                                 }
-                            } catch (...) {
+
+                                uint64_t casPhys = getU64("cas_physical_bytes");
+                                uint64_t total = getU64("physical_total_bytes");
+
+                                if (casPhys > 0 || total > 0) {
+                                    uint64_t logical = getU64("storage_logical_bytes");
+                                    uint64_t casRaw = getU64("cas_unique_raw_bytes");
+                                    if (casRaw == 0)
+                                        casRaw = logical;
+                                    uint64_t dedupSaved = getU64("cas_dedup_saved_bytes");
+                                    uint64_t compSaved = getU64("cas_compress_saved_bytes");
+                                    uint64_t meta = getU64("metadata_physical_bytes");
+                                    uint64_t idx = getU64("index_physical_bytes");
+                                    uint64_t vec = getU64("vector_physical_bytes");
+                                    uint64_t tmp = getU64("logs_tmp_physical_bytes");
+                                    uint64_t casSaved = dedupSaved + compSaved;
+
+                                    std::cout << "--- Storage Breakdown ---\n";
+                                    std::cout << "CAS (Content Store):\n";
+                                    std::cout << "  Ingested (logical) : " << humanSize(casRaw)
+                                              << "\n";
+                                    std::cout << "  Physical           : " << humanSize(casPhys)
+                                              << "\n";
+                                    std::cout << "  Savings            : " << humanSize(casSaved)
+                                              << " (dedup=" << humanSize(dedupSaved)
+                                              << ", compress=" << humanSize(compSaved) << ")\n";
+                                    std::cout << "Overhead:\n";
+                                    std::cout << "  Metadata DB        : " << humanSize(meta)
+                                              << "\n";
+                                    std::cout << "  Search Index       : " << humanSize(idx)
+                                              << "\n";
+                                    std::cout << "  Vector Store       : " << humanSize(vec)
+                                              << "\n";
+                                    std::cout << "  Logs & Temp        : " << humanSize(tmp)
+                                              << "\n";
+                                    std::cout << "-------------------------\n";
+                                    std::cout << "Total Physical Usage : " << humanSize(total)
+                                              << "\n";
+                                }
+
+                                bool vecReady = false;
+                                try {
+                                    auto it = s.readinessStates.find("vector_index");
+                                    if (it != s.readinessStates.end())
+                                        vecReady = it->second;
+                                } catch (...) {
+                                }
+
+                                std::string line = "VECDB: ";
+                                uint64_t vecBytes = getU64("vector_physical_bytes");
+                                if (vecBytes > 0) {
+                                    line += "Initialized - " + humanSize(vecBytes);
+                                } else {
+                                    line += vecReady ? "Initialized" : "Not initialized";
+                                }
+                                uint64_t vecRows = getU64("vector_rows");
+                                if (vecRows > 0) {
+                                    line += " (" + std::to_string(vecRows) + " rows)";
+                                }
+                                std::cout << line << "\n";
+
+                            } catch (const std::exception& e) {
+                                std::cout << "Error fetching verbose stats: " << e.what() << "\n";
                             }
                         }
                         co_return Result<void>();
@@ -304,6 +493,8 @@ private:
     YamsCLI* cli_ = nullptr;
     bool jsonOutput_ = false;
     bool verbose_ = false;
+    // Default to using daemon-reported physical sizes only; do not local-scan unless opted in
+    bool noPhysical_ = true;
 
     struct StatusInfo {
         // Storage
@@ -439,7 +630,9 @@ private:
             auto futProbe = promProbe.get_future();
             auto workProbe = [leaseHandle, &promProbe]() mutable -> boost::asio::awaitable<void> {
                 auto& client = **leaseHandle;
-                auto sr = co_await client.status();
+                yams::daemon::StatusRequest sreq;
+                sreq.detailed = false;
+                auto sr = co_await client.call(sreq);
                 promProbe.set_value(std::move(sr));
                 co_return;
             };

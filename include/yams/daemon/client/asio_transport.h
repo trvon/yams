@@ -43,7 +43,6 @@ public:
     void debugDumpFsmSnapshots(std::size_t maxEntries = 10) const noexcept {
         fsm_.debug_dump_snapshots(maxEntries);
     }
-    ConnectionFsm::State fsmState() const noexcept { return fsm_.state(); }
 
 private:
     // Multiplexing: per-socket connection shared across requests

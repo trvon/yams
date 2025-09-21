@@ -31,6 +31,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
         }
     }
     req.matchAllTags = j.value("match_all_tags", false);
+    req.includeDiff = j.value("include_diff", false);
     req.useSession = j.value("use_session", true);
     req.sessionName = j.value("session", std::string{});
 
@@ -53,7 +54,8 @@ json MCPSearchRequest::toJson() const {
                 {"color", colorMode},
                 {"path_pattern", pathPattern},
                 {"tags", tags},
-                {"match_all_tags", matchAllTags}};
+                {"match_all_tags", matchAllTags},
+                {"include_diff", includeDiff}};
 }
 
 // MCPSearchResponse implementation
@@ -128,6 +130,10 @@ json MCPSearchResponse::toJson() const {
         r["score"] = result.score;
         if (!result.snippet.empty())
             r["snippet"] = result.snippet;
+        if (result.diff)
+            r["diff"] = *result.diff;
+        if (result.localInputFile)
+            r["local_input_file"] = *result.localInputFile;
 
         if (result.vectorScore || result.keywordScore || result.kgEntityScore ||
             result.structuralScore) {

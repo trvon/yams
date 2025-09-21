@@ -342,7 +342,7 @@ void ModelLoader::resetStats() {
 namespace optimization {
 
 Result<void> optimizeONNXModel(const std::string& input_path, const std::string& output_path,
-                               const std::map<std::string, std::string>& options) {
+                               [[maybe_unused]] const std::map<std::string, std::string>& options) {
     if (!fs::exists(input_path)) {
         return Error{ErrorCode::NotFound, "Input model not found"};
     }

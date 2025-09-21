@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <thread>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -18,15 +19,15 @@ namespace yams::daemon {
 double getMemoryUsage();
 double getCpuUsage();
 
-boost::asio::awaitable<Response>
-RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
+boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
     try {
         // fastMode flag removed; status path remains lightweight via DaemonMetrics
         if (metrics_) {
+            // Refresh basic cache in background; honor per-request detail level
             metrics_->refresh();
-            auto snap = metrics_->getSnapshot();
+            auto snap = metrics_->getSnapshot(req.detailed);
             res.running = snap.running;
             res.version = snap.version;
             res.uptimeSeconds = snap.uptimeSeconds;
@@ -66,12 +67,32 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             res.requestCounts["worker_queued"] = snap.workerQueued;
             res.requestCounts["post_ingest_threads"] = snap.postIngestThreads;
             res.requestCounts["post_ingest_queued"] = snap.postIngestQueued;
+            res.requestCounts["post_ingest_inflight"] = snap.postIngestInflight;
+            res.requestCounts["post_ingest_capacity"] = snap.postIngestCapacity;
+            // Export selected tuning config values for clients (best-effort)
+            try {
+                if (serviceManager_) {
+                    const auto& tc = serviceManager_->getConfig().tuning;
+                    res.requestCounts["tuning_post_ingest_capacity"] = tc.postIngestCapacity;
+                    res.requestCounts["tuning_post_ingest_threads_min"] = tc.postIngestThreadsMin;
+                    res.requestCounts["tuning_post_ingest_threads_max"] = tc.postIngestThreadsMax;
+                    res.requestCounts["tuning_admit_warn_threshold"] = tc.admitWarnThreshold;
+                    res.requestCounts["tuning_admit_stop_threshold"] = tc.admitStopThreshold;
+                }
+            } catch (...) {
+            }
             res.requestCounts["post_ingest_processed"] = snap.postIngestProcessed;
             res.requestCounts["post_ingest_failed"] = snap.postIngestFailed;
             res.requestCounts["post_ingest_latency_ms_ema"] =
                 static_cast<size_t>(snap.postIngestLatencyMsEma);
             res.requestCounts["post_ingest_rate_sec_ema"] =
                 static_cast<size_t>(snap.postIngestRateSecEma);
+            // Surface whether the InternalEventBus is being used for post-ingest
+            try {
+                res.requestCounts["post_ingest_use_bus"] =
+                    yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0;
+            } catch (...) {
+            }
             res.retryAfterMs = snap.retryAfterMs;
             for (const auto& [k, v] : snap.readinessStates)
                 res.readinessStates[k] = v;
@@ -80,6 +101,76 @@ RequestDispatcher::handleStatusRequest(const StatusRequest& /*req*/) {
             // Content store diagnostics
             res.contentStoreRoot = snap.contentStoreRoot;
             res.contentStoreError = snap.contentStoreError;
+            // Storage size summary (exposed via requestCounts for backwards compatible clients)
+            if (snap.logicalBytes > 0)
+                res.requestCounts["storage_logical_bytes"] = static_cast<size_t>(snap.logicalBytes);
+            if (snap.physicalBytes > 0)
+                res.requestCounts["storage_physical_bytes"] =
+                    static_cast<size_t>(snap.physicalBytes);
+            if (snap.storeObjects > 0)
+                res.requestCounts["storage_documents"] = static_cast<size_t>(snap.storeObjects);
+            if (snap.logicalBytes > 0 && snap.physicalBytes > 0) {
+                std::uint64_t saved = (snap.logicalBytes > snap.physicalBytes)
+                                          ? (snap.logicalBytes - snap.physicalBytes)
+                                          : 0ULL;
+                res.requestCounts["storage_saved_bytes"] = static_cast<size_t>(saved);
+                std::uint64_t pct = snap.logicalBytes ? (saved * 100ULL) / snap.logicalBytes : 0ULL;
+                res.requestCounts["storage_saved_pct"] = static_cast<size_t>(pct);
+            } else {
+                // Avoid signaling 100% savings when physical is unknown
+                res.requestCounts.erase("storage_saved_bytes");
+                res.requestCounts.erase("storage_saved_pct");
+            }
+            // New: detailed storage breakdown (when available)
+            if (snap.casPhysicalBytes > 0)
+                res.requestCounts["cas_physical_bytes"] =
+                    static_cast<size_t>(snap.casPhysicalBytes);
+            if (snap.casUniqueRawBytes > 0)
+                res.requestCounts["cas_unique_raw_bytes"] =
+                    static_cast<size_t>(snap.casUniqueRawBytes);
+            if (snap.casDedupSavedBytes > 0)
+                res.requestCounts["cas_dedup_saved_bytes"] =
+                    static_cast<size_t>(snap.casDedupSavedBytes);
+            if (snap.casCompressSavedBytes > 0)
+                res.requestCounts["cas_compress_saved_bytes"] =
+                    static_cast<size_t>(snap.casCompressSavedBytes);
+            if (snap.metadataPhysicalBytes > 0)
+                res.requestCounts["metadata_physical_bytes"] =
+                    static_cast<size_t>(snap.metadataPhysicalBytes);
+            if (snap.indexPhysicalBytes > 0)
+                res.requestCounts["index_physical_bytes"] =
+                    static_cast<size_t>(snap.indexPhysicalBytes);
+            if (snap.vectorPhysicalBytes > 0)
+                res.requestCounts["vector_physical_bytes"] =
+                    static_cast<size_t>(snap.vectorPhysicalBytes);
+            if (snap.logsTmpPhysicalBytes > 0)
+                res.requestCounts["logs_tmp_physical_bytes"] =
+                    static_cast<size_t>(snap.logsTmpPhysicalBytes);
+            if (snap.physicalTotalBytes > 0)
+                res.requestCounts["physical_total_bytes"] =
+                    static_cast<size_t>(snap.physicalTotalBytes);
+
+            // Document counters from metadata repository (authoritative document totals)
+            try {
+                if (serviceManager_) {
+                    auto repo = serviceManager_->getMetadataRepo();
+                    if (repo) {
+                        if (auto total = repo->getDocumentCount(); total) {
+                            res.requestCounts["documents_total"] =
+                                static_cast<size_t>(total.value());
+                        }
+                        if (auto idx = repo->getIndexedDocumentCount(); idx) {
+                            res.requestCounts["documents_indexed"] =
+                                static_cast<size_t>(idx.value());
+                        }
+                        if (auto ext = repo->getContentExtractedDocumentCount(); ext) {
+                            res.requestCounts["documents_content_extracted"] =
+                                static_cast<size_t>(ext.value());
+                        }
+                    }
+                }
+            } catch (...) {
+            }
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;
@@ -271,6 +362,24 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         response.additionalStats["wal_pending_entries"] = "0";
         response.additionalStats["plugins_loaded"] = "0";
         response.additionalStats["plugins_json"] = "[]";
+        // Internal bus + tuning toggles (doctor hints)
+        try {
+            response.additionalStats["tuning_use_internal_bus_for_repair"] =
+                TuneAdvisor::useInternalBusForRepair() ? "true" : "false";
+            response.additionalStats["tuning_use_internal_bus_for_post_ingest"] =
+                TuneAdvisor::useInternalBusForPostIngest() ? "true" : "false";
+        } catch (...) {
+        }
+        try {
+            auto& bus = InternalEventBus::instance();
+            response.additionalStats["bus_embed_queued"] = std::to_string(bus.embedQueued());
+            response.additionalStats["bus_embed_consumed"] = std::to_string(bus.embedConsumed());
+            response.additionalStats["bus_embed_dropped"] = std::to_string(bus.embedDropped());
+            response.additionalStats["bus_post_queued"] = std::to_string(bus.postQueued());
+            response.additionalStats["bus_post_consumed"] = std::to_string(bus.postConsumed());
+            response.additionalStats["bus_post_dropped"] = std::to_string(bus.postDropped());
+        } catch (...) {
+        }
         // Minimal readiness hint (align to lifecycle readiness)
         bool notReady = true;
         try {
@@ -300,6 +409,65 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 response.vectorIndexSize = snap.vectorDbSizeBytes;
                 if (snap.vectorRowsExact > 0)
                     response.additionalStats["vector_rows"] = std::to_string(snap.vectorRowsExact);
+
+                // Compute storage/db sizes (best-effort, inexpensive on request)
+                try {
+                    namespace fs = std::filesystem;
+                    if (!snap.contentStoreRoot.empty()) {
+                        fs::path storageRoot{snap.contentStoreRoot};
+                        fs::path dataRoot = storageRoot.parent_path();
+
+                        auto fileSize = [](const fs::path& p) -> uint64_t {
+                            std::error_code ec;
+                            auto sz = fs::file_size(p, ec);
+                            return ec ? 0ull : static_cast<uint64_t>(sz);
+                        };
+                        auto dirSize = [&](const fs::path& p, uint64_t& countOut) -> uint64_t {
+                            uint64_t total = 0;
+                            uint64_t cnt = 0;
+                            std::error_code ec;
+                            if (fs::exists(p, ec)) {
+                                for (auto it = fs::recursive_directory_iterator(p, ec);
+                                     !ec && it != fs::recursive_directory_iterator(); ++it) {
+                                    if (it->is_regular_file(ec)) {
+                                        total += fileSize(it->path());
+                                        ++cnt;
+                                    }
+                                }
+                            }
+                            countOut = cnt;
+                            return total;
+                        };
+
+                        // Objects directory
+                        uint64_t objFiles = 0;
+                        uint64_t objBytes = dirSize(storageRoot / "objects", objFiles);
+                        response.additionalStats["storage_objects_bytes"] =
+                            std::to_string(objBytes);
+                        response.additionalStats["storage_objects_files"] =
+                            std::to_string(objFiles);
+
+                        // Refs database (if present)
+                        uint64_t refsBytes = fileSize(storageRoot / "refs.db");
+                        response.additionalStats["storage_refs_db_bytes"] =
+                            std::to_string(refsBytes);
+
+                        // Main DB and vector DB/index
+                        uint64_t dbBytes = fileSize(dataRoot / "yams.db");
+                        response.additionalStats["db_bytes"] = std::to_string(dbBytes);
+                        uint64_t vecDbBytes = fileSize(dataRoot / "vectors.db");
+                        response.additionalStats["vectors_db_bytes"] = std::to_string(vecDbBytes);
+                        uint64_t vecIndexBytes = fileSize(dataRoot / "vector_index.bin");
+                        response.additionalStats["vector_index_bytes"] =
+                            std::to_string(vecIndexBytes);
+
+                        // Aggregate storage usage (objects + refs)
+                        uint64_t storageTotal = objBytes + refsBytes;
+                        response.additionalStats["storage_total_bytes"] =
+                            std::to_string(storageTotal);
+                    }
+                } catch (...) {
+                }
             }
         } catch (...) {
         }

@@ -1,0 +1,8 @@
+{
+  "event_name": "workflow_dispatch",
+  "inputs": {
+    "channel": "nightly",
+    "fast_mode": "true",
+    "macos_only": "true"
+  }
+}

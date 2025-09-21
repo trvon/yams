@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <future>
 #include <thread>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/system_executor.hpp>
+#include <yams/crypto/hasher.h>
 
 namespace yams::app::services {
 
@@ -75,8 +77,42 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
                 std::future_status::ready) {
                 res = f2.get();
             }
-            if (res)
+            if (res) {
+                // Optional strong verification for single-file adds
+                if (opts.verify) {
+                    try {
+                        // Verify only for explicit single-file path (non-recursive)
+                        std::error_code fec;
+                        bool isFile = !dreq.path.empty() && !opts.recursive &&
+                                      std::filesystem::is_regular_file(dreq.path, fec) && !fec;
+                        if (isFile) {
+                            auto hasher = yams::crypto::createSHA256Hasher();
+                            std::string expected = hasher->hashFile(dreq.path);
+                            const auto& ar = res.value();
+                            auto fsize = std::filesystem::file_size(dreq.path);
+                            bool ok = true;
+                            std::string why;
+                            if (!expected.empty() && !ar.hash.empty() && expected != ar.hash) {
+                                ok = false;
+                                why = "hash mismatch";
+                            } else if (ar.size != 0 && ar.size != fsize) {
+                                ok = false;
+                                why = "size mismatch";
+                            }
+                            if (!ok) {
+                                return Error{ErrorCode::InvalidData,
+                                             std::string("verification failed: ") + why};
+                            }
+                        }
+                    } catch (const std::exception& ex) {
+                        return Error{ErrorCode::Unknown,
+                                     std::string("verification error: ") + ex.what()};
+                    } catch (...) {
+                        return Error{ErrorCode::Unknown, "verification error: unknown"};
+                    }
+                }
                 return res;
+            }
             lastError = res.error().message;
         } catch (const std::exception& e) {
             lastError = e.what();

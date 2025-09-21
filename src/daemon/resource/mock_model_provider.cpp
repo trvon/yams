@@ -348,7 +348,7 @@ std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferred
     return createModelProvider(defaultConfig, preferredProvider, forceMockProvider);
 }
 
-std::unique_ptr<IModelProvider> createModelProvider(const ModelPoolConfig& config,
+std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const ModelPoolConfig& config,
                                                     const std::string& preferredProvider,
                                                     bool forceMockProvider) {
     auto& registry = getProviderRegistry();

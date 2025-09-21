@@ -304,7 +304,7 @@ public:
 
 private:
     RecoveryManager& manager_;
-    RecoveryOperation operation_;
+    [[maybe_unused]] RecoveryOperation operation_;
     RecoveryRequest request_;
     RecoveryOperationResult result_;
     bool executed_ = false;

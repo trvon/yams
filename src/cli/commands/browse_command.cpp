@@ -1504,16 +1504,47 @@ public:
             return;
         }
 
-        // Show document count
-        ImGui::Text("Documents: %d", totalItems);
+        // Determine paging window
+        int perPage = std::max(1, state.documentsPerPage);
+        int maxPage = (totalItems - 1) / perPage;
+        if (state.currentPage < 0)
+            state.currentPage = 0;
+        if (state.currentPage > maxPage)
+            state.currentPage = maxPage;
+        int startIndex = state.currentPage * perPage;
+        int endIndex = std::min(startIndex + perPage, totalItems);
+        state.hasMoreDocuments = (endIndex < totalItems);
+
+        // Header with count and page controls
+        ImGui::Text("Documents: %d  ", totalItems);
+        ImGui::SameLine();
+        ImGui::TextDisabled(" Page %d / %d ", state.currentPage + 1, maxPage + 1);
+        ImGui::SameLine();
+        bool prevDisabled = (state.currentPage == 0);
+        if (prevDisabled)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("◀ Prev")) {
+            state.currentPage = std::max(0, state.currentPage - 1);
+        }
+        if (prevDisabled)
+            ImGui::EndDisabled();
+        ImGui::SameLine();
+        bool nextDisabled = (state.currentPage >= maxPage);
+        if (nextDisabled)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Next ▶")) {
+            state.currentPage = std::min(maxPage, state.currentPage + 1);
+        }
+        if (nextDisabled)
+            ImGui::EndDisabled();
+
         ImGui::Separator();
 
-        // Create scrollable region using ImGui's native scrolling
+        // Scrollable region for the current page
         ImGui::BeginChild("DocumentList", ImVec2(0, 0), false,
                           ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
-        // Render all items (ImGui handles viewport optimization internally)
-        for (int i = 0; i < totalItems; ++i) {
+        for (int i = startIndex; i < endIndex; ++i) {
             const auto& doc = state.documents[i];
 
             // Check if this item should be selected
@@ -1530,7 +1561,7 @@ public:
             if (isSelected) {
                 ImGui::SetItemDefaultFocus();
                 // Auto-scroll to keep selected item visible
-                ImGui::SetScrollHereY(0.5f);
+                ImGui::SetScrollHereY(0.2f);
             }
 
             // Show metadata on the same line - use available width

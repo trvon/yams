@@ -1,11 +1,12 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/as_tuple.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/read.hpp>
@@ -15,8 +16,6 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
-
-#include <yams/daemon/ipc/fsm_metrics_registry.h>
 
 #include <spdlog/spdlog.h>
 #include <atomic>
@@ -201,7 +200,7 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(cons
     }
 
     auto [ec, response_result] =
-        co_await response_ch->async_receive(boost::asio::experimental::as_tuple(use_awaitable));
+        co_await response_ch->async_receive(boost::asio::as_tuple(use_awaitable));
     if (ec) {
         co_return Error{ErrorCode::NetworkError, "Failed to receive response: " + ec.message()};
     }
@@ -255,8 +254,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         co_return wres.error();
     }
 
-    auto [ec, void_result] =
-        co_await done_ch->async_receive(boost::asio::experimental::as_tuple(use_awaitable));
+    auto [ec, void_result] = co_await done_ch->async_receive(boost::asio::as_tuple(use_awaitable));
     if (ec) {
         co_return Error{ErrorCode::NetworkError,
                         "Failed to receive stream completion: " + ec.message()};

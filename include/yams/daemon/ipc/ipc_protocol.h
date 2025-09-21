@@ -3671,15 +3671,16 @@ struct ModelStatusResponse {
 // ============================================================================
 
 struct AddDocumentResponse {
-    std::string hash;          // Document hash
-    std::string path;          // Stored path
-    size_t size = 0;           // Document size
-    size_t documentsAdded = 0; // For recursive adds
+    std::string hash;
+    std::string path;
+    std::string message;
+    size_t documentsAdded = 0;
+    size_t size = 0;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << path << static_cast<uint64_t>(size) << static_cast<uint64_t>(documentsAdded);
+        ser << hash << path << documentsAdded << message << static_cast<uint64_t>(size);
     }
 
     template <typename Deserializer>
@@ -3694,14 +3695,18 @@ struct AddDocumentResponse {
         if (!p)
             return p.error();
         res.path = std::move(p.value());
+        auto da = deser.template read<uint64_t>();
+        if (!da)
+            return da.error();
+        res.documentsAdded = static_cast<size_t>(da.value());
+        auto m = deser.readString();
+        if (!m)
+            return m.error();
+        res.message = std::move(m.value());
         auto s = deser.template read<uint64_t>();
         if (!s)
             return s.error();
-        res.size = s.value();
-        auto d = deser.template read<uint64_t>();
-        if (!d)
-            return d.error();
-        res.documentsAdded = d.value();
+        res.size = static_cast<size_t>(s.value());
         return res;
     }
 };

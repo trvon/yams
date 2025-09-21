@@ -11,10 +11,12 @@
 // Only enable when the standard library declares support via feature-test macro.
 // This avoids false-positives on platforms like Ubuntu 22.04 (GCC 11) where
 // <format> is incomplete or unavailable.
+#ifndef YAMS_STD_FORMAT_AVAILABLE
 #if defined(__cpp_lib_format) && (__cpp_lib_format >= 201907)
 #define YAMS_STD_FORMAT_AVAILABLE 1
 #else
 #define YAMS_STD_FORMAT_AVAILABLE 0
+#endif
 #endif
 
 #if YAMS_STD_FORMAT_AVAILABLE

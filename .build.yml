@@ -25,7 +25,7 @@ tags:
 
 environment:
   # Define consistent directories.
-  BUILD_DIR: build/yams-release
+  BUILD_DIR: build/release
   STAGE_DIR: stage
   # Optional: set this to "nightly" or "weekly" via scheduler/env to produce
   # date/week-based releases on non-tag builds.
@@ -34,7 +34,7 @@ environment:
 packages:
   # Build dependencies (Debian/apt)
   - build-essential # gcc, make, etc.
-  - cmake
+  - meson
   - ninja-build
   - zip
   - ccache
@@ -63,6 +63,8 @@ packages:
   - libncurses-dev
   - protobuf-compiler
   - libprotobuf-dev
+  - libmediainfo-dev  # enables MediaInfo-based video metadata extraction
+  - mediainfo         # MediaInfo CLI tool used at runtime for JSON output
 
 tasks:
   - normalize_submodules: |
@@ -226,18 +228,17 @@ tasks:
         echo "conan not found in PATH; aborting build" >&2
         exit 1
       fi
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      if [ -d yams ] && [ -f yams/meson.build ]; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
       fi
       cd "${REPO_DIR}"
       export YAMS_DISABLE_MODEL_PRELOAD=1
-      CLEAN_VERSION_CMAKE="${YAMS_VERSION_CMAKE}"
-      echo "Starting build (CMake version ${CLEAN_VERSION_CMAKE})"
+      CLEAN_VERSION_MESON="${YAMS_VERSION}"
+      echo "Starting build (Meson version ${CLEAN_VERSION_MESON})"
 
-      # Fetch dependencies and generate CMake toolchain/deps.
-      # Use clang toolchain to avoid GCC 15 onnxruntime 1.18 build issues.
+      # Fetch dependencies and generate Meson toolchain/deps.
       conan install . \
         -of "${BUILD_DIR}" \
         -pr:h=./conan/profiles/host-linux-clang \
@@ -245,20 +246,26 @@ tasks:
         -c tools.build:jobs="${CONAN_CPU_COUNT}" \
         --build=missing
 
-      # Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
-      cmake --preset yams-release \
-        -DYAMS_VERSION="${CLEAN_VERSION_CMAKE}" \
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-        -DCURSES_NEED_NCURSES=ON \
-        -DCURSES_NEED_WIDE=ON
+      # Configure with Meson.
+      # NOTE: Do not pass -Dversion here; no custom Meson option is defined. Runtime/display versioning
+      # is handled separately and project() version remains the static value in meson.build until
+      # a dedicated yams-version option is introduced.
+      # Conan 2 generates the Meson native file under: <build dir>/build-<buildtype-lowercase>/conan/
+      MESON_EXTRA_ARGS=""
+      if [ "${FAST_MODE:-0}" = "1" ]; then
+        echo "FAST_MODE=1: disabling ONNX and tests for quicker build"
+        MESON_EXTRA_ARGS="${MESON_EXTRA_ARGS} -Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false"
+      fi
+      meson setup "${BUILD_DIR}" \
+        --native-file "${BUILD_DIR}/build-release/conan/conan_meson_native.ini" \
+        ${MESON_EXTRA_ARGS}
 
       # Build the project.
-      cmake --build --preset yams-release
+      meson compile -C "${BUILD_DIR}"
 
       # Install the built artifacts into the staging directory.
       mkdir -p "${STAGE_DIR}"
-      cmake --install "${BUILD_DIR}" --config Release --prefix "${STAGE_DIR}"
+      meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
 
       # Show ccache stats after build (if available)
       if command -v ccache >/dev/null 2>&1; then
@@ -293,39 +300,23 @@ tasks:
         zip -qry "../yams-${CLEAN_VERSION}-stage.zip" .
       fi
 
-  - package_cpack: |
+  - package_meson: |
       set -e
       # Package on tag builds or when explicitly channelized as nightly/weekly
-      # Auto-channelize main branch builds as nightly when not tagged
-      if [[ -z "${RELEASE_CHANNEL:-}" && "${GIT_REF:-}" == "refs/heads/main" ]]; then
-        export RELEASE_CHANNEL=nightly
-      fi
       if [[ "${GIT_REF:-}" != refs/tags/* && "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
-        echo "Skipping CPack packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
+        echo "Skipping packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
         exit 0
       fi
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      if [ -d yams ] && [ -f yams/meson.build ]; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
       fi
       cd "${REPO_DIR}"
-      CLEAN_VERSION="${YAMS_VERSION_CMAKE}"
-      echo "Packaging with CPack..."
-      cd "${BUILD_DIR}"
-      # Generate DEB package
-      cpack -G DEB \
-        -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" \
-        -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" \
-        -D CPACK_DEBIAN_PACKAGE_MAINTAINER="Trevon <git@trevon.dev>"
-      # Generate RPM package if rpmbuild is available; otherwise skip
-      if command -v rpmbuild >/dev/null 2>&1; then
-        cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" || {
-          echo "CPack RPM failed; continuing without RPM artifact" >&2
-        }
-      else
-        echo "rpmbuild not found; skipping RPM packaging on this image"
-      fi
+      CLEAN_VERSION="${YAMS_VERSION}"
+      echo "Packaging with Meson..."
+      chmod +x scripts/build-deb.sh
+      scripts/build-deb.sh "${CLEAN_VERSION}" "${BUILD_DIR}"
 
   - collect_artifacts: |
       set -e

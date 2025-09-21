@@ -4,9 +4,9 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/as_tuple.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -36,7 +36,7 @@ namespace yams::daemon {
 using boost::asio::awaitable;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
-using boost::asio::experimental::as_tuple;
+using boost::asio::as_tuple;
 using namespace boost::asio::experimental::awaitable_operators;
 
 namespace {

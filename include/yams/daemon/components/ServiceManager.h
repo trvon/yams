@@ -9,8 +9,12 @@
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/daemon.h> // For DaemonConfig
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -48,6 +52,8 @@ class TuningManager;
 } // namespace yams::daemon
 
 namespace yams::daemon {
+
+class IngestService;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
@@ -87,8 +93,38 @@ public:
     // Resize PostIngestQueue worker threads; returns false if unchanged/missing.
     bool resizePostIngestThreads(std::size_t target);
     void enqueuePostIngest(const std::string& hash, const std::string& mime) {
-        if (postIngest_)
-            postIngest_->enqueue(PostIngestQueue::Task{hash, mime, {}});
+        if (yams::daemon::TuneAdvisor::useInternalBusForPostIngest()) {
+            yams::daemon::InternalEventBus::PostIngestTask t{hash, mime};
+            static std::shared_ptr<
+                yams::daemon::SpscQueue<yams::daemon::InternalEventBus::PostIngestTask>>
+                q = yams::daemon::InternalEventBus::instance()
+                        .get_or_create_channel<yams::daemon::InternalEventBus::PostIngestTask>(
+                            "post_ingest", 4096);
+            if (!q->try_push(std::move(t))) {
+                // Best-effort; if bus is full, drop with a warning
+                yams::daemon::InternalEventBus::instance().incPostDropped();
+            } else {
+                yams::daemon::InternalEventBus::instance().incPostQueued();
+            }
+            return;
+        }
+        // TODO(021-38-remove-ipc): This direct enqueue is kept for rollback safety.
+        // After the InternalEventBus consumer path is stable, remove and always use the bus.
+        if (postIngest_) {
+            PostIngestQueue::Task t{
+                hash, mime, /*session*/ "", {}, PostIngestQueue::Task::Stage::Metadata};
+            // Try fast non-blocking path with brief backoff to avoid hot locks under burst load.
+            constexpr int kMaxAttempts = 5;
+            int attempts = 0;
+            while (attempts++ < kMaxAttempts) {
+                if (postIngest_->tryEnqueue(t))
+                    return;
+                // Backoff: 10,20,30,40ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(10 * attempts));
+            }
+            // Fallback to legacy blocking enqueue to preserve correctness
+            postIngest_->enqueue(std::move(t));
+        }
     }
     // Last search engine build metadata (for diagnostics/status)
     std::string getLastSearchBuildReason() const { return lastSearchBuildReason_; }
@@ -97,6 +133,29 @@ public:
     std::function<void(bool)> getWorkerJobSignal();
     // Best-effort queue depth estimation for backpressure/telemetry
     std::size_t getWorkerQueueDepth() const;
+
+    // Tuning configuration (no envs): getter/setter with live application where applicable.
+    const TuningConfig& getTuningConfig() const { return tuningConfig_; }
+    void setTuningConfig(const TuningConfig& cfg) {
+        tuningConfig_ = cfg;
+        if (postIngest_ && cfg.postIngestCapacity > 0)
+            postIngest_->setCapacity(cfg.postIngestCapacity);
+        if (cfg.postIngestThreadsMin > 0)
+            (void)resizePostIngestThreads(cfg.postIngestThreadsMin);
+        // Align PoolManager bounds for post_ingest with new config
+        try {
+            PoolManager::Config piCfg{};
+            piCfg.min_size =
+                static_cast<uint32_t>(std::max<std::size_t>(1, cfg.postIngestThreadsMin));
+            piCfg.max_size =
+                static_cast<uint32_t>(std::max(cfg.postIngestThreadsMin, cfg.postIngestThreadsMax));
+            piCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
+            piCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
+            piCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
+            PoolManager::instance().configure("post_ingest", piCfg);
+        } catch (...) {
+        }
+    }
     const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
     getContentExtractors() const {
         return contentExtractors_;
@@ -289,6 +348,7 @@ private:
     std::atomic<std::size_t> poolCompleted_{0};
     std::size_t poolThreads_{0};
 
+    std::unique_ptr<IngestService> ingestService_;
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
     mutable std::mutex searchEngineMutex_;
 
@@ -299,6 +359,8 @@ private:
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     bool embeddingsAutoOnAdd_{false};
+    // Centralized tuning config (persistable via config file; avoids envs).
+    TuningConfig tuningConfig_{};
     // Prevent duplicate plugin autoload scheduling
     std::atomic<bool> pluginsAutoloadScheduled_{false};
 

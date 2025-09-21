@@ -14,6 +14,10 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
+// Smart name resolution
+#include <filesystem>
+#include <yams/app/services/retrieval_service.h>
+#include <yams/app/services/services.hpp>
 
 namespace yams::cli {
 
@@ -43,12 +47,29 @@ void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
 
     // Flags
     cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
+    cmd->add_flag("--latest", latest_, "When multiple matches, pick the latest");
+    cmd->add_flag("--oldest", oldest_, "When multiple matches, pick the oldest");
+    cmd->add_flag("--no-session", noSession_, "Bypass session scoping for name resolution");
 
-    cmd->callback([this]() { cli_->setPendingCommand(this); });
+    // Basic conflict: latest vs oldest
+    cmd->callback([this]() {
+        if (latest_ && oldest_) {
+            throw CLI::ValidationError("update", "--latest and --oldest are mutually exclusive");
+        }
+        cli_->setPendingCommand(this);
+    });
 }
 
 Result<void> UpdateCommand::execute() {
     try {
+        // If called by name, resolve to hash first using smart resolver (daemon path later uses
+        // hash)
+        if (hash_.empty() && !name_.empty()) {
+            auto hr = resolveNameToHashSmart(name_);
+            if (!hr)
+                return hr.error();
+            hash_ = hr.value();
+        }
         // Attempt daemon-first update; fall back to local on failure
         if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
@@ -227,13 +248,18 @@ Result<void> UpdateCommand::executeLocal() {
         }
         docId = docResult.value()->id;
     } else if (!name_.empty()) {
-        // Resolve name to document
-        auto resolveResult = resolveNameToDocument(name_);
-        if (!resolveResult) {
-            return resolveResult.error();
+        // Resolve name using smart resolver
+        auto hr = resolveNameToHashSmart(name_);
+        if (!hr)
+            return hr.error();
+        docHash = hr.value();
+        auto docResult = metadataRepo->getDocumentByHash(docHash);
+        if (!docResult)
+            return Error{docResult.error()};
+        if (!docResult.value().has_value()) {
+            return Error{ErrorCode::NotFound, "Document not found with resolved hash: " + docHash};
         }
-        docId = resolveResult.value().id;
-        docHash = resolveResult.value().sha256Hash;
+        docId = docResult.value()->id;
     } else {
         return Error{ErrorCode::InvalidArgument, "No document identifier specified"};
     }
@@ -378,6 +404,121 @@ Result<metadata::DocumentInfo> UpdateCommand::resolveNameToDocument(const std::s
     }
 
     return Error{ErrorCode::NotFound, "No document found with name: " + name};
+}
+
+// Smart resolution mirroring get_by_name behavior used in MCP server
+Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& name) {
+    // Normalize: expand leading '~'
+    std::string nm = name;
+    try {
+        if (!nm.empty() && nm.front() == '~') {
+            if (const char* home = std::getenv("HOME")) {
+                nm = std::string(home) + nm.substr(1);
+            }
+        }
+    } catch (...) {
+    }
+
+    // Use RetrievalService to resolve by name via daemon when available; fall back to service
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions ropts;
+    if (cli_ && cli_->hasExplicitDataDir())
+        ropts.explicitDataDir = cli_->getDataPath();
+
+    bool pickOldest = oldest_;
+    bool includeContent = false;
+    bool useSession = !noSession_;
+    std::string sessionName{};
+
+    // Provide resolver via DocumentService for parity
+    std::function<Result<std::string>(const std::string&)> resolver;
+    if (cli_) {
+        if (auto appContext = cli_->getAppContext()) {
+            auto documentService = yams::app::services::makeDocumentService(*appContext);
+            if (documentService) {
+                resolver = [documentService](const std::string& nm2) {
+                    return documentService->resolveNameToHash(nm2);
+                };
+            }
+        }
+    }
+
+    auto grr = rsvc.getByNameSmart(nm, pickOldest, includeContent, useSession, sessionName, ropts,
+                                   resolver);
+    if (grr) {
+        return grr.value().hash;
+    }
+
+    // Fallback: try common list patterns via RetrievalService (daemon)
+    auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
+        yams::daemon::ListRequest lreq;
+        lreq.namePattern = pat;
+        lreq.limit = 500;
+        lreq.pathsOnly = false;
+        auto lr = rsvc.list(lreq, ropts);
+        if (lr && !lr.value().items.empty())
+            return lr.value();
+        return std::nullopt;
+    };
+
+    std::optional<yams::daemon::ListResponse> lr;
+    lr = tryList(std::string("%/") + nm);
+    if (!lr) {
+        std::string stem = nm;
+        try {
+            stem = std::filesystem::path(nm).stem().string();
+        } catch (...) {
+        }
+        lr = tryList(std::string("%/") + stem + "%");
+    }
+    if (!lr)
+        lr = tryList(std::string("%") + nm + "%");
+    if (!lr || lr->items.empty())
+        return Error{ErrorCode::NotFound, "No matching documents"};
+
+    // Disambiguate
+    const yams::daemon::ListEntry* chosen = nullptr;
+    if (latest_ || oldest_) {
+        for (const auto& it : lr->items) {
+            if (!chosen)
+                chosen = &it;
+            else if (oldest_) {
+                if (it.indexed < chosen->indexed)
+                    chosen = &it;
+            } else {
+                if (it.indexed > chosen->indexed)
+                    chosen = &it;
+            }
+        }
+    } else {
+        auto scoreName = [&](const std::string& base) -> int {
+            if (base == nm)
+                return 1000;
+            if (base.size() >= nm.size() && base.rfind(nm, 0) == 0)
+                return 800;
+            if (base.find(nm) != std::string::npos)
+                return 600;
+            int dl = static_cast<int>(std::abs((long)(base.size() - nm.size())));
+            return 400 - std::min(200, dl * 10);
+        };
+        int best = -1;
+        for (const auto& it : lr->items) {
+            std::string b;
+            try {
+                b = std::filesystem::path(it.path).filename().string();
+            } catch (...) {
+                b = it.name;
+            }
+            int sc = scoreName(b);
+            if (sc > best) {
+                best = sc;
+                chosen = &it;
+            }
+        }
+    }
+    if (!chosen)
+        return Error{ErrorCode::NotFound, "No matching documents"};
+    return chosen->hash;
 }
 
 // Factory function

@@ -82,7 +82,7 @@ static Error makeCurlError(CURLcode code, std::string_view where) {
 }
 
 // Case-insensitive starts_with
-static bool istarts_with(std::string_view s, std::string_view prefix) {
+[[maybe_unused]] static bool istarts_with(std::string_view s, std::string_view prefix) {
     if (s.size() < prefix.size())
         return false;
     for (size_t i = 0; i < prefix.size(); ++i) {

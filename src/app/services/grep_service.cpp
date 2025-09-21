@@ -183,7 +183,22 @@ public:
         if (afterContext < 0)
             afterContext = 0;
 
-        // Build candidate document set using index-backed prefilters when possible
+        // Stage caps and timeouts (env-overridable)
+        auto getenv_int = [](const char* k, int def) -> int {
+            if (const char* v = std::getenv(k)) {
+                try {
+                    return std::max(0, std::stoi(v));
+                } catch (...) {
+                }
+            }
+            return def;
+        };
+        const int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 2000);
+        const int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 200);
+        const int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 15000);
+        auto start_time = std::chrono::steady_clock::now();
+
+        // Build candidate document set: KG(tags) -> metadata -> fallback
         std::vector<metadata::DocumentInfo> docs;
         if (!req.tags.empty()) {
             auto tRes = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
@@ -192,10 +207,10 @@ public:
                              "Failed to query documents by tags: " + tRes.error().message};
             }
             docs = std::move(tRes.value());
-        } else {
+        }
+        if (docs.empty()) {
             bool canUseFTS = req.literalText || req.word;
             if (canUseFTS) {
-                // Use FTS to preselect candidate docs; fall back to full scan on failure
                 auto sRes = ctx_.metadataRepo->search(req.pattern, /*limit*/ 2000, /*offset*/ 0);
                 if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
                     std::unordered_set<int64_t> allow;
@@ -213,8 +228,6 @@ public:
                     }
                 }
             }
-            // Optional preselection via hybrid engine (guarded) to accelerate regex scans.
-            // If enabled and no FTS candidates found, use hybrid search to pick top-K docs to scan.
             if (docs.empty()) {
                 bool usePreselect = true;
                 if (const char* env = std::getenv("YAMS_GREP_PRESELECT")) {
@@ -232,7 +245,6 @@ public:
                             builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
                             auto opts =
                                 yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                            // Favor keyword heavier for grep-like queries
                             opts.hybrid.final_top_k = 1000;
                             opts.hybrid.vector_weight = 0.30f;
                             opts.hybrid.keyword_weight = 0.70f;
@@ -264,19 +276,54 @@ public:
                             }
                         }
                     } catch (...) {
-                        // ignore preselect errors; fall through to full scan
                     }
                 }
             }
-            if (docs.empty()) {
-                auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
-                if (!allRes) {
-                    return Error{ErrorCode::InternalError,
-                                 "Failed to enumerate documents: " + allRes.error().message};
-                }
-                docs = std::move(allRes.value());
-            }
         }
+        if (docs.empty()) {
+            auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            if (!allRes) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to enumerate documents: " + allRes.error().message};
+            }
+            docs = std::move(allRes.value());
+        }
+
+        // Apply early path/include filtering
+        if (!req.paths.empty() || !req.includePatterns.empty()) {
+            std::vector<metadata::DocumentInfo> filtered;
+            filtered.reserve(docs.size());
+            for (auto& d : docs) {
+                if (!req.paths.empty() && !pathFilterMatch(d.filePath, req.paths))
+                    continue;
+                if (!req.includePatterns.empty() &&
+                    !pathFilterMatch(d.filePath, req.includePatterns))
+                    continue;
+                filtered.push_back(std::move(d));
+            }
+            docs = std::move(filtered);
+        }
+
+        // Prefer hot docs (extracted/text) then cold; cap both sets
+        std::vector<metadata::DocumentInfo> hotDocs;
+        std::vector<metadata::DocumentInfo> coldDocs;
+        hotDocs.reserve(docs.size());
+        coldDocs.reserve(docs.size());
+        for (auto& d : docs) {
+            bool isText = !d.mimeType.empty() && d.mimeType.rfind("text/", 0) == 0;
+            if (d.contentExtracted || isText)
+                hotDocs.push_back(std::move(d));
+            else
+                coldDocs.push_back(std::move(d));
+        }
+        if (max_docs_hot >= 0 && hotDocs.size() > static_cast<size_t>(max_docs_hot))
+            hotDocs.resize(static_cast<size_t>(max_docs_hot));
+        if (max_docs_cold >= 0 && coldDocs.size() > static_cast<size_t>(max_docs_cold))
+            coldDocs.resize(static_cast<size_t>(max_docs_cold));
+
+        docs.clear();
+        docs.insert(docs.end(), hotDocs.begin(), hotDocs.end());
+        docs.insert(docs.end(), coldDocs.begin(), coldDocs.end());
 
         GrepResponse response;
         response.totalMatches = 0;
@@ -316,7 +363,7 @@ public:
             }
         }
 
-        // Dynamic, bounded parallelism
+        // Dynamic, bounded parallelism (config-free): cap to a conservative small number
         size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
         size_t rec = hw > 1 ? (hw - 1) : 1;
 #if !defined(_WIN32)
@@ -327,26 +374,9 @@ public:
             rec = static_cast<size_t>(std::clamp(capacity, 1.0, static_cast<double>(hw)));
         }
 #endif
-        // Be more aggressive: ensure at least half of cores in use
-        rec = std::max(rec, hw / 2);
-        if (const char* env = std::getenv("YAMS_GREP_CONCURRENCY"); env && *env) {
-            try {
-                auto v = static_cast<size_t>(std::stoul(env));
-                if (v > 0)
-                    rec = v;
-            } catch (...) {
-            }
-        }
-        size_t workers = std::clamp<size_t>(rec, 1, hw);
+        // Keep grep background-friendly by default: at most 4 workers (or fewer if docs < 4)
+        size_t workers = std::min<size_t>({rec, hw, static_cast<size_t>(4)});
         workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
-        if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
-            try {
-                auto cap = static_cast<size_t>(std::stoul(gcap));
-                if (cap > 0)
-                    workers = std::min(workers, cap);
-            } catch (...) {
-            }
-        }
 
         std::atomic<size_t> next{0};
         std::mutex outMutex;
@@ -356,9 +386,20 @@ public:
         std::vector<std::string> filesWithout;
         std::atomic<size_t> totalMatches{0};
         std::atomic<size_t> regexMatches{0};
+        std::atomic<bool> stop{false};
 
         auto worker = [&]() {
             while (true) {
+                if (stop.load(std::memory_order_relaxed))
+                    break;
+                if (budget_ms > 0) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+                    if (elapsed.count() >= budget_ms) {
+                        stop.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                }
                 size_t i = next.fetch_add(1);
                 if (i >= docs.size())
                     break;
@@ -468,6 +509,14 @@ public:
                                 if (req.maxCount > 0 &&
                                     static_cast<int>(fileResult.matchCount) >= req.maxCount)
                                     break;
+                                if (budget_ms > 0) {
+                                    auto e2 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - start_time);
+                                    if (e2.count() >= budget_ms) {
+                                        stop.store(true, std::memory_order_relaxed);
+                                        break;
+                                    }
+                                }
                             }
                         } else {
                             continue;
@@ -495,13 +544,67 @@ public:
                             return ch;
                         }
                         std::streamsize xsputn(const char* s, std::streamsize n) override {
-                            for (std::streamsize i = 0; i < n; ++i)
-                                overflow(static_cast<unsigned char>(s[i]));
+                            // Process in bulk: split on '\n' without per-char callbacks
+                            const char* p = s;
+                            const char* end = s + n;
+                            while (p < end) {
+                                const void* nl = memchr(p, '\n', static_cast<size_t>(end - p));
+                                if (!nl) {
+                                    // no newline in remainder
+                                    // append non-CR characters
+                                    if (memchr(p, '\r', static_cast<size_t>(end - p)) != nullptr) {
+                                        // handle CR occurrences by copying segments
+                                        const char* q = p;
+                                        while (q < end) {
+                                            const char* r = static_cast<const char*>(
+                                                memchr(q, '\r', static_cast<size_t>(end - q)));
+                                            if (!r) {
+                                                buffer.append(q, end);
+                                                break;
+                                            }
+                                            buffer.append(q, r);
+                                            q = r + 1; // skip CR
+                                        }
+                                    } else {
+                                        buffer.append(p, end);
+                                    }
+                                    return n;
+                                }
+                                const char* nlc = static_cast<const char*>(nl);
+                                // append up to newline, skipping CRs
+                                if (memchr(p, '\r', static_cast<size_t>(nlc - p)) != nullptr) {
+                                    const char* q = p;
+                                    while (q < nlc) {
+                                        const char* r = static_cast<const char*>(
+                                            memchr(q, '\r', static_cast<size_t>(nlc - q)));
+                                        if (!r) {
+                                            buffer.append(q, nlc);
+                                            break;
+                                        }
+                                        buffer.append(q, r);
+                                        q = r + 1; // skip CR
+                                    }
+                                } else {
+                                    buffer.append(p, nlc);
+                                }
+                                // deliver line
+                                cb(buffer);
+                                buffer.clear();
+                                p = nlc + 1; // skip LF
+                            }
                             return n;
                         }
                     };
                     LineScanBuf sb(onLine);
                     std::ostream os(&sb);
+                    if (budget_ms > 0) {
+                        auto e3 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start_time);
+                        if (e3.count() >= budget_ms) {
+                            stop.store(true, std::memory_order_relaxed);
+                            break;
+                        }
+                    }
                     auto rs = ctx_.store->retrieveStream(doc.sha256Hash, os, nullptr);
                     if (!rs)
                         continue;

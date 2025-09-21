@@ -1,0 +1,109 @@
+project('yams', ['cpp', 'c'],
+  version: '0.0.0',
+  default_options: [
+    'buildtype=release',
+    'warning_level=2',
+    'cpp_std=c++20',
+    'c_std=c11',
+  ],
+)
+
+fs = import('fs')
+pkg = import('pkgconfig')
+
+# --- Version header generation ---
+_override_version = get_option('yams-version')
+_effective_version = _override_version != '' ? _override_version : meson.project_version()
+_build_timestamp = run_command('date', '-u', '+%Y-%m-%dT%H:%M:%SZ', check: true).stdout().strip()
+_git_desc = ''
+_git_cmd = find_program('git', required: false)
+if _git_cmd.found()
+  # Capture short git describe (best-effort; ignore errors quietly)
+  _r = run_command(_git_cmd, ['describe', '--tags', '--always', '--dirty'], check: false)
+  if _r.returncode() == 0
+    _git_desc = _r.stdout().strip()
+  endif
+endif
+
+version_config = configuration_data()
+version_config.set('YAMS_EFFECTIVE_VERSION', _effective_version)
+version_config.set('YAMS_PROJECT_VERSION', meson.project_version())
+version_config.set('YAMS_OVERRIDE_VERSION', _override_version)
+version_config.set('YAMS_BUILD_TIMESTAMP', _build_timestamp)
+version_config.set('YAMS_GIT_DESCRIBE', _git_desc)
+
+configure_file(
+  output: 'version_generated.h',
+  install: true,
+  install_dir: get_option('includedir') / 'yams',
+  configuration: version_config,
+  format: 'cmake', # Simple @VAR@ substitution; header template below.
+  input: files('include/yams/version_generated.h.in')
+)
+
+yams_build_cli = get_option('build-cli')
+yams_build_mcp = get_option('build-mcp-server')
+yams_enable_tui = get_option('enable-tui')
+
+# Install public headers under the compiler's include prefix without duplicating
+# the top-level 'include' directory (was producing prefix/include/include/...).
+install_subdir('include', install_dir: get_option('includedir'), strip_directory: true)
+
+# Core libraries (ordered by dependency)
+subdir('src/core')
+subdir('src/crypto')
+subdir('src/chunking')
+subdir('src/compression')
+subdir('src/storage')
+subdir('src/wal')
+subdir('src/manifest')
+subdir('src/integrity')
+subdir('src/config')
+subdir('src/metadata')
+subdir('src/extraction')
+subdir('src/detection')
+subdir('src/content')
+subdir('src/downloader')
+subdir('src/indexing')
+subdir('src/genai')
+subdir('src/vector')
+subdir('src/search')
+subdir('src/api')
+subdir('src/repair')
+subdir('src/daemon/client')
+subdir('src/app/services')
+subdir('src/daemon')
+subdir('src/benchmarks')
+
+if get_option('build-mcp-server')
+  subdir('src/mcp')
+endif
+
+if get_option('build-plugins')
+  subdir('plugins')
+endif
+
+if get_option('build-cli')
+  subdir('src/cli')
+  subdir('tools/yams-cli')
+  if get_option('build-mcp-server')
+    subdir('tools/yams-mcp')
+  endif
+endif
+
+# Tests (enabled by default in Debug builds)
+_tests_opt = get_option('build-tests')
+_buildtype = get_option('buildtype')
+_tests_enabled = _tests_opt or (_buildtype == 'debug')
+if _tests_enabled
+  subdir('tests')
+endif
+
+summary({
+  'project': meson.project_name(),
+  'version': meson.project_version(),
+  'cpp_std': get_option('cpp_std'),
+  'build_cli': yams_build_cli,
+  'build_mcp_server': yams_build_mcp,
+  'enable_tui': yams_enable_tui,
+}, section: 'YAMS Meson configuration', bool_yn: true)

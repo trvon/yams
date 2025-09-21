@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <string>
 
 namespace yams::app::services::utils {
@@ -10,6 +11,18 @@ namespace yams::app::services::utils {
 // - '*' matches zero or more characters
 // - '?' matches exactly one character
 // Pattern is matched against the entire text.
+namespace {
+
+bool hasPathWildcards(const std::string& path) {
+    for (char c : path) {
+        if (c == '*' || c == '?' || c == '[' || c == ']')
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
 bool matchGlob(const std::string& text, const std::string& pattern) {
     const char* s = text.c_str();
     const char* p = pattern.c_str();
@@ -77,6 +90,42 @@ std::string createSnippet(const std::string& content, size_t maxLength, bool pre
     while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back())))
         out.pop_back();
     out.append("...");
+    return out;
+}
+
+NormalizedLookupPath normalizeLookupPath(const std::string& path) {
+    NormalizedLookupPath out;
+    out.original = path;
+    out.normalized = path;
+
+    if (path.empty() || path == "-")
+        return out;
+
+    if (hasPathWildcards(path)) {
+        out.hasWildcards = true;
+        return out;
+    }
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path p{path};
+
+    if (!p.is_absolute()) {
+        auto abs = fs::absolute(p, ec);
+        if (!ec)
+            p = abs;
+    }
+
+    auto canon = fs::weakly_canonical(p, ec);
+    if (!ec && !canon.empty())
+        p = canon;
+
+    auto preferred = p.make_preferred().string();
+    if (!preferred.empty() && preferred != path) {
+        out.normalized = preferred;
+        out.changed = true;
+    }
+
     return out;
 }
 

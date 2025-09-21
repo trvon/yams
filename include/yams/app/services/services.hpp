@@ -58,6 +58,17 @@ std::string escapeRegex(const std::string& text);
 /// Match glob patterns (supporting * and ? wildcards)
 bool matchGlob(const std::string& text, const std::string& pattern);
 
+struct NormalizedLookupPath {
+    std::string original;
+    std::string normalized;
+    bool changed{false};
+    bool hasWildcards{false};
+};
+
+/// Normalize a user-supplied document path for lookup against daemon-stored paths.
+/// Converts relative inputs to absolute canonical form when no glob characters are present.
+NormalizedLookupPath normalizeLookupPath(const std::string& path);
+
 } // namespace yams::app::services::utils
 
 namespace yams::app::services {
@@ -822,6 +833,10 @@ struct AddDirectoryRequest {
     bool followSymlinks{false};
     // When true, skip synchronous text extraction/indexing during store()
     bool deferExtraction{false};
+    // Post-add verification: when true, verify stored content exists and matches expected hash
+    bool verify{false};
+    // Optional: verify indexes (FTS/vector) presence when enabled
+    bool verifyIndexes{false};
 };
 
 struct IndexedFileResult {

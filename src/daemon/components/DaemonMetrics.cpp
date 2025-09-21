@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <yams/compression/compression_monitor.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -12,6 +14,12 @@
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
+#ifdef __unix__
+#include <sys/stat.h>
+#endif
+#if defined(TRACY_ENABLE)
+#include <tracy/Tracy.hpp>
+#endif
 
 #ifdef __APPLE__
 #include <unistd.h>
@@ -208,10 +216,10 @@ DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateCom
 }
 
 void DaemonMetrics::refresh() {
-    (void)getSnapshot();
+    (void)getSnapshot(false);
 }
 
-MetricsSnapshot DaemonMetrics::getSnapshot() const {
+MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
     // Return cached snapshot if fresh
     if (cacheMs_ > 0) {
         auto now = std::chrono::steady_clock::now();
@@ -328,6 +336,13 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
             if (auto* pq = services_->getPostIngestQueue()) {
                 out.postIngestThreads = pq->threads();
                 out.postIngestQueued = pq->size();
+                // New gauges: inflight and capacity
+                try {
+                    auto g = pq->gauges();
+                    out.postIngestInflight = g.inflight;
+                    out.postIngestCapacity = g.cap;
+                } catch (...) {
+                }
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
                 out.postIngestLatencyMsEma = pq->latencyMsEma();
@@ -362,6 +377,10 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
         out.muxActiveHandlers = msnap.activeHandlers;
         out.muxQueuedBytes = msnap.queuedBytes;
         out.muxWriterBudgetBytes = msnap.writerBudgetBytes;
+#if defined(TRACY_ENABLE)
+        TracyPlot("mux.queued.bytes", static_cast<double>(out.muxQueuedBytes));
+        TracyPlot("mux.writer.budget", static_cast<double>(out.muxWriterBudgetBytes));
+#endif
         // Fallback to a sane non-zero default when snapshot hasn't been initialized yet.
         if (out.muxWriterBudgetBytes == 0) {
             try {
@@ -371,6 +390,22 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
             }
         }
         muxQueuedBytesLocal = msnap.queuedBytes;
+    } catch (...) {
+    }
+    // Provide a best-effort retryAfter hint for clients when post-ingest queue is saturated.
+    try {
+        if (services_) {
+            if (auto* pq = services_->getPostIngestQueue()) {
+                auto g = pq->gauges();
+                if (g.cap > 0 && g.queued >= g.cap) {
+                    // Suggest a small backoff based on tuning control interval
+                    auto cfg = services_->getTuningConfig();
+                    out.retryAfterMs = std::max<uint32_t>(50, cfg.controlIntervalMs / 4);
+                } else {
+                    out.retryAfterMs = 0;
+                }
+            }
+        }
     } catch (...) {
     }
 
@@ -390,6 +425,10 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
 
         // CPU percent uses deltas since last snapshot; stored in DaemonMetrics instance
         out.cpuUsagePercent = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+#if defined(TRACY_ENABLE)
+        TracyPlot("daemon.mem.mb", out.memoryUsageMb);
+        TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);
+#endif
     } catch (...) {
     }
 
@@ -443,6 +482,13 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                 }
             } catch (...) {
             }
+#if defined(TRACY_ENABLE)
+            // Per-subsystem plots (vector DB rows and file size bytes)
+            if (out.vectorRowsExact > 0)
+                TracyPlot("vector.rows", static_cast<double>(out.vectorRowsExact));
+            if (out.vectorDbSizeBytes > 0)
+                TracyPlot("vector.db.bytes", static_cast<double>(out.vectorDbSizeBytes));
+#endif
         }
     } catch (...) {
     }
@@ -467,10 +513,7 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                 out.contentStoreError = services_->getContentStoreError();
             } catch (...) {
             }
-            // Compression and store stats (optional)
-            // Allow disabling via env to avoid instability on platforms with
-            // fragile SQLite setups. When disabled, high-level metrics still
-            // refresh but deep store stats remain unset.
+            // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;
             try {
                 if (const char* env = std::getenv("YAMS_DISABLE_STORE_STATS")) {
@@ -480,15 +523,160 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
                 }
             } catch (...) {
             }
-            if (!disableStoreStats) {
+            if (cs) {
                 try {
-                    if (cs) {
-                        auto ss = cs->getStats();
-                        out.storeObjects = ss.totalObjects;
+                    auto ss = cs->getStats();
+                    // Lightweight fields
+                    out.storeObjects = ss.totalObjects;
+                    out.logicalBytes = ss.totalBytes;              // logical (ingested) bytes
+                    out.casUniqueRawBytes = ss.totalBytes;         // unique raw bytes seen by CAS
+                    out.casDedupSavedBytes = ss.deduplicatedBytes; // bytes avoided via dedup
+                    if (detailed && !disableStoreStats) {
                         out.uniqueBlocks = ss.uniqueBlocks;
                         out.deduplicatedBytes = ss.deduplicatedBytes;
                         out.compressionRatio = ss.dedupRatio();
                     }
+                } catch (...) {
+                }
+            }
+            // Physical size scan (TTL cached) only when detailed
+            if (detailed) {
+                try {
+                    // Populate compression savings (process-wide monitor)
+                    try {
+                        auto& g = yams::compression::CompressionMonitor::getGlobalStats();
+                        // Access atomics via load to avoid data races
+                        out.casCompressSavedBytes = g.totalSpaceSaved.load();
+                    } catch (...) {
+                    }
+                    auto now = std::chrono::steady_clock::now();
+                    bool expired = true;
+                    {
+                        std::lock_guard<std::mutex> lk(cacheMutex_);
+                        if (lastPhysicalAt_.time_since_epoch().count() != 0) {
+                            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           now - lastPhysicalAt_)
+                                           .count();
+                            expired = (age < 0) || (static_cast<uint32_t>(age) >= physicalTtlMs_);
+                        }
+                    }
+                    if (expired) {
+                        std::uint64_t total = 0;
+                        std::uint64_t casObjectsBytes = 0;
+                        std::uint64_t refsDbBytes = 0;
+                        std::uint64_t dbBytes = 0;
+                        std::uint64_t dbWalBytes = 0;
+                        std::uint64_t dbShmBytes = 0;
+                        std::uint64_t vecDbBytes = 0;
+                        std::uint64_t vecIdxBytes = 0;
+                        std::uint64_t tmpBytes = 0;
+                        std::uint64_t indexBytes = 0;
+                        std::error_code ec;
+                        namespace fs = std::filesystem;
+                        fs::path root;
+                        try {
+                            root = services_ ? (services_->getResolvedDataDir() / "storage")
+                                             : fs::path{};
+                        } catch (...) {
+                        }
+                        if (!root.empty() && fs::exists(root, ec)) {
+                            for (fs::recursive_directory_iterator
+                                     it(root, fs::directory_options::skip_permission_denied, ec),
+                                 end;
+                                 it != end; it.increment(ec)) {
+                                if (ec) {
+                                    ec.clear();
+                                    continue;
+                                }
+                                if (it->is_regular_file(ec)) {
+                                    std::uint64_t add = 0;
+                                    try {
+#ifdef __unix__
+                                        struct stat st;
+                                        if (::stat(it->path().c_str(), &st) == 0 &&
+                                            st.st_blocks > 0) {
+                                            add = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
+                                        } else {
+                                            add = static_cast<std::uint64_t>(it->file_size(ec));
+                                        }
+#else
+                                        add = static_cast<std::uint64_t>(it->file_size(ec));
+#endif
+                                    } catch (...) {
+                                        add = 0;
+                                    }
+                                    total += add;
+                                    // attribute within storage/ subdirs
+                                    auto p = it->path();
+                                    if (p.string().find((root / "objects").string()) == 0) {
+                                        casObjectsBytes += add;
+                                    } else if (p.filename() == "refs.db") {
+                                        refsDbBytes += add;
+                                    } else if (p.string().find((root / "temp").string()) == 0) {
+                                        tmpBytes += add;
+                                    }
+                                }
+                            }
+                        }
+                        // Data dir (siblings to storage): yams.db (+WAL/SHM), vectors.db,
+                        // vector_index.bin
+                        try {
+                            auto dd = services_ ? services_->getResolvedDataDir() : fs::path{};
+                            if (!dd.empty()) {
+                                auto sizeOf = [&](const fs::path& p) -> std::uint64_t {
+                                    std::error_code e2;
+                                    return fs::exists(p, e2)
+                                               ? static_cast<std::uint64_t>(fs::file_size(p, e2))
+                                               : 0ULL;
+                                };
+                                dbBytes = sizeOf(dd / "yams.db");
+                                dbWalBytes = sizeOf(dd / "yams.db-wal");
+                                dbShmBytes = sizeOf(dd / "yams.db-shm");
+                                vecDbBytes = sizeOf(dd / "vectors.db");
+                                vecIdxBytes = sizeOf(dd / "vector_index.bin");
+                                // If search index is externalized under dataDir/search_index,
+                                // attribute here
+                                std::uint64_t extIndex = 0;
+                                std::error_code e3;
+                                fs::path idxRoot = dd / "search_index";
+                                if (fs::exists(idxRoot, e3)) {
+                                    for (fs::recursive_directory_iterator it(idxRoot, e3), end;
+                                         it != end; it.increment(e3)) {
+                                        if (e3)
+                                            break;
+                                        if (it->is_regular_file(e3))
+                                            extIndex += static_cast<std::uint64_t>(
+                                                fs::file_size(it->path(), e3));
+                                    }
+                                }
+                                indexBytes = extIndex;
+                            }
+                        } catch (...) {
+                        }
+                        std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
+                        std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
+                        std::uint64_t totalComputed =
+                            casObjectsBytes + metaBytes + indexBytes + vecBytes + tmpBytes;
+                        std::lock_guard<std::mutex> lk(cacheMutex_);
+                        lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
+                        lastPhysicalAt_ = now;
+                        // Stash breakdown into cached_ as well for consumers using non-detailed
+                        // snapshot later
+                        cached_.casPhysicalBytes = casObjectsBytes;
+                        cached_.metadataPhysicalBytes = metaBytes;
+                        cached_.indexPhysicalBytes = indexBytes;
+                        cached_.vectorPhysicalBytes = vecBytes;
+                        cached_.logsTmpPhysicalBytes = tmpBytes;
+                        cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
+                    }
+                    out.physicalBytes = lastPhysicalBytes_;
+                    // Also mirror breakdown to current output
+                    out.casPhysicalBytes = cached_.casPhysicalBytes;
+                    out.metadataPhysicalBytes = cached_.metadataPhysicalBytes;
+                    out.indexPhysicalBytes = cached_.indexPhysicalBytes;
+                    out.vectorPhysicalBytes = cached_.vectorPhysicalBytes;
+                    out.logsTmpPhysicalBytes = cached_.logsTmpPhysicalBytes;
+                    out.physicalTotalBytes = cached_.physicalTotalBytes;
                 } catch (...) {
                 }
             }
@@ -662,6 +850,16 @@ MetricsSnapshot DaemonMetrics::getSnapshot() const {
         MetricsSnapshotRegistry::instance().set(std::make_shared<const MetricsSnapshot>(out));
     } catch (...) {
     }
+
+#if defined(TRACY_ENABLE)
+    // Emit InternalEventBus drop counters as plots for quick backpressure visibility
+    try {
+        auto& bus = InternalEventBus::instance();
+        TracyPlot("bus.embed.dropped", static_cast<double>(bus.embedDropped()));
+        TracyPlot("bus.post.dropped", static_cast<double>(bus.postDropped()));
+    } catch (...) {
+    }
+#endif
     return out;
 }
 

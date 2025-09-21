@@ -231,8 +231,9 @@ WasmRuntime::Result WasmRuntime::callHeadObject(const std::string& key,
     return callJsonExport("object_storage_v1_head", key, optsJson);
 }
 
-WasmRuntime::Result WasmRuntime::callJsonExport(const std::string& exportName, const std::string& a,
-                                                const std::string& b) {
+WasmRuntime::Result WasmRuntime::callJsonExport([[maybe_unused]] const std::string& exportName,
+                                                [[maybe_unused]] const std::string& a,
+                                                [[maybe_unused]] const std::string& b) {
     WasmRuntime::Result r;
 #if YAMS_WASMTIME_AVAILABLE
     try {

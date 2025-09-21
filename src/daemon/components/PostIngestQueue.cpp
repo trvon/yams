@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <regex>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/extraction/extraction_util.h>
@@ -45,7 +46,10 @@ void PostIngestQueue::enqueue(Task t) {
     {
         std::unique_lock<std::mutex> lk(mtx_);
         // Bounded queue with backpressure: wait while full
-        cv_.wait(lk, [&] { return stop_.load() || q_.size() < capacity_; });
+        // total queued used only for wait predicate below
+        cv_.wait(lk, [&] {
+            return stop_.load() || (qMeta_.size() + qKg_.size() + qEmb_.size()) < capacity_;
+        });
         if (stop_.load())
             return; // shutdown requested
         if (inflight_.find(t.hash) != inflight_.end()) {
@@ -54,26 +58,100 @@ void PostIngestQueue::enqueue(Task t) {
         }
         inflight_.insert(t.hash);
         t.enqueuedAt = std::chrono::steady_clock::now();
-        q_.push(std::move(t));
+        if (t.session.empty())
+            t.session = "default";
+        switch (t.stage) {
+            case Task::Stage::KnowledgeGraph:
+                qKg_.push_back(std::move(t));
+                break;
+            case Task::Stage::Embeddings:
+                qEmb_.push_back(std::move(t));
+                break;
+            default:
+                qMeta_.push_back(std::move(t));
+                break;
+        }
     }
     cv_.notify_one();
 }
 
+bool PostIngestQueue::tryEnqueue(const Task& t) {
+    std::unique_lock<std::mutex> lk(mtx_);
+    if (stop_.load())
+        return false;
+    if ((qMeta_.size() + qKg_.size() + qEmb_.size()) >= capacity_)
+        return false;
+    if (inflight_.find(t.hash) != inflight_.end()) {
+        return false; // duplicate suppressed
+    }
+    Task copy = t;
+    copy.enqueuedAt = std::chrono::steady_clock::now();
+    if (copy.session.empty())
+        copy.session = "default";
+    inflight_.insert(copy.hash);
+    switch (copy.stage) {
+        case Task::Stage::KnowledgeGraph:
+            qKg_.push_back(std::move(copy));
+            break;
+        case Task::Stage::Embeddings:
+            qEmb_.push_back(std::move(copy));
+            break;
+        default:
+            qMeta_.push_back(std::move(copy));
+            break;
+    }
+    lk.unlock();
+    cv_.notify_one();
+    return true;
+}
+
 std::size_t PostIngestQueue::size() const {
     std::lock_guard<std::mutex> lk(mtx_);
-    return q_.size();
+    return qMeta_.size() + qKg_.size() + qEmb_.size();
 }
 
 void PostIngestQueue::workerLoop() {
     Task task;
-    {
+    bool haveTask = false;
+    // Try InternalEventBus first when enabled
+    if (TuneAdvisor::useInternalBusForPostIngest()) {
+        static std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> bus =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+                "post_ingest", 4096);
+        InternalEventBus::PostIngestTask bt;
+        if (bus && bus->try_pop(bt)) {
+            // Deduplicate using inflight_ under lock
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (inflight_.find(bt.hash) != inflight_.end()) {
+                    // Already queued/processing, skip
+                    haveTask = false;
+                } else {
+                    inflight_.insert(bt.hash);
+                    task.hash = std::move(bt.hash);
+                    task.mime = std::move(bt.mime);
+                    task.enqueuedAt = std::chrono::steady_clock::now();
+                    haveTask = true;
+                    InternalEventBus::instance().incPostConsumed();
+                }
+            }
+        }
+    }
+    if (!haveTask) {
         std::unique_lock<std::mutex> lk(mtx_);
-        cv_.wait(lk, [&] { return stop_.load() || !q_.empty(); });
+        cv_.wait(lk, [&] {
+            return stop_.load() || (!qMeta_.empty() || !qKg_.empty() || !qEmb_.empty());
+        });
         if (stop_.load())
             return;
-        task = std::move(q_.front());
-        q_.pop();
+        if (!popNextTaskLocked(task)) {
+            // Nothing eligible (token-starved), wait briefly to allow refill
+            lk.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return;
+        }
         cv_.notify_one();
+        haveTask = true;
     }
 
     bool processedOk = true;
@@ -304,6 +382,78 @@ void PostIngestQueue::workerLoop() {
         } catch (...) {
         }
     }
+    // Optional tiny pause to reduce contention on very fast loops and give CPU back
+    try {
+        auto ms = TuneAdvisor::workerPollMs();
+        if (ms > 0 && ms < 1000)
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min<uint32_t>(ms, 25)));
+    } catch (...) {
+    }
+}
+
+bool PostIngestQueue::admitSessionLocked(const std::string& session) {
+    auto now = std::chrono::steady_clock::now();
+    auto it = buckets_.find(session);
+    if (it == buckets_.end()) {
+        buckets_[session] = Bucket{static_cast<double>(tokenBurst_), now};
+        return true;
+    }
+    auto& b = it->second;
+    // Refill tokens based on elapsed time
+    double elapsed = std::chrono::duration<double>(now - b.last).count();
+    b.tokens = std::min<double>(b.tokens + elapsed * tokenRatePerSec_, tokenBurst_);
+    b.last = now;
+    if (b.tokens >= 1.0) {
+        b.tokens -= 1.0;
+        return true;
+    }
+    return false;
+}
+
+bool PostIngestQueue::popNextTaskLocked(Task& out) {
+    // Weighted-fair selection order cycles through a flattened schedule
+    // Build a small static pattern based on weights: [M x wMeta][K x wKg][E x wEmb]
+    auto nonEmpty = [&]() { return !qMeta_.empty() || !qKg_.empty() || !qEmb_.empty(); };
+    if (!nonEmpty())
+        return false;
+    const uint32_t period = wMeta_ + wKg_ + wEmb_;
+    for (uint32_t i = 0; i < period; ++i) {
+        uint32_t idx = (schedCounter_ + i) % period;
+        // map idx to a queue band
+        if (idx < wMeta_) {
+            if (!qMeta_.empty()) {
+                const auto& cand = qMeta_.front();
+                if (admitSessionLocked(cand.session)) {
+                    out = cand;
+                    qMeta_.pop_front();
+                    schedCounter_ = (idx + 1) % period;
+                    return true;
+                }
+            }
+        } else if (idx < wMeta_ + wKg_) {
+            if (!qKg_.empty()) {
+                const auto& cand = qKg_.front();
+                if (admitSessionLocked(cand.session)) {
+                    out = cand;
+                    qKg_.pop_front();
+                    schedCounter_ = (idx + 1) % period;
+                    return true;
+                }
+            }
+        } else {
+            if (!qEmb_.empty()) {
+                const auto& cand = qEmb_.front();
+                if (admitSessionLocked(cand.session)) {
+                    out = cand;
+                    qEmb_.pop_front();
+                    schedCounter_ = (idx + 1) % period;
+                    return true;
+                }
+            }
+        }
+    }
+    // No eligible task due to token starvation
+    return false;
 }
 
 bool PostIngestQueue::resize(std::size_t target) {

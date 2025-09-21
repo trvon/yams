@@ -31,6 +31,8 @@ public:
 
 private:
     void tick_once();
+    void apply_post_ingest_control(std::size_t queued, std::size_t inflight, std::size_t capacity,
+                                   std::uint64_t activeConns);
 
     ServiceManager* sm_;
     StateComponent* state_;
@@ -43,6 +45,10 @@ private:
     std::chrono::steady_clock::time_point repairReadySince_{};
     std::chrono::steady_clock::time_point repairRateWindowStart_{};
     uint64_t repairBatchesAtWindowStart_{0};
+
+    // PI controller state for post-ingest threads
+    std::chrono::steady_clock::time_point lastPiAdjust_{};
+    double integratorQueueErr_{0.0};
 };
 
 } // namespace yams::daemon

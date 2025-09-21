@@ -1,7 +1,9 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <sstream>
+#include <string_view>
 #include <unordered_set>
 #include <yams/content/content_handler_registry.h>
 #include <yams/crypto/hasher.h>
@@ -239,6 +241,102 @@ public:
                 }
 
                 documentId = insertResult.value();
+
+                // Feature-flagged versioning (Phase 1: path-series only)
+                auto isVersioningEnabled = []() {
+                    if (const char* env = std::getenv("YAMS_ENABLE_VERSIONING")) {
+                        std::string_view v(env);
+                        return !(v == "0" || v == "false" || v == "FALSE");
+                    }
+                    // default ON
+                    return true;
+                }();
+
+                if (isVersioningEnabled) {
+                    try {
+                        const auto seriesKey = path.string();
+                        // Find all docs with the exact same path (LIKE without wildcards acts as
+                        // exact)
+                        auto prevListRes = metadataRepo_->findDocumentsByPath(seriesKey);
+                        if (prevListRes) {
+                            const auto& prevList = prevListRes.value();
+                            std::optional<metadata::DocumentInfo> prevLatest;
+                            int64_t maxVersion = 0;
+                            for (const auto& d : prevList) {
+                                if (d.id == documentId)
+                                    continue; // skip the newly inserted
+                                auto isLatestRes = metadataRepo_->getMetadata(d.id, "is_latest");
+                                if (isLatestRes && isLatestRes.value().has_value() &&
+                                    isLatestRes.value().value().asBoolean()) {
+                                    prevLatest = d;
+                                    break;
+                                }
+                                // Fallback: remember highest version if present
+                                auto verRes = metadataRepo_->getMetadata(d.id, "version");
+                                if (verRes && verRes.value().has_value()) {
+                                    int64_t v = 0;
+                                    try {
+                                        v = verRes.value().value().asInteger();
+                                    } catch (...) {
+                                        v = 0;
+                                    }
+                                    if (v > maxVersion) {
+                                        maxVersion = v;
+                                        prevLatest = d;
+                                    }
+                                }
+                            }
+
+                            // Prepare version metadata
+                            int64_t newVersion = 1;
+                            if (prevLatest.has_value()) {
+                                // Flip previous latest off
+                                auto _ = metadataRepo_->setMetadata(prevLatest->id, "is_latest",
+                                                                    metadata::MetadataValue(false));
+                                // Link lineage parent->child
+                                metadata::DocumentRelationship rel;
+                                rel.parentId = prevLatest->id;
+                                rel.childId = documentId;
+                                rel.relationshipType = metadata::RelationshipType::VersionOf;
+                                rel.createdTime = std::chrono::system_clock::now();
+                                (void)metadataRepo_->insertRelationship(rel);
+
+                                // Compute incremented version
+                                auto pv = metadataRepo_->getMetadata(prevLatest->id, "version");
+                                if (pv && pv.value().has_value()) {
+                                    try {
+                                        newVersion = pv.value().value().asInteger() + 1;
+                                    } catch (...) {
+                                        newVersion = maxVersion > 0 ? maxVersion + 1 : 2;
+                                    }
+                                } else {
+                                    newVersion = maxVersion > 0 ? maxVersion + 1 : 2;
+                                }
+                            } else {
+                                newVersion = 1;
+                            }
+
+                            // Set new doc flags
+                            (void)metadataRepo_->setMetadata(documentId, "version",
+                                                             metadata::MetadataValue(newVersion));
+                            (void)metadataRepo_->setMetadata(documentId, "is_latest",
+                                                             metadata::MetadataValue(true));
+                            (void)metadataRepo_->setMetadata(documentId, "series_key",
+                                                             metadata::MetadataValue(seriesKey));
+
+                            spdlog::info(
+                                "Versioning: path='{}' new_id={} version={} prev_latest={}",
+                                seriesKey, documentId, newVersion,
+                                prevLatest.has_value() ? prevLatest->id : 0);
+                        } else {
+                            spdlog::warn("Versioning: findDocumentsByPath failed for '{}': {}",
+                                         path.string(), prevListRes.error().message);
+                        }
+                    } catch (const std::exception& ex) {
+                        spdlog::warn("Versioning: exception while updating lineage for '{}': {}",
+                                     path.string(), ex.what());
+                    }
+                }
             }
 
             result.documentId = std::to_string(documentId);

@@ -11,11 +11,15 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#if defined(TRACY_ENABLE)
+#include <tracy/Tracy.hpp>
+#endif
 
 namespace {
 using yams::daemon::MessageType;
 
-inline yams::daemon::EmbeddingEvent make_embedding_start_event(const yams::daemon::Request& req) {
+[[maybe_unused]] inline yams::daemon::EmbeddingEvent
+make_embedding_start_event(const yams::daemon::Request& req) {
     using namespace yams::daemon;
     EmbeddingEvent ev{};
     if (auto* r = std::get_if<BatchEmbeddingRequest>(&req)) {
@@ -46,6 +50,9 @@ namespace yams::daemon {
 
 std::size_t
 StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per_item) const {
+#if defined(TRACY_ENABLE)
+    ZoneScopedN("SRP::compute_item_chunk_count");
+#endif
     std::size_t target = cfg_.chunk_size > 0
                              ? (cfg_.chunk_size / std::max<std::size_t>(approx_bytes_per_item, 1))
                              : 256;
@@ -267,6 +274,14 @@ bool StreamingRequestProcessor::supports_streaming(const Request& request) const
 
 // -------------------- next_chunk (deterministic) ---------------------------
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
+#if defined(TRACY_ENABLE)
+    ZoneScopedN("SRP::next_chunk");
+    // Mark this streaming step as its own fiber segment for clearer stacks
+    YAMS_FIBER_ENTER("srp_chunk");
+    struct FiberGuard {
+        ~FiberGuard() { YAMS_FIBER_LEAVE(); }
+    } _fg;
+#endif
     try {
         // Unconditional debug: trace next_chunk entry and internal flags
         try {
@@ -361,14 +376,16 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                         pending_request_.reset();
                         // Log counters for visibility
                         if (std::holds_alternative<BatchEmbeddingResponse>(final)) {
-                            const auto& r = std::get<BatchEmbeddingResponse>(final);
+                            [[maybe_unused]] const auto& r =
+                                std::get<BatchEmbeddingResponse>(final);
 #ifdef YAMS_TESTING
                             spdlog::debug(
                                 "[SRP] delegate final BatchEmbeddingResponse succ={} fail={}",
                                 r.successCount, r.failureCount);
 #endif
                         } else if (std::holds_alternative<EmbedDocumentsResponse>(final)) {
-                            const auto& r = std::get<EmbedDocumentsResponse>(final);
+                            [[maybe_unused]] const auto& r =
+                                std::get<EmbedDocumentsResponse>(final);
 #ifdef YAMS_TESTING
                             spdlog::debug(
                                 "[SRP] delegate final EmbedDocumentsResponse req={} emb={}",

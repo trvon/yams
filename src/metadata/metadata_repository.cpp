@@ -762,8 +762,9 @@ std::string sanitizeFTS5Query(const std::string& query) {
         return trimmed.empty() ? "\"\"" : trimmed;
     }
 
-    // For regular queries, wrap in quotes to treat as literal phrase
-    // This handles all special characters safely
+    // For regular queries, just escape internal quotes. This allows FTS5 to use
+    // its default AND behavior for multiple terms, which is a more sensible
+    // default than a phrase search for "bag of words" queries.
     std::string escaped;
     for (char c : trimmed) {
         if (c == '"') {
@@ -774,9 +775,8 @@ std::string sanitizeFTS5Query(const std::string& query) {
         }
     }
 
-    // Wrap in quotes to make it a phrase search
-    // This prevents FTS5 from interpreting special characters as operators
-    return "\"" + escaped + "\"";
+    // DO NOT wrap in quotes. Let FTS5 handle it as a set of terms.
+    return escaped;
 }
 
 Result<SearchResults> MetadataRepository::search(const std::string& query, int limit, int offset) {

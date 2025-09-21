@@ -71,6 +71,7 @@ struct MCPSearchRequest {
     std::string pathPattern;
     std::vector<std::string> tags;
     bool matchAllTags = false;
+    bool includeDiff = false; // include structured diff when pathPattern refers to a local file
     // Session scoping
     bool useSession = true;  // default: scope to current session when available
     std::string sessionName; // optional: target a specific session
@@ -98,6 +99,8 @@ struct MCPSearchResponse {
         std::optional<float> keywordScore;
         std::optional<float> kgEntityScore;
         std::optional<float> structuralScore;
+        std::optional<json> diff;                  // structured diff (added/removed/truncated)
+        std::optional<std::string> localInputFile; // absolute local path (when diff produced)
     };
     std::vector<Result> results;
 

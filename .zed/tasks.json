@@ -1,58 +1,26 @@
 [
   {
-    "label": "build (Debug)",
-    "command": "cmake --build --preset yams-debug"
+    "label": "meson: build (Debug)",
+    "command": "meson compile -C build/debug"
+  },
+  {
+    "label": "meson: test (Debug)",
+    "command": "meson test -C build/debug"
   },
   {
     "label": "conan: install (Debug)",
-    "command": "conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing"
+    "command": "conan install . -of build/debug -s build_type=Debug -b missing"
   },
   {
-    "label": "cmake: configure (Debug)",
-    "command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON"
+    "label": "meson: setup (Debug)",
+    "command": "meson setup build/debug --reconfigure --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini"
   },
   {
-    "label": "build+test (Debug)",
-    "command": "cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure"
+    "label": "full: clean+conan+meson (Debug)",
+    "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug"
   },
   {
-    "label": "conan: install (Release)",
-    "command": "conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing"
-  },
-  {
-    "label": "cmake: configure (Release)",
-    "command": "cmake --preset yams-release"
-  },
-  {
-    "label": "build (Release)",
-    "command": "cmake --build --preset yams-release"
-  },
-  {
-    "label": "full: clean+conan+configure+build (Debug)",
-    "command": "rm -rf build/yams-debug && conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-debug"
-  },
-  {
-    "label": "full: clean+conan+configure+build+test (Debug)",
-    "command": "rm -rf build/yams-debug CMakeUserPresets.json && conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-debug && ctest --preset yams-debug --output-on-failure"
-  },
-  {
-    "label": "full: clean+conan+configure+build (Release)",
-    "command": "rm -rf build/yams-release && conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-release && cmake --build --preset yams-release"
-  },
-  {
-    "label": "full: clean+conan+configure+build+test (Release)",
-    "command": "rm -rf build/yams-release CMakeUserPresets.json && conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing && cmake --preset yams-release -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON && cmake --build --preset yams-release && ctest --preset yams-release --output-on-failure"
-  },
-  {
-    "label": "release: act push (tag)",
-    "command": "gh act push -j build-release -e .act/release.tag.json"
-  },
-  {
-    "label": "release: act push (tag, full image)",
-    "command": "gh act push -j build-release -e .act/release.tag.json -P ubuntu-latest=catthehacker/ubuntu:full-22.04 -s GITHUB_TOKEN=fake"
-  },
-  {
-    "label": "release: act push (tag, linux-only)",
-    "command": "gh act push -j build-release -e .act/release.tag.json -M os=linux-hosted"
+    "label": "full: clean+conan+meson+test (Debug)",
+    "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug && meson test -C build/debug"
   }
 ]

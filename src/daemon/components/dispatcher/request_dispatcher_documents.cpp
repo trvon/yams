@@ -545,117 +545,21 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 }
                 co_return response;
             } else {
-                auto documentService =
-                    app::services::makeDocumentService(serviceManager_->getAppContext());
-                app::services::StoreDocumentRequest serviceReq;
-                serviceReq.path = req.path;
-                serviceReq.content = req.content;
-                serviceReq.name = req.name;
-                serviceReq.mimeType = req.mimeType;
-                serviceReq.disableAutoMime = req.disableAutoMime;
-                serviceReq.tags = req.tags;
-                // Inline extraction/FTS5 for small or content-based adds to avoid requiring
-                // later `yams repair --fts5`. Fall back to deferred for large files.
-                {
-                    bool inlineExtract = false;
-                    if (!req.content.empty()) {
-                        inlineExtract = true; // content provided inline is usually small
-                    } else if (!req.path.empty()) {
-                        std::error_code fsec;
-                        std::filesystem::path p(req.path);
-                        if (std::filesystem::exists(p, fsec) &&
-                            std::filesystem::is_regular_file(p, fsec)) {
-                            auto sz = std::filesystem::file_size(p, fsec);
-                            // Heuristic threshold: 2 MiB for inline extraction
-                            constexpr std::uintmax_t kInlineThreshold = 2ull * 1024ull * 1024ull;
-                            if (!fsec && sz > 0 && sz <= kInlineThreshold) {
-                                inlineExtract = true;
-                            }
-                        }
-                    }
-                    serviceReq.deferExtraction = !inlineExtract;
+                auto channel = InternalEventBus::instance()
+                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                                       "store_document_tasks", 4096);
+                InternalEventBus::StoreDocumentTask task{req};
+                if (channel->try_push(std::move(task))) {
+                    AddDocumentResponse response;
+                    response.hash = ""; // Hash is not known yet
+                    response.path = req.path.empty() ? req.name : req.path;
+                    response.documentsAdded = 1;
+                    response.message = "Document accepted for asynchronous processing.";
+                    co_return response;
+                } else {
+                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                            "Ingestion queue is full. Please try again later."};
                 }
-                for (const auto& [key, value] : req.metadata) {
-                    serviceReq.metadata[key] = value;
-                }
-                serviceReq.collection = req.collection;
-                serviceReq.snapshotId = req.snapshotId;
-                serviceReq.snapshotLabel = req.snapshotLabel;
-                serviceReq.noEmbeddings = req.noEmbeddings;
-                auto t0 = std::chrono::steady_clock::now();
-                (void)t0;
-                auto result = documentService->store(serviceReq);
-                if (!result) {
-                    co_return ErrorResponse{result.error().code, result.error().message};
-                }
-                const auto& serviceResp = result.value();
-                AddDocumentResponse response;
-                response.hash = serviceResp.hash;
-                response.path = req.path.empty() ? req.name : req.path;
-                response.documentsAdded = 1;
-                if (daemon_ && !serviceResp.hash.empty()) {
-                    daemon_->onDocumentAdded(serviceResp.hash, response.path);
-                }
-                // Delegate heavy post-ingest work (extraction/index/graph) to background queue
-                try {
-                    if (serviceManager_ && serviceManager_->getPostIngestQueue() &&
-                        !serviceResp.hash.empty()) {
-                        // Use provided mime or let the queue resolve from metadata
-                        serviceManager_->enqueuePostIngest(serviceResp.hash, req.mimeType);
-                    }
-                } catch (...) {
-                }
-                // Never block AddDocument on embedding generation. Schedule asynchronously if
-                // policy requires; otherwise just notify listeners that a document was added.
-                try {
-                    if (!req.noEmbeddings && serviceManager_ &&
-                        serviceManager_->isEmbeddingsAutoOnAdd() && !response.hash.empty()) {
-                        auto shouldAuto = []() -> bool {
-                            using TA = yams::daemon::TuneAdvisor;
-                            try {
-                                auto pol = TA::autoEmbedPolicy();
-                                if (pol == TA::AutoEmbedPolicy::Always)
-                                    return true;
-                            } catch (...) {
-                            }
-                            return false;
-                        }();
-                        if (!shouldAuto) {
-                            spdlog::info("[AddDocument] embeddings not scheduled (policy=Never); "
-                                         "hash={} path={}",
-                                         response.hash, response.path);
-                            if (daemon_)
-                                daemon_->onDocumentAdded(response.hash, response.path);
-                        } else {
-                            spdlog::info("[AddDocument] scheduling embeddings (policy=Always); "
-                                         "hash={} path={}",
-                                         response.hash, response.path);
-                            auto ex = getWorkerExecutor();
-                            auto signal = getWorkerJobSignal();
-                            if (signal)
-                                signal(true);
-                            auto* sm = this->serviceManager_;
-                            boost::asio::dispatch(ex, [sm, h = response.hash, p = response.path,
-                                                       signal]() mutable {
-                                try {
-                                    if (sm) {
-                                        auto store = sm->getContentStore();
-                                        auto meta = sm->getMetadataRepo();
-                                        auto dataDir = sm->getConfig().dataDir;
-                                        yams::vector::EmbeddingService esvc(store, meta, dataDir);
-                                        (void)esvc.generateEmbeddingsForDocuments(
-                                            std::vector<std::string>{h});
-                                    }
-                                } catch (...) {
-                                }
-                                if (signal)
-                                    signal(false);
-                            });
-                        }
-                    }
-                } catch (...) {
-                }
-                co_return response;
             }
         });
 }

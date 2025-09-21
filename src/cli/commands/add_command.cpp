@@ -92,6 +92,8 @@ public:
         cmd->add_option("--exclude", excludePatterns_,
                         "File patterns to exclude (e.g., '*.tmp,*.log')")
             ->delimiter(',');
+        cmd->add_flag("--verify", verify_,
+                      "Verify stored content (hash + existence) after add; slower but safer");
 
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
@@ -233,6 +235,7 @@ public:
                     aopts.timeoutMs = daemonTimeoutMs_;
                     aopts.retries = daemonRetries_;
                     aopts.backoffMs = daemonBackoffMs_;
+                    aopts.verify = verify_;
 
                     // Auto-detect directory targets and enable recursive ingestion when omitted
                     if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
@@ -337,6 +340,13 @@ private:
         // Get app context and services
         auto appContext = cli_->getAppContext();
         if (!appContext) {
+            // Surface storage init hint (e.g., FTS5 repair guidance)
+            auto initHint = cli_->ensureStorageInitialized();
+            if (!initHint) {
+                return Error{initHint.error().code,
+                             std::string("Failed to initialize app context: ") +
+                                 initHint.error().message};
+            }
             return Error{ErrorCode::NotInitialized, "Failed to initialize app context"};
         }
 
@@ -356,7 +366,7 @@ private:
         }
 
         // Iterate and process each path
-        size_t ok = 0, failed = 0, indexed = 0;
+        size_t ok = 0, failed = 0;
         for (const auto& p : paths) {
             if (p.string() == "-") {
                 auto r = storeFromStdinWithServices(*appContext);
@@ -383,7 +393,6 @@ private:
                 auto r = storeFileWithServices(*appContext, p);
                 if (r) {
                     ok++;
-                    indexed++;
                 } else {
                     failed++;
                 }
@@ -526,6 +535,7 @@ private:
         req.includePatterns = includePatterns_;
         req.excludePatterns = excludePatterns_;
         req.recursive = recursive_;
+        req.verify = verify_;
         // Match daemon behavior: directory ingestion defers extraction
         req.deferExtraction = true;
 
@@ -573,9 +583,9 @@ private:
 
             std::cout << output.dump(2) << std::endl;
         } else {
-            std::cout << "Added " << resp.filesIndexed << " files from directory"
-                      << " (" << resp.filesSkipped << " skipped, " << resp.filesFailed << " failed)"
-                      << std::endl;
+            std::cout << "Processed " << resp.filesProcessed << " files"
+                      << " (" << resp.filesIndexed << " indexed, " << resp.filesSkipped
+                      << " skipped, " << resp.filesFailed << " failed)" << std::endl;
         }
 
         // Perform light indexing for each successfully added file
@@ -643,6 +653,7 @@ private:
     bool recursive_ = false;
     std::vector<std::string> includePatterns_;
     std::vector<std::string> excludePatterns_;
+    bool verify_ = false;
 
     // Daemon interaction controls
     int daemonTimeoutMs_ = 30000;

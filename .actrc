@@ -1,4 +1,4 @@
--P ubuntu-latest=catthehacker/ubuntu:full-22.04
---artifact-server-path ./.act/artifacts
-# Helpful defaults; override per-run as needed
--s GITHUB_TOKEN=fake
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+-P ubuntu-24.04-arm=catthehacker/ubuntu:24.04
+# Simulate macOS runners with a Linux image so matrix doesn’t error out.
+-P macos-15=catthehacker/ubuntu:act-latest

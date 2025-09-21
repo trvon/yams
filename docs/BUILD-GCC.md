@@ -40,23 +40,29 @@ sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-ope
 ```
 Other distros: use analogous `*-devel` / package names.
 
-## 3. Quick Start (Conan + Presets)
+## 3. Quick Start (Conan + Meson)
 
 ```bash
-# Debug (Unity build, sanitizers, tests optional)
-conan install . -of build/yams-debug -s build_type=Debug -b missing \
-  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=True
-cmake --preset yams-debug
-cmake --build --preset yams-debug -j
+# Debug
+conan install . -of build/debug -s build_type=Debug -b missing
+meson setup build/debug \
+  --prefix /usr/local \
+  --native-file build/debug/build/Debug/generators/conan_meson_native.ini \
+  --buildtype=debug
+meson compile -C build/debug
 
-# Release (LTO/IPO)
-conan install . -of build/yams-release -s build_type=Release -b missing \
-  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=True
-cmake --preset yams-release
-cmake --build --preset yams-release -j
+# Reconfigure later (Debug)
+meson setup build/debug --reconfigure \
+  --prefix /usr/local \
+  --native-file build/debug/build/Debug/generators/conan_meson_native.ini
 
-# Tests (Debug)
-ctest --preset yams-debug --output-on-failure
+# Release
+conan install . -of build/release -s build_type=Release -b missing
+meson setup build/release \
+  --prefix /usr/local \
+  --native-file build/release/build/Release/generators/conan_meson_native.ini \
+  --buildtype=release
+meson compile -C build/release
 ```
 
 Set parallelism: `export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)` (Linux) or pass `-j` to build step.
@@ -67,22 +73,15 @@ downloads the lightweight `onnxruntime-genai` headers (v0.9.1) at configure
 time (no additional flags). You will see a provider log entry
 `onnxruntime-genai headers provided (v0.9.1)` on success.
 
-### Plugin & Targeted Tests
+### Tests
 
-Explicitly build plugin/unit test targets first (ctest does not auto-build):
+By default tests are disabled to keep loops fast. Enable them via Meson:
 ```bash
-cmake --build --preset yams-debug --target s3_signer_tests object_storage_adapter_tests
-ctest --preset yams-debug -R S3SignerUnitTests --output-on-failure
-ctest --preset yams-debug -R ObjectStorageAdapterUnitTests --output-on-failure
+meson configure build/debug -Dbuild-tests=true
+meson compile -C build/debug
+meson test -C build/debug -t unit
+meson test -C build/debug -t integration
 ```
-S3 smoke (networked, optional):
-```bash
-cmake --build --preset yams-debug --target s3_plugin_smoke_test
-ctest --preset yams-debug -R s3_plugin_smoke_test --output-on-failure
-```
-Enable integration smoke: `-DYAMS_TEST_S3_PLUGIN_INTEGRATION=ON` at configure time.
-
-Integration tests (S3 / ONNX) are disabled by default to keep local loops fast.
 
 ### No-Conan (System Dependencies Only)
 Presets: `yams-debug-no-conan`, `yams-release-no-conan` (assumes you supply all libs and set `YAMS_ENABLE_ONNX=ON` + provide ORT via `CMAKE_PREFIX_PATH` or internal build flag).
@@ -128,19 +127,14 @@ sudo make install
 
 ### Development Build (Debug + tests)
 
-For development with tests and debugging:
-
 ```bash
-CC=gcc CXX=g++ cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DYAMS_BUILD_PROFILE=dev \
-    -DYAMS_BUILD_TESTS=ON \
-    -DYAMS_ENABLE_SANITIZERS=ON
-
-make -j$(nproc)
-
-# Run tests
-ctest --output-on-failure
+conan install . -of build/debug -s build_type=Debug -b missing
+meson setup build/debug \
+  --prefix /usr/local \
+  --native-file build/debug/build/Debug/generators/conan_meson_native.ini \
+  --buildtype=debug -Dbuild-tests=true
+meson compile -C build/debug
+meson test -C build/debug --print-errorlogs
 ```
 
 ### Disable CURL
@@ -159,26 +153,17 @@ Note: When YAMS_REQUIRE_CURL=OFF, HTTP downloader features will be unavailable.
 
 ### Coverage
 
-For code coverage analysis:
+For code coverage analysis (example):
 
 ```bash
-CC=gcc CXX=g++ cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DYAMS_BUILD_PROFILE=dev \
-    -DYAMS_BUILD_TESTS=ON \
-    -DYAMS_ENABLE_COVERAGE=ON
-
-make -j$(nproc)
-
-# Run tests to generate coverage data
-ctest
-
-# Generate coverage report
-gcovr --root .. \
-    --exclude '_deps/*' \
-    --exclude 'tests/*' \
-    --html --html-details \
-    --output coverage.html
+conan install . -of build/debug -s build_type=Debug -b missing
+meson setup build/debug \
+  --prefix /usr/local \
+  --native-file build/debug/build/Debug/generators/conan_meson_native.ini \
+  --buildtype=debug -Dbuild-tests=true
+meson compile -C build/debug
+meson test -C build/debug
+gcovr --root . --exclude '_deps/*' --exclude 'tests/*' --html --html-details --output build/debug/coverage.html
 ```
 
 ## 6. Compiler Notes

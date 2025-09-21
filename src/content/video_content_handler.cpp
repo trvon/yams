@@ -162,9 +162,9 @@ std::optional<ExtendedVideoMetadata> extractUsingFFProbe(const std::filesystem::
 #endif
 
 #ifdef YAMS_HAVE_MEDIAINFO
-    std::string cmd = yams::fmt_format("mediainfo --Output=JSON \"{}\"", path.string());
+    std::string mi_cmd = yams::fmt_format("mediainfo --Output=JSON \"{}\"", path.string());
 
-    if (FILE* pipe = popen(cmd.c_str(), "r")) {
+    if (FILE* pipe = popen(mi_cmd.c_str(), "r")) {
         char buffer[4096];
         std::string result;
         while (fgets(buffer, sizeof(buffer), pipe)) {

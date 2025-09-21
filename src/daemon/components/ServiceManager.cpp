@@ -12,10 +12,10 @@
 #include <optional>
 #include <thread>
 #include <unistd.h>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/as_tuple.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/post.hpp>
@@ -26,7 +26,9 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -40,6 +42,7 @@
 #include <yams/daemon/resource/plugin_loader.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/migration.h>
+#include <yams/repair/embedding_repair_util.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
@@ -237,6 +240,27 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         } catch (const std::exception& e) {
             spdlog::warn("Exception trusting configured pluginDir: {}", e.what());
         }
+
+        try {
+            if (!ingestService_) {
+                std::size_t ingestThreads = 1;
+                try {
+                    auto configured = config_.workerThreads;
+                    if (configured > 0)
+                        ingestThreads = std::max<std::size_t>(1, configured / 4);
+                    if (ingestThreads == 0)
+                        ingestThreads = 1;
+                } catch (...) {
+                    ingestThreads = 1;
+                }
+                ingestService_ = std::make_unique<IngestService>(this, ingestThreads);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("ServiceManager: failed to initialize IngestService scaffold: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn("ServiceManager: unknown error initializing IngestService scaffold");
+        }
     } catch (const std::exception& e) {
         spdlog::warn("Exception during ServiceManager constructor setup: {}", e.what());
     }
@@ -348,10 +372,18 @@ yams::Result<void> ServiceManager::initialize() {
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
         PoolManager::instance().configure("ipc_io", ioCfg);
-        // Post-ingest pool (background CPU) — conservative defaults
+        // Post-ingest pool (background CPU) — derive bounds from TuningConfig
         PoolManager::Config piCfg{};
-        piCfg.min_size = 1;
-        piCfg.max_size = 4;
+        try {
+            const auto& cfg = tuningConfig_;
+            piCfg.min_size =
+                static_cast<uint32_t>(std::max<std::size_t>(1, cfg.postIngestThreadsMin));
+            piCfg.max_size =
+                static_cast<uint32_t>(std::max(cfg.postIngestThreadsMin, cfg.postIngestThreadsMax));
+        } catch (...) {
+            piCfg.min_size = 1;
+            piCfg.max_size = 8;
+        }
         piCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         piCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         piCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
@@ -386,6 +418,11 @@ void ServiceManager::shutdown() {
     }
 
     spdlog::debug("ServiceManager: Shutting down daemon resources");
+
+    if (ingestService_) {
+        ingestService_->stop();
+        ingestService_.reset();
+    }
 
     // Persist vector index when ready
     if (vectorIndexManager_ && state_.readiness.vectorIndexReady.load()) {
@@ -605,8 +642,10 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
     std::filesystem::path lockPath =
         std::filesystem::path(cfg.database_path).replace_extension(".lock");
     try {
+        spdlog::info("[VectorInit] Opening lock file: {}", lockPath.string());
         lock_fd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
         if (lock_fd >= 0) {
+            spdlog::info("[VectorInit] Acquiring lock on: {}", lockPath.string());
             struct flock fl{};
             fl.l_type = F_WRLCK;
             fl.l_whence = SEEK_SET;
@@ -618,6 +657,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 lock_fd = -1;
                 return Result<bool>(false);
             } else {
+                spdlog::info("[VectorInit] Lock acquired.");
                 // Stamp pid for diagnostics
                 try {
                     (void)ftruncate(lock_fd, 0);
@@ -628,10 +668,10 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 }
             }
         } else {
-            spdlog::debug("[VectorInit] could not open lock file (continuing without lock)");
+            spdlog::warn("[VectorInit] could not open lock file (continuing without lock)");
         }
     } catch (...) {
-        spdlog::debug("[VectorInit] lock setup error (continuing without lock)");
+        spdlog::warn("[VectorInit] lock setup error (continuing without lock)");
     }
 
     const int maxAttempts = 3;
@@ -645,6 +685,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         }
         try {
             auto vdb = std::make_shared<vector::VectorDatabase>(cfg);
+            spdlog::info("[VectorInit] Calling vdb->initialize() attempt {}", attempt + 1);
             if (!vdb->initialize()) {
                 auto err = vdb->getLastError();
                 spdlog::warn("[VectorInit] initialization attempt {} failed: {}", attempt + 1, err);
@@ -660,6 +701,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                     attempt = maxAttempts - 1; // signal final
                 }
             } else {
+                spdlog::info("[VectorInit] vdb->initialize() succeeded.");
                 vectorDatabase_ = std::move(vdb);
                 spdlog::info("[VectorInit] end pid={} tid={} path={} dim={} attempts={}",
                              static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
@@ -698,6 +740,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
     }
     // Release advisory lock if held
     if (lock_fd >= 0) {
+        spdlog::info("[VectorInit] Releasing lock.");
         struct flock fl{};
         fl.l_type = F_UNLCK;
         fl.l_whence = SEEK_SET;
@@ -706,6 +749,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         (void)fcntl(lock_fd, F_SETLK, &fl);
         ::close(lock_fd);
         lock_fd = -1;
+        spdlog::info("[VectorInit] Lock released.");
     }
     if (!vectorDatabase_) {
         spdlog::error("[VectorInit] all {} attempt(s) failed; continuing without vector DB",
@@ -822,9 +866,11 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
 
 boost::asio::awaitable<Result<void>>
 ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
+    spdlog::info("[ServiceManager] Async initialization started.");
     // Vector DB initialization (single guarded attempt invoked earlier in constructor)
     // Idempotent: safe if already attempted.
     (void)initializeVectorDatabaseOnce(config_.dataDir);
+    spdlog::info("[ServiceManager] Phase: Vector DB Init (once).");
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
     writeBootstrapStatusFile(config_, state_);
 
@@ -845,6 +891,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     // Plugins step: mark ready (host scaffolding) and record duration uniformly
+    spdlog::info("[ServiceManager] Phase: Plugins Ready.");
     try {
         (void)init::record_duration(
             "plugins",
@@ -878,6 +925,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         fs::create_directories(dataDir, ec);
         resolvedDataDir_ = dataDir;
     }
+    spdlog::info("[ServiceManager] Phase: Data Dir Resolved.");
     spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
 
     // Content store (synchronous, quick) using init helpers
@@ -908,6 +956,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                 storeRes.error().message};
         }
     }
+    spdlog::info("[ServiceManager] Phase: Content Store Initialized.");
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
@@ -923,6 +972,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         },
         state_.initDurationsMs);
     writeBootstrapStatusFile(config_, state_);
+    spdlog::info("[ServiceManager] Phase: Database Opened.");
 
     // Phase: Migrations (if DB ok)
     if (db_ok) {
@@ -934,6 +984,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             },
             state_.initDurationsMs);
     }
+    spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
     // Phase: Connection pool + repo
     if (db_ok) {
@@ -987,11 +1038,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         writeBootstrapStatusFile(config_, state_);
     }
+    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
     // Executors and sessions
     if (database_ && metadataRepo_)
         searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
+    spdlog::info("[ServiceManager] Phase: Executors and Sessions Initialized.");
 
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
@@ -1019,14 +1072,24 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         } catch (...) {
         }
+        std::size_t qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         postIngest_ = std::make_unique<PostIngestQueue>(contentStore_, metadataRepo_,
-                                                        contentExtractors_, kgStore, threads);
-        spdlog::info("Post-ingest queue initialized (threads={})", threads);
+                                                        contentExtractors_, kgStore, threads, qcap);
+        // Apply daemon tuning config (capacity/min threads) now that queue exists
+        try {
+            if (config_.tuning.postIngestCapacity > 0)
+                postIngest_->setCapacity(config_.tuning.postIngestCapacity);
+            if (config_.tuning.postIngestThreadsMin > 0)
+                (void)resizePostIngestThreads(config_.tuning.postIngestThreadsMin);
+        } catch (...) {
+        }
+        spdlog::info("Post-ingest queue initialized (threads={}, capacity={})", threads, qcap);
     } catch (const std::exception& e) {
         spdlog::warn("Post-ingest queue init failed: {}", e.what());
     } catch (...) {
         spdlog::warn("Post-ingest queue init failed (unknown)");
     }
+    spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
 
     // Vector DB initialization (single guarded attempt invoked earlier in constructor)
     // Idempotent: safe if already attempted.
@@ -1086,6 +1149,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     } catch (const std::exception& e) {
         spdlog::warn("Exception initializing VectorIndexManager: {}", e.what());
     }
+    spdlog::info("[ServiceManager] Phase: Vector Index Manager Initialized.");
 
     // Embedding generator will be initialized after plugin adoption
     spdlog::debug("Embedding generator initialization deferred to plugin adoption phase");
@@ -1189,6 +1253,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     } catch (const std::exception& e) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
     }
+    spdlog::info("[ServiceManager] Phase: Plugins Autoloaded.");
 
     // Build HybridSearchEngine with timeout
     try {
@@ -1232,6 +1297,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     } catch (const std::exception& e) {
         spdlog::warn("Exception wiring HybridSearchEngine: {}", e.what());
     }
+    spdlog::info("[ServiceManager] Phase: Search Engine Built.");
 
     // Watchdog: promote lifecycle if core infra is ready
     try {
@@ -1249,6 +1315,75 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }).detach();
     } catch (...) {
     }
+
+    if (ingestService_) {
+        ingestService_->start();
+    }
+    spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
+
+    // Launch InternalEventBus consumer for embed jobs when worker executors are available.
+    try {
+        std::shared_ptr<ServiceManager> self;
+        try {
+            self = shared_from_this();
+        } catch (const std::bad_weak_ptr&) {
+            self.reset();
+        }
+        if (self) {
+            auto exec = getWorkerExecutor();
+            boost::asio::co_spawn(
+                exec,
+                [self]() -> boost::asio::awaitable<void> {
+                    using Bus = yams::daemon::InternalEventBus;
+                    auto channel =
+                        Bus::instance().get_or_create_channel<Bus::EmbedJob>("embed_jobs", 1024);
+                    using namespace std::chrono_literals;
+                    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+                    for (;;) {
+                        Bus::EmbedJob job;
+                        if (channel && channel->try_pop(job)) {
+                            try {
+                                auto content = self->getContentStore();
+                                auto meta = self->getMetadataRepo();
+                                auto embed = self->getEmbeddingGenerator();
+                                if (!embed) {
+                                    (void)self->ensureEmbeddingGeneratorReady();
+                                    embed = self->getEmbeddingGenerator();
+                                }
+                                if (!(content && meta && embed)) {
+                                    spdlog::debug(
+                                        "EmbedJob: services not ready; dropping job ({} docs)",
+                                        job.hashes.size());
+                                } else {
+                                    yams::repair::EmbeddingRepairConfig rcfg;
+                                    rcfg.batchSize = job.batchSize ? job.batchSize : 32u;
+                                    rcfg.skipExisting = job.skipExisting;
+                                    rcfg.dataPath = self->getConfig().dataDir;
+                                    auto repair = yams::repair::repairMissingEmbeddings(
+                                        content, meta, embed, rcfg, job.hashes, nullptr,
+                                        self->getContentExtractors());
+                                    if (!repair) {
+                                        spdlog::warn("EmbedJob: repair failed: {}",
+                                                     repair.error().message);
+                                    }
+                                }
+                            } catch (const std::exception& e) {
+                                spdlog::debug("EmbedJob consumer exception: {}", e.what());
+                            } catch (...) {
+                            }
+                            Bus::instance().incEmbedConsumed();
+                            continue;
+                        }
+                        timer.expires_after(100ms);
+                        co_await timer.async_wait(boost::asio::use_awaitable);
+                    }
+                    co_return;
+                },
+                boost::asio::detached);
+        }
+    } catch (...) {
+    }
+    spdlog::info("[ServiceManager] Phase: Event Bus Consumer Launched.");
 
     co_return Result<void>();
 }

@@ -79,30 +79,8 @@ private:
     bool debug_ = false;
 };
 
-// Command factory implementations
-std::unique_ptr<Command> createGCCommand() {
-    class GCCommandImpl : public GCCommand {
-    public:
-        using GCCommand::GCCommand;
-    };
-    return std::make_unique<GCCommandImpl>();
-}
-
-std::unique_ptr<Command> createStatsCommand() {
-    class StatsCommandImpl : public StatsCommand {
-    public:
-        using StatsCommand::StatsCommand;
-    };
-    return std::make_unique<StatsCommandImpl>();
-}
-
-std::unique_ptr<Command> createVerifyCommand() {
-    class VerifyCommandImpl : public VerifyCommand {
-    public:
-        using VerifyCommand::VerifyCommand;
-    };
-    return std::make_unique<VerifyCommandImpl>();
-}
+// Command factory implementations are provided in each command translation unit.
+// See: src/commands/*.cpp
 
 } // namespace yams::tools
 

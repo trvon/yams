@@ -288,7 +288,10 @@ void LifecycleComponent::handleSignal(int signal) {
             }
             break;
         case SIGHUP:
-            spdlog::info("Received SIGHUP, configuration reload requested (not yet implemented).");
+            spdlog::info("Received SIGHUP, configuration reload requested.");
+            if (daemon_) {
+                daemon_->requestReload();
+            }
             break;
         default:
             break;

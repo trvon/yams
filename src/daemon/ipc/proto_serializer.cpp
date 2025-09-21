@@ -1512,15 +1512,13 @@ template <> struct ProtoBinding<AddDocumentResponse> {
     static void set(Envelope& env, const AddDocumentResponse& r) {
         auto* o = env.mutable_add_document_response();
         o->set_hash(r.hash);
-        o->set_message(r.path);
+        o->set_message(r.message);
     }
     static AddDocumentResponse get(const Envelope& env) {
         const auto& i = env.add_document_response();
         AddDocumentResponse r{};
         r.hash = i.hash();
-        r.path = i.message();
-        r.size = 0;
-        r.documentsAdded = 0;
+        r.message = i.message();
         return r;
     }
 };

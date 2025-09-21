@@ -6,32 +6,31 @@ The YAMS test suite provides comprehensive testing coverage including unit tests
 
 ## Quick Start
 
-### Running Tests
+### Running Tests (Meson)
 
 ```bash
-# Build the project with tests enabled
+# Configure with tests enabled
+conan install . -of build/debug -s build_type=Debug -b missing
+meson setup build/debug --native-file build/debug/build/Debug/generators/conan_meson_native.ini --buildtype=debug -Dbuild-tests=true
+meson compile -C build/debug
+
+# Run suites
+meson test -C build/debug                 # all
+meson test -C build/debug -t unit         # unit only
+meson test -C build/debug -t integration  # integration only
+meson test -C build/debug -t stress       # stress (long-running)
+
+# List tests
+meson test -C build/debug -l
+```
+
+### Legacy CMake/CTest (for reference)
+These commands are retained for contributors still using the legacy build. Prefer Meson going forward.
+
+```bash
 cmake -B build -DBUILD_TESTS=ON -DENABLE_COVERAGE=ON
 cmake --build build
-
-# Run all tests
-cd build
-ctest
-
-# Run specific test categories
-ctest -L unit          # Unit tests only
-ctest -L integration   # Integration tests only
-ctest -L benchmark     # Performance benchmarks
-ctest -L stress        # Stress tests
-
-# Run tests with verbose output
-ctest -V
-
-# Run specific test executable
-./tests/unit/extraction/extraction_tests
-
-# Run tests with coverage
-make coverage
-# View coverage report: open coverage_report/index.html
+cd build && ctest -V
 ```
 
 ### Running Benchmarks

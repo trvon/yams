@@ -103,6 +103,79 @@ public:
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
+        // Prefer config-first resolution without depending on IPC FSM
+        // Try env -> config.toml (daemon.socket_path) -> defaults
+        namespace fs = std::filesystem;
+        [[maybe_unused]] auto resolveSocketPathConfigFirstLocal = []() -> fs::path {
+            if (const char* env = std::getenv("YAMS_DAEMON_SOCKET"); env && *env) {
+                return fs::path(env);
+            }
+            // Minimal config reader for daemon.socket_path
+            fs::path cfgPath;
+            if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
+                cfgPath = fs::path(cfgEnv);
+            } else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+                cfgPath = fs::path(xdg) / "yams" / "config.toml";
+            } else if (const char* home = std::getenv("HOME")) {
+                cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
+            }
+            if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                try {
+                    std::ifstream f(cfgPath);
+                    std::string line;
+                    bool in_daemon = false;
+                    auto ltrim = [](std::string& s) {
+                        s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
+                                    return !std::isspace(ch);
+                                }));
+                    };
+                    auto rtrim = [](std::string& s) {
+                        s.erase(std::find_if(s.rbegin(), s.rend(),
+                                             [](unsigned char ch) { return !std::isspace(ch); })
+                                    .base(),
+                                s.end());
+                    };
+                    while (std::getline(f, line)) {
+                        ltrim(line);
+                        rtrim(line);
+                        if (line.empty() || line[0] == '#')
+                            continue;
+                        if (line.front() == '[') {
+                            in_daemon = (line == "[daemon]" || line == "[ daemon ]");
+                            continue;
+                        }
+                        auto pos = line.find('=');
+                        if (pos == std::string::npos)
+                            continue;
+                        std::string key = line.substr(0, pos);
+                        std::string val = line.substr(pos + 1);
+                        ltrim(key);
+                        rtrim(key);
+                        ltrim(val);
+                        rtrim(val);
+                        if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') ||
+                                                (val.front() == '\'' && val.back() == '\''))) {
+                            val = val.substr(1, val.size() - 2);
+                        }
+                        if (key == "daemon.socket_path" || (in_daemon && key == "socket_path")) {
+                            if (!val.empty())
+                                return fs::path(val);
+                        }
+                    }
+                } catch (...) {
+                }
+            }
+            // Fallbacks
+            if (const char* xdgRun = std::getenv("XDG_RUNTIME_DIR")) {
+                return fs::path(xdgRun) / "yams-daemon.sock";
+            }
+            // Non-root: temp dir; root: /var/run
+            if (::geteuid() == 0) {
+                return fs::path("/var/run/yams-daemon.sock");
+            }
+            // Use a user-specific socket path by default to match the PID file behavior
+            return fs::temp_directory_path() / "yams-daemon.sock";
+        };
         pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
     // Normalize dataDir for all CLI/MCP callers: env > config.toml(core.data_dir) > XDG/HOME > cwd
@@ -311,7 +384,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Async variant using adapter's connect helper and timers; avoids blocking sleeps
     // If daemon is not reachable and autoStart is disabled, surface a failure.
     const auto socketPath = pImpl->config_.socketPath.empty()
-                                ? yams::daemon::ConnectionFsm::resolve_socket_path_config_first()
+                                ? DaemonClient::resolveSocketPathConfigFirst()
                                 : pImpl->config_.socketPath;
     if (socketPath.empty()) {
         co_return Error{ErrorCode::NetworkError, "Socket path not resolved"};
@@ -459,7 +532,7 @@ boost::asio::awaitable<Result<GrepResponse>> DaemonClient::grep(const GrepReques
 
 boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
     StatusRequest req;
-    req.detailed = true;
+    req.detailed = false; // avoid heavy daemon-side scans by default
 
     // Transient-aware retry loop for early startup/socket closure races
     Error lastErr{ErrorCode::NetworkError, "Uninitialized"};
@@ -1523,9 +1596,8 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     spdlog::info("Starting YAMS daemon...");
 
     // Resolve socket path with unified precedence: explicit config > config.toml > env > defaults
-    auto socketPath = config.socketPath.empty()
-                          ? yams::daemon::ConnectionFsm::resolve_socket_path_config_first()
-                          : config.socketPath;
+    auto socketPath = config.socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst()
+                                                : config.socketPath;
 
     // Determine data dir from config or environment (YAMS_STORAGE)
     std::filesystem::path dataDir = config.dataDir;

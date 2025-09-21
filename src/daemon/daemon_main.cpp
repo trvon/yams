@@ -142,6 +142,8 @@ int main(int argc, char* argv[]) {
 
     // Load and parse config if it exists
     if (!configPath.empty() && fs::exists(configPath)) {
+        // Record for reloads
+        config.configFilePath = configPath;
         yams::config::ConfigMigrator migrator;
         auto parseResult = migrator.parseTomlConfig(configPath);
         if (parseResult) {
@@ -302,6 +304,43 @@ int main(int argc, char* argv[]) {
                         c = static_cast<char>(std::tolower(c));
                     bool en = (v == "1" || v == "true" || v == "on");
                     yams::daemon::TuneAdvisor::setAggressiveIdleShrinkEnabled(en);
+                }
+                if (auto it = tune.find("use_internal_bus_for_repair"); it != tune.end()) {
+                    std::string v = it->second;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    bool en = (v == "1" || v == "true" || v == "on");
+                    yams::daemon::TuneAdvisor::setUseInternalBusForRepair(en);
+                }
+                if (auto it = tune.find("use_internal_bus_for_post_ingest"); it != tune.end()) {
+                    std::string v = it->second;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    bool en = (v == "1" || v == "true" || v == "on");
+                    yams::daemon::TuneAdvisor::setUseInternalBusForPostIngest(en);
+                }
+
+                // Map tuning config to DaemonConfig.tuning (controller + queue policy)
+                try {
+                    using yams::daemon::TuningConfig;
+                    auto& tc = config.tuning;
+                    if (auto v = as_int("target_cpu_percent"))
+                        tc.targetCpuPercent = static_cast<uint32_t>(*v);
+                    if (auto v = as_int("post_ingest_capacity"))
+                        tc.postIngestCapacity = static_cast<std::size_t>(*v);
+                    if (auto v = as_int("post_ingest_threads_min"))
+                        tc.postIngestThreadsMin = static_cast<std::size_t>(*v);
+                    if (auto v = as_int("post_ingest_threads_max"))
+                        tc.postIngestThreadsMax = static_cast<std::size_t>(*v);
+                    if (auto v = as_int("admit_warn_threshold"))
+                        tc.admitWarnThreshold = static_cast<std::size_t>(*v);
+                    if (auto v = as_int("admit_stop_threshold"))
+                        tc.admitStopThreshold = static_cast<std::size_t>(*v);
+                    if (auto v = as_int("control_interval_ms"))
+                        tc.controlIntervalMs = static_cast<uint32_t>(*v);
+                    if (auto v = as_int("hold_ms"))
+                        tc.holdMs = static_cast<uint32_t>(*v);
+                } catch (...) {
                 }
             }
 
@@ -499,6 +538,39 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+    }
+
+    // Simple helper to expand a leading '~' to $HOME for file-system paths.
+    auto expand_tilde = [](const std::filesystem::path& p) -> std::filesystem::path {
+        namespace fs = std::filesystem;
+        if (p.empty())
+            return p;
+        auto s = p.string();
+        if (!s.empty() && s[0] == '~') {
+            const char* home = std::getenv("HOME");
+            if (home && *home) {
+                if (s.size() == 1) {
+                    return fs::path(home);
+                }
+                if (s.size() > 1 && (s[1] == '/' || s[1] == '\\')) {
+                    // "~/..." → "$HOME/..."
+                    return fs::path(home) / s.substr(2);
+                }
+            }
+        }
+        return p;
+    };
+
+    // Normalize key paths early (before daemonizing) so relative or '~' inputs don't break after
+    // chdir("/"). Keep explicit CLI choices intact but canonicalize them.
+    try {
+        config.socketPath = expand_tilde(config.socketPath);
+        config.pidFile = expand_tilde(config.pidFile);
+        config.logFile = expand_tilde(config.logFile);
+        // dataDir may be normalized earlier; expand '~' here as a last pass.
+        config.dataDir = expand_tilde(config.dataDir);
+    } catch (...) {
+        // best effort
     }
 
     // Propagate configured plugin directory (if any) into PluginLoader global configuredDirs

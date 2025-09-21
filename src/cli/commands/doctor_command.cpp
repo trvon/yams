@@ -838,6 +838,73 @@ private:
             }
             auto leaseHandle = std::move(leaseRes.value());
             auto& client = **leaseHandle;
+
+            // Database migrations health (local DB), surface failures and guidance
+            try {
+                namespace fs = std::filesystem;
+                fs::path dbPath = cli_->getDataPath() / "yams.db";
+                sqlite3* db = nullptr;
+                if (sqlite3_open(dbPath.string().c_str(), &db) == SQLITE_OK) {
+                    auto queryScalar = [&](const char* sql) -> std::optional<std::string> {
+                        sqlite3_stmt* stmt = nullptr;
+                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+                            return std::nullopt;
+                        std::optional<std::string> out{};
+                        if (sqlite3_step(stmt) == SQLITE_ROW) {
+                            const unsigned char* txt = sqlite3_column_text(stmt, 0);
+                            if (txt)
+                                out = std::string(reinterpret_cast<const char*>(txt));
+                        }
+                        sqlite3_finalize(stmt);
+                        return out;
+                    };
+
+                    // Any failed migrations?
+                    sqlite3_stmt* st = nullptr;
+                    bool haveFail = false;
+                    if (sqlite3_prepare_v2(db,
+                                           "SELECT version,name,error FROM migration_history "
+                                           "WHERE success=0 ORDER BY applied_at DESC LIMIT 3",
+                                           -1, &st, nullptr) == SQLITE_OK) {
+                        while (sqlite3_step(st) == SQLITE_ROW) {
+                            if (!haveFail) {
+                                std::cout << "\nDatabase Migrations\n";
+                                std::cout << "-------------------\n";
+                                haveFail = true;
+                            }
+                            int ver = sqlite3_column_int(st, 0);
+                            const unsigned char* n = sqlite3_column_text(st, 1);
+                            const unsigned char* e = sqlite3_column_text(st, 2);
+                            std::cout << "✗ version=" << ver << ", name='"
+                                      << (n ? (const char*)n : "?") << "'";
+                            if (e && *e)
+                                std::cout << ", error=\"" << (const char*)e << "\"";
+                            std::cout << "\n";
+                        }
+                        sqlite3_finalize(st);
+                    }
+                    // Leftover temp FTS table from failed swap?
+                    if (auto ftsNew =
+                            queryScalar("SELECT name FROM sqlite_master WHERE type='table' AND "
+                                        "name='documents_fts_new'")) {
+                        if (haveFail == false) {
+                            std::cout << "\nDatabase Migrations\n";
+                            std::cout << "-------------------\n";
+                            haveFail = true;
+                        }
+                        std::cout
+                            << "⚠ Found leftover 'documents_fts_new' — an FTS migration likely "
+                               "failed mid-way.\n";
+                        std::cout << "  Run: yams repair --fts5\n";
+                    }
+                    if (haveFail) {
+                        std::cout << "Hint: try 'yams repair --fts5' to rebuild FTS, or rerun your "
+                                     "command with '--verbose' for details.\n";
+                    }
+                    sqlite3_close(db);
+                }
+            } catch (...) {
+            }
             std::cout << "Daemon: ";
             auto s = yams::cli::run_result<yams::daemon::StatusResponse>(client.status(),
                                                                          std::chrono::seconds(3));
@@ -1864,7 +1931,7 @@ Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
         uint32_t ipcMax = std::min<unsigned>(32, hc);
         uint32_t ioMax = std::min<unsigned>(32, std::max<unsigned>(1, hc / 2));
         std::map<std::string, std::string> suggestions{
-            {"tuning.backpressure_read_pause_ms", "5"},
+            {"tuning.backpressure_read_pause_ms", "10"},
             {"tuning.worker_poll_ms", "150"},
             {"tuning.idle_cpu_pct", "10.0"},
             {"tuning.idle_mux_low_bytes", "4194304"},

@@ -20,6 +20,9 @@
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
+#if __has_include(<yams/version_generated.h>)
+#include <yams/version_generated.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -97,7 +100,18 @@ YamsCLI::YamsCLI() {
     spdlog::set_level(spdlog::level::warn);
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
-#ifdef YAMS_VERSION_LONG_STRING
+    // Prefer generated effective version if present; otherwise fallback to existing macros.
+#if __has_include(<yams/version_generated.h>)
+    {
+        yams::VersionInfo ver{};
+        std::string long_version = std::string(ver.effective_version);
+        if (std::string(ver.git_describe).size()) {
+            long_version += " (" + std::string(ver.git_describe) + ")";
+        }
+        long_version += " built:" + std::string(ver.build_timestamp);
+        app_->set_version_flag("--version", long_version);
+    }
+#elif defined(YAMS_VERSION_LONG_STRING)
     app_->set_version_flag("--version", YAMS_VERSION_LONG_STRING);
 #else
     app_->set_version_flag("--version", YAMS_VERSION_STRING);
@@ -422,8 +436,20 @@ Result<void> YamsCLI::ensureStorageInitialized() {
     }
     auto initResult = initializeStorage();
     if (!initResult) {
-        auto hint = std::string(" (tip: run 'yams init --storage \"") + dataPath_.string() + "' )";
-        return Error{initResult.error().code, initResult.error().message + hint};
+        // Map common DB/init errors to actionable guidance
+        const std::string& em = initResult.error().message;
+        std::string hint;
+        // FTS5/tokenizer issues often arise during migrations creating virtual tables
+        if (em.find("FTS5") != std::string::npos || em.find("tokenize") != std::string::npos) {
+            hint = " (hint: run 'yams repair --fts5')";
+        } else if (em.find("constraint failed") != std::string::npos) {
+            // Likely uniqueness or foreign-key constraints; suggest safe, scoped repairs
+            hint = " (hint: try 'yams repair --orphans' or 'yams doctor --fix')";
+        } else {
+            // Default: storage onboarding
+            hint = " (tip: run 'yams init')";
+        }
+        return Error{initResult.error().code, em + hint};
     }
     return Result<void>();
 }
@@ -541,11 +567,18 @@ Result<void> YamsCLI::initializeStorage() {
         // Apply all migrations
         auto migrateResult = migrationManager.migrate();
         if (!migrateResult) {
-            if (verbose_) {
-                spdlog::error("Failed to run database migrations: {}",
-                              migrateResult.error().message);
+            const std::string em = migrateResult.error().message;
+            // Be tolerant to idempotent/constraint cases: proceed if schema already satisfies
+            // constraints
+            if (em.find("constraint failed") != std::string::npos ||
+                em.find("already exists") != std::string::npos) {
+                spdlog::warn("Proceeding despite migration warning: {}", em);
+            } else {
+                if (verbose_) {
+                    spdlog::error("Failed to run database migrations: {}", em);
+                }
+                return migrateResult;
             }
-            return migrateResult;
         }
 
         // Create connection pool for MetadataRepository

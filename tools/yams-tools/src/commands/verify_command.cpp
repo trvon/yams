@@ -315,4 +315,8 @@ private:
     int reportIntervalHours_ = 1;
 };
 
+std::unique_ptr<Command> createVerifyCommand() {
+    return std::make_unique<VerifyCommand>();
+}
+
 } // namespace yams::tools

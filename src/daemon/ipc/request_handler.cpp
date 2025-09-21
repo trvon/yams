@@ -29,6 +29,9 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#if defined(TRACY_ENABLE)
+#include <tracy/Tracy.hpp>
+#endif
 
 namespace yams::daemon {
 
@@ -105,7 +108,7 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
     }
 }
 
-RequestHandler::~RequestHandler() = default;
+RequestHandler::~RequestHandler() {}
 
 boost::asio::awaitable<std::vector<uint8_t>>
 RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
@@ -183,11 +186,22 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
     }
 }
 
+// Note: Only the compat::stop_token variant is provided. On platforms where
+// std::stop_token exists, yams::compat::stop_token aliases it, avoiding the
+// need for an overload that would collide at the type level.
+
 boost::asio::awaitable<void>
 RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket socket,
                                   yams::compat::stop_token token) {
     using boost::asio::use_awaitable;
     try {
+#if defined(TRACY_ENABLE)
+        // Treat each connection as a fiber for better cross-await stack attribution
+        YAMS_FIBER_ENTER("ipc_conn");
+        struct FiberGuard {
+            ~FiberGuard() { YAMS_FIBER_LEAVE(); }
+        } _fg;
+#endif
         spdlog::debug("RequestHandler::handle_connection coroutine started");
         spdlog::debug("New connection established");
         // Wrap socket in shared_ptr so per-request coroutines can safely reference it
@@ -214,6 +228,10 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
         FrameReader reader(MAX_MESSAGE_SIZE);
         bool should_exit = false;
 
+        uint64_t fsm_guard_fail_count = 0;
+        // Track consecutive idle read timeouts to prevent leaking idle connections forever
+        std::uint32_t consecutive_idle_timeouts = 0;
+        constexpr std::uint32_t kMaxIdleTimeouts = 120; // ~4 minutes if read_timeout ≈ 2s
         while (!token.stop_requested() && sock->is_open()) {
             // Pause reads when backpressured to avoid amplifying write pressure
             if (fsm.backpressured()) {
@@ -237,20 +255,49 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 guard_err = ex.what();
             }
             if (!can_read) {
-                // FSM not ready to read (e.g., mid-response). Avoid tight loop/log spam.
-                static std::atomic<uint64_t> s_guard_fail_count{0};
-                auto count = s_guard_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (count % 1000 == 1) {
-                    spdlog::warn("FSM not ready for read — backing off (occurrences={}): {}", count,
-                                 guard_err);
-                } else {
-                    spdlog::debug("FSM not ready for read: {}", guard_err);
+                // FSM not ready to read (e.g., mid-response). If FSM is already in Error/Closed
+                // state, close immediately to allow recovery instead of spinning.
+                const auto st = fsm.state();
+                if (st == ConnectionFsm::State::Error || st == ConnectionFsm::State::Closed) {
+                    spdlog::warn("Closing connection immediately due to FSM={} (context={}): {}",
+                                 ConnectionFsm::to_string(st), "before_async_read", guard_err);
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                    break;
                 }
+
+                // Otherwise, progressively back off. Warn sparsely with state included.
+                fsm_guard_fail_count++;
+                if (fsm_guard_fail_count % 2000 == 1) {
+                    spdlog::warn(
+                        "FSM not ready for read — backing off (occurrences={} state={}): {}",
+                        fsm_guard_fail_count, ConnectionFsm::to_string(st), guard_err);
+                } else {
+                    spdlog::debug("FSM not ready for read (state={}): {}",
+                                  ConnectionFsm::to_string(st), guard_err);
+                }
+
                 using namespace boost::asio;
                 steady_timer wait(co_await this_coro::executor);
-                wait.expires_after(
-                    std::chrono::milliseconds(TuneAdvisor::backpressureReadPauseMs()));
+                uint32_t base = TuneAdvisor::backpressureReadPauseMs();
+                uint32_t mult = (fsm_guard_fail_count > 8000)   ? 16
+                                : (fsm_guard_fail_count > 4000) ? 8
+                                : (fsm_guard_fail_count > 2000) ? 4
+                                : (fsm_guard_fail_count > 500)  ? 2
+                                                                : 1;
+                uint32_t delay_ms = std::min<uint32_t>(base * mult, 1500);
+                wait.expires_after(std::chrono::milliseconds(delay_ms));
                 co_await wait.async_wait(use_awaitable);
+
+                // Close sooner under prolonged non-Error unreadable states to avoid resource burn.
+                if (fsm_guard_fail_count >= 10000 || st == ConnectionFsm::State::Closing) {
+                    spdlog::warn("Closing connection after prolonged unreadable FSM state "
+                                 "(count={}, state={})",
+                                 fsm_guard_fail_count, ConnectionFsm::to_string(st));
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                    break;
+                }
                 continue;
             }
 
@@ -268,18 +315,30 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
 
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
-                // Idle persistent connection; keep connection open and continue
+                // Idle persistent connection; keep connection open and continue.
+                // IMPORTANT: Do not signal FSM on idle timeouts. The FSM's on_timeout()
+                // is reserved for operation deadlines (header/payload/write). Calling it
+                // while in Connected (idle) can spuriously transition to Error.
                 spdlog::debug(
                     "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
                     sock->native_handle(),
                     std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout)
                         .count());
-                fsm.on_timeout(ConnectionFsm::Operation::Read);
+                // Bound idle lifetime to avoid FD/backlog exhaustion if clients vanish silently
+                if (++consecutive_idle_timeouts >= kMaxIdleTimeouts) {
+                    spdlog::info(
+                        "Closing idle connection after {} consecutive read timeouts (fd={})",
+                        consecutive_idle_timeouts, sock->native_handle());
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                    break;
+                }
                 continue;
             } else {
                 // Header/payload bytes became available
                 bytes_read = std::get<0>(read_or_timeout);
                 spdlog::debug("socket.async_read returned {} bytes", bytes_read);
+                consecutive_idle_timeouts = 0; // traffic observed, reset idle counter
                 if (bytes_read == 0) {
                     spdlog::debug("Closing connection: peer sent EOF");
                     fsm.on_close_request();
@@ -444,6 +503,9 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                                 co_return;
                             },
                             boost::asio::detached);
+                        if (fsm.alive()) {
+                            fsm.on_response_complete(false);
+                        }
                     }
                 } else {
                     auto handle_result =
@@ -1071,7 +1133,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // Signal FSM that response has completed
         if (fsm) {
             fsm->on_response_complete(config_.close_after_response);
-            spdlog::info(
+            spdlog::debug(
                 "one-shot streaming complete: close_after_response={} fsm_state={} request_id={}",
                 config_.close_after_response, ConnectionFsm::to_string(fsm->state()), request_id);
         }
@@ -1090,16 +1152,16 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                           timer.async_wait(boost::asio::use_awaitable));
                 // Close regardless after drain/timeout
                 socket.close();
-                spdlog::info("graceful half-close complete (request_id={} fd={})", request_id,
-                             socket.native_handle());
+                spdlog::debug("graceful half-close complete (request_id={} fd={})", request_id,
+                              socket.native_handle());
             } else {
-                spdlog::info("closing socket after response (request_id={} fd={})", request_id,
-                             socket.native_handle());
+                spdlog::debug("closing socket after response (request_id={} fd={})", request_id,
+                              socket.native_handle());
                 socket.close();
             }
         } else {
-            spdlog::info("keeping socket open after response (request_id={} fd={})", request_id,
-                         socket.native_handle());
+            spdlog::debug("keeping socket open after response (request_id={} fd={})", request_id,
+                          socket.native_handle());
         }
 
         auto duration = std::chrono::steady_clock::now() - start_time;
@@ -1505,8 +1567,14 @@ boost::asio::awaitable<void>
 RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket,
                              ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
+#if defined(TRACY_ENABLE)
+    ZoneScopedN("RequestHandler::writer_drain");
+#endif
     // Must be called on write strand
     while (!rr_active_.empty()) {
+#if defined(TRACY_ENABLE)
+        ZoneScopedN("writer_drain:turn");
+#endif
         auto rid = rr_active_.front();
         rr_active_.pop_front();
         auto it = rr_queues_.find(rid);
@@ -1761,19 +1829,19 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                                               boost::asio::use_awaitable) ||
                       timer.async_wait(boost::asio::use_awaitable));
             socket.close();
-            spdlog::info("graceful half-close complete (streaming) (request_id={} fd={})",
-                         request_id, socket.native_handle());
+            spdlog::debug("graceful half-close complete (streaming) (request_id={} fd={})",
+                          request_id, socket.native_handle());
         } else {
-            spdlog::info("closing socket after streaming response (request_id={} fd={})",
-                         request_id, socket.native_handle());
+            spdlog::debug("closing socket after streaming response (request_id={} fd={})",
+                          request_id, socket.native_handle());
             socket.close();
         }
         if (fsm) {
             fsm->on_close_request();
         }
     } else {
-        spdlog::info("keeping socket open after streaming response (request_id={} fd={})",
-                     request_id, socket.native_handle());
+        spdlog::debug("keeping socket open after streaming response (request_id={} fd={})",
+                      request_id, socket.native_handle());
     }
     co_return Result<void>();
 }

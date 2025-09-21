@@ -1655,14 +1655,11 @@ Result<void> SqliteVecBackend::rollbackTransaction() {
 }
 
 Result<void> SqliteVecBackend::loadSqliteVecExtension() {
-    // Since we're statically linking sqlite-vec, we need to initialize it
-    // Call sqlite3_vec_init to register the vec0 virtual table module
-
-    spdlog::debug("Initializing sqlite-vec extension...");
-
+#if SQLITE_VEC_STATIC
+    // Statically linked: directly initialize the extension
+    spdlog::debug("Initializing sqlite-vec extension (static)...");
     char* error_msg = nullptr;
     int rc = sqlite3_vec_init(db_, &error_msg, nullptr);
-
     if (rc != SQLITE_OK) {
         std::string error = error_msg ? error_msg : "Unknown error";
         if (error_msg) {
@@ -1671,8 +1668,32 @@ Result<void> SqliteVecBackend::loadSqliteVecExtension() {
         return Error{ErrorCode::DatabaseError,
                      "Failed to initialize sqlite-vec extension: " + error};
     }
-
-    spdlog::info("sqlite-vec extension initialized successfully");
+    spdlog::info("sqlite-vec extension initialized successfully (static)");
+#else
+    // Not statically linked. Best-effort: try dynamic loading if a module path
+    // is provided via env var; otherwise, return a clear error so callers can
+    // degrade gracefully.
+    spdlog::debug("sqlite-vec static not present; attempting dynamic load if configured");
+    const char* mod_path = std::getenv("YAMS_SQLITE_VEC_MODULE");
+    if (mod_path && *mod_path) {
+        sqlite3_enable_load_extension(db_, 1);
+        char* err = nullptr;
+        int rc = sqlite3_load_extension(db_, mod_path, nullptr, &err);
+        sqlite3_enable_load_extension(db_, 0);
+        if (rc != SQLITE_OK) {
+            std::string error = err ? err : "Unknown error";
+            if (err)
+                sqlite3_free(err);
+            return Error{ErrorCode::DatabaseError,
+                         std::string("Failed to load sqlite-vec module ") + mod_path + ": " +
+                             error};
+        }
+        spdlog::info("sqlite-vec module loaded: {}", mod_path);
+    } else {
+        return Error{ErrorCode::NotFound,
+                     "sqlite-vec not linked; set YAMS_SQLITE_VEC_MODULE to a loadable module"};
+    }
+#endif
 
     // Verify the extension is working by checking if vec0 module is available
     const char* test_sql = "SELECT 1 FROM pragma_module_list WHERE name='vec0'";

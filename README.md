@@ -1,11 +1,14 @@
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/trvon/yams)  [![Release](https://github.com/trvon/yams/actions/workflows/release.yml/badge.svg)](https://github.com/trvon/yams/actions/workflows/release.yml)  [![builds.sr.ht status](https://builds.sr.ht/~trvon.svg)](https://builds.sr.ht/~trvon?)
+<p align="center">
+<h1 align="center">YAMS — Yet Another Memory System</h1>
+<h6 align="center">Persistent memory for LLMs and apps. Content‑addressed storage with dedupe, compression, full‑text and vector search.</h6>
+</p>
+<p align="center">
+<img alt="license" src="https://img.shields.io/github/license/trvon/yams?style=flat-square">
+<img alt="language" src="https://img.shields.io/github/languages/top/trvon/yams?style=flat-square">
+<img alt="github builds" src="https://img.shields.io/github/actions/workflow/status/trvon/yams/release.yml">
+<img alt="last commit" src="https://img.shields.io/github/last-commit/trvon/yams?style=flat-square">
+</p>
 
-# YAMS — Yet Another Memory System
-Persistent memory for LLMs and apps. Content‑addressed storage with dedupe, compression, full‑text and vector search.
-
-- SourceHut: https://sr.ht/~trvon/yams/
-- GitHub mirror: https://github.com/trvon/yams
-- Docs: https://trvon.github.io/yams
 
 ## Features
 - SHA‑256 content‑addressed storage
@@ -15,20 +18,43 @@ Persistent memory for LLMs and apps. Content‑addressed storage with dedupe, co
 - Portable CLI and MCP server
 - Extensible with Plugin Support
 
+## Links
+- SourceHut: https://sr.ht/~trvon/yams/
+- GitHub mirror: https://github.com/trvon/yams
+- Docs: https://yamsmemory.ai
+- Discord: https://discord.gg/n7maE5MuhY
+
 ## Install
 Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
 
-Build with Conan (recommended):
+### Build with Meson (Recommended)
 
 ```bash
-pip install conan
-conan profile detect --force
-# Enable ONNX by default (optional but recommended)
-conan install . -of build/yams-release -s build_type=Release -b missing -o yams/*:enable_onnx=True
-cmake --preset yams-release
-cmake --build --preset yams-release -j
-sudo cmake --install build/yams-release && sudo ldconfig || true
+# 1. Resolve dependencies
+conan install . -of build/release -s build_type=Release -b missing
+
+# 2. Configure
+meson setup build/release \
+  --prefix /usr/local \
+  --native-file build/release/build-release/conan/conan_meson_native.ini \
+  --buildtype=release
+
+# (Optional) Fast mode (skip ONNX + tests) reconfigure
+FAST_MODE=1 meson setup build/release --reconfigure \
+  --native-file build/release/build-release/conan/conan_meson_native.ini
+
+# (Optional) Inject display version
+meson setup build/release --reconfigure \
+  -Dyams-version="$(git describe --tags --always)" \
+  --native-file build/release/build-release/conan/conan_meson_native.ini
+
+# 3. Build
+meson compile -C build/release
+
+# 4. (Optional) Install
+sudo meson install -C build/release
 ```
+
 
 Dependencies quick ref:
 
@@ -36,7 +62,9 @@ Dependencies quick ref:
 - macOS (Homebrew): openssl@3 protobuf sqlite3 ncurses ninja cmake
   - Export `OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)` if CMake cannot locate OpenSSL
 
-Common build options: `YAMS_BUILD_TESTS=ON|OFF`, `YAMS_BUILD_BENCHMARKS=ON|OFF`, `YAMS_ENABLE_PDF=ON|OFF`, `YAMS_ENABLE_TUI=ON|OFF`, `YAMS_ENABLE_ONNX=ON|OFF`.
+Common build options (Meson): `-Dbuild-tests=true|false`, `-Denable-tui=true|false`, `-Denable-onnx=enabled|disabled|auto`, `-Dplugin-onnx=true|false`, `-Dyams-version=...`.
+Fast iteration: set `FAST_MODE=1` when running `meson setup --reconfigure` to disable ONNX & tests in CI (SourceHut) or locally.
+Media metadata: install `mediainfo` + dev package (e.g. `libmediainfo-dev`) or FFmpeg (`ffprobe`) to enable richer video parsing.
 
 Further build documentation:
 - GCC specifics / quick reference: `docs/BUILD-GCC.md`
@@ -149,6 +177,3 @@ Plugins not listed by `yams plugin list`:
 - Check the daemon startup log for: `Plugin scan directories: dir1;dir2;...` to confirm discovery paths.
 
 Monitor with `yams stats --verbose` and `yams doctor`.
-
-## License
-Apache-2.0

@@ -7,6 +7,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
@@ -82,8 +83,11 @@ void TuningManager::tick_once() {
         muxQueuedBytes < std::max<std::uint64_t>(TuneAdvisor::maxMuxBytes() / 64ull,
                                                  1ull * 1024ull * 1024ull); // ~1/64 of cap or 1MiB
     if (noConns && noWorkerQ && muxLow) {
-        pm.apply_delta({"ipc", -1, "central_idle", TuneAdvisor::statusTickMs()});
-        pm.apply_delta({"ipc_io", -1, "central_idle", TuneAdvisor::statusTickMs()});
+        const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
+        const int step =
+            std::max(1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
+        pm.apply_delta({"ipc", -step, "central_idle", TuneAdvisor::statusTickMs()});
+        pm.apply_delta({"ipc_io", -step, "central_idle", TuneAdvisor::statusTickMs()});
     } else {
         // Pressure grow
         const bool workerHigh =
@@ -92,7 +96,11 @@ void TuningManager::tick_once() {
                                  ? (muxQueuedBytes > maxMux)
                                  : (muxQueuedBytes > TuneAdvisor::muxBacklogHighFallbackBytes());
         if (workerHigh) {
-            pm.apply_delta({"ipc", +1, "central_worker_queue_high", TuneAdvisor::statusTickMs()});
+            const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
+            const int step =
+                std::max(1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
+            pm.apply_delta(
+                {"ipc", +step, "central_worker_queue_high", TuneAdvisor::statusTickMs()});
         }
         // IO pool growth heuristic: only grow when connections per IO thread exceed a threshold
         // to avoid unbounded scaling on any activity.
@@ -100,15 +108,27 @@ void TuningManager::tick_once() {
             auto ioStats = pm.stats("ipc_io");
             std::uint32_t ioThreads = std::max<std::uint32_t>(ioStats.current_size, 1);
             const std::uint32_t connPerThread = TuneAdvisor::ioConnPerThread();
-            bool connHigh = (activeConns > static_cast<std::uint64_t>(ioThreads) * connPerThread);
+            // Aggressive profile lowers threshold (divide by scale), efficient raises it.
+            const double scale = std::max(0.5, TuneAdvisor::profileScale());
+            const std::uint32_t adjConnPerThread = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(std::lround(connPerThread / scale)));
+            bool connHigh =
+                (activeConns > static_cast<std::uint64_t>(ioThreads) * adjConnPerThread);
             if (muxHigh || connHigh) {
-                pm.apply_delta({"ipc_io", +1,
+                const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
+                const int step = std::max(
+                    1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
+                pm.apply_delta({"ipc_io", +step,
                                 muxHigh ? "central_mux_backlog" : "central_conns_per_thread_high",
                                 TuneAdvisor::statusTickMs()});
             }
         } catch (...) {
             if (muxHigh) {
-                pm.apply_delta({"ipc_io", +1, "central_mux_backlog", TuneAdvisor::statusTickMs()});
+                const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
+                const int step = std::max(
+                    1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
+                pm.apply_delta(
+                    {"ipc_io", +step, "central_mux_backlog", TuneAdvisor::statusTickMs()});
             }
         }
     }
@@ -138,21 +158,36 @@ void TuningManager::tick_once() {
         }
         if (servicesReady) {
             std::size_t pqDepth = 0;
+            std::size_t pqInflight = 0;
+            std::size_t pqCap = 0;
             try {
-                if (auto* pq = sm_->getPostIngestQueue())
+                if (auto* pq = sm_->getPostIngestQueue()) {
                     pqDepth = pq->size();
+                    auto g = pq->gauges();
+                    pqInflight = g.inflight;
+                    pqCap = g.cap;
+                }
             } catch (...) {
             }
-            if (activeConns > 0) {
-                pm.apply_delta({"post_ingest", -1, "busy", TuneAdvisor::poolCooldownMs()});
-            } else if (pqDepth > 0) {
-                pm.apply_delta({"post_ingest", +1, "backlog", TuneAdvisor::poolCooldownMs()});
-            } else {
-                pm.apply_delta({"post_ingest", -1, "idle", TuneAdvisor::poolCooldownMs()});
-            }
+            apply_post_ingest_control(pqDepth, pqInflight, pqCap, activeConns);
             auto piStats = pm.stats("post_ingest");
-            if (piStats.current_size > 0)
-                (void)sm_->resizePostIngestThreads(piStats.current_size);
+            if (piStats.current_size > 0) {
+                // Clamp to configured bounds
+                auto cfg = sm_->getTuningConfig();
+                std::size_t desired = piStats.current_size;
+                // Scale desired by profile (aggressive grows faster)
+                desired = static_cast<std::size_t>(std::llround(
+                    static_cast<double>(desired) * std::max(0.5, TuneAdvisor::profileScale())));
+                if (cfg.postIngestThreadsMax > 0)
+                    desired = std::min(desired, cfg.postIngestThreadsMax);
+                if (cfg.postIngestThreadsMin > 0)
+                    desired = std::max(desired, cfg.postIngestThreadsMin);
+                (void)sm_->resizePostIngestThreads(desired);
+            }
+#if defined(TRACY_ENABLE)
+            TracyPlot("post_ingest.queued", static_cast<double>(pqDepth));
+            TracyPlot("post_ingest.threads", static_cast<double>(piStats.current_size));
+#endif
         }
     } catch (...) {
     }
@@ -171,6 +206,13 @@ void TuningManager::tick_once() {
         FsmMetricsRegistry::instance().setIpcPoolSize(ipcStats.current_size);
         FsmMetricsRegistry::instance().setIoPoolSize(ioStats.current_size);
         FsmMetricsRegistry::instance().setWriterBudgetBytes(writerBudget);
+#if defined(TRACY_ENABLE)
+        TracyPlot("pool.ipc.size", static_cast<double>(ipcStats.current_size));
+        TracyPlot("pool.io.size", static_cast<double>(ioStats.current_size));
+        TracyPlot("writer.budget.bytes", static_cast<double>(writerBudget));
+        TracyPlot("active.conns", static_cast<double>(activeConns));
+        TracyPlot("mux.queued.bytes", static_cast<double>(muxQueuedBytes));
+#endif
     } catch (...) {
     }
 
@@ -215,7 +257,7 @@ void TuningManager::tick_once() {
                 isBusy && repairBusySince_.time_since_epoch().count() != 0 &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - repairBusySince_)
                         .count() >= degradeHold;
-            const bool idleHeld =
+            [[maybe_unused]] const bool idleHeld =
                 !isBusy && repairReadySince_.time_since_epoch().count() != 0 &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
                         .count() >= readyHold;
@@ -255,6 +297,72 @@ void TuningManager::tick_once() {
             setRepair_(tokens, batch);
         }
     } catch (...) {
+    }
+}
+
+void TuningManager::apply_post_ingest_control(std::size_t queued, std::size_t inflight,
+                                              std::size_t capacity, std::uint64_t activeConns) {
+#if defined(TRACY_ENABLE)
+    ZoneScopedN("TuningManager::apply_post_ingest_control");
+#endif
+    auto cfg = sm_->getTuningConfig();
+    // Choose a target queue around mid between warn and stop, clamped to capacity
+    const std::size_t warn = cfg.admitWarnThreshold > 0 ? cfg.admitWarnThreshold : capacity / 2;
+    const std::size_t stop =
+        cfg.admitStopThreshold > 0 ? cfg.admitStopThreshold : capacity * 9 / 10;
+    const std::size_t target = std::min<std::size_t>(capacity, (warn + stop) / 2);
+
+    // PI controller on queue depth; proportional on error, integral to reduce steady-state error
+    double err =
+        static_cast<double>(static_cast<long long>(queued) - static_cast<long long>(target));
+    // Anti-windup: clamp integral
+    integratorQueueErr_ = std::clamp(integratorQueueErr_ + err * 0.01, -1000.0, 1000.0);
+
+    // Convert control signal to discrete +/- N adjustments with hold time to avoid thrash
+    auto now = std::chrono::steady_clock::now();
+    // Make post-ingest control more responsive: tie hold to cooldown and reduce default hold.
+    // Effective hold = max(poolCooldownMs, max(300ms, cfg.holdMs/3)).
+    {
+        uint32_t cfgHold = (cfg.holdMs > 0 ? cfg.holdMs : 3000);
+        uint32_t reduced = std::max<uint32_t>(300, cfgHold / 3);
+        uint32_t eff = std::max<uint32_t>(TuneAdvisor::poolCooldownMs(), reduced);
+        // store into a local as milliseconds
+        (void)eff;
+    }
+    auto hold = std::chrono::milliseconds(
+        std::max<uint32_t>(TuneAdvisor::poolCooldownMs(),
+                           std::max<uint32_t>(300, (cfg.holdMs > 0 ? cfg.holdMs : 3000) / 3)));
+    bool canAdjust =
+        (lastPiAdjust_.time_since_epoch().count() == 0) ||
+        (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPiAdjust_) >= hold);
+
+    auto& pm = PoolManager::instance();
+    if (!canAdjust)
+        return;
+
+    const int step = std::max(1, TuneAdvisor::poolScaleStep());
+    // If active connections are high, prefer to shrink post_ingest to keep IPC responsive
+    if (activeConns > 0 && queued == 0) {
+        pm.apply_delta({"post_ingest", -step, "busy_shrink", TuneAdvisor::poolCooldownMs()});
+        lastPiAdjust_ = now;
+        return;
+    }
+
+    if (queued >= stop) {
+        pm.apply_delta({"post_ingest", +std::max(1, step * 2), "queue_at_stop",
+                        TuneAdvisor::poolCooldownMs()});
+        lastPiAdjust_ = now;
+        return;
+    }
+    if (err > static_cast<double>(warn) * 0.1) {
+        pm.apply_delta({"post_ingest", +step, "queue_above_target", TuneAdvisor::poolCooldownMs()});
+        lastPiAdjust_ = now;
+        return;
+    }
+    if (queued == 0 && inflight == 0) {
+        pm.apply_delta({"post_ingest", -step, "queue_empty", TuneAdvisor::poolCooldownMs()});
+        lastPiAdjust_ = now;
+        return;
     }
 }
 

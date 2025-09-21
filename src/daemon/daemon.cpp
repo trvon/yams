@@ -17,12 +17,18 @@
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/connection_fsm.h>
+#if defined(TRACY_ENABLE)
+#include <tracy/Tracy.hpp>
+#endif
 
 #include <yams/daemon/resource/plugin_loader.h>
+// Config migration utilities for live tuning reload
+#include <yams/config/config_migration.h>
 
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
+#include <yams/profiling.h>
 
 namespace {
 void set_current_thread_name(const std::string& name) {
@@ -40,8 +46,7 @@ namespace yams::daemon {
 YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     // Resolve paths if not explicitly set
     if (config_.socketPath.empty()) {
-        // Prefer config-first resolution to stay consistent with client/CLI
-        // Honors [daemon].socket_path in config.toml and env overrides.
+        // Keep centralized FSM-based resolution for consistency with client/CLI
         config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
     if (config_.pidFile.empty()) {
@@ -49,104 +54,6 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     }
     if (config_.logFile.empty()) {
         config_.logFile = resolveSystemPath(PathType::LogFile);
-    }
-
-    // Initialize logging sink early so all subsequent logs go to file
-    try {
-        auto existing = spdlog::get("daemon");
-        if (!existing) {
-            // Use rotating file sink to preserve logs across crashes
-            const size_t max_size = 10 * 1024 * 1024; // 10MB per file
-            const size_t max_files = 5;               // Keep 5 rotated files
-            auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                config_.logFile.string(), max_size, max_files);
-
-            // Initialize a small async logging thread pool for cross-thread logging
-
-            auto logger = std::make_shared<spdlog::logger>("daemon", rotating_sink);
-            spdlog::set_default_logger(logger);
-            spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%t] [%^%l%$] %v");
-            // Honor YAMS_LOG_LEVEL if set; default to 'info' to reduce idle load
-            auto lvl = spdlog::level::info;
-            try {
-                if (const char* env = std::getenv("YAMS_LOG_LEVEL")) {
-                    std::string v(env);
-                    for (auto& c : v)
-                        c = static_cast<char>(std::tolower(c));
-                    if (v == "trace")
-                        lvl = spdlog::level::trace;
-                    else if (v == "debug")
-                        lvl = spdlog::level::debug;
-                    else if (v == "info")
-                        lvl = spdlog::level::info;
-                    else if (v == "warn" || v == "warning")
-                        lvl = spdlog::level::warn;
-                    else if (v == "error")
-                        lvl = spdlog::level::err;
-                    else if (v == "critical" || v == "fatal")
-                        lvl = spdlog::level::critical;
-                    else if (v == "off")
-                        lvl = spdlog::level::off;
-                }
-            } catch (...) {
-            }
-            spdlog::set_level(lvl);
-        } else {
-            spdlog::set_default_logger(existing);
-            // Existing logger present: still honor YAMS_LOG_LEVEL override
-            auto lvl = spdlog::level::info;
-            try {
-                if (const char* env = std::getenv("YAMS_LOG_LEVEL")) {
-                    std::string v(env);
-                    for (auto& c : v)
-                        c = static_cast<char>(std::tolower(c));
-                    if (v == "trace")
-                        lvl = spdlog::level::trace;
-                    else if (v == "debug")
-                        lvl = spdlog::level::debug;
-                    else if (v == "info")
-                        lvl = spdlog::level::info;
-                    else if (v == "warn" || v == "warning")
-                        lvl = spdlog::level::warn;
-                    else if (v == "error")
-                        lvl = spdlog::level::err;
-                    else if (v == "critical" || v == "fatal")
-                        lvl = spdlog::level::critical;
-                    else if (v == "off")
-                        lvl = spdlog::level::off;
-                }
-            } catch (...) {
-            }
-            spdlog::set_level(lvl);
-        }
-    } catch (const std::exception& e) {
-        // Fall back to default stderr logger if file cannot be created
-        spdlog::warn("Failed to initialize file logger ({}), continuing with default logger",
-                     e.what());
-        auto lvl = spdlog::level::info;
-        try {
-            if (const char* env = std::getenv("YAMS_LOG_LEVEL")) {
-                std::string v(env);
-                for (auto& c : v)
-                    c = static_cast<char>(std::tolower(c));
-                if (v == "trace")
-                    lvl = spdlog::level::trace;
-                else if (v == "debug")
-                    lvl = spdlog::level::debug;
-                else if (v == "info")
-                    lvl = spdlog::level::info;
-                else if (v == "warn" || v == "warning")
-                    lvl = spdlog::level::warn;
-                else if (v == "error")
-                    lvl = spdlog::level::err;
-                else if (v == "critical" || v == "fatal")
-                    lvl = spdlog::level::critical;
-                else if (v == "off")
-                    lvl = spdlog::level::off;
-            }
-        } catch (...) {
-        }
-        spdlog::set_level(lvl);
     }
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
@@ -232,14 +139,18 @@ Result<void> YamsDaemon::start() {
     spdlog::info("Starting YAMS daemon...");
 
     // Starting -> Initializing (ensure ordering so HealthyEvent can promote to Ready)
+    spdlog::info("[Startup] Phase: FSM Reset");
     lifecycleFsm_.reset();
 
+    spdlog::info("[Startup] Phase: LifecycleManager Init");
     if (auto result = lifecycleManager_->initialize(); !result) {
         running_ = false;
         return result;
     }
+    spdlog::info("[Startup] Phase: LifecycleManager Init OK");
 
     // Start centralized tuning BEFORE accepting connections or initializing services
+    spdlog::info("[Startup] Phase: TuningManager Start");
     try {
         if (tuningManager_) {
             tuningManager_->start();
@@ -250,16 +161,47 @@ Result<void> YamsDaemon::start() {
     } catch (const std::exception& e) {
         spdlog::warn("Failed to start TuningManager early: {}", e.what());
     }
+    spdlog::info("[Startup] Phase: TuningManager Start OK");
 
     // Transition to Initializing as soon as core lifecycle is bootstrapped,
     // before kicking off async service initialization to avoid race with HealthyEvent.
+    spdlog::info("[Startup] Phase: FSM BootstrappedEvent");
     lifecycleFsm_.dispatch(BootstrappedEvent{});
 
     // Start integrated socket server ASAP so status requests work during initialization
+    spdlog::info("[Startup] Phase: SocketServer Start");
     SocketServer::Config socketConfig;
     socketConfig.socketPath = config_.socketPath;
     socketConfig.workerThreads = config_.workerThreads;
-    socketConfig.maxConnections = 100; // TODO: make configurable
+    // Derive maxConnections from TuneAdvisor (env/config) with a sane computed fallback.
+    // Priority:
+    //  1) YAMS_MAX_ACTIVE_CONN via TuneAdvisor::maxActiveConn()
+    //  2) Computed: recommendedThreads * ioConnPerThread * 4 (burst factor), min 256
+    {
+        uint64_t cap = 0;
+        try {
+            cap = TuneAdvisor::maxActiveConn();
+        } catch (...) {
+            cap = 0;
+        }
+        if (cap == 0) {
+            uint32_t rec = 0;
+            uint32_t per = 8;
+            try {
+                rec = TuneAdvisor::recommendedThreads();
+            } catch (...) {
+            }
+            try {
+                per = TuneAdvisor::ioConnPerThread();
+            } catch (...) {
+            }
+            uint64_t computed = static_cast<uint64_t>(rec) * static_cast<uint64_t>(per) * 4ull;
+            if (computed < 256ull)
+                computed = 256ull;
+            cap = computed;
+        }
+        socketConfig.maxConnections = static_cast<std::size_t>(cap);
+    }
 
     socketServer_ = std::make_unique<SocketServer>(socketConfig, requestDispatcher_.get(), &state_);
 
@@ -270,6 +212,7 @@ Result<void> YamsDaemon::start() {
         return Error{ErrorCode::IOError,
                      "Failed to start socket server: " + result.error().message};
     }
+    spdlog::info("[Startup] Phase: SocketServer Start OK");
 
     // Mark IPC as ready now that socket server is running
     state_.readiness.ipcServerReady = true;
@@ -293,6 +236,7 @@ Result<void> YamsDaemon::start() {
     // here
 
     // Set callback to transition to Ready state when initialization completes
+    spdlog::info("[Startup] Phase: ServiceManager Set Callback");
     serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
         if (success) {
             lifecycleFsm_.dispatch(HealthyEvent{});
@@ -304,6 +248,7 @@ Result<void> YamsDaemon::start() {
     });
 
     // Kick off service initialization (async)
+    spdlog::info("[Startup] Phase: ServiceManager Init");
     if (auto result = serviceManager_->initialize(); !result) {
         running_ = false;
         lifecycleManager_->shutdown();
@@ -315,6 +260,7 @@ Result<void> YamsDaemon::start() {
         }
         return result;
     }
+    spdlog::info("[Startup] Phase: ServiceManager Init OK (async)");
 
     // Defer RepairCoordinator start until lifecycle is Healthy/Ready to avoid competing with init
 
@@ -327,6 +273,9 @@ Result<void> YamsDaemon::start() {
         // Drive lifecycle FSM periodically
         lifecycleFsm_.tick();
         while (!token.stop_requested() && !stopRequested_.load()) {
+#if defined(TRACY_ENABLE)
+            YAMS_FRAME_MARK_START("daemon_tick");
+#endif
             // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
             // Read each iteration so env changes take effect without restart.
             uint32_t tick_ms = TuneAdvisor::statusTickMs();
@@ -335,6 +284,10 @@ Result<void> YamsDaemon::start() {
                                   [&] { return stopRequested_.load(); })) {
                 // Shutdown requested: inform lifecycle FSM and exit loop
                 lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
+
+#if defined(TRACY_ENABLE)
+                YAMS_FRAME_MARK_END("daemon_tick");
+#endif
                 break;
             }
             // Periodically refresh metrics snapshot cache to ensure fast status replies
@@ -343,6 +296,14 @@ Result<void> YamsDaemon::start() {
                     metrics_->refresh();
                 }
             } catch (...) {
+            }
+            // Apply pending reload requests (e.g., SIGHUP) for tuning-only adjustments
+            if (reloadRequested_.load(std::memory_order_relaxed)) {
+                try {
+                    reloadTuningConfig();
+                } catch (...) {
+                }
+                reloadRequested_.store(false, std::memory_order_relaxed);
             }
             // Deferred RepairCoordinator start: require FSM Ready and searchEngineReady
             if (config_.enableAutoRepair && !repairCoordinator_) {
@@ -427,6 +388,10 @@ Result<void> YamsDaemon::start() {
             } catch (...) {
                 // best-effort ticker; ignore errors
             }
+
+#if defined(TRACY_ENABLE)
+            YAMS_FRAME_MARK_END("daemon_tick");
+#endif
         }
         spdlog::debug("Daemon main loop exiting.");
     });
@@ -529,7 +494,6 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
 
     switch (type) {
         case PathType::Socket:
-            // Delegate to centralized FSM resolver for consistency
             return yams::daemon::ConnectionFsm::resolve_socket_path();
         case PathType::PidFile:
             if (isRoot)
@@ -588,5 +552,74 @@ std::shared_ptr<yams::vector::EmbeddingGenerator> YamsDaemon::_test_getEmbedding
     return serviceManager_ ? serviceManager_->getEmbeddingGenerator() : nullptr;
 }
 #endif
+
+} // namespace yams::daemon
+
+namespace yams::daemon {
+
+void YamsDaemon::reloadTuningConfig() {
+    try {
+        if (config_.configFilePath.empty()) {
+            spdlog::info("[Reload] No config file path recorded; skipping reload");
+            return;
+        }
+        if (!std::filesystem::exists(config_.configFilePath)) {
+            spdlog::warn("[Reload] Config file missing: {}", config_.configFilePath.string());
+            return;
+        }
+    } catch (...) {
+    }
+    try {
+        yams::config::ConfigMigrator migrator;
+        auto parsed = migrator.parseTomlConfig(config_.configFilePath.string());
+        if (!parsed) {
+            spdlog::warn("[Reload] Failed to parse config: {}", parsed.error().message);
+            return;
+        }
+        const auto& toml = parsed.value();
+        if (toml.find("tuning") == toml.end()) {
+            spdlog::info("[Reload] No [tuning] section in config; nothing to apply");
+            return;
+        }
+        const auto& tune = toml.at("tuning");
+        auto as_int = [&](const char* k) -> std::optional<int> {
+            auto it = tune.find(k);
+            if (it == tune.end())
+                return std::nullopt;
+            try {
+                return std::stoi(it->second);
+            } catch (...) {
+                return std::nullopt;
+            }
+        };
+        TuningConfig tc = config_.tuning; // start from current
+        if (auto v = as_int("target_cpu_percent"))
+            tc.targetCpuPercent = static_cast<uint32_t>(*v);
+        if (auto v = as_int("post_ingest_capacity"))
+            tc.postIngestCapacity = static_cast<std::size_t>(*v);
+        if (auto v = as_int("post_ingest_threads_min"))
+            tc.postIngestThreadsMin = static_cast<std::size_t>(*v);
+        if (auto v = as_int("post_ingest_threads_max"))
+            tc.postIngestThreadsMax = static_cast<std::size_t>(*v);
+        if (auto v = as_int("admit_warn_threshold"))
+            tc.admitWarnThreshold = static_cast<std::size_t>(*v);
+        if (auto v = as_int("admit_stop_threshold"))
+            tc.admitStopThreshold = static_cast<std::size_t>(*v);
+        if (auto v = as_int("control_interval_ms"))
+            tc.controlIntervalMs = static_cast<uint32_t>(*v);
+        if (auto v = as_int("hold_ms"))
+            tc.holdMs = static_cast<uint32_t>(*v);
+        config_.tuning = tc;
+        if (serviceManager_) {
+            serviceManager_->setTuningConfig(tc);
+        }
+        spdlog::info("[Reload] Applied tuning config: cap={}, threads={}..{}",
+                     tc.postIngestCapacity, tc.postIngestThreadsMin, tc.postIngestThreadsMax);
+    } catch (const std::exception& e) {
+        spdlog::warn("[Reload] Exception during tuning reload: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[Reload] Unknown error during tuning reload");
+    }
+}
 
 } // namespace yams::daemon

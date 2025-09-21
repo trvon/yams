@@ -178,7 +178,7 @@ TEST_F(WALManagerComprehensiveTest, RecoveryMultipleLogFiles) {
     ASSERT_TRUE(wal->initialize().has_value());
 
     std::atomic<size_t> recoveredCount{0};
-    auto result = wal->recover([&](const WALEntry& entry) -> Result<void> {
+    auto result = wal->recover([&]([[maybe_unused]] const WALEntry& entry) -> Result<void> {
         recoveredCount++;
         return {};
     });
@@ -220,7 +220,7 @@ TEST_F(WALManagerComprehensiveTest, PartialWriteRecovery) {
     ASSERT_TRUE(wal->initialize().has_value());
 
     std::vector<WALEntry> recovered;
-    auto result = wal->recover([&](const WALEntry& entry) -> Result<void> {
+    auto result = wal->recover([&]([[maybe_unused]] const WALEntry& entry) -> Result<void> {
         recovered.push_back(entry);
         return {};
     });
@@ -324,7 +324,7 @@ TEST_F(WALManagerComprehensiveTest, CheckpointOperations) {
     ASSERT_TRUE(wal->initialize().has_value());
 
     std::vector<std::string> recoveredHashes;
-    auto result = wal->recover([&](const WALEntry& entry) -> Result<void> {
+    auto result = wal->recover([&]([[maybe_unused]] const WALEntry& entry) -> Result<void> {
         if (entry.header.operation == WALEntry::OpType::StoreBlock && !entry.data.empty()) {
             // Extract block hash from entry data
             // For StoreBlock, data format is typically: hash + size + refcount
@@ -363,7 +363,7 @@ TEST_F(WALManagerComprehensiveTest, RecoveryErrorHandling) {
 
     int processedCount = 0;
     int errorCount = 0;
-    auto result = wal->recover([&](const WALEntry& entry) -> Result<void> {
+    auto result = wal->recover([&]([[maybe_unused]] const WALEntry& entry) -> Result<void> {
         processedCount++;
         if (processedCount == 3) {
             errorCount++;

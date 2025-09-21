@@ -10,22 +10,22 @@ Concise instructions to build, test, and develop YAMS locally.
 ## Prerequisites
 - Git
 - C++ compiler: Clang 14+ or GCC 11+
-- CMake 3.25+ (Ninja recommended)
+- Meson 1.4+ and Ninja
 - Python 3.8+ and pip (for Conan)
 - Conan 2.x (package/dependency manager)
 
 Install examples:
 - macOS (Homebrew)
-  - brew install cmake ninja python
+  - brew install meson ninja python
   - pip3 install --upgrade conan
   - xcode-select --install  (ensure Command Line Tools present)
 - Ubuntu/Debian
   - sudo apt-get update
-  - sudo apt-get install -y build-essential cmake ninja-build python3-pip
+  - sudo apt-get install -y build-essential meson ninja-build python3-pip
   - pip3 install --upgrade conan
 - Fedora
   - sudo dnf groupinstall -y "Development Tools"
-  - sudo dnf install -y cmake ninja-build python3-pip
+  - sudo dnf install -y meson ninja-build python3-pip
   - pip3 install --upgrade conan
 
 Initialize Conan profile (one-time):
@@ -33,48 +33,70 @@ Initialize Conan profile (one-time):
 conan profile detect --force
 ```
 
-## Quick start (Release)
+## Quick start (Meson + Conan)
 ```bash
-# From repo root
-pip3 install --upgrade conan
-
-# Resolve deps to a dedicated build folder
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
-
-# Configure
-cmake --preset yams-release
-
-# Build
-cmake --build --preset yams-release
-
-# Install (optional; may require sudo depending on CMAKE_INSTALL_PREFIX)
-sudo cmake --install build/yams-release
-```
-
-## Debug build
-```bash
-conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
-cmake --preset yams-debug   # configure preset
-cmake --build --preset yams-debug  # build preset
-```
-
-## Run unit tests
-Common options:
-- Run tests from the configured build directory with ctest
-- Show output on failures; parallelize with -j
-
-Examples:
-```bash
-# Debug (single-config Ninja default layout)
-ctest --preset yams-debug --output-on-failure
-
 # Release
-ctest --preset yams-release --output-on-failure
+conan install . -of build/release -s build_type=Release -b missing
+meson setup build/release \
+  --prefix /usr/local \
+  --native-file build/release/build-release/conan/conan_meson_native.ini \
+  --buildtype=release
+meson compile -C build/release
+
+# Debug
+conan install . -of build/debug -s build_type=Debug -b missing
+meson setup build/debug \
+  --prefix /usr/local \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini \
+  --buildtype=debug
+meson compile -C build/debug
 ```
 
+### Fast Mode
+For quicker iteration (disables ONNX plugin/features & tests):
+```bash
+FAST_MODE=1 meson setup build/debug --reconfigure \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
+```
+or set `FAST_MODE=1` in CI (SourceHut manifest already respects it).
+
+### Overriding Display Version
+Inject a runtime/display version distinct from the static project version:
+```bash
+meson setup build/release --reconfigure \
+  -Dyams-version="$(git describe --tags --always)" \
+  --native-file build/release/build-release/conan/conan_meson_native.ini
+```
+The generated header `yams/version_generated.h` provides `YAMS_EFFECTIVE_VERSION`, git describe, and build timestamp.
+
+## Run tests (Meson)
+In Debug builds, tests are now enabled by default. For Release builds, pass `-Dbuild-tests=true` if you want to build tests.
+```bash
+meson compile -C build/debug
+meson test -C build/debug                 # all suites
+meson test -C build/debug -t unit         # unit only
+meson test -C build/debug -t integration  # integration only
+```
+You can enable tests for Release builds by configuring that build dir with `-Dbuild-tests=true`.
+
+## Strict local builds (warnings-as-errors)
+To stabilize warnings locally without blocking CI, use the helper script (strict by default):
+```bash
+# Debug strict build (no tests compiled or run)
+bash scripts/dev/tidy_build.sh --no-test
+
+# If you already ran `conan install` and want to skip it:
+bash scripts/dev/tidy_build.sh --no-conan --no-test
+
+# Release strict build
+bash scripts/dev/tidy_build.sh --release --no-test
+
+# Disable strict (temporarily)
+bash scripts/dev/tidy_build.sh --no-strict --no-test
+```
 Notes:
-- If your generator uses single-config (Ninja), the inner build dir path is build/yams-*/build.
-- ctest will discover tests if the project enables testing (enable_testing/add_test).
+- CI remains non-strict for now; strict gating will be enabled once local builds are clean (see PBI 027).
+- The script auto-detects the Conan Meson native file location.
 
 ## Developer loop
 - Edit code
@@ -91,26 +113,22 @@ Notes:
 If YAMS_STORAGE is not supported in your version, run yams from a working directory you control (see docs for configuration and default paths).
 
 ## Address/UB Sanitizers (Debug)
-Build with sanitizers for faster defect discovery:
+You can inject sanitizer flags via environment or Meson options if/when exposed. Example with environment flags:
 ```bash
-# Example via CMake cache flags (per build directory)
-cmake --preset yams-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
-cmake --build --preset yams-debug -j
-# Run tests to exercise instrumented code
-ctest --preset yams-debug --output-on-failure
+CFLAGS='-fsanitize=address,undefined' CXXFLAGS='-fsanitize=address,undefined' \
+  meson setup build/debug --reconfigure
+meson compile -C build/debug
+meson test -C build/debug
 ```
-If your project doesn’t expose YA_ENABLE_ASAN/UBSAN, you can add compile/link flags via CMAKE_<LANG>_FLAGS_* cache entries or a toolchain overlay.
+If dedicated Meson options are added later, prefer those over raw flags.
 
 ## Static analysis and formatting
 - clang-format:
   ```bash
   find src include -name '*.[ch]pp' -o -name '*.cc' -o -name '*.hh' | xargs clang-format -i
   ```
-- clang-tidy (example invocation):
-  ```bash
-  cmake --build --preset yams-debug --target clang-tidy
-  ```
-Adjust targets/paths to your repository layout. If a .clang-format or .clang-tidy exists at repo root, it will be used.
+- clang-tidy: integrate via your editor or invoke directly on changed files.
+Adjust targets/paths to your repository layout. If a .clang-format exists at repo root, it will be used.
 
 ## CCache (optional)
 Speed up rebuilds:
@@ -137,12 +155,14 @@ mkdocs serve -f yams/mkdocs.yml
 ```
 
 ## Troubleshooting
-- Compiler/toolchain not found: verify conan profile detect and PATH for compiler/cmake/ninja.
-- Link errors/missing deps: re-run conan install with --build=missing; clean the build folder if needed.
-- Tests not discovered: confirm enable_testing() and add_test() are present; run ctest from the correct inner build dir.
-- Install prefix: set CMAKE_INSTALL_PREFIX when configuring if you don’t want system-wide install.
+- Compiler/toolchain not found: verify `conan profile detect` and PATH for meson/ninja.
+- Link errors/missing deps: re-run `conan install` with `--build=missing`; clean the build folder if needed.
+- Tests not found: ensure you configured with `-Dbuild-tests=true` and recompiled; list tests with `meson test -C build/debug -l`.
+- Install prefix: use `meson install -C build/<dir>` and Meson install options as needed.
 
 ## Notes
 - Use Release for benchmarking and production builds; Debug + sanitizers for local development.
-- Keep your build trees (build/yams-debug, build/yams-release) out of version control.
-- File issues with exact compiler/CMake/Conan versions and commands you ran for fast triage.
+- Keep your build trees (build/debug, build/release) out of version control.
+- `mediainfo` + `libmediainfo-dev` (or distro equivalent) enables richer video metadata (`YAMS_HAVE_MEDIAINFO`).
+- `ffprobe` (from FFmpeg) similarly enables `YAMS_HAVE_FFPROBE`; either tool enables video handler compilation.
+- Provide exact compiler/Meson/Conan versions and commands you ran when filing issues for fast triage.

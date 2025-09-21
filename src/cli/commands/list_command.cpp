@@ -34,6 +34,7 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+using yams::app::services::utils::normalizeLookupPath;
 
 class ListCommand : public ICommand {
 public:
@@ -49,6 +50,9 @@ public:
 
         cmd->add_option("--name", namePattern_,
                         "Filter by name pattern (supports wildcards: * and ?)");
+        auto* positional = cmd->add_option("pattern", positionalName_,
+                                           "Name or path pattern (positional argument)");
+        positional->type_name("PATTERN");
 
         cmd->add_option("--format", format_, "Output format: table, json, csv, minimal")
             ->default_val("table")
@@ -117,6 +121,17 @@ public:
             // Handle snippet flag logic
             if (noSnippets_) {
                 showSnippets_ = false;
+            }
+
+            if (namePattern_.empty() && !positionalName_.empty()) {
+                namePattern_ = positionalName_;
+            }
+            if (!namePattern_.empty()) {
+                auto normalized = normalizeLookupPath(namePattern_);
+                if (normalized.changed && !normalized.hasWildcards) {
+                    namePattern_ = normalized.normalized;
+                    namePatternWasNormalized_ = true;
+                }
             }
 
             auto result = execute();
@@ -1223,6 +1238,8 @@ private:
 
     YamsCLI* cli_ = nullptr;
     std::string namePattern_; // Filter by name pattern
+    std::string positionalName_;
+    bool namePatternWasNormalized_ = false;
     std::string format_;
     std::string sortBy_;
     bool reverse_ = false;

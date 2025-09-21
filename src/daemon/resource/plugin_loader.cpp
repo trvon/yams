@@ -163,7 +163,7 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
 }
 
 Result<size_t> PluginLoader::loadPluginsFromDirectory(const std::filesystem::path& directory,
-                                                      const std::string& pattern) {
+                                                      [[maybe_unused]] const std::string& pattern) {
     try {
         if (!fs::exists(directory)) {
             spdlog::debug("Plugin directory does not exist: {}", directory.string());

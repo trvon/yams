@@ -178,4 +178,8 @@ static bool registered = []() {
     return true;
 }();
 
+std::unique_ptr<Command> createGCCommand() {
+    return std::make_unique<GCCommand>();
+}
+
 } // namespace yams::tools

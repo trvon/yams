@@ -1,5 +1,5 @@
 from conan import ConanFile
-from conan.tools.cmake import CMakeToolchain, CMake, cmake_layout, CMakeDeps
+from conan.tools.layout import basic_layout
 from conan.tools.build import check_min_cppstd
 
 class YamsConan(ConanFile):
@@ -27,13 +27,13 @@ class YamsConan(ConanFile):
         "build_mcp_server": True,  # Enabled by default for v0.0.4
         "build_tests": False,
         "build_benchmarks": False,
-        "enable_pdf": True,  # PDF support enabled by default (uses FetchContent since PDFium not in Conan Center)
+        "enable_pdf": True,  # PDF support enabled by default
         "enable_tui": False,  # TUI disabled by default to reduce dependencies
         "enable_onnx": True,      # ONNX enabled by default; can be disabled to drop Boost
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
     }
 
-    generators = "CMakeDeps"  # CMakeToolchain is handled in generate()
+    generators = ("MesonToolchain", "PkgConfigDeps")
 
     def requirements(self):
         # Core dependencies
@@ -43,96 +43,44 @@ class YamsConan(ConanFile):
         self.requires("sqlite3/3.44.2")
         self.requires("zlib/1.3.1")
         self.requires("zstd/1.5.5")
-        # LZ4 removed - not used in codebase
+        self.requires("libarchive/3.7.6")
         self.requires("openssl/3.2.0")
         self.requires("libcurl/8.10.1")
         self.requires("protobuf/3.21.12")
-
-        # Compat
+        self.requires("taglib/2.0")
         self.requires('tl-expected/1.1.0')
-
-        # Boost is required for IPC client pool (Asio)
-        # Use Boost 1.86.0 across builds to ensure consistent Asio headers
-        # Override to unify any transitive Boost requirements (e.g., from onnxruntime)
         self.requires("boost/1.86.0", override=True)
-
-        # Note: PDFium is not available in Conan Center
-        # When enable_pdf=True, CMake will fall back to FetchContent
-        # to download prebuilt binaries from pdfium-binaries project
-
-        # For TUI (separate from CLI)
         if self.options.enable_tui:
             self.requires("ncurses/6.4")
-            # Note: ImTUI is downloaded via FetchContent when TUI is enabled
-
-        # ONNX Runtime for embeddings and LLM inference (optional)
         if self.options.enable_onnx:
             self.requires("onnxruntime/1.18.1")
-
-        # WASM runtime (optional): wasmtime-cpp is not in ConanCenter by default.
-        # If you have a package available on your remotes, you can enable this and
-        # provide the correct reference here (e.g., "wasmtime-cpp/x.y.z").
-        # Otherwise, YAMS_HAVE_WASMTIME just toggles build codepaths and you must
-        # supply include/link flags via your toolchain or presets.
-        if self.options.enable_wasmtime:
-            pass  # Intentionally no default requires; see note above.
+        self.requires("xz_utils/5.4.5")
+        if self.options.enable_pdf:
+            self.requires("pdfium/95.0.4629")
+            self.requires("libmediainfo/22.03")
+            self.requires("openjpeg/2.5.3", override=True)
 
     def build_requirements(self):
         if self.options.build_tests:
             self.test_requires("gtest/1.15.0")
         if self.options.build_benchmarks:
             self.test_requires("benchmark/1.8.3")
-        # Add Tracy profiler for Debug builds
         if self.settings.build_type == "Debug":
-            # Tracy profiler for Debug builds (profiling and zones)
-            # Note: Conan Center currently provides up to 0.12.2
             self.requires("tracy/0.12.2")
 
     def configure(self):
-        # SQLite3 configuration - enable FTS5 for full-text search
         self.options["sqlite3"].enable_fts5 = True
-        self.options["sqlite3"].enable_fts4 = True  # For additional compatibility
-        self.options["sqlite3"].enable_fts3_parenthesis = True  # For advanced query syntax
-
-        # Network stack options
-        # Ensure libcurl uses OpenSSL and zlib; prefer static for predictable deployment
+        self.options["sqlite3"].enable_fts4 = True
+        self.options["sqlite3"].enable_fts3_parenthesis = True
         self.options["libcurl"].with_ssl = "openssl"
         self.options["libcurl"].with_zlib = True
         self.options["libcurl"].shared = False
-        # Harden OpenSSL linkage to static unless overridden
         self.options["openssl"].shared = False
-
-        # MCP server configuration is now minimal
+        self.options["libarchive"].shared = False
+        self.options["taglib"].shared = False
 
     def validate(self):
         check_min_cppstd(self, "20")
 
     def layout(self):
-        cmake_layout(self)
-
-    def generate(self):
-        # The toolchain is auto-generated, but we can configure cache variables
-        # by creating a toolchain_file.cmake in the generators folder
-        from conan.tools.cmake import CMakeToolchain
-        tc = CMakeToolchain(self)
-        tc.variables["YAMS_USE_CONAN"] = "ON"  # Must be string "ON" for CMake
-        # Convert Conan boolean options to CMake ON/OFF strings
-        tc.variables["YAMS_BUILD_CLI"] = "ON" if self.options.build_cli else "OFF"
-        tc.variables["YAMS_BUILD_MCP_SERVER"] = "ON" if self.options.build_mcp_server else "OFF"
-        tc.variables["YAMS_BUILD_TESTS"] = "ON" if self.options.build_tests else "OFF"
-        tc.variables["YAMS_BUILD_BENCHMARKS"] = "ON" if self.options.build_benchmarks else "OFF"
-        tc.variables["YAMS_ENABLE_PDF"] = "ON" if self.options.enable_pdf else "OFF"
-        tc.variables["YAMS_ENABLE_TUI"] = "ON" if self.options.enable_tui else "OFF"
-        tc.variables["YAMS_ENABLE_ONNX"] = "ON" if self.options.enable_onnx else "OFF"
-        # Toggle WASM runtime integration in CMake; external toolchain must supply wasmtime-cpp
-        tc.variables["YAMS_HAVE_WASMTIME"] = "ON" if self.options.enable_wasmtime else "OFF"
-        tc.generate()
-
-    def build(self):
-        cmake = CMake(self)
-        cmake.configure()
-        cmake.build()
-
-    def package(self):
-        cmake = CMake(self)
-        cmake.install()
+        basic_layout(self)

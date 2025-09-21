@@ -1,5 +1,6 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
@@ -33,10 +34,12 @@
 #include <errno.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <regex>
 #include <sstream>
@@ -2174,7 +2177,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
     // Pass through engine-level filters directly instead of injecting into the query
-    dreq.pathPattern = req.pathPattern;
+    std::string pathPattern = req.pathPattern;
+    if (!pathPattern.empty()) {
+        auto normalized = yams::app::services::utils::normalizeLookupPath(pathPattern);
+        if (!normalized.hasWildcards && normalized.changed) {
+            pathPattern = normalized.normalized;
+        }
+    }
+    dreq.pathPattern = pathPattern;
     dreq.tags = req.tags;
     dreq.matchAllTags = req.matchAllTags;
     dreq.limit = req.limit;
@@ -2384,6 +2394,98 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         m.score = item.score;
         m.snippet = item.snippet;
         out.results.push_back(std::move(m));
+    }
+    // Optional diff parity: when includeDiff=true and pathPattern is a local file, attach a
+    // structured diff to the matching search result.
+    if (req.includeDiff && !req.pathPattern.empty()) {
+        auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.pathPattern);
+        if (resolved.isLocalFile && resolved.absPath.has_value()) {
+            try {
+                // Find a matching result by filename equality
+                std::string base = std::filesystem::path(*resolved.absPath).filename().string();
+                size_t idx = static_cast<size_t>(-1);
+                for (size_t i = 0; i < out.results.size(); ++i) {
+                    const auto& rr = out.results[i];
+                    if (!rr.path.empty() &&
+                        std::filesystem::path(rr.path).filename().string() == base) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx != static_cast<size_t>(-1)) {
+                    yams::app::services::RetrievalService rsvc;
+                    yams::app::services::RetrievalOptions ropts;
+                    if (auto appc = app::services::makeSessionService(nullptr); appc) {
+                        // no-op placeholder for future per-session retrieval options
+                    }
+                    // Prefer using known hash if present
+                    std::string hash = out.results[idx].hash;
+                    if (hash.empty()) {
+                        // best-effort resolve by name if missing
+                        auto appContext = app::services::AppContext{};
+                        (void)appContext;
+                    }
+                    // Retrieve indexed content by hash when available
+                    std::string indexedContent;
+                    if (!hash.empty()) {
+                        yams::daemon::GetRequest greq;
+                        greq.hash = hash;
+                        greq.metadataOnly = false;
+                        auto gr = rsvc.get(greq, ropts);
+                        if (gr)
+                            indexedContent = gr.value().content;
+                    }
+                    // Load local content (limit ~1MB)
+                    std::ifstream ifs(*resolved.absPath);
+                    if (ifs) {
+                        std::string local((std::istreambuf_iterator<char>(ifs)),
+                                          std::istreambuf_iterator<char>());
+                        if (!indexedContent.empty()) {
+                            auto toLines = [](const std::string& s) {
+                                std::vector<std::string> lines;
+                                std::stringstream ss(s);
+                                std::string line;
+                                while (std::getline(ss, line))
+                                    lines.push_back(line);
+                                return lines;
+                            };
+                            auto a = toLines(local);
+                            auto b = toLines(indexedContent);
+                            std::vector<std::string> added;
+                            std::vector<std::string> removed;
+                            size_t i = 0, j = 0, shown = 0, maxShown = 200;
+                            while ((i < a.size() || j < b.size()) && shown < maxShown) {
+                                const std::string* la = (i < a.size()) ? &a[i] : nullptr;
+                                const std::string* lb = (j < b.size()) ? &b[j] : nullptr;
+                                if (la && lb && *la == *lb) {
+                                    ++i;
+                                    ++j;
+                                    continue;
+                                }
+                                if (la) {
+                                    removed.push_back(*la);
+                                    ++i;
+                                    ++shown;
+                                }
+                                if (lb && shown < maxShown) {
+                                    added.push_back(*lb);
+                                    ++j;
+                                    ++shown;
+                                }
+                            }
+                            bool truncated = (i < a.size() || j < b.size());
+                            if (!added.empty() || !removed.empty()) {
+                                out.results[idx].diff = json{{"added", added},
+                                                             {"removed", removed},
+                                                             {"truncated", truncated}};
+                                out.results[idx].localInputFile = *resolved.absPath;
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
     }
     sendProgress("search", 100.0, "done");
     co_return out;
@@ -2967,6 +3069,38 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
 
 boost::asio::awaitable<Result<MCPStoreDocumentResponse>>
 MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
+    // Fast path: reject completely empty inputs before contacting the daemon
+    if ((req.path.empty() || req.path == "") && (req.name.empty() || req.name == "") &&
+        (req.content.empty() || req.content == "")) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "No content or path provided. Set 'path' to a file or provide 'content'."};
+    }
+
+    // Lightweight throttle: limit concurrent add/store operations to avoid stressing the IPC FSM
+    {
+        using namespace std::chrono_literals;
+        auto exec = co_await boost::asio::this_coro::executor;
+        boost::asio::steady_timer timer{exec};
+        const int maxConcurrent = 2;
+        const auto throttleDeadline = 2s;
+        auto start = std::chrono::steady_clock::now();
+        while (addInFlight_.load(std::memory_order_relaxed) >= maxConcurrent) {
+            if (std::chrono::steady_clock::now() - start >= throttleDeadline) {
+                co_return Error{ErrorCode::Timeout,
+                                "Add busy: too many concurrent operations. Please retry."};
+            }
+            timer.expires_after(10ms);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+        addInFlight_.fetch_add(1, std::memory_order_relaxed);
+    }
+    struct ScopeExit {
+        std::function<void()> fn;
+        ~ScopeExit() {
+            if (fn)
+                fn();
+        }
+    } _decr{[this]() noexcept { addInFlight_.fetch_sub(1, std::memory_order_relaxed); }};
     // Preflight: require daemon content_store readiness
     bool modelReadyFlag = true; // track model/embeddings readiness across function
     try {
@@ -3003,9 +3137,54 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
     }
     // Convert MCP request to daemon request
     daemon::AddDocumentRequest daemon_req;
+    // Choose path source: prefer explicit path; else treat name as path if it points to a file
+    std::string candidatePath = req.path;
+    if (candidatePath.empty() && !req.name.empty()) {
+        // Heuristic: if 'name' resolves to an existing file, treat it as path (CLI parity)
+        std::string tmp = req.name;
+        // Strip CR/LF and trim
+        if (!tmp.empty()) {
+            tmp.erase(std::remove_if(tmp.begin(), tmp.end(),
+                                     [](unsigned char c) { return c == '\n' || c == '\r'; }),
+                      tmp.end());
+            auto ltrim = [](std::string& s) {
+                s.erase(s.begin(),
+                        std::find_if(s.begin(), s.end(), [](int ch) { return !std::isspace(ch); }));
+            };
+            auto rtrim = [](std::string& s) {
+                s.erase(std::find_if(s.rbegin(), s.rend(), [](int ch) { return !std::isspace(ch); })
+                            .base(),
+                        s.end());
+            };
+            ltrim(tmp);
+            rtrim(tmp);
+        }
+        // Resolve relative against PWD/current and check existence
+        if (!tmp.empty()) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::path p(tmp);
+            if (!p.is_absolute()) {
+                if (const char* pwd = std::getenv("PWD")) {
+                    fs::path cand = fs::path(pwd) / p;
+                    if (fs::exists(cand, ec))
+                        p = cand;
+                }
+            }
+            if (fs::exists(p, ec) && fs::is_regular_file(p, ec)) {
+                candidatePath = p.string();
+                // If 'name' appears to be a path, set document name to basename for UX
+                try {
+                    daemon_req.name = p.filename().string();
+                } catch (...) {
+                }
+            }
+        }
+    }
+
     // Normalize path: expand '~' and make absolute using PWD for relative paths
     {
-        std::string _p = req.path;
+        std::string _p = candidatePath;
         // Sanitize control characters (CR/LF/NUL) and trim leading/trailing spaces/tabs
         if (!_p.empty()) {
             std::string cleaned;
@@ -3073,7 +3252,8 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         daemon_req.path = _p;
     }
     daemon_req.content = req.content;
-    daemon_req.name = req.name;
+    if (daemon_req.name.empty())
+        daemon_req.name = req.name;
     daemon_req.mimeType = req.mimeType;
     daemon_req.disableAutoMime = req.disableAutoMime;
     // Force noEmbeddings when model provider is not ready (from preflight snapshot)
@@ -3092,75 +3272,56 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             daemon_req.metadata[key] = value.dump();
         }
     }
-    // Use shared service: daemon-first add with normalization and retries
-    yams::app::services::AddOptions aopts;
-    aopts.path = daemon_req.path;
-    aopts.content = daemon_req.content;
-    aopts.name = daemon_req.name;
-    aopts.mimeType = daemon_req.mimeType;
-    aopts.disableAutoMime = daemon_req.disableAutoMime;
-    aopts.noEmbeddings = daemon_req.noEmbeddings;
-    aopts.collection = daemon_req.collection;
-    aopts.snapshotId = daemon_req.snapshotId;
-    aopts.snapshotLabel = daemon_req.snapshotLabel;
-    aopts.recursive = daemon_req.recursive;
-    aopts.includePatterns = daemon_req.includePatterns;
-    aopts.excludePatterns = daemon_req.excludePatterns;
-    aopts.tags = daemon_req.tags;
-    aopts.metadata = daemon_req.metadata;
-    aopts.timeoutMs = 10000; // keep short caps for MCP responsiveness
-    aopts.retries = 2;
-    aopts.backoffMs = 250;
-
+    // Single-path daemon call with bounded retries; no local fallback
     {
-        yams::app::services::DocumentIngestionService ing;
-        auto res = ing.addViaDaemon(aopts);
-        if (res) {
-            MCPStoreDocumentResponse out;
-            // Preserve directory-add behavior: return empty hash for recursive dir adds
-            if (aopts.recursive && aopts.content.empty()) {
+        using namespace std::chrono_literals;
+        auto exec = co_await boost::asio::this_coro::executor;
+        boost::asio::steady_timer timer{exec};
+        const int maxAttempts = 3;
+        bool hasContent = !daemon_req.content.empty();
+        // Detect directory to choose IPC mode
+        bool isDir = false;
+        if (!hasContent && !daemon_req.path.empty()) {
+            std::error_code __ec;
+            isDir = std::filesystem::is_directory(daemon_req.path, __ec);
+        }
+        for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+            Result<yams::daemon::AddDocumentResponse> addRes =
+                (hasContent || isDir || daemon_req.recursive)
+                    ? co_await daemon_client_->streamingAddDocument(daemon_req)
+                    : co_await daemon_client_->call(daemon_req);
+            if (addRes) {
+                MCPStoreDocumentResponse out;
+                // For directory adds, return empty hash to signal multi-file op
                 std::error_code ec;
-                if (!aopts.path.empty() && std::filesystem::is_directory(aopts.path, ec)) {
+                if (!hasContent && !daemon_req.path.empty() && daemon_req.recursive &&
+                    std::filesystem::is_directory(daemon_req.path, ec)) {
                     co_return out;
                 }
+                out.hash = addRes.value().hash;
+                out.bytesStored = 0;
+                out.bytesDeduped = 0;
+                co_return out;
             }
-            out.hash = res.value().hash;
-            out.bytesStored = 0;
-            out.bytesDeduped = 0;
-            co_return out;
+            const auto& err = addRes.error();
+            bool retryable =
+                (err.code == ErrorCode::NotInitialized || err.code == ErrorCode::Timeout ||
+                 err.code == ErrorCode::NetworkError);
+            if (!retryable || attempt == maxAttempts)
+                co_return err;
+            timer.expires_after(std::chrono::milliseconds(250 * attempt));
+            co_await timer.async_wait(boost::asio::use_awaitable);
         }
-        spdlog::warn("[MCP] add: daemon path failed ({}). Falling back to local DocumentService.",
-                     res.error().message);
     }
 
-    // Daemon path failed (timeout/not ready/unavailable). Fallback to DocumentService.
-    try {
-        auto docService = app::services::makeDocumentService(appContext_);
-        if (!docService) {
-            co_return Error{ErrorCode::InternalError, "DocumentService unavailable"};
-        }
-        app::services::StoreDocumentRequest sreq;
-        sreq.path = daemon_req.path;
-        sreq.content = daemon_req.content;
-        sreq.name = daemon_req.name;
-        sreq.mimeType = daemon_req.mimeType;
-        // Ensure embeddings are disabled in local fallback if daemon embeddings are degraded
-        sreq.noEmbeddings = aopts.noEmbeddings;
-        sreq.tags = daemon_req.tags;
-        for (const auto& [k, v] : daemon_req.metadata) {
-            sreq.metadata[k] = v;
-        }
-        auto sres = docService->store(sreq);
-        if (!sres)
-            co_return sres.error();
-        MCPStoreDocumentResponse out;
-        out.hash = sres.value().hash;
-        out.bytesStored = sres.value().bytesStored;
-        out.bytesDeduped = sres.value().bytesDeduped;
-        co_return out;
-    } catch (...) {
-        co_return Error{ErrorCode::InternalError, "Local fallback failed"};
+    // If neither content nor a valid path was provided, fail fast with a clear error
+    if (daemon_req.path.empty() && daemon_req.content.empty()) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "No content or path provided. Set 'path' to a file or provide 'content'."};
     }
+
+    // Should not reach here
+    co_return Error{ErrorCode::Unknown, "Unexpected add failure"};
 }
 
 boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>
@@ -3451,38 +3612,30 @@ MCPServer::handleGetStatus(const MCPStatusRequest& req) {
 
 boost::asio::awaitable<Result<MCPAddDirectoryResponse>>
 MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
-    // Preflight: require daemon content_store readiness; avoid any local fallback
-    try {
-        auto sres = co_await daemon_client_->status();
-        if (!sres)
-            co_return sres.error();
-        const auto& s = sres.value();
-        bool csr = false;
-        if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
-            csr = it->second;
-        bool modelReady = true;
-        try {
-            if (auto it = s.readinessStates.find("model_provider"); it != s.readinessStates.end())
-                modelReady = it->second;
-            if (auto it2 = s.readinessStates.find("embeddings"); it2 != s.readinessStates.end())
-                modelReady = modelReady && it2->second;
-        } catch (...) {
-        }
-        if (!csr) {
-            std::string hint = "Content store not ready. Check daemon status and config.";
-            if (!s.contentStoreError.empty())
-                hint += std::string(" Error: ") + s.contentStoreError;
-            co_return Error{ErrorCode::InvalidState, hint};
-        }
-    } catch (...) {
-        // If status fails unexpectedly, return a clear error instead of attempting local work
-        co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
-    }
+    // Daemon-first: prefer dispatcher AddDocument(path=dir, recursive=true)
+    // Remove dependency on local appContext_.store to avoid "Content store not available" race.
 
     // Normalize and validate the directory path
     std::filesystem::path dir_path;
     try {
         std::string path_str = req.directoryPath;
+        // Sanitize accidental newlines/CRs from JSON inputs and trim whitespace
+        if (!path_str.empty()) {
+            path_str.erase(std::remove_if(path_str.begin(), path_str.end(),
+                                          [](unsigned char c) { return c == '\n' || c == '\r'; }),
+                           path_str.end());
+            auto ltrim = [](std::string& s) {
+                s.erase(s.begin(),
+                        std::find_if(s.begin(), s.end(), [](int ch) { return !std::isspace(ch); }));
+            };
+            auto rtrim = [](std::string& s) {
+                s.erase(std::find_if(s.rbegin(), s.rend(), [](int ch) { return !std::isspace(ch); })
+                            .base(),
+                        s.end());
+            };
+            ltrim(path_str);
+            rtrim(path_str);
+        }
         if (path_str.rfind("file://", 0) == 0) {
             path_str = path_str.substr(7);
         }
@@ -3503,79 +3656,81 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
 
     std::error_code ec;
     if (!std::filesystem::is_directory(dir_path, ec) || ec) {
-        co_return Error{
-            ErrorCode::InvalidArgument,
-            "Path is not a valid directory. Use the 'add' tool for single files. Path: " +
-                dir_path.string()};
+        co_return Error{ErrorCode::InvalidArgument,
+                        "Path is not a directory: " + dir_path.string()};
     }
 
-    // Prefer daemon-side directory add to ensure post-ingest queue and graph/indexing are engaged.
-    // Build a daemon AddDocumentRequest targeting the directory with recursive patterns.
-    daemon::AddDocumentRequest addReq;
-    addReq.path = dir_path.string();
-    addReq.recursive = true; // This tool should always be recursive for directories.
-
-    if (req.includePatterns.empty()) {
-        addReq.includePatterns.push_back("*");
-    } else {
-        addReq.includePatterns = req.includePatterns;
-    }
-
-    addReq.excludePatterns = req.excludePatterns;
-    addReq.collection = req.collection;
-    addReq.snapshotId = req.snapshotId;
-    addReq.snapshotLabel = req.snapshotLabel;
-    // Preserve tags in metadata (IndexingService consumes tags via metadata in daemon path)
-    // Disable embeddings when model provider is not ready to avoid cascading transport failures
-    addReq.noEmbeddings = false;
-    try {
-        auto sres2 = co_await daemon_client_->status();
-        if (sres2) {
-            const auto& s2 = sres2.value();
-            bool ready = true;
-            if (auto it = s2.readinessStates.find("model_provider"); it != s2.readinessStates.end())
-                ready = ready && it->second;
-            if (auto it2 = s2.readinessStates.find("embeddings"); it2 != s2.readinessStates.end())
-                ready = ready && it2->second;
-            addReq.noEmbeddings = !ready;
-            if (addReq.noEmbeddings) {
-                spdlog::warn(
-                    "[MCP] add_directory: Model provider not ready — forcing noEmbeddings");
+    // Wait briefly for daemon readiness (content_store) to avoid transient startup errors
+    {
+        using namespace std::chrono_literals;
+        const auto ready_timeout = 5s; // bounded wait
+        const auto poll_interval = 150ms;
+        auto exec = co_await boost::asio::this_coro::executor;
+        boost::asio::steady_timer timer{exec};
+        auto start = std::chrono::steady_clock::now();
+        for (;;) {
+            auto sres = co_await daemon_client_->status();
+            if (sres) {
+                const auto& s = sres.value();
+                auto it = s.readinessStates.find("content_store");
+                if (it == s.readinessStates.end() || it->second) {
+                    break; // either not exposed or ready
+                }
             }
+            if (std::chrono::steady_clock::now() - start >= ready_timeout) {
+                break; // proceed; server will return a retryable error if still not ready
+            }
+            timer.expires_after(poll_interval);
+            co_await timer.async_wait(boost::asio::use_awaitable);
         }
-    } catch (...) {
     }
-    if (!req.tags.empty()) {
-        std::string joined;
-        for (size_t i = 0; i < req.tags.size(); ++i) {
-            if (i)
-                joined += ",";
-            joined += req.tags[i];
-        }
-        addReq.metadata["tags"] = joined;
-    }
+
+    // Build AddDocumentRequest targeting a directory ingestion (recursive)
+    daemon::AddDocumentRequest dreq;
+    dreq.path = dir_path.string();
+    dreq.content.clear();
+    dreq.name.clear();
+    dreq.tags = req.tags;
+    // metadata
     for (const auto& [k, v] : req.metadata.items()) {
         if (v.is_string())
-            addReq.metadata[k] = v.get<std::string>();
+            dreq.metadata[k] = v.get<std::string>();
         else
-            addReq.metadata[k] = v.dump();
+            dreq.metadata[k] = v.dump();
     }
-    // Defer extraction to daemon post-ingest queue for speed
-    addReq.noEmbeddings = false; // allow embeddings policy to decide later
-    // Call daemon (streamingAddDocument handles directory on daemon side)
-    auto dres = co_await daemon_client_->streamingAddDocument(addReq);
-    if (!dres) {
-        co_return dres.error();
+    dreq.recursive = true; // force recursive for directories
+    dreq.includeHidden = false;
+    dreq.includePatterns = req.includePatterns;
+    dreq.excludePatterns = req.excludePatterns;
+    dreq.collection = req.collection;
+    dreq.snapshotId.clear();
+    dreq.snapshotLabel.clear();
+    dreq.mimeType.clear();
+    dreq.disableAutoMime = false;
+    dreq.noEmbeddings = false;
+
+    // Use streamingAddDocument; dispatcher will return a single AddDocumentResponse when done
+    auto addRes = co_await daemon_client_->streamingAddDocument(dreq);
+    if (!addRes) {
+        // Map NotReady/Internal to a clearer message for clients; keep code as-is
+        if (addRes.error().code == ErrorCode::NotInitialized) {
+            co_return Error{ErrorCode::NotInitialized,
+                            "Daemon: content store initializing; please retry shortly"};
+        }
+        co_return addRes.error();
     }
-    const auto& ar = dres.value();
+
+    // We do not have per-file detailed results over AddDocumentResponse; provide a summary
     MCPAddDirectoryResponse out;
     out.directoryPath = req.directoryPath;
     out.collection = req.collection;
-    out.filesProcessed = ar.documentsAdded; // daemon returns documentsAdded for dir case
-    out.filesIndexed = ar.documentsAdded;
+    // Since dispatcher’s directory path produces multiple adds internally, we cannot accurately
+    // report processed/indexed counts without a separate API. Provide a minimal summary.
+    out.filesProcessed = 0;
+    out.filesIndexed = 0;
     out.filesSkipped = 0;
     out.filesFailed = 0;
-    // Results are not returned by daemon; leave empty for now
+    out.results.clear();
     co_return out;
 }
 
@@ -3692,6 +3847,16 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     if (req.hash.empty() && !req.name.empty() && req.path.empty() && req.pattern.empty() &&
         req.names.empty()) {
         // Resolve name -> hash using the same strategy as handleGetByName (smart + fallback).
+        // Normalize: expand leading '~' to HOME to allow user-friendly paths.
+        std::string normName = req.name;
+        try {
+            if (!normName.empty() && normName.front() == '~') {
+                if (const char* home = std::getenv("HOME")) {
+                    normName = std::string(home) + normName.substr(1);
+                }
+            }
+        } catch (...) {
+        }
         yams::app::services::RetrievalService rsvc;
         yams::app::services::RetrievalOptions ropts;
         ropts.requestTimeoutMs = 60000;
@@ -3705,8 +3870,15 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
 
         // Prefer latest when disambiguating unless caller explicitly asked for oldest.
         const bool pickOldest = req.oldest;
-        auto grr = rsvc.getByNameSmart(req.name, pickOldest, /*allowFuzzy*/ true,
-                                       /*useSession*/ false, std::string{}, ropts, resolver);
+        bool useSession = req.useSession; // allow client to bypass session filters
+        auto grr = rsvc.getByNameSmart(normName, pickOldest, /*allowFuzzy*/ true,
+                                       /*useSession*/ useSession, req.sessionName, ropts, resolver);
+        // Rescue pass: if session-scoped lookup failed and caller allowed sessions, retry without
+        // session to avoid false negatives when the active session excludes the target.
+        if (!grr && useSession) {
+            grr = rsvc.getByNameSmart(normName, pickOldest, /*allowFuzzy*/ true,
+                                      /*useSession*/ false, std::string{}, ropts, resolver);
+        }
         if (!grr) {
             // Fall back to simple basename-list matching similar to handleGetByName
             auto tryList =
@@ -3740,13 +3912,13 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                     return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
                 }
                 auto scoreName = [&](const std::string& base) -> int {
-                    if (base == req.name)
+                    if (base == normName)
                         return 1000;
-                    if (base.size() >= req.name.size() && base.rfind(req.name, 0) == 0)
+                    if (base.size() >= normName.size() && base.rfind(normName, 0) == 0)
                         return 800;
-                    if (base.find(req.name) != std::string::npos)
+                    if (base.find(normName) != std::string::npos)
                         return 600;
-                    int dl = static_cast<int>(std::abs((long)(base.size() - req.name.size())));
+                    int dl = static_cast<int>(std::abs((long)(base.size() - normName.size())));
                     return 400 - std::min(200, dl * 10);
                 };
                 int bestScore = -1;
@@ -3768,17 +3940,17 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             };
 
             std::optional<yams::daemon::ListResponse> lr;
-            lr = tryList(std::string("%/") + req.name);
+            lr = tryList(std::string("%/") + normName);
             if (!lr) {
-                std::string stem = req.name;
+                std::string stem = normName;
                 try {
-                    stem = std::filesystem::path(req.name).stem().string();
+                    stem = std::filesystem::path(normName).stem().string();
                 } catch (...) {
                 }
                 lr = tryList(std::string("%/") + stem + "%");
             }
             if (!lr)
-                lr = tryList(std::string("%") + req.name + "%");
+                lr = tryList(std::string("%") + normName + "%");
             if (!lr || lr->items.empty()) {
                 co_return Error{ErrorCode::NotFound, "No matching documents"};
             }
@@ -4609,7 +4781,9 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         }
 
         if (matches.empty()) {
-            // Fall through to legacy path below
+            // If a path-like query yields no results, fail explicitly instead of falling through.
+            // This makes the behavior more predictable for callers.
+            co_return Error{ErrorCode::NotFound, "document not found by path: " + wanted};
         } else {
             // Disambiguate
             if (req.latest || req.oldest) {
@@ -4819,22 +4993,51 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
         return Error{ErrorCode::NotFound, "resolver unavailable"};
     };
     // Prefer name when provided; otherwise, fallback to hash-based get
-    Result<yams::daemon::GetResponse> getr_local = [&]() -> Result<yams::daemon::GetResponse> {
-        if (!req.name.empty()) {
-            return rsvc.getByNameSmart(req.name, req.oldest, true, false, std::string{}, ropts,
-                                       resolver);
-        } else if (!req.hash.empty()) {
-            yams::daemon::GetRequest dreq;
-            dreq.hash = req.hash;
-            dreq.metadataOnly = false;
-            return rsvc.get(dreq, ropts);
-        } else {
-            return Error{ErrorCode::InvalidArgument, "name or hash required"};
+    std::optional<yams::daemon::GetResponse> get_local;
+    if (!req.name.empty()) {
+        auto normalized = yams::app::services::utils::normalizeLookupPath(req.name);
+        std::vector<std::string> candidates;
+        candidates.reserve(2);
+        if (normalized.changed)
+            candidates.push_back(normalized.normalized);
+        candidates.push_back(req.name);
+
+        std::optional<Error> lastNotFound;
+        for (const auto& candidate : candidates) {
+            auto attempt = rsvc.getByNameSmart(candidate, req.oldest, true, false, std::string{},
+                                               ropts, resolver);
+            if (attempt) {
+                get_local = attempt.value();
+                break;
+            }
+            auto err = attempt.error();
+            if (err.code == ErrorCode::NotFound) {
+                lastNotFound = err;
+                continue;
+            }
+            co_return err;
         }
-    }();
-    if (!getr_local)
-        co_return getr_local.error();
-    const auto& r = getr_local.value();
+
+        if (!get_local.has_value()) {
+            if (lastNotFound)
+                co_return lastNotFound.value();
+            co_return Error{ErrorCode::NotFound, "Document not found: " + req.name};
+        }
+    } else if (!req.hash.empty()) {
+        yams::daemon::GetRequest dreq;
+        dreq.hash = req.hash;
+        dreq.metadataOnly = false;
+        auto get_by_hash = rsvc.get(dreq, ropts);
+        if (!get_by_hash)
+            co_return get_by_hash.error();
+        get_local = std::move(get_by_hash.value());
+    } else {
+        co_return Error{ErrorCode::InvalidArgument, "name or hash required"};
+    }
+
+    if (!get_local.has_value())
+        co_return Error{ErrorCode::InternalError, "Failed to retrieve document"};
+    const auto& r = *get_local;
     MCPCatDocumentResponse out;
     out.size = r.size;
     out.hash = r.hash;
@@ -5185,7 +5388,8 @@ json MCPServer::buildServerCapabilities() const {
 }
 
 // --- Cancel & Progress Helper Implementations ---
-void MCPServer::handleCancelRequest(const nlohmann::json& params, const nlohmann::json& id) {
+void MCPServer::handleCancelRequest(const nlohmann::json& params,
+                                    [[maybe_unused]] const nlohmann::json& id) {
     // Expect params: { "id": <original request id> } but also accept { "requestId": ... }
     nlohmann::json target;
     if (params.contains("id")) {

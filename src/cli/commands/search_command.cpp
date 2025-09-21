@@ -1,10 +1,16 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
+#include <optional>
 #include <sstream>
+#include <vector>
+#include <yams/app/services/factory.hpp>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/result_renderer.h>
@@ -36,6 +42,7 @@
 namespace yams::cli {
 
 using json = nlohmann::json;
+using yams::app::services::utils::normalizeLookupPath;
 
 class SearchCommand : public ICommand {
 private:
@@ -53,6 +60,7 @@ private:
     std::string queryFile_;
     std::vector<std::string> extraArgs_;
     std::string pathFilter_;
+    std::optional<std::string> resolvedLocalFilePath_{};
     size_t limit_ = 20;
     std::string searchType_ = "hybrid";
     // Default list mode derived from env; currently not used directly here but kept for consistency
@@ -183,6 +191,104 @@ private:
                 return true;
         }
         return false;
+    }
+
+    Result<void> printDiffForSearchResult(const yams::app::services::SearchResponse& resp) {
+        if (!resolvedLocalFilePath_.has_value() || pathsOnly_ || cli_->getJsonOutput())
+            return Result<void>();
+
+        namespace fs = std::filesystem;
+        fs::path abs{*resolvedLocalFilePath_};
+        std::error_code ec;
+        if (!fs::exists(abs, ec) || !fs::is_regular_file(abs, ec))
+            return Result<void>();
+
+        const yams::app::services::SearchItem* matched = nullptr;
+        for (const auto& item : resp.results) {
+            if (item.path == abs.string()) {
+                matched = &item;
+                break;
+            }
+        }
+        std::string resolvedHash = matched ? matched->hash : std::string{};
+        if (resolvedHash.empty()) {
+            auto appContext = cli_->getAppContext();
+            if (appContext) {
+                auto documentService = yams::app::services::makeDocumentService(*appContext);
+                if (documentService) {
+                    auto hres = documentService->resolveNameToHash(abs.string());
+                    if (hres)
+                        resolvedHash = hres.value();
+                }
+            }
+        }
+        if (resolvedHash.empty())
+            return Result<void>();
+
+        yams::app::services::RetrievalService rsvc;
+        yams::app::services::RetrievalOptions ropts;
+        if (cli_->hasExplicitDataDir())
+            ropts.explicitDataDir = cli_->getDataPath();
+
+        yams::daemon::GetRequest greq;
+        greq.hash = resolvedHash;
+        greq.metadataOnly = false;
+        auto gr = rsvc.get(greq, ropts);
+        if (!gr)
+            return Result<void>();
+
+        const auto& indexed = gr.value();
+        std::ifstream ifs(abs);
+        if (!ifs)
+            return Result<void>();
+        std::string local((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        if (local == indexed.content) {
+            std::cout << "\nNo differences: local file matches indexed content (" << abs.string()
+                      << ")\n";
+            return Result<void>();
+        }
+
+        auto toLines = [](const std::string& s) {
+            std::vector<std::string> lines;
+            std::stringstream ss(s);
+            std::string line;
+            while (std::getline(ss, line))
+                lines.push_back(line);
+            return lines;
+        };
+
+        auto localLines = toLines(local);
+        auto indexedLines = toLines(indexed.content);
+        size_t i = 0, j = 0;
+        size_t shown = 0;
+        constexpr size_t kMaxLines = 200;
+
+        std::cout << "\n=== Diff (local vs indexed) for: " << abs.string() << " ===\n";
+        while ((i < localLines.size() || j < indexedLines.size()) && shown < kMaxLines) {
+            const std::string* la = (i < localLines.size()) ? &localLines[i] : nullptr;
+            const std::string* lb = (j < indexedLines.size()) ? &indexedLines[j] : nullptr;
+            if (la && lb && *la == *lb) {
+                ++i;
+                ++j;
+                continue;
+            }
+            if (la) {
+                std::cout << "- " << *la << "\n";
+                ++shown;
+                ++i;
+            }
+            if (lb && shown < kMaxLines) {
+                std::cout << "+ " << *lb << "\n";
+                ++shown;
+                ++j;
+            }
+        }
+
+        if (i < localLines.size() || j < indexedLines.size()) {
+            std::cout << "... diff truncated after " << kMaxLines << " lines ...\n";
+        }
+
+        return Result<void>();
     }
 
 public:
@@ -354,11 +460,15 @@ public:
                 const std::string& q = query_;
                 auto contains = [&](const char* s) { return q.find(s) != std::string::npos; };
                 bool punct = false;
+                bool hasWordConnectors = false; // code-ish identifiers like add_directory, foo-bar
                 for (char c : q) {
                     if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
                         c == '"' || c == '\'' || c == '\\' || c == '`' || c == ';') {
                         punct = true;
                         break;
+                    }
+                    if (c == '_' || c == '-' || c == '.' || c == '/') {
+                        hasWordConnectors = true;
                     }
                 }
                 int dq = static_cast<int>(std::count(q.begin(), q.end(), '\"'));
@@ -371,8 +481,28 @@ public:
                 bool unbalanced = (dq % 2 != 0) || (lp != rp) || (lb != rb) || (lc != rc);
                 bool codeSeq = contains("::") || contains("->") || contains("#include") ||
                                contains("template<") || contains("std::");
-                if (!literalText_ && !fuzzySearch_ && (codeSeq || punct || unbalanced)) {
+                // If the query has word-connector characters and no whitespace, treat literally
+                bool singleTokenWithConnectors =
+                    hasWordConnectors && (q.find_first_of(" \t\n\r") == std::string::npos);
+                if (!literalText_ && !fuzzySearch_ &&
+                    (codeSeq || punct || unbalanced || singleTokenWithConnectors)) {
                     literalText_ = true;
+                }
+            }
+
+            resolvedLocalFilePath_.reset();
+            if (!pathFilter_.empty()) {
+                auto normalized = normalizeLookupPath(pathFilter_);
+                if (normalized.changed) {
+                    pathFilter_ = normalized.normalized;
+                }
+                if (!normalized.hasWildcards) {
+                    namespace fs = std::filesystem;
+                    std::error_code ec;
+                    fs::path candidate{pathFilter_};
+                    if (fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec)) {
+                        resolvedLocalFilePath_ = candidate.string();
+                    }
                 }
             }
             // Normalize include globs (split commas)
@@ -705,6 +835,7 @@ public:
                     }
                 }
 
+                (void)printDiffForSearchResult(resp);
                 return Result<void>();
             };
             // Fully async daemon path with a single co_spawn and promise completion

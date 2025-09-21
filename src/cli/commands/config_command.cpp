@@ -344,16 +344,28 @@ private:
 
             // Basic numeric validation for tuning keys where applicable
             if (key_.starts_with("tuning.")) {
-                auto k = key_.substr(std::string("tuning.").size());
-                auto is_number = [&](const std::string& s) {
-                    if (s.empty())
-                        return false;
-                    char* end = nullptr;
-                    std::strtod(s.c_str(), &end);
-                    return end && *end == '\0';
-                };
-                if (!is_number(value_)) {
-                    return Error{ErrorCode::InvalidArgument, "tuning value must be numeric"};
+                auto sub = key_.substr(std::string("tuning.").size());
+                if (sub == "profile") {
+                    // Accept only efficient|balanced|aggressive (case-insensitive)
+                    std::string v = value_;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    if (v != "efficient" && v != "balanced" && v != "aggressive") {
+                        return Error{
+                            ErrorCode::InvalidArgument,
+                            "tuning.profile must be one of: efficient|balanced|aggressive"};
+                    }
+                } else {
+                    auto is_number = [&](const std::string& s) {
+                        if (s.empty())
+                            return false;
+                        char* end = nullptr;
+                        std::strtod(s.c_str(), &end);
+                        return end && *end == '\0';
+                    };
+                    if (!is_number(value_)) {
+                        return Error{ErrorCode::InvalidArgument, "tuning value must be numeric"};
+                    }
                 }
             }
 

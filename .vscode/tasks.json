@@ -1,333 +1,53 @@
 {
   "version": "2.0.0",
-  // Granular tasks + composite sequences to avoid repeating long shell chains.
   "tasks": [
     {
-      "label": "clean-all",
+      "label": "meson: build (Debug)",
       "type": "shell",
-      "command": "rm -rf build/yams-debug build/yams-debug-tidy build/yams-release",
-      "problemMatcher": []
+      "command": "meson compile -C build/debug",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "meson: test (Debug)",
+      "type": "shell",
+      "command": "meson test -C build/debug",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
     },
     {
       "label": "conan: install (Debug)",
       "type": "shell",
-      "command": "conan install . -of build/yams-debug -s build_type=Debug -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "none"
+      "command": "conan install . -of build/debug -s build_type=Debug -b missing"
     },
     {
-      "label": "cmake: configure (Debug)",
+      "label": "meson: setup (Debug)",
       "type": "shell",
-      "command": "cmake --preset yams-debug -DYAMS_BUILD_DOCS=OFF -DYAMS_BUILD_TESTS=ON -DYAMS_BUILD_BENCHMARKS=ON",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "none"
+      "command": "meson setup build/debug --reconfigure --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini"
     },
     {
-      "label": "build (Debug)",
+      "label": "full: clean+conan+meson (Debug)",
       "type": "shell",
-      "command": "cmake --build --preset yams-debug -j",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
+      "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug"
     },
     {
-      "label": "build: onnx plugin (Debug)",
-      "detail": "Build optional ONNX plugin (ignores failure)",
+      "label": "full: clean+conan+meson+test (Debug)",
       "type": "shell",
-      "command": "bash -c 'cmake --build --preset yams-debug --target yams_onnx_plugin || echo \"[info] ONNX plugin skipped\"'",
-      "options": {
-        "env": {
-          "YAMS_USE_ONNX": "1"
-        }
-      },
-      "problemMatcher": [
-        "$gcc"
-      ]
+      "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug && meson test -C build/debug"
     },
     {
-      "label": "test (Debug)",
+      "label": "meson: setup (Debug + tests)",
       "type": "shell",
-      "command": "ctest --preset yams-debug --output-on-failure",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
+      "command": "meson setup build/debug --wipe --prefix /usr/local -Dbuild-tests=true --native-file build/debug/build-debug/conan/conan_meson_native.ini"
     },
     {
-      "label": "test: daemon (Debug)",
-      "detail": "Run only daemon-related tests (regex Daemon)",
+      "label": "full: clean+conan+meson+tests (Debug)",
       "type": "shell",
-      "command": "ctest --preset yams-debug -R 'Daemon' --output-on-failure",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
-    },
-    {
-      "label": "build+test (Debug)",
-      "detail": "Incremental build then tests",
-      "dependsOn": [
-        "build (Debug)",
-        "test (Debug)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": []
-    },
-    {
-      "label": "build+test: daemon (Debug)",
-      "detail": "Incremental build then daemon-only tests",
-      "dependsOn": [
-        "build (Debug)",
-        "test: daemon (Debug)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": []
-    },
-    {
-      "label": "debug: configure+build",
-      "detail": "Install (only if needed) + configure + build (no tests)",
-      "dependsOn": [
-        "conan: install (Debug)",
-        "cmake: configure (Debug)",
-        "build (Debug)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": []
-    },
-    {
-      "label": "debug: full (everything)",
-      "detail": "Conan install + configure + build + plugin + tests (ONNX enabled)",
-      "dependsOn": [
-        "conan: install (Debug)",
-        "cmake: configure (Debug)",
-        "build (Debug)",
-        "build: onnx plugin (Debug)",
-        "test (Debug)"
-      ],
-      "dependsOrder": "sequence",
-      "options": {
-        "env": {
-          "YAMS_USE_ONNX": "1"
-        }
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    },
-    {
-      "label": "run: daemon (Debug)",
-      "type": "shell",
-      "command": "build/yams-debug/yams-daemon",
-      "problemMatcher": []
-    },
-    {
-      "label": "run: cli status",
-      "type": "shell",
-      "command": "build/yams-debug/yams status || echo 'Hint: daemon not running'",
-      "problemMatcher": []
-    },
-    {
-      "label": "analyze: tidy",
-      "detail": "Strict clang-tidy preset (single-job) + build only",
-      "type": "shell",
-      "command": "bash -c 'set -euo pipefail; conan install . -of build/yams-debug-tidy -s build_type=Debug -b missing; cmake --preset yams-debug-tidy; cmake --build --preset yams-debug-tidy'",
-      "problemMatcher": [
-        "$gcc"
-      ]
-    },
-    {
-      "label": "conan: install (Release)",
-      "type": "shell",
-      "command": "conan install . -of build/yams-release -s build_type=Release -o '&:build_tests=True' -o '&:build_benchmarks=True' -b missing",
-      "problemMatcher": [
-        "$gcc"
-      ]
-    },
-    {
-      "label": "cmake: configure (Release)",
-      "type": "shell",
-      "command": "cmake --preset yams-release",
-      "problemMatcher": [
-        "$gcc"
-      ]
-    },
-    {
-      "label": "build (Release)",
-      "type": "shell",
-      "command": "cmake --build --preset yams-release -j",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
-    },
-    {
-      "label": "test (Release)",
-      "type": "shell",
-      "command": "ctest --preset yams-release --output-on-failure",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
-    },
-    {
-      "label": "test: daemon (Release)",
-      "detail": "Run only daemon-related tests (regex Daemon)",
-      "type": "shell",
-      "command": "ctest --preset yams-release -R 'Daemon' --output-on-failure",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
-    },
-    {
-      "label": "release: build",
-      "detail": "Install + configure + build (tests optional)",
-      "dependsOn": [
-        "conan: install (Release)",
-        "cmake: configure (Release)",
-        "build (Release)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
-    },
-    {
-      "label": "release: build+test",
-      "detail": "Install + configure + build + tests",
-      "dependsOn": [
-        "conan: install (Release)",
-        "cmake: configure (Release)",
-        "build (Release)",
-        "test (Release)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": [
-        "$gcc"
-      ]
-    },
-    {
-      "label": "release: build+package",
-      "detail": "Build + CPack packages (TGZ, ZIP)",
-      "type": "shell",
-      "command": "bash -c 'set -euo pipefail; conan install . -of build/yams-release -s build_type=Release -b missing; cmake --preset yams-release; cmake --build --preset yams-release -j --target package'",
-      "problemMatcher": [
-        "$gcc"
-      ]
-    },
-    {
-      "label": "clean: debug",
-      "type": "shell",
-      "command": "rm -rf build/yams-debug",
-      "problemMatcher": []
-    },
-    {
-      "label": "clean: release",
-      "type": "shell",
-      "command": "rm -rf build/yams-release",
-      "problemMatcher": []
-    },
-    {
-      "label": "ccache: stats",
-      "type": "shell",
-      "command": "ccache -s || echo 'ccache not installed'",
-      "problemMatcher": []
-    },
-    {
-      "label": "tidy: build+test (Debug)",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh -p yams-debug",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
-    },
-    {
-      "label": "tidy: build+test (Release)",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh --release",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
-    },
-    {
-      "label": "tidy: mock embeddings (Debug)",
-      "detail": "Debug build & tests with mock embedding/provider mode",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh -p yams-debug --mock",
-      "options": {
-        "env": {
-          "YAMS_TESTING": "1"
-        }
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
-    },
-    {
-      "label": "tidy: daemon tests (Debug)",
-      "detail": "Quick loop: build + run only Daemon* tests",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh -p yams-debug -r Daemon",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
-    },
-    {
-      "label": "tidy: embeddings tests (Debug)",
-      "detail": "Build + run embeddings-related tests (regex Embeddings)",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh -p yams-debug -r Embeddings",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "test"
-    },
-    {
-      "label": "tidy: build only (Debug)",
-      "detail": "Configure & build without tests",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh -p yams-debug --no-test",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
-    },
-    {
-      "label": "tidy: clean rebuild (Debug)",
-      "detail": "Clean + full build + tests",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh -p yams-debug -c",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
-    },
-    {
-      "label": "tidy: clang-tidy (Debug)",
-      "detail": "Run clang-tidy focused build (serial)",
-      "type": "shell",
-      "command": "bash scripts/dev/tidy_build.sh --tidy yams-debug",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "group": "build"
+      "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local -Dbuild-tests=true --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug && meson test -C build/debug"
     }
   ]
 }

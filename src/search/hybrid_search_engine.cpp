@@ -226,12 +226,12 @@ public:
         return Result<void>();
     }
 
-    Result<void> saveIndex(const std::string& path) override {
+    Result<void> saveIndex([[maybe_unused]] const std::string& path) override {
         // TODO: Implement persistence
         return Result<void>(Error{ErrorCode::InvalidOperation, "Save not implemented"});
     }
 
-    Result<void> loadIndex(const std::string& path) override {
+    Result<void> loadIndex([[maybe_unused]] const std::string& path) override {
         // TODO: Implement persistence
         return Result<void>(Error{ErrorCode::InvalidOperation, "Load not implemented"});
     }
@@ -282,7 +282,8 @@ private:
 
     std::vector<std::string> tokenize(const std::string& text) const {
         std::vector<std::string> tokens;
-        std::regex word_regex(R"(\b[a-z0-9]+\b)");
+        // Treat underscores and hyphens as internal token characters to preserve code identifiers
+        std::regex word_regex(R"(\b[a-z0-9]+(?:[_-][a-z0-9]+)*\b)");
         auto words_begin = std::sregex_iterator(text.begin(), text.end(), word_regex);
         auto words_end = std::sregex_iterator();
 

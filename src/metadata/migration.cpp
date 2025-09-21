@@ -240,9 +240,12 @@ Result<void> MigrationManager::rollbackMigration(const Migration& migration) {
 Result<void> MigrationManager::recordMigration(int version, const std::string& name,
                                                std::chrono::milliseconds duration, bool success,
                                                const std::string& error) {
-    auto stmtResult = db_.prepare("INSERT INTO migration_history "
-                                  "(version, name, applied_at, duration_ms, success, error) "
-                                  "VALUES (?, ?, ?, ?, ?, ?)");
+    auto stmtResult = db_.prepare(
+        "INSERT INTO migration_history (version, name, applied_at, duration_ms, success, error) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(version) DO UPDATE SET "
+        " name=excluded.name, applied_at=excluded.applied_at, duration_ms=excluded.duration_ms,"
+        " success=excluded.success, error=excluded.error");
     if (!stmtResult)
         return stmtResult.error();
 
@@ -279,7 +282,7 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createMetadataIndexes(),      createRelationshipTables(),
             createSearchTables(),         createCollectionIndexes(),
             createKnowledgeGraphSchema(), createBinarySignatureSchema(),
-            createVectorSearchSchema()};
+            createVectorSearchSchema(),   upgradeFTS5Tokenization()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -370,7 +373,8 @@ Migration YamsMetadataMigrations::createFTS5Tables() {
                 content,
                 title,
                 content_type,
-                tokenize='porter unicode61'
+                -- Preserve code identifiers and paths by treating '_' and '-' as token characters
+                tokenize='unicode61 tokenchars ''_-'''
             );
             
             -- No triggers needed - we'll manually populate FTS when content is extracted
@@ -380,6 +384,107 @@ Migration YamsMetadataMigrations::createFTS5Tables() {
     m.downFunc = [](Database& db) -> Result<void> {
         return db.execute(R"(
             DROP TABLE IF EXISTS documents_fts;
+        )");
+    };
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::upgradeFTS5Tokenization() {
+    Migration m;
+    m.version = 10;
+    m.name = "Rebuild FTS5 with tokenchars _ and -";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result)
+            return fts5Result.error();
+        if (!fts5Result.value())
+            return {};
+
+        // Rebuild FTS using the outer migration transaction from MigrationManager.
+        // Do not issue explicit BEGIN/COMMIT here to avoid nested transactions.
+        Result<void> rc;
+
+        // Drop any leftover temp table from previous failed attempts
+        (void)db.execute("DROP TABLE IF EXISTS documents_fts_new;");
+
+        // Create a new FTS5 table with improved tokenization
+        rc = db.execute(R"(
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_new USING fts5(
+                content,
+                title,
+                content_type,
+                tokenize='unicode61 tokenchars ''_-'''
+            );
+        )");
+        if (!rc)
+            return rc;
+
+        // Backfill from existing extracted content in chunks to avoid long-running transactions
+        // Determine total rows to process
+        auto countStmtRes = db.prepare(R"(
+            SELECT COUNT(*) FROM documents WHERE content_extracted = 1
+        )");
+        if (!countStmtRes)
+            return countStmtRes.error();
+        {
+            auto stmt = std::move(countStmtRes).value();
+            auto step = stmt.step();
+            if (!step)
+                return step.error();
+            std::int64_t total = 0;
+            if (step.value()) {
+                total = stmt.getInt64(0);
+            }
+            const std::int64_t kChunk = 10000; // configurable future
+            for (std::int64_t offset = 0; offset < total; offset += kChunk) {
+                auto ins = db.prepare(R"(
+                    INSERT OR REPLACE INTO documents_fts_new (rowid, content, title, content_type)
+                    SELECT d.id,
+                           COALESCE(dc.content_text, ''),
+                           d.file_name,
+                           COALESCE(d.mime_type, '')
+                    FROM documents d
+                    LEFT JOIN document_content dc ON dc.document_id = d.id
+                    WHERE d.content_extracted = 1
+                    ORDER BY d.id
+                    LIMIT ? OFFSET ?
+                )");
+                if (!ins)
+                    return ins.error();
+                auto q = std::move(ins).value();
+                auto b1 = q.bind(1, static_cast<std::int64_t>(kChunk));
+                if (!b1)
+                    return b1;
+                auto b2 = q.bind(2, offset);
+                if (!b2)
+                    return b2;
+                auto ex = q.execute();
+                if (!ex)
+                    return ex;
+                // Periodic progress log (every ~100k rows)
+                if ((offset / kChunk) % 10 == 0) {
+                    spdlog::info("[FTS5 v10] Backfill progress: {}/{} rows", offset, total);
+                }
+            }
+            spdlog::info("[FTS5 v10] Backfill complete: {} rows", total);
+        }
+
+        // Swap tables
+        rc = db.execute(R"(
+            DROP TABLE IF EXISTS documents_fts;
+            ALTER TABLE documents_fts_new RENAME TO documents_fts;
+        )");
+        if (!rc)
+            return rc;
+        return rc;
+    };
+
+    m.downFunc = [](Database& db) -> Result<void> {
+        return db.execute(R"(
+            DROP TABLE IF EXISTS documents_fts_new;
         )");
     };
 

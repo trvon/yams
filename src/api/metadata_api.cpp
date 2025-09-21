@@ -709,7 +709,7 @@ void MetadataApi::sortDocuments(std::vector<metadata::DocumentMetadata>& documen
 }
 
 Result<void> MetadataApi::exportToJson(const std::vector<metadata::DocumentMetadata>& documents,
-                                       const std::string& path, bool compress) {
+                                       const std::string& path, [[maybe_unused]] bool compress) {
     try {
         json j = json::array();
 
@@ -743,7 +743,7 @@ Result<void> MetadataApi::exportToJson(const std::vector<metadata::DocumentMetad
 }
 
 Result<void> MetadataApi::exportToCsv(const std::vector<metadata::DocumentMetadata>& documents,
-                                      const std::string& path, bool compress) {
+                                      const std::string& path, [[maybe_unused]] bool compress) {
     try {
         std::ofstream file(path);
         if (!file) {

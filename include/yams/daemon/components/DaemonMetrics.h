@@ -59,6 +59,12 @@ struct MetricsSnapshot {
     // Post-ingest queue metrics
     std::size_t postIngestThreads{0};
     std::size_t postIngestQueued{0};
+    std::size_t postIngestInflight{0};
+    std::size_t postIngestCapacity{0};
+    // Optional per-queue sizes (for diagnostics only)
+    std::size_t postIngestQMeta{0};
+    std::size_t postIngestQKg{0};
+    std::size_t postIngestQEmb{0};
     std::size_t postIngestProcessed{0};
     std::size_t postIngestFailed{0};
     double postIngestLatencyMsEma{0.0};
@@ -86,6 +92,20 @@ struct MetricsSnapshot {
     std::uint64_t uniqueBlocks{0};
     std::uint64_t deduplicatedBytes{0};
     double compressionRatio{0.0};
+    // Storage size summary (best-effort)
+    std::uint64_t logicalBytes{0};  // total logical bytes from content store
+    std::uint64_t physicalBytes{0}; // on-disk (scanned) bytes for storage dir (TTL-cached)
+
+    // Storage breakdown (best-effort; populated when detailed=true)
+    std::uint64_t casPhysicalBytes{0};      // storage/objects (filesystem blocks)
+    std::uint64_t casUniqueRawBytes{0};     // sum of unique raw bytes entering CAS
+    std::uint64_t casDedupSavedBytes{0};    // bytes avoided via dedup (duplicate chunks)
+    std::uint64_t casCompressSavedBytes{0}; // bytes saved via compression (global monitor)
+    std::uint64_t metadataPhysicalBytes{0}; // yams.db + WAL/SHM + refs.db
+    std::uint64_t indexPhysicalBytes{0};    // text/search index files (if externalized)
+    std::uint64_t vectorPhysicalBytes{0};   // vector DB + index files
+    std::uint64_t logsTmpPhysicalBytes{0};  // logs + temp files under data dir
+    std::uint64_t physicalTotalBytes{0};    // sum of above components
 
     // Resolved data directory
     std::string dataDir;
@@ -107,7 +127,11 @@ public:
     DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                   const ServiceManager* services);
 
-    MetricsSnapshot getSnapshot() const;
+    // Retrieve metrics snapshot. When detailed is true, include deep store stats
+    // (may perform additional I/O) without poisoning the basic cache.
+    MetricsSnapshot getSnapshot(bool detailed) const;
+    // Backward-compatible basic snapshot (no deep store stats)
+    MetricsSnapshot getSnapshot() const { return getSnapshot(false); }
     // Optional: force refresh cache now (used by periodic ticker)
     void refresh();
 
@@ -127,6 +151,11 @@ private:
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};
     mutable std::uint64_t lastTotalJiffies_{0};
+
+    // TTL cache for physical storage scan
+    mutable std::chrono::steady_clock::time_point lastPhysicalAt_{};
+    mutable std::uint64_t lastPhysicalBytes_{0};
+    uint32_t physicalTtlMs_{60000}; // default 60s; may be tuned via env later
 };
 
 } // namespace yams::daemon

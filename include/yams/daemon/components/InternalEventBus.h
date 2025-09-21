@@ -4,10 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::daemon {
 
@@ -69,13 +72,65 @@ public:
     }
 
     template <typename T>
-    std::shared_ptr<SpscQueue<T>> make_channel(const std::string& /*name*/, std::size_t capacity) {
-        // For now, do not keep a global registry; return the channel to the owner.
-        return std::make_shared<SpscQueue<T>>(capacity);
+    std::shared_ptr<SpscQueue<T>> make_channel(const std::string& name, std::size_t capacity) {
+        return get_or_create_channel<T>(name, capacity);
     }
+
+    template <typename T>
+    std::shared_ptr<SpscQueue<T>> get_or_create_channel(const std::string& name,
+                                                        std::size_t capacity) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = chans_.find(name);
+        if (it != chans_.end()) {
+            return std::static_pointer_cast<SpscQueue<T>>(it->second);
+        }
+        auto q = std::make_shared<SpscQueue<T>>(capacity ? capacity : 1000);
+        chans_[name] = q;
+        return q;
+    }
+
+    // Common event types
+    struct EmbedJob {
+        std::vector<std::string> hashes;
+        uint32_t batchSize{0};
+        bool skipExisting{true};
+        std::string modelName;
+    };
+    struct PostIngestTask {
+        std::string hash;
+        std::string mime;
+    };
+    struct StoreDocumentTask {
+        AddDocumentRequest request;
+    };
 
 private:
     InternalEventBus() = default;
+    std::mutex mu_;
+    std::unordered_map<std::string, std::shared_ptr<void>> chans_;
+    // Simple counters for doctor/status
+    std::atomic<std::uint64_t> embedQueued_{0};
+    std::atomic<std::uint64_t> embedDropped_{0};
+    std::atomic<std::uint64_t> embedConsumed_{0};
+    std::atomic<std::uint64_t> postQueued_{0};
+    std::atomic<std::uint64_t> postDropped_{0};
+    std::atomic<std::uint64_t> postConsumed_{0};
+
+public:
+    // Counter helpers
+    void incEmbedQueued() { embedQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incEmbedDropped() { embedDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incEmbedConsumed() { embedConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incPostQueued() { postQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incPostDropped() { postDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incPostConsumed() { postConsumed_.fetch_add(1, std::memory_order_relaxed); }
+
+    std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t embedConsumed() const { return embedConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t postQueued() const { return postQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t postDropped() const { return postDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t postConsumed() const { return postConsumed_.load(std::memory_order_relaxed); }
 };
 
 } // namespace yams::daemon

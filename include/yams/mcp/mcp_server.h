@@ -178,6 +178,9 @@ private:
     bool handshakeTrace_{
         false}; // YAMS_MCP_HANDSHAKE_TRACE=1 to emit notifications/log lifecycle traces
     bool enableYamsExtensions_{true}; // YAMS_DISABLE_EXTENSIONS=1 to disable YAMS-specific features
+
+    // Throttle concurrent MCP add/store operations (stability under high add rates)
+    std::atomic<int> addInFlight_{0};
     // Handshake state / diagnostics
     std::atomic<int> readyEagerCount_{0};
     std::atomic<int> readyAutoCount_{0};

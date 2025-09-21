@@ -17,16 +17,14 @@ jobs:
         include:
           - arch: x86_64
             runs_on: ubuntu-latest
-            host_profile: conan/profiles/host-linux-clang
             build_type: Debug
             coverage: true
-            extra_cmake_flags: "-DYAMS_ENABLE_COVERAGE=ON -DYAMS_ENABLE_ONNX=OFF"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
           - arch: armv8
             runs_on: ubuntu-24.04-arm
-            host_profile: conan/profiles/host-linux-clang-arm
             build_type: Debug
             coverage: false
-            extra_cmake_flags: "-DYAMS_ENABLE_COVERAGE=OFF -DYAMS_ENABLE_ONNX=OFF"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
     # Allow longer time for first-time ARM dependency builds.
     timeout-minutes: 50
@@ -43,7 +41,7 @@ jobs:
           sudo apt-get update
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
-          sudo apt-get install -y --no-install-recommends libboost-all-dev
+          sudo apt-get install -y --no-install-recommends libboost-all-dev meson
           echo "Installed system Boost headers/libs for module-mode fallback"
       - name: Cache Conan packages
         id: cache_conan
@@ -55,7 +53,7 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('conanfile.py', 'CMakePresets.json', matrix.host_profile) }}
+          key: conan2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.arch }}-
       - name: Conan cache diagnostics
@@ -88,7 +86,7 @@ jobs:
           conan profile detect --force
           sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
           export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
-          conan install . -of build/warm-debug -pr:h=${{ matrix.host_profile }} -pr:b=default -s build_type=Debug -o yams/*:enable_onnx=False -b missing
+          conan install . -of build/warm-debug -pr:b=default -s build_type=Debug -o yams/*:build_tests=True -o yams/*:enable_onnx=False -b missing
       - name: Install Release deps (seed) (x86_64 only)
         if: matrix.arch == 'x86_64'
         shell: bash
@@ -159,61 +157,25 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
-      - name: Configure CMake for Debug Build with Tests and Sanitizers (ONNX disabled)
+      - name: Configure and Build with Meson
         shell: bash
         run: |
           rm -rf ${{ env.BUILD_DIR }}
-          rm -f CMakeUserPresets.json
           conan install . \
             --output-folder=${{ env.BUILD_DIR }} \
-            -pr:h=${{ matrix.host_profile }} \
             -pr:b=default \
             -s build_type=Debug \
+            -o yams/*:build_tests=True \
             -o yams/*:enable_onnx=False \
             --build=missing
-          echo "--- Conan generated files (generators) ---"
-          GEN_DIR="${{ env.BUILD_DIR }}/build/Debug/generators"
-          find "$GEN_DIR" -maxdepth 2 -type f -iname '*boost*' -print || true
-          echo "--- Toolchain sanity (first toolchain file if present) ---"
-          find ${{ env.BUILD_DIR }} -maxdepth 5 -name conan_toolchain.cmake -print -exec grep -E 'CMAKE_CXX_COMPILER' {} \; | head -20 || true
-          # Prepend correct generators dir to CMAKE_PREFIX_PATH to help CMake locate *Config.cmake packages
-          export CMAKE_PREFIX_PATH="${GEN_DIR}:${GEN_DIR}/Boost:${GEN_DIR}/boost:${CMAKE_PREFIX_PATH:-}"
-          echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
-          # Diagnostic: warn if Boost config is still missing
-          if ! compgen -G "$GEN_DIR/*Boost*Config*.cmake" > /dev/null && [ ! -f "$GEN_DIR/boost-config.cmake" ]; then
-            echo "WARNING: Boost config not found under $GEN_DIR; verify Conan install graph included boost/1.86.0" >&2
-          fi
-          cmake --preset yams-debug \
-            -DYAMS_BUILD_PROFILE=dev \
-            -DYAMS_BUILD_TESTS=ON \
-            -DYAMS_ENABLE_SANITIZERS=ON \
-            ${{ matrix.extra_cmake_flags }} \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_PREFIX_PATH="$GEN_DIR;$GEN_DIR/Boost;$GEN_DIR/boost" \
-            -DBoost_DIR="$GEN_DIR" \
-            -Dboost_DIR="$GEN_DIR" \
-            -DBOOST_ROOT="$GEN_DIR" \
-            -DBoost_NO_SYSTEM_PATHS=ON \
-            -DBoost_NO_BOOST_CMAKE=OFF \
-            -DBoost_USE_STATIC_LIBS=OFF -DBoost_USE_MULTITHREADED=ON -DBoost_USE_STATIC_RUNTIME=OFF \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage" # Needed for install step if any
-          echo "BUILD_DIR=${{ env.BUILD_DIR }}" >> $GITHUB_ENV # Ensure BUILD_DIR is available for subsequent steps
+          meson setup ${{ env.BUILD_DIR }} --native-file ${{ env.BUILD_DIR }}/build-debug/conan/conan_meson_native.ini ${{ matrix.extra_meson_flags }}
+          meson compile -C ${{ env.BUILD_DIR }}
 
-      - name: Build Project
-        shell: bash
-        run: |
-          cmake --build --preset yams-debug
-
-      - name: ccache stats (post-build)
-        shell: bash
-        run: |
-          ccache -s || echo "ccache not available"
-
-      - name: Run Tests
+      - name: Run Tests with Meson
         shell: bash
         run: |
           cd ${{ env.BUILD_DIR }}
-          ctest --output-on-failure -j$(nproc)
+          meson test --print-errorlogs
 
       - name: Generate Coverage Report
         if: matrix.coverage == true

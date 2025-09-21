@@ -1,5 +1,7 @@
 #include <memory>
+#include <unistd.h>
 #include <gtest/gtest.h>
+#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_executor.h>
@@ -10,11 +12,15 @@ using namespace yams::metadata;
 class SearchExecutorTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Create in-memory database for testing
-        database_ = std::make_shared<Database>(":memory:");
-        ASSERT_TRUE(database_->initialize());
+        // Create file-backed test database so pool + direct DB share state
+        db_path_ = "/tmp/yams_search_exec_test_" + std::to_string(::getpid()) + ".db";
+        database_ = std::make_shared<Database>();
+        ASSERT_TRUE(database_->open(db_path_, ConnectionMode::Create).has_value());
 
-        metadataRepo_ = std::make_shared<MetadataRepository>(database_);
+        // Init connection pool and repository (pool owns its own connections)
+        pool_ = std::make_unique<ConnectionPool>(db_path_);
+        ASSERT_TRUE(pool_->initialize().has_value());
+        metadataRepo_ = std::make_shared<MetadataRepository>(*pool_);
 
         // Create search executor
         SearchConfig config;
@@ -28,55 +34,69 @@ protected:
     }
 
     void setupTestData() {
-        // Add some test documents to the database
-        auto conn = database_->getConnection();
+        // Create schema for tests
+        ASSERT_TRUE(database_
+                        ->execute("CREATE TABLE IF NOT EXISTS documents (\n"
+                                  "  id INTEGER PRIMARY KEY,\n"
+                                  "  title TEXT, path TEXT, content_type TEXT, file_size INTEGER,\n"
+                                  "  content_hash TEXT, last_modified TEXT, indexed_at TEXT,\n"
+                                  "  detected_language TEXT, language_confidence REAL\n"
+                                  ")")
+                        .has_value());
 
-        // Create FTS5 table for testing
-        std::string createFtsTable = R"(
-            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-                title, content, content_type, path
-            )
-        )";
-        conn->execute(createFtsTable);
+        ASSERT_TRUE(database_
+                        ->execute("CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(\n"
+                                  "  title, content, content_type, path\n"
+                                  ")")
+                        .has_value());
 
         // Insert test documents
-        std::string insertDoc = R"(
+        auto insertDoc = R"(
             INSERT INTO documents_fts (rowid, title, content, content_type, path)
             VALUES (?, ?, ?, ?, ?)
         )";
 
-        auto stmt = conn->prepare(insertDoc);
+        auto stmtRes = database_->prepare(insertDoc);
+        ASSERT_TRUE(stmtRes.has_value());
+        auto stmt = std::move(stmtRes.value());
 
         // Document 1
-        stmt->bind(1, 1);
-        stmt->bind(2, "Machine Learning Basics");
-        stmt->bind(3,
-                   "Introduction to machine learning algorithms and concepts. This document covers "
-                   "supervised learning, unsupervised learning, and reinforcement learning.");
-        stmt->bind(4, "text/plain");
-        stmt->bind(5, "/docs/ml-basics.txt");
-        stmt->step();
-        stmt->reset();
+        ASSERT_TRUE(stmt.bind(1, 1).has_value());
+        ASSERT_TRUE(stmt.bind(2, "Machine Learning Basics").has_value());
+        ASSERT_TRUE(
+            stmt.bind(3, "Introduction to machine learning algorithms and concepts. This document "
+                         "covers "
+                         "supervised learning, unsupervised learning, and reinforcement learning.")
+                .has_value());
+        ASSERT_TRUE(stmt.bind(4, "text/plain").has_value());
+        ASSERT_TRUE(stmt.bind(5, "/docs/ml-basics.txt").has_value());
+        ASSERT_TRUE(stmt.step().has_value());
+        ASSERT_TRUE(stmt.reset().has_value());
 
         // Document 2
-        stmt->bind(1, 2);
-        stmt->bind(2, "Deep Learning with Neural Networks");
-        stmt->bind(3, "Neural networks are the foundation of deep learning. This guide explains "
-                      "backpropagation, gradient descent, and common architectures.");
-        stmt->bind(4, "text/plain");
-        stmt->bind(5, "/docs/deep-learning.txt");
-        stmt->step();
-        stmt->reset();
+        ASSERT_TRUE(stmt.bind(1, 2).has_value());
+        ASSERT_TRUE(stmt.bind(2, "Deep Learning with Neural Networks").has_value());
+        ASSERT_TRUE(
+            stmt.bind(3, "Neural networks are the foundation of deep learning. This guide explains "
+                         "backpropagation, gradient descent, and common architectures.")
+                .has_value());
+        ASSERT_TRUE(stmt.bind(4, "text/plain").has_value());
+        ASSERT_TRUE(stmt.bind(5, "/docs/deep-learning.txt").has_value());
+        ASSERT_TRUE(stmt.step().has_value());
+        ASSERT_TRUE(stmt.reset().has_value());
 
         // Document 3
-        stmt->bind(1, 3);
-        stmt->bind(2, "Data Structures and Algorithms");
-        stmt->bind(3, "Comprehensive guide to data structures including arrays, lists, trees, and "
-                      "graphs. Also covers sorting and searching algorithms.");
-        stmt->bind(4, "application/pdf");
-        stmt->bind(5, "/docs/data-structures.pdf");
-        stmt->step();
-        stmt->reset();
+        ASSERT_TRUE(stmt.bind(1, 3).has_value());
+        ASSERT_TRUE(stmt.bind(2, "Data Structures and Algorithms").has_value());
+        ASSERT_TRUE(
+            stmt.bind(3,
+                      "Comprehensive guide to data structures including arrays, lists, trees, and "
+                      "graphs. Also covers sorting and searching algorithms.")
+                .has_value());
+        ASSERT_TRUE(stmt.bind(4, "application/pdf").has_value());
+        ASSERT_TRUE(stmt.bind(5, "/docs/data-structures.pdf").has_value());
+        ASSERT_TRUE(stmt.step().has_value());
+        ASSERT_TRUE(stmt.reset().has_value());
 
         // Add corresponding entries to documents table
         std::string insertDocMeta = R"(
@@ -84,36 +104,40 @@ protected:
             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 'en', 0.95)
         )";
 
-        auto metaStmt = conn->prepare(insertDocMeta);
+        auto metaStmtRes = database_->prepare(insertDocMeta);
+        ASSERT_TRUE(metaStmtRes.has_value());
+        auto metaStmt = std::move(metaStmtRes.value());
 
-        metaStmt->bind(1, 1);
-        metaStmt->bind(2, "Machine Learning Basics");
-        metaStmt->bind(3, "/docs/ml-basics.txt");
-        metaStmt->bind(4, "text/plain");
-        metaStmt->bind(5, 1024);
-        metaStmt->bind(6, "hash1");
-        metaStmt->step();
-        metaStmt->reset();
+        ASSERT_TRUE(metaStmt.bind(1, 1).has_value());
+        ASSERT_TRUE(metaStmt.bind(2, "Machine Learning Basics").has_value());
+        ASSERT_TRUE(metaStmt.bind(3, "/docs/ml-basics.txt").has_value());
+        ASSERT_TRUE(metaStmt.bind(4, "text/plain").has_value());
+        ASSERT_TRUE(metaStmt.bind(5, 1024).has_value());
+        ASSERT_TRUE(metaStmt.bind(6, "hash1").has_value());
+        ASSERT_TRUE(metaStmt.execute().has_value());
+        ASSERT_TRUE(metaStmt.reset().has_value());
 
-        metaStmt->bind(1, 2);
-        metaStmt->bind(2, "Deep Learning with Neural Networks");
-        metaStmt->bind(3, "/docs/deep-learning.txt");
-        metaStmt->bind(4, "text/plain");
-        metaStmt->bind(5, 2048);
-        metaStmt->bind(6, "hash2");
-        metaStmt->step();
-        metaStmt->reset();
+        ASSERT_TRUE(metaStmt.bind(1, 2).has_value());
+        ASSERT_TRUE(metaStmt.bind(2, "Deep Learning with Neural Networks").has_value());
+        ASSERT_TRUE(metaStmt.bind(3, "/docs/deep-learning.txt").has_value());
+        ASSERT_TRUE(metaStmt.bind(4, "text/plain").has_value());
+        ASSERT_TRUE(metaStmt.bind(5, 2048).has_value());
+        ASSERT_TRUE(metaStmt.bind(6, "hash2").has_value());
+        ASSERT_TRUE(metaStmt.execute().has_value());
+        ASSERT_TRUE(metaStmt.reset().has_value());
 
-        metaStmt->bind(1, 3);
-        metaStmt->bind(2, "Data Structures and Algorithms");
-        metaStmt->bind(3, "/docs/data-structures.pdf");
-        metaStmt->bind(4, "application/pdf");
-        metaStmt->bind(5, 4096);
-        metaStmt->bind(6, "hash3");
-        metaStmt->step();
+        ASSERT_TRUE(metaStmt.bind(1, 3).has_value());
+        ASSERT_TRUE(metaStmt.bind(2, "Data Structures and Algorithms").has_value());
+        ASSERT_TRUE(metaStmt.bind(3, "/docs/data-structures.pdf").has_value());
+        ASSERT_TRUE(metaStmt.bind(4, "application/pdf").has_value());
+        ASSERT_TRUE(metaStmt.bind(5, 4096).has_value());
+        ASSERT_TRUE(metaStmt.bind(6, "hash3").has_value());
+        ASSERT_TRUE(metaStmt.execute().has_value());
     }
 
+    std::string db_path_;
     std::shared_ptr<Database> database_;
+    std::unique_ptr<ConnectionPool> pool_;
     std::shared_ptr<MetadataRepository> metadataRepo_;
     std::unique_ptr<SearchExecutor> executor_;
 };
@@ -123,11 +147,9 @@ TEST_F(SearchExecutorTest, BasicSearch) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& response = result.value();
-    EXPECT_FALSE(response.hasError);
-    EXPECT_GT(response.results.size(), 0);
-    EXPECT_EQ(response.originalQuery, "machine learning");
-    EXPECT_FALSE(response.processedQuery.empty());
+    const auto& results = result.value();
+    EXPECT_GT(results.size(), 0u);
+    // Query normalization details are internal; ensure we have results
 }
 
 TEST_F(SearchExecutorTest, SearchWithResults) {
@@ -135,8 +157,8 @@ TEST_F(SearchExecutorTest, SearchWithResults) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& response = result.value();
-    const auto& items = response.results.getItems();
+    const auto& results = result.value();
+    const auto& items = results.getItems();
 
     EXPECT_GT(items.size(), 0);
 
@@ -156,10 +178,8 @@ TEST_F(SearchExecutorTest, SearchWithPagination) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& response = result.value();
-    EXPECT_LE(response.results.size(), 1);
-    EXPECT_EQ(response.offset, 0);
-    EXPECT_EQ(response.limit, 1);
+    const auto& results = result.value();
+    EXPECT_LE(results.size(), 1u);
 }
 
 TEST_F(SearchExecutorTest, SearchWithFilters) {
@@ -175,7 +195,7 @@ TEST_F(SearchExecutorTest, SearchWithFilters) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& items = result.value().results.getItems();
+    const auto& items = result.value().getItems();
 
     // All results should be text/plain
     for (const auto& item : items) {
@@ -192,7 +212,7 @@ TEST_F(SearchExecutorTest, SearchWithSorting) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& items = result.value().results.getItems();
+    const auto& items = result.value().getItems();
 
     if (items.size() > 1) {
         // Check that results are sorted by title
@@ -206,7 +226,7 @@ TEST_F(SearchExecutorTest, EmptyQuery) {
     auto result = executor_->search("");
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, ErrorCode::InvalidArgument);
+    EXPECT_EQ(result.error().code, yams::ErrorCode::InvalidArgument);
 }
 
 TEST_F(SearchExecutorTest, InvalidQuery) {
@@ -214,7 +234,7 @@ TEST_F(SearchExecutorTest, InvalidQuery) {
 
     // Should handle gracefully
     if (!result.has_value()) {
-        EXPECT_NE(result.error().code, ErrorCode::InternalError);
+        EXPECT_NE(result.error().code, yams::ErrorCode::InternalError);
     }
 }
 
@@ -268,24 +288,14 @@ TEST_F(SearchExecutorTest, SearchWithHighlights) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& items = result.value().results.getItems();
-
-    if (!items.empty()) {
-        // At least one result should have highlights
-        bool hasHighlights = false;
-        for (const auto& item : items) {
-            if (!item.highlights.empty()) {
-                hasHighlights = true;
-
-                // Check highlight structure
-                for (const auto& highlight : item.highlights) {
-                    EXPECT_FALSE(highlight.field.empty());
-                    EXPECT_FALSE(highlight.snippet.empty());
-                    EXPECT_LE(highlight.startOffset, highlight.endOffset);
-                }
-            }
+    const auto& items = result.value().getItems();
+    // Highlights may not always be present in this synthetic setup; if present, validate structure
+    for (const auto& item : items) {
+        for (const auto& highlight : item.highlights) {
+            EXPECT_FALSE(highlight.field.empty());
+            EXPECT_FALSE(highlight.snippet.empty());
+            EXPECT_LE(highlight.startOffset, highlight.endOffset);
         }
-        // Note: Highlights might not always be generated in this test setup
     }
 }
 
@@ -294,8 +304,8 @@ TEST_F(SearchExecutorTest, SearchStatistics) {
 
     ASSERT_TRUE(result.has_value());
 
-    const auto& response = result.value();
-    const auto& stats = response.results.getStatistics();
+    const auto& results = result.value();
+    const auto& stats = results.getStatistics();
 
     EXPECT_GE(stats.totalTime.count(), 0);
     EXPECT_GE(stats.searchTime.count(), 0);

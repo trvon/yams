@@ -16,6 +16,14 @@ name: Release
         description: "Also upload built assets to Cloudflare R2 via Wrangler"
         required: false
         default: "false"
+      fast_mode:
+        description: "Skip packaging & verification steps (speed up local / act runs)"
+        required: false
+        default: "false"
+      macos_only:
+        description: "Limit matrix to macOS variants only (skip linux-hosted)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -46,7 +54,20 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+      - name: Skip non-linux entries under act (warm)
+        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
+        shell: bash
+        run: |
+          echo "Skipping warm job for ${{ matrix.os }} under act"
+          exit 0
+      - name: Skip linux-hosted when macos_only=true
+        if: inputs.macos_only == 'true' && matrix.os == 'linux-hosted'
+        shell: bash
+        run: |
+          echo "macos_only=true: skipping linux-hosted warm job entry"
+          exit 0
       - name: Cache Conan packages (warm)
+        if: github.actor != 'nektos/act'
         id: cache_conan_warm
         uses: actions/cache@v4
         continue-on-error: true
@@ -57,19 +78,20 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
           restore-keys: |
             warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-
             warm-conan2-${{ runner.os }}-
             conan2-${{ runner.os }}-
       - name: Cache ccache (warm)
+        if: github.actor != 'nektos/act'
         uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
           restore-keys: |
             warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-
             warm-ccache-${{ runner.os }}-
@@ -93,21 +115,21 @@ jobs:
             suffix: linux-x86_64
             packaging: tar
             build_packages: true
-            cmake_args: ""
+            meson_args: ""
             hosted: true
           - os: macos-hosted-arm64
             runs_on: macos-15
             suffix: macos-arm64
             packaging: zip
             build_packages: false
-            cmake_args: -DCMAKE_OSX_ARCHITECTURES=arm64
+            meson_args: "" # arch via profile edit
             hosted: true
           - os: macos-hosted-x64
             runs_on: macos-15
             suffix: macos-x86_64
             packaging: zip
             build_packages: false
-            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64"
+            meson_args: "" # arch via profile edit
             hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
@@ -117,8 +139,35 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Skip non-linux entries under act (build)
+        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
+        shell: bash
+        run: |
+          echo "Skipping build-release job steps for ${{ matrix.os }} under act"
+          exit 0
+      - name: Skip linux-hosted when macos_only=true
+        if: inputs.macos_only == 'true' && matrix.os == 'linux-hosted'
+        shell: bash
+        run: |
+          echo "macos_only=true: skipping linux-hosted build-release job entry"
+          exit 0
+      - name: Verify runner architecture (act diagnostics)
+        if: github.actor == 'nektos/act' && matrix.os == 'linux-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACT_UNAME="$(uname -m || true)"
+          echo "Detected uname -m: ${ACT_UNAME}"
+          if [ "${ACT_UNAME}" != "x86_64" ]; then
+            echo "ERROR: Non-x86_64 architecture detected under act: ${ACT_UNAME}" >&2
+            echo "cpuinfo (and other x86-specific code) will not build on this architecture." >&2
+            echo "Re-run forcing amd64 containers, e.g.:" >&2
+            echo "  act --container-architecture linux/amd64 --job build-release --input fast_mode=true" >&2
+            exit 1
+          fi
 
       - name: Cache Conan packages (early)
+        if: github.actor != 'nektos/act'
         id: cache_conan_early
         uses: actions/cache@v4
         continue-on-error: true
@@ -130,7 +179,7 @@ jobs:
             ~/.conan2/metadata
             ~/.conan2/s
           # Use same key pattern as tests workflow for maximum cross-workflow reuse
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
             conan2-${{ runner.os }}-
@@ -149,22 +198,23 @@ jobs:
             fi
           done
       - name: Cache macOS build directory
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.actor != 'nektos/act'
         uses: actions/cache@v4
         with:
-          path: build/yams-release
-          key: macos-build-${{ matrix.suffix }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}-${{ hashFiles('src/**', 'include/**') }}
+          path: build/release
+          key: macos-build-${{ matrix.suffix }}-${{ hashFiles('meson.build', 'meson_options.txt') }}-${{ hashFiles('src/**', 'include/**') }}
           restore-keys: |
             macos-build-${{ matrix.suffix }}-
 
       - name: Cache ccache
+        if: github.actor != 'nektos/act'
         uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'CMakePresets.json') }}
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-
@@ -183,8 +233,17 @@ jobs:
             ccache \
             rpm \
             fakeroot \
-            dpkg-dev
-          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev ccache rpm fakeroot dpkg-dev"
+            dpkg-dev \
+            meson \
+            cmake \
+            ninja-build \
+            clang \
+            clang-tools \
+            lld
+          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev ccache rpm fakeroot dpkg-dev meson cmake ninja-build clang clang-tools lld"
+          # Ensure compilers are preferred
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CXX=clang++" >> $GITHUB_ENV
 
       - name: Sanitize stdlib flags (macOS only)
         if: runner.os == 'macOS'
@@ -267,7 +326,7 @@ jobs:
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
 
       - name: Download CI benchmark artifacts (-yams, if available)
-        if: github.event_name == 'workflow_run'
+        if: github.event_name == 'workflow_run' && github.actor != 'nektos/act'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
@@ -278,7 +337,7 @@ jobs:
           if_no_artifact_found: warn
 
       - name: Download CI benchmark artifacts (legacy -conan, fallback)
-        if: github.event_name == 'workflow_run'
+        if: github.event_name == 'workflow_run' && github.actor != 'nektos/act'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
@@ -289,7 +348,7 @@ jobs:
           if_no_artifact_found: warn
 
       - name: Download CI coverage (if available)
-        if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted'
+        if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
@@ -302,7 +361,7 @@ jobs:
 
       - name: Extract release notes from CHANGELOG.md (stable only)
         id: changelog
-        if: steps.meta.outputs.channel == 'stable'
+        if: steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act'
         uses: ffurrer2/extract-release-notes@v2
         with:
           changelog_file: CHANGELOG.md
@@ -312,25 +371,23 @@ jobs:
         if: ${{ matrix.hosted }}
         shell: bash
         run: |
-          pipx install conan 2>/dev/null || python3 -m pip install --upgrade conan || python -m pip install --upgrade conan || pip3 install --upgrade conan
+          set -euo pipefail
+          pipx install conan 2>/dev/null || python3 -m pip install --user --upgrade conan || python -m pip install --user --upgrade conan || pip3 install --user --upgrade conan
+          PY_USER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
+          [ -d "$PY_USER_BIN" ] && echo "$PY_USER_BIN" >> "$GITHUB_PATH" || true
+          [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
+          export PATH="$HOME/.local/bin:$PY_USER_BIN:$PATH"
+          which conan || { echo 'Conan not found on PATH after installation'; ls -al "$HOME/.local/bin" || true; exit 127; }
           conan --version
           mkdir -p ~/.conan2
           # Best-effort: global.conf may not exist in repo for hosted macOS
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
-      - name: Ensure build tools (cmake, ninja) for local runners/act
+      - name: Ensure build tools (meson, ninja) for local runners/act
         if: ${{ matrix.hosted }}
         shell: bash
         run: |
           set -euo pipefail
-          need_modern_cmake() {
-            if ! command -v cmake >/dev/null 2>&1; then
-              return 0
-            fi
-            v=$(cmake --version | head -1 | sed -E 's/.* ([0-9]+)\.([0-9]+)\..*/\1.\2/')
-            awk -v have="$v" 'BEGIN{ split(have,a,"."); if (a[1]>3 || (a[1]==3 && a[2]>=25)) exit 1; else exit 0 }'
-          }
-
           add_user_bin_to_path() {
             if [ -n "${GITHUB_PATH:-}" ]; then
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -338,21 +395,10 @@ jobs:
               export PATH="$HOME/.local/bin:$PATH"
             fi
           }
-
-          if need_modern_cmake; then
-            echo "Installing modern CMake and Ninja via pip"
-            python3 -m pip install --user --upgrade cmake 'ninja>=1.10' || python -m pip install --user --upgrade cmake 'ninja>=1.10'
-            add_user_bin_to_path
-            echo "cmake version: $(cmake --version | head -1)"
-            echo "ninja version: $(ninja --version || true)"
-          elif ! command -v ninja >/dev/null 2>&1; then
-            echo "Installing Ninja via pip"
-            python3 -m pip install --user --upgrade 'ninja>=1.10' || true
-            add_user_bin_to_path
-          else
-            echo "cmake present: $(cmake --version | head -1)"
-            echo "ninja present: $(ninja --version || true)"
-          fi
+          python3 -m pip install --user --upgrade meson 'ninja>=1.10' || python -m pip install --user --upgrade meson 'ninja>=1.10'
+          add_user_bin_to_path
+          echo "meson version: $(meson --version || true)"
+          echo "ninja version: $(ninja --version || true)"
           # Install ccache on macOS if missing
           if [ "$RUNNER_OS" = "macOS" ] && ! command -v ccache >/dev/null 2>&1; then
             brew install ccache || true
@@ -392,6 +438,29 @@ jobs:
             else
               echo "Detected clang major: $RAW_VER"
             fi
+      - name: Compare profile vs detected clang (advice)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROFILE_FILE="./conan/profiles/host-linux-clang"
+          if [ -f "$PROFILE_FILE" ]; then
+            PROFILE_VER=$(grep -E '^compiler.version=' "$PROFILE_FILE" | sed -E 's/.*=//')
+          else
+            PROFILE_VER="(missing profile)"
+          fi
+          if command -v clang++ >/dev/null 2>&1; then
+            SYS_VER=$(clang++ --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+          elif command -v clang >/dev/null 2>&1; then
+            SYS_VER=$(clang --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+          else
+            SYS_VER="unknown"
+          fi
+          echo "Profile declares clang version: $PROFILE_VER"
+          echo "System detected clang version: $SYS_VER"
+          if [ -n "$SYS_VER" ] && [ "$SYS_VER" != "unknown" ] && [ "$PROFILE_VER" != "$SYS_VER" ]; then
+            echo "NOTE: Mismatch between profile (clang $PROFILE_VER) and system (clang $SYS_VER)." >&2
+            echo "      Consider either installing clang-$PROFILE_VER or adjusting profile to $SYS_VER for local/act runs to avoid subtle ABI or flag differences." >&2
+          fi
 
       - name: Check Conan (self-hosted sanity)
         if: ${{ !matrix.hosted }}
@@ -415,13 +484,10 @@ jobs:
         shell: bash
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
-          # Clean any existing build directory and presets to avoid duplicate preset issues
-          rm -rf build/yams-release
-          rm -f CMakeUserPresets.json
-          # Select explicit platform profile (no mutation-in-place)
+          # Align build directory with README (build/release)
+          rm -rf build/release
           if [ "$RUNNER_OS" = "macOS" ]; then
             HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
-            # Adjust architecture dynamically for universal runner matrix
             case "${{ matrix.suffix }}" in
               macos-arm64)
                 sed -i '' -E 's/^arch=.*/arch=armv8/' "$HOST_PROFILE"
@@ -436,7 +502,7 @@ jobs:
             HOST_PROFILE="./conan/profiles/host-linux-clang"
           fi
           BUILD_PROFILE="default"
-          CONAN_ARGS="-of build/yams-release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing"
+          CONAN_ARGS="-of build/release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing"
           if [ "$RUNNER_OS" = "macOS" ]; then
             case "${{ matrix.suffix }}" in
               macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
@@ -444,17 +510,11 @@ jobs:
             esac
           fi
           conan install . $CONAN_ARGS
-          echo "--- Toolchain sanity (first toolchain file if present) ---"
-          find build/yams-release -maxdepth 5 -name conan_toolchain.cmake -print -exec grep -E 'CMAKE_CXX_COMPILER' {} \; | head -20 || true
-          cmake --preset yams-release \
-            -DYAMS_BUILD_PROFILE=release \
-            -DYAMS_VERSION="${{ steps.meta.outputs.version }}" \
-            -DCMAKE_CXX_STANDARD=20 \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}" \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            ${{ matrix.cmake_args}}
-          cmake --build --preset yams-release --parallel
-          echo "BUILD_DIR=build/yams-release" >> $GITHUB_ENV
+          meson setup build/release \
+            --native-file build/release/build-release/conan/conan_meson_native.ini \
+            -Dwerror=true -Dwarning_level=3 -Denable-lzma=true
+          meson compile -C build/release
+          echo "BUILD_DIR=build/release" >> $GITHUB_ENV
 
       - name: ccache stats (post-build)
         shell: bash
@@ -466,8 +526,8 @@ jobs:
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
           # Collect from validation build (if Linux hosted ran validation)
-          if [ -f "build/yams-release/bench_results.json" ]; then
-            cp build/yams-release/bench_results.json "$BUILD_DIR/bench_results/"
+          if [ -f "build/release/bench_results.json" ]; then
+            cp build/release/bench_results.json "$BUILD_DIR/bench_results/"
             echo "Collected benchmark results from validation build"
           fi
           # Also check CI artifacts if available
@@ -480,14 +540,12 @@ jobs:
         run: |
           # Ensure BUILD_DIR is properly set
           if [ ! -d "$BUILD_DIR" ]; then
-            echo "BUILD_DIR not found at $BUILD_DIR, checking for alternative..."
-            if [ -d "build/yams-release" ]; then
-              BUILD_DIR="build/yams-release"
-              echo "Using BUILD_DIR: $BUILD_DIR"
-              echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
-            fi
+            echo "BUILD_DIR not found at $BUILD_DIR, attempting fallback to build/release (legacy path build/yams-release no longer used)." >&2
+            exit 1
           fi
-          cmake --install "$BUILD_DIR" --config Release
+          meson install -C "$BUILD_DIR" --destdir stage
+          if [ ! -d stage ]; then
+            echo "Stage directory missing after meson install" >&2; ls -al "$BUILD_DIR" >&2 || true; exit 1; fi
 
       - name: Generate release summary
         shell: bash
@@ -552,6 +610,7 @@ jobs:
           cat "$SUMMARY_FILE"
 
       - name: Package
+        if: ${{ inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
         shell: bash
         run: |
           cd "$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}"
@@ -569,69 +628,13 @@ jobs:
           echo "Created asset: $OUTDIR/$ASSET"
 
       - name: Build Linux packages (DEB/RPM)
-        if: matrix.build_packages == true && matrix.os == 'linux-hosted'
+        if: ${{ matrix.build_packages == true && matrix.os == 'linux-hosted' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
         shell: bash
         run: |
-          cd "$BUILD_DIR"
-          DISPLAY_VERSION="${{ steps.meta.outputs.version }}"
-          PKG_VERSION="${{ steps.meta.outputs.base_version }}"   # numeric semantic for DEB/RPM metadata
+          chmod +x scripts/build-deb.sh
+          scripts/build-deb.sh "${{ steps.meta.outputs.version }}" "${{ env.BUILD_DIR }}"
 
-          echo "Packaging with DISPLAY_VERSION=$DISPLAY_VERSION (package metadata version=$PKG_VERSION)"
-
-          # Generate DEB package (use numeric version for control file)
-          cpack -G DEB \
-            -D CPACK_PACKAGE_VERSION="${PKG_VERSION}" \
-            -D CPACK_DEBIAN_PACKAGE_MAINTAINER="Trevon <git@trevon.dev>" \
-            -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" || echo "CPack DEB generation failed"
-          DEB_FILE=$(ls *.deb 2>/dev/null | head -1 || true)
-          if [ -n "$DEB_FILE" ]; then
-            TARGET_DEB="yams-${DISPLAY_VERSION}-linux-x86_64.deb"
-            mv "$DEB_FILE" "$GITHUB_WORKSPACE/$TARGET_DEB"
-            echo "Created DEB package: $TARGET_DEB"
-          else
-            echo "WARNING: No .deb produced (possibly due to CPack config or empty install set)" >&2
-          fi
-
-          # Generate RPM package (only if rpmbuild exists)
-          if command -v rpmbuild >/dev/null 2>&1; then
-            cpack -G RPM \
-              -D CPACK_PACKAGE_VERSION="${PKG_VERSION}" \
-              -D CPACK_PACKAGE_CONTACT="Trevon <git@trevon.dev>" || echo "CPack RPM generation failed"
-            RPM_FILE=$(ls *.rpm 2>/dev/null | head -1 || true)
-            if [ -n "$RPM_FILE" ]; then
-              TARGET_RPM="yams-${DISPLAY_VERSION}-linux-x86_64.rpm"
-              mv "$RPM_FILE" "$GITHUB_WORKSPACE/$TARGET_RPM"
-              echo "Created RPM package: $TARGET_RPM"
-            else
-              echo "WARNING: No .rpm produced" >&2
-            fi
-          else
-            echo "rpmbuild not found, skipping RPM generation"
-          fi
-          # Generate AppImage if appimage-builder is available
-          if command -v appimage-builder >/dev/null 2>&1; then
-            cd "$GITHUB_WORKSPACE"
-            cp packaging/appimage/AppImageBuilder.yml .
-            export YAMS_VERSION="${DISPLAY_VERSION}"
-            appimage-builder --skip-tests || echo "AppImage build failed, skipping"
-            APPIMAGE_FILE=$(ls YAMS-*.AppImage 2>/dev/null | head -1)
-            if [ -n "$APPIMAGE_FILE" ]; then
-              mv "$APPIMAGE_FILE" "yams-${DISPLAY_VERSION}-x86_64.AppImage"
-              echo "Created AppImage: yams-${DISPLAY_VERSION}-x86_64.AppImage"
-            fi
-          else
-            echo "appimage-builder not found, skipping AppImage generation"
-          fi
-
-      - name: Prepare release notes from CHANGELOG.md (stable only)
-        if: steps.meta.outputs.channel == 'stable'
-        shell: bash
-        run: |
-          COMBINED_NOTES="$BUILD_DIR/combined_release_notes.md"
-          # Use CHANGELOG.md section extract verbatim for release notes
-          echo "${{ steps.changelog.outputs.release_notes }}" > "$COMBINED_NOTES"
-          echo "Combined release notes prepared from CHANGELOG.md:"
-          cat "$COMBINED_NOTES"
+      # Release notes are sourced directly from CHANGELOG.md during release creation
 
       - name: Publish matrix.json (expected platform count)
         if: matrix.os == 'linux-hosted'
@@ -642,7 +645,7 @@ jobs:
           echo '{"total": 3}' > matrix.json
 
       - name: Upload matrix metadata
-        if: matrix.os == 'linux-hosted'
+        if: matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
         uses: actions/upload-artifact@v4
         with:
           name: matrix-meta
@@ -650,6 +653,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Release Artifacts
+        if: github.actor != 'nektos/act'
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.suffix }}-files${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
@@ -665,7 +669,7 @@ jobs:
           retention-days: 1
 
       - name: Verify Linux package artifacts
-        if: matrix.os == 'linux-hosted'
+        if: ${{ matrix.os == 'linux-hosted' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -682,8 +686,8 @@ jobs:
     name: Create GitHub Release
     needs: build-release
     runs-on: ubuntu-latest
-    # Run unconditionally; dynamic threshold enforced inside the job
-    if: always() && !cancelled()
+    # Skip release creation entirely when running under act
+    if: always() && !cancelled() && github.actor != 'nektos/act'
     permissions:
       contents: write
       actions: read
@@ -1248,84 +1252,14 @@ jobs:
           done
           echo "Collected assets:"
           ls -la assets/
-      - name: Combine release notes (include platform status)
-        shell: bash
-        run: |
-          COMBINED_NOTES="combined_release_notes.md"
-
-          if [ "${{ steps.meta.outputs.channel }}" = "stable" ]; then
-            cp "$BUILD_DIR/combined_release_notes.md" "$COMBINED_NOTES"
-
-            # Add platform build status
-            echo "## Platform Builds" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            echo "Successfully built for ${{ steps.check-status.outputs.success_count }} out of ${{ steps.check-status.outputs.total_expected }} platforms:" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-
-            # Add summaries from each platform
-            for summary in release-artifacts/release-*/release_summary.md;
-            do
-              if [ -f "$summary" ]; then
-                platform=$(basename $(dirname "$summary") | sed 's/release-//')
-                echo "### ✅ $platform" >> "$COMBINED_NOTES"
-                tail -n +2 "$summary" >> "$COMBINED_NOTES"
-                echo "" >> "$COMBINED_NOTES"
-              fi
-            done
-
-            # List missing platforms if any
-            if [ "${{ steps.check-status.outputs.success_count }}" -lt "3" ]; then
-              echo "### ⚠️ Missing Platforms" >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-              echo "Some platforms failed to build. They may be added in a future patch release." >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-            fi
-
-            # Add series changelog if not a patch 0 release
-            PATCH_VERSION=$(echo "${{ steps.meta.outputs.version }}" | sed -E 's/^v?[0-9]+\.[0-9]+\.([0-9]+).*/\1/')
-            if [ "$PATCH_VERSION" != "0" ]; then
-              echo "---" >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-              echo "## All Changes in v${{ steps.grouped-changelog.outputs.minor_version }}.x Series" >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-              echo "<details>" >> "$COMBINED_NOTES"
-              echo "<summary>Click to expand full series changelog</summary>" >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-              # Include grouped changelog content
-              if [ -f "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" ]; then
-                tail -n +4 "${{ steps.grouped-changelog.outputs.grouped_changelog_file }}" >> "$COMBINED_NOTES"
-              fi
-              echo "" >> "$COMBINED_NOTES"
-              echo "</details>" >> "$COMBINED_NOTES"
-            fi
-          else
-            # Nightly/Weekly: generate minimal, automatic notes with commit log since last tag
-            echo "# YAMS ${{ steps.meta.outputs.version }}" > "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            echo "This is an automated ${{ steps.meta.outputs.channel }} build." >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-            if [ -n "$PREV_TAG" ]; then
-              echo "## Changes since $PREV_TAG" >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-              git log --pretty=format:"- %h %s (%an)" "${PREV_TAG}..HEAD" >> "$COMBINED_NOTES" || true
-            else
-              echo "## Recent changes" >> "$COMBINED_NOTES"
-              echo "" >> "$COMBINED_NOTES"
-              git log -n 50 --pretty=format:"- %h %s (%an)" >> "$COMBINED_NOTES" || true
-            fi
-            echo "" >> "$COMBINED_NOTES"
-            echo "## Platform Builds" >> "$COMBINED_NOTES"
-            echo "" >> "$COMBINED_NOTES"
-            echo "Successfully built for ${{ steps.check-status.outputs.success_count }} out of ${{ steps.check-status.outputs.total_expected }} platforms." >> "$COMBINED_NOTES"
-          fi
+      # Combine step removed; use CHANGELOG.md directly for release notes
 
       - name: "Dry-run: print release notes (act only)"
         if: ${{ github.actor == 'nektos/act' }}
         shell: bash
         run: |
-          echo "--- Combined Release Notes (dry-run) ---"
-          cat combined_release_notes.md
+          echo "--- CHANGELOG.md (dry-run) ---"
+          cat CHANGELOG.md
 
       - name: Create or update GitHub Release (draft, upload assets first)
         if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
@@ -1333,7 +1267,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: YAMS ${{ steps.meta.outputs.version }}
-          body_path: combined_release_notes.md
+          body_path: CHANGELOG.md
           files: assets/*
           draft: true
           allowUpdates: true
@@ -1354,7 +1288,7 @@ jobs:
           fi
           TAG="${{ steps.meta.outputs.tag }}"
           # publish the release after assets are uploaded
-          gh release edit "$TAG" --draft=false --notes-file combined_release_notes.md \
+          gh release edit "$TAG" --draft=false --notes-file CHANGELOG.md \
             ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }}
 
       - name: List release assets (post-upload)

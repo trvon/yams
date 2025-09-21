@@ -46,7 +46,8 @@ public:
         initialized_ = false;
     }
 
-    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+    Result<std::vector<float>>
+    generateEmbedding([[maybe_unused]] const std::string& text) override {
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Mock provider not initialized"};
         }
@@ -79,7 +80,7 @@ public:
     }
 
     Result<std::vector<std::vector<float>>>
-    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+    generateBatchEmbeddings([[maybe_unused]] const std::vector<std::string>& texts) override {
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Mock provider not initialized"};
         }
@@ -155,7 +156,8 @@ public:
         initialized_ = false;
     }
 
-    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+    Result<std::vector<float>>
+    generateEmbedding([[maybe_unused]] const std::string& text) override {
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Daemon client not initialized"};
         }
@@ -165,7 +167,7 @@ public:
     }
 
     Result<std::vector<std::vector<float>>>
-    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+    generateBatchEmbeddings([[maybe_unused]] const std::vector<std::string>& texts) override {
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Daemon client not initialized"};
         }

@@ -131,7 +131,8 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2A
     // Additive keys introduced post-initial v2 rollout. These will be merged non-destructively.
     return {{"embeddings", {{"auto_on_add", "false"}}},
             {"tuning",
-             {{"backpressure_read_pause_ms", "5"},
+             {{"profile", "balanced"},
+              {"backpressure_read_pause_ms", "10"},
               {"worker_poll_ms", "150"},
               {"idle_cpu_pct", "10.0"},
               {"idle_mux_low_bytes", "4194304"},
@@ -485,8 +486,11 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"connect_timeout_ms", "1000"},
               {"request_timeout_ms", "5000"}}},
 
+            {"tuning", {{"profile", "balanced"}}},
+
             {"tuning",
-             {{"backpressure_read_pause_ms", "5"},
+             {{"profile", "balanced"},
+              {"backpressure_read_pause_ms", "10"},
               {"worker_poll_ms", "150"},
               {"idle_cpu_pct", "10.0"},
               {"idle_mux_low_bytes", "4194304"},

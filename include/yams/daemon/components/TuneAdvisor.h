@@ -17,6 +17,38 @@ class TuneAdvisor {
 public:
     enum class AutoEmbedPolicy { Never, Idle, Always };
 
+    enum class Profile { Efficient, Balanced, Aggressive };
+
+    // Resolve tuning profile from env (YAMS_TUNING_PROFILE). Defaults to Balanced.
+    static Profile tuningProfile() {
+        if (const char* s = std::getenv("YAMS_TUNING_PROFILE")) {
+            std::string v{s};
+            for (auto& c : v)
+                c = static_cast<char>(std::tolower(c));
+            if (v == "efficient" || v == "conservative")
+                return Profile::Efficient;
+            if (v == "aggressive")
+                return Profile::Aggressive;
+        }
+        return Profile::Balanced;
+    }
+
+    // Scale factor applied to several heuristics
+    // Efficient  -> 0.75 (slower growth, lower resource use)
+    // Balanced   -> 1.0
+    // Aggressive -> 1.5 (faster growth, lower thresholds)
+    static double profileScale() {
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.75;
+            case Profile::Aggressive:
+                return 1.5;
+            case Profile::Balanced:
+            default:
+                return 1.0;
+        }
+    }
+
     // -------- Runtime-tunable policy (defaults chosen conservatively) --------
     static AutoEmbedPolicy autoEmbedPolicy() {
         return autoEmbedPolicy_.load(std::memory_order_relaxed);
@@ -393,11 +425,21 @@ public:
     // -------- Code-controlled worker sizing (no env steering) --------
     // When non-zero, components should prefer these values over heuristics.
     static uint32_t postIngestThreads() {
+        // 1) Explicit override set by config/daemon_main
         uint32_t configured = postIngestThreads_.load(std::memory_order_relaxed);
         if (configured != 0)
             return configured;
-        // Background workers: prefer small cap (12.5% of CPU budget), hard max 4
-        return TuneAdvisor::recommendedThreads(0.125, /*hardMax=*/4);
+        // 2) Environment variable override for quick experiments
+        if (const char* s = std::getenv("YAMS_POST_INGEST_THREADS")) {
+            try {
+                int v = std::stoi(s);
+                if (v >= 1 && v <= 64)
+                    return static_cast<uint32_t>(v);
+            } catch (...) {
+            }
+        }
+        // 3) Conservative default: single background worker; users can raise via config/env
+        return 1u;
     }
     static void setPostIngestThreads(uint32_t n) {
         postIngestThreads_.store(n, std::memory_order_relaxed);
@@ -452,12 +494,12 @@ public:
     }
 
     // -------- New centralized tuning getters (env-driven) --------
-    // Backpressure read pause when receiver is backpressured (ms). Default 5.
+    // Backpressure read pause when receiver is backpressured (ms). Default 10.
     static uint32_t backpressureReadPauseMs() {
         uint32_t ov = backpressureReadPauseMsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        uint32_t def = 5;
+        uint32_t def = 10;
         if (const char* s = std::getenv("YAMS_BACKPRESSURE_READ_PAUSE_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -567,7 +609,8 @@ public:
         if (const char* s = std::getenv("YAMS_POOL_COOLDOWN_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 0 && v <= 60000)
+                // v is unsigned; the lower-bound check is redundant on some compilers
+                if (v <= 60000)
                     return v;
             } catch (...) {
             }
@@ -767,6 +810,20 @@ public:
         ioConnPerThreadOverride_.store(v, std::memory_order_relaxed);
     }
 
+    // Internal Event Bus toggles (config-driven)
+    static bool useInternalBusForRepair() {
+        return useInternalBusRepair_.load(std::memory_order_relaxed);
+    }
+    static void setUseInternalBusForRepair(bool en) {
+        useInternalBusRepair_.store(en, std::memory_order_relaxed);
+    }
+    static bool useInternalBusForPostIngest() {
+        return useInternalBusPostIngest_.load(std::memory_order_relaxed);
+    }
+    static void setUseInternalBusForPostIngest(bool en) {
+        useInternalBusPostIngest_.store(en, std::memory_order_relaxed);
+    }
+
 private:
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
@@ -803,6 +860,9 @@ private:
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
+    // Defaults: prefer internal event bus by default; config/env can override
+    static inline std::atomic<bool> useInternalBusRepair_{true};
+    static inline std::atomic<bool> useInternalBusPostIngest_{true};
 };
 
 } // namespace yams::daemon

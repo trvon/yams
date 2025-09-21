@@ -2,6 +2,10 @@
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 #include <yams/tools/command.h>
+// Daemon metrics (prefer daemon-first, avoid local scans)
+#include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -61,19 +65,91 @@ public:
             return 0;
 
         try {
-            logVerbose("Gathering storage statistics...");
+            logVerbose("Gathering storage statistics (daemon-first)...");
 
-            // Initialize storage components
+            // Try daemon-first lightweight status
+            bool rendered = false;
+            do {
+                yams::daemon::ClientConfig cfg;
+                cfg.enableChunkedResponses = false;
+                cfg.requestTimeout = std::chrono::milliseconds(2000);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes)
+                    break;
+                auto lease = std::move(leaseRes.value());
+                auto& client = **lease;
+                yams::daemon::StatusRequest sreq;
+                sreq.detailed = false; // never trigger physical scanning from CLI tools
+                auto sres = client.call_sync(sreq);
+                if (!sres)
+                    break;
+                const auto& st = sres.value();
+                // Render a compact breakdown using requestCounts keys if present
+                if (outputFormat_ == "json") {
+                    nlohmann::json j;
+                    j["docs"] = st.requestCounts.count("storage_documents")
+                                    ? st.requestCounts.at("storage_documents")
+                                    : 0;
+                    j["logical_bytes"] = st.requestCounts.count("storage_logical_bytes")
+                                             ? st.requestCounts.at("storage_logical_bytes")
+                                             : 0;
+                    j["physical_bytes"] = st.requestCounts.count("storage_physical_bytes")
+                                              ? st.requestCounts.at("storage_physical_bytes")
+                                              : 0;
+                    // CAS savings if available
+                    if (st.requestCounts.count("casDedupSavedBytes"))
+                        j["cas_dedup_saved_bytes"] = st.requestCounts.at("casDedupSavedBytes");
+                    if (st.requestCounts.count("casCompressSavedBytes"))
+                        j["cas_compress_saved_bytes"] =
+                            st.requestCounts.at("casCompressSavedBytes");
+                    // Overheads if available
+                    const char* overheadKeys[] = {"metadataPhysicalBytes", "indexPhysicalBytes",
+                                                  "vectorPhysicalBytes", "logsTmpPhysicalBytes"};
+                    for (auto* k : overheadKeys) {
+                        if (st.requestCounts.count(k))
+                            j["overhead"][k] = st.requestCounts.at(k);
+                    }
+                    std::cout << j.dump(2) << std::endl;
+                } else {
+                    auto fmt = [&](const char* k) -> std::string {
+                        if (!st.requestCounts.count(k))
+                            return std::string("n/a");
+                        return formatSize(static_cast<uint64_t>(st.requestCounts.at(k)));
+                    };
+                    uint64_t docs = st.requestCounts.count("storage_documents")
+                                        ? st.requestCounts.at("storage_documents")
+                                        : 0;
+                    std::cout << "STOR : ok, docs=" << docs
+                              << ", logical=" << fmt("storage_logical_bytes")
+                              << ", physical=" << fmt("storage_physical_bytes");
+                    // Show savings if available
+                    if (st.requestCounts.count("casDedupSavedBytes") ||
+                        st.requestCounts.count("casCompressSavedBytes")) {
+                        std::cout << ", saved="
+                                  << formatSize(static_cast<uint64_t>(
+                                         (st.requestCounts.count("casDedupSavedBytes")
+                                              ? st.requestCounts.at("casDedupSavedBytes")
+                                              : 0) +
+                                         (st.requestCounts.count("casCompressSavedBytes")
+                                              ? st.requestCounts.at("casCompressSavedBytes")
+                                              : 0)))
+                                  << " (dedup=" << fmt("casDedupSavedBytes")
+                                  << ", compress=" << fmt("casCompressSavedBytes") << ")";
+                    }
+                    std::cout << "\n";
+                }
+                rendered = true;
+            } while (false);
+
+            if (rendered)
+                return 0;
+
+            // Fallback to legacy local scans only if daemon not available
             auto storageResult = initializeStorage();
             if (!storageResult)
                 return 1;
-
             auto [storage, refCounter, manifestMgr] = *storageResult;
-
-            // Gather statistics
             Stats stats = gatherStatistics(*storage, *refCounter, *manifestMgr);
-
-            // Output based on format
             if (outputFormat_ == "json") {
                 printJSON(stats);
             } else if (outputFormat_ == "csv") {
@@ -81,7 +157,6 @@ public:
             } else {
                 printHumanReadable(stats);
             }
-
             return 0;
 
         } catch (const std::exception& e) {
@@ -137,6 +212,9 @@ private:
         static constexpr const char* CYAN = "\x1b[36m";
         static constexpr const char* WHITE = "\x1b[37m";
     };
+
+    // factory in TU
+    std::unique_ptr<Command> createStatsCommand() { return std::make_unique<StatsCommand>(); }
 
     bool colorsEnabled() const {
         const char* noColor = std::getenv("NO_COLOR");

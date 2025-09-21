@@ -172,6 +172,9 @@ private:
 
     // Version 9: Add vector search schema for embeddings
     static Migration createVectorSearchSchema();
+
+    // Version 10: Rebuild FTS5 with improved tokenization for code identifiers
+    static Migration upgradeFTS5Tokenization();
 };
 
 /**

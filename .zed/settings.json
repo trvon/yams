@@ -1,16 +1,7 @@
-// Folder-specific settings
-//
-// For a full list of overridable settings, and general information on folder-specific settings,
-// see the documentation: https://zed.dev/docs/configuring-zed#settings-files
 {
-  "cmake.useCMakePresets": "always",
-  "cmake.configureOnOpen": true,
-  "cmake.configurePreset": "yams-debug",
-  "cmake.buildPreset": "build-yams-debug",
-  "cmake.testPreset": "test-yams-debug",
-  "cmake.configureInitCache": [],
-  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
-  "cmake.buildEnvironment": {
-    "CTEST_OUTPUT_ON_FAILURE": "1"
+  "languages": {
+    "CMake": {
+      "format_on_save": "off"
+    }
   }
 }

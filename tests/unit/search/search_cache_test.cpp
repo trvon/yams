@@ -20,23 +20,27 @@ protected:
         cache_ = std::make_unique<SearchCache>(config_);
     }
 
-    SearchResponse createTestResponse(size_t numResults) {
-        SearchResponse response;
-        response.totalResults = numResults;
-        response.queryTime = 10ms;
+    SearchResults createTestResponse(size_t numResults) {
+        SearchResults results;
+        SearchStatistics stats;
+        stats.totalResults = numResults;
+        stats.returnedResults = numResults;
+        stats.queryTime = 10ms;
+        stats.totalTime = 10ms;
+        results.setStatistics(stats);
 
         for (size_t i = 0; i < numResults; ++i) {
             SearchResultItem item;
-            item.documentId = i;
+            item.documentId = static_cast<yams::DocumentId>(i);
             item.title = "Document " + std::to_string(i);
-            item.snippet = "This is a test snippet for document " + std::to_string(i);
+            item.contentPreview = "This is a test snippet for document " + std::to_string(i);
             item.path = "/test/doc" + std::to_string(i) + ".txt";
-            item.score = 1.0f - (0.1f * i);
+            item.relevanceScore = 1.0f - (0.1f * static_cast<float>(i));
 
-            response.results.push_back(item);
+            results.addItem(std::move(item));
         }
 
-        return response;
+        return results;
     }
 
     SearchCacheConfig config_;
@@ -53,8 +57,8 @@ TEST_F(SearchCacheTest, PutAndGet) {
 
     auto cached = cache_->get(key);
     ASSERT_TRUE(cached.has_value());
-    EXPECT_EQ(cached->totalResults, 5);
-    EXPECT_EQ(cached->results.size(), 5);
+    EXPECT_EQ(cached->getStatistics().totalResults, 5u);
+    EXPECT_EQ(cached->getItems().size(), 5u);
 }
 
 TEST_F(SearchCacheTest, GetNonExistent) {
@@ -233,8 +237,8 @@ TEST_F(SearchCacheTest, HitMissStatistics) {
 
     auto stats = cache_->getStats();
 
-    EXPECT_EQ(stats.hits.load(), 2);
-    EXPECT_EQ(stats.misses.load(), 3);
+    EXPECT_EQ(stats.hits.load(), 2u);
+    EXPECT_EQ(stats.misses.load(), 3u);
     EXPECT_NEAR(stats.hitRate(), 0.4, 0.01);
 }
 
@@ -250,9 +254,9 @@ TEST_F(SearchCacheTest, EvictionStatistics) {
 
     auto stats = cache_->getStats();
 
-    EXPECT_EQ(stats.evictions.load(), 1);
-    EXPECT_EQ(stats.insertions.load(), 3);
-    EXPECT_EQ(stats.currentSize.load(), 2);
+    EXPECT_EQ(stats.evictions.load(), 1u);
+    EXPECT_EQ(stats.insertions.load(), 3u);
+    EXPECT_EQ(stats.currentSize.load(), 2u);
 }
 
 TEST_F(SearchCacheTest, MemoryUsageTracking) {
@@ -279,14 +283,14 @@ TEST_F(SearchCacheTest, ResetStatistics) {
     cache_->get(CacheKey::fromQuery("missing", nullptr, 0, 10));
 
     auto stats = cache_->getStats();
-    EXPECT_GT(stats.hits.load(), 0);
-    EXPECT_GT(stats.misses.load(), 0);
+    EXPECT_GT(stats.hits.load(), 0u);
+    EXPECT_GT(stats.misses.load(), 0u);
 
     cache_->resetStats();
 
     stats = cache_->getStats();
-    EXPECT_EQ(stats.hits.load(), 0);
-    EXPECT_EQ(stats.misses.load(), 0);
+    EXPECT_EQ(stats.hits.load(), 0u);
+    EXPECT_EQ(stats.misses.load(), 0u);
 }
 
 // ===== Thread Safety Tests =====
@@ -298,7 +302,7 @@ TEST_F(SearchCacheTest, ConcurrentAccess) {
     std::vector<std::thread> threads;
 
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, t, operationsPerThread]() {
+        threads.emplace_back([this, t]() {
             for (int i = 0; i < operationsPerThread; ++i) {
                 auto key = CacheKey::fromQuery(
                     "thread" + std::to_string(t) + "_op" + std::to_string(i), nullptr, 0, 10);
@@ -341,8 +345,9 @@ TEST_F(SearchCacheTest, CacheKeyEquality) {
 
 TEST_F(SearchCacheTest, CacheKeyWithFilters) {
     SearchFilters filters;
-    filters.dateFilter = DateRangeFilter();
-    filters.dateFilter->from = std::chrono::system_clock::now();
+    DateRangeFilter drf;
+    drf.from = std::chrono::system_clock::now();
+    filters.addDateRangeFilter(drf);
 
     auto key1 = CacheKey::fromQuery("test", &filters, 0, 10);
     auto key2 = CacheKey::fromQuery("test", nullptr, 0, 10);
@@ -361,9 +366,9 @@ TEST_F(SearchCacheTest, CacheKeyPatternMatching) {
 // ===== Memory Limit Tests =====
 
 TEST_F(SearchCacheTest, MemoryLimitEnforcement) {
-    // Set very small memory limit
-    config_.maxMemoryMB = 0.001; // 1KB
-    config_.maxEntries = 1000;   // High entry limit
+    // Set small memory limit (1 MB) to trigger evictions deterministically
+    config_.maxMemoryMB = 1;   // ~1MB
+    config_.maxEntries = 1000; // High entry limit
     cache_ = std::make_unique<SearchCache>(config_);
 
     // Add large responses
@@ -373,7 +378,7 @@ TEST_F(SearchCacheTest, MemoryLimitEnforcement) {
         cache_->put(key, response);
 
         // Check that memory limit is respected
-        EXPECT_LE(cache_->memoryUsage(), 1024); // 1KB
+        EXPECT_LE(cache_->memoryUsage(), 1024 * 1024); // <= 1MB
     }
 }
 
@@ -385,7 +390,7 @@ TEST_F(SearchCacheTest, CacheWarming) {
     cache_ = std::make_unique<SearchCache>(config_);
 
     int executorCalls = 0;
-    auto executor = [&executorCalls, this](const std::string& query) {
+    auto executor = [&executorCalls, this]([[maybe_unused]] const std::string& query) {
         executorCalls++;
         return createTestResponse(5);
     };
@@ -443,7 +448,7 @@ TEST_F(SearchCacheTest, SaveAndLoadCache) {
 
     // Save to disk
     auto saveResult = cache_->saveToDisk("/tmp/test_cache.bin");
-    ASSERT_TRUE(saveResult.isSuccess());
+    ASSERT_TRUE(saveResult.has_value());
 
     // Clear cache
     cache_->clear();
@@ -451,7 +456,7 @@ TEST_F(SearchCacheTest, SaveAndLoadCache) {
 
     // Load from disk
     auto loadResult = cache_->loadFromDisk("/tmp/test_cache.bin");
-    ASSERT_TRUE(loadResult.isSuccess());
+    ASSERT_TRUE(loadResult.has_value());
 
     // Check that entries are restored
     EXPECT_EQ(cache_->size(), 5);

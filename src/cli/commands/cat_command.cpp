@@ -3,7 +3,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
+#include <vector>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/extraction/html_text_extractor.h>
@@ -11,6 +14,8 @@
 #include <yams/profiling.h>
 
 namespace yams::cli {
+
+using yams::app::services::utils::normalizeLookupPath;
 
 class CatCommand : public ICommand {
 public:
@@ -27,6 +32,9 @@ public:
         auto* group = cmd->add_option_group("retrieval_method");
         group->add_option("hash", hash_, "Hash of the document to display");
         group->add_option("--name", name_, "Name of the document to display");
+        auto* positional =
+            group->add_option("target", target_, "Document hash or path (positional argument)");
+        positional->type_name("HASH|PATH");
         group->require_option(1);
         // Disambiguation flags: select newest/oldest when multiple matches exist
         cmd->add_flag(
@@ -64,6 +72,14 @@ public:
                 return Error{ErrorCode::NotInitialized, "Content store not initialized"};
             }
 
+            if (hash_.empty() && name_.empty() && !target_.empty()) {
+                if (isValidHashPrefix(target_)) {
+                    hash_ = target_;
+                } else {
+                    name_ = target_;
+                }
+            }
+
             // Resolve the hash to display
             std::string hashToDisplay;
 
@@ -81,29 +97,56 @@ public:
                 }
             } else if (!name_.empty()) {
                 YAMS_ZONE_SCOPED_N("CatCommand::nameResolution");
-                // Name-based display
-                auto resolveResult = resolveNameToHash(name_);
-                if (!resolveResult) {
-                    // If document not found in YAMS, check if it's a local file
-                    if (resolveResult.error().code == ErrorCode::NotFound &&
-                        std::filesystem::exists(name_)) {
-                        // Fall back to reading local file
-                        std::ifstream file(name_, std::ios::binary);
+                auto normalized = normalizeLookupPath(name_);
+                std::vector<std::string> lookupCandidates;
+                lookupCandidates.reserve(2);
+                if (normalized.changed)
+                    lookupCandidates.push_back(normalized.normalized);
+                lookupCandidates.push_back(name_);
+
+                std::optional<Error> lastNotFound;
+                for (const auto& candidate : lookupCandidates) {
+                    auto resolveResult = resolveNameToHash(candidate);
+                    if (resolveResult) {
+                        hashToDisplay = resolveResult.value();
+                        break;
+                    }
+
+                    auto err = resolveResult.error();
+                    if (err.code == ErrorCode::NotFound) {
+                        lastNotFound = err;
+                        continue;
+                    }
+                    return err;
+                }
+
+                if (hashToDisplay.empty()) {
+                    bool displayedLocal = false;
+                    for (const auto& candidate : lookupCandidates) {
+                        if (candidate.empty())
+                            continue;
+                        std::error_code fsec;
+                        if (!std::filesystem::exists(candidate, fsec))
+                            continue;
+
+                        std::ifstream file(candidate, std::ios::binary);
                         if (!file) {
                             return Error{ErrorCode::FileNotFound,
-                                         "Cannot read local file: " + name_};
+                                         "Cannot read local file: " + candidate};
                         }
-
-                        // Output file contents directly to stdout
                         std::cout << file.rdbuf();
-
-                        // Successfully displayed local file
-                        return Result<void>();
+                        displayedLocal = true;
+                        break;
                     }
-                    // Not a local file either, return original error
-                    return resolveResult.error();
+
+                    if (displayedLocal)
+                        return Result<void>();
+
+                    if (lastNotFound.has_value())
+                        return lastNotFound.value();
+
+                    return Error{ErrorCode::NotFound, "Document not found: " + name_};
                 }
-                hashToDisplay = resolveResult.value();
             } else {
                 return Error{ErrorCode::InvalidArgument, "No document specified"};
             }
@@ -554,6 +597,7 @@ private:
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
+    std::string target_;
     bool raw_ = false;       // Flag to output raw content without text extraction
     bool getLatest_ = false; // When ambiguous, select newest
     bool getOldest_ = false; // When ambiguous, select oldest

@@ -180,8 +180,14 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
                                     "Metadata repository not ready. Please try again shortly."};
         }
         if (!state_->readiness.contentStoreReady.load()) {
-            co_return ErrorResponse{ErrorCode::InvalidState,
-                                    "Content store not ready. Please try again shortly."};
+            std::string error_detail = "Content store not available. Please try again shortly.";
+            if (serviceManager_) {
+                std::string cs_error = serviceManager_->getContentStoreError();
+                if (!cs_error.empty()) {
+                    error_detail += " Details: " + cs_error;
+                }
+            }
+            co_return ErrorResponse{ErrorCode::InvalidState, error_detail};
         }
     }
 

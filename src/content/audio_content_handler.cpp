@@ -57,7 +57,7 @@ struct ID3v2Header {
 };
 
 // Extract ID3v1 tag from file end
-std::optional<std::unordered_map<std::string, std::string>>
+[[maybe_unused]] std::optional<std::unordered_map<std::string, std::string>>
 extractID3v1(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file)
@@ -99,7 +99,7 @@ extractID3v1(const std::filesystem::path& path) {
 }
 
 // Basic WAV header analysis for duration/properties
-std::optional<AudioMetadata> analyzeWAVHeader(const std::filesystem::path& path) {
+[[maybe_unused]] std::optional<AudioMetadata> analyzeWAVHeader(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file)
         return std::nullopt;
@@ -152,7 +152,8 @@ std::optional<AudioMetadata> analyzeWAVHeader(const std::filesystem::path& path)
 }
 
 // Command-line fallback using system tools
-std::optional<AudioMetadata> extractUsingFFProbe(const std::filesystem::path& path) {
+[[maybe_unused]] std::optional<AudioMetadata>
+extractUsingFFProbe(const std::filesystem::path& path) {
 #ifdef YAMS_HAVE_FFPROBE
     std::string cmd = yams::format("ffprobe -v quiet -show_format -show_streams -of csv=p=0 \"{}\"",
                                    path.string());

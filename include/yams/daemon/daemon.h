@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
 
 #include <atomic>
@@ -55,6 +56,11 @@ struct DaemonConfig {
     // Streaming keepalive configuration
     std::chrono::milliseconds heartbeatInterval{500}; // default 500ms
     std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
+
+    // Adaptive tuning configuration (no envs)
+    TuningConfig tuning{};
+    // Path to loaded config file for reloads
+    std::filesystem::path configFilePath;
 
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
     struct DownloadPolicy {
@@ -124,6 +130,7 @@ public:
     // Threading and state
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};
+    std::atomic<bool> reloadRequested_{false};
     yams::compat::jthread daemonThread_;
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
@@ -140,6 +147,8 @@ public:
     // On-demand plugin autoload bridge
     Result<size_t> autoloadPluginsNow();
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
+    void requestReload() { reloadRequested_.store(true, std::memory_order_relaxed); }
+    void reloadTuningConfig();
 };
 
 } // namespace yams::daemon

@@ -119,8 +119,8 @@ public:
 
             result.success = true;
             result.message =
-                fmt::format("Compaction completed: removed {} vectors, merged {} segments",
-                            result.vectors_removed, result.segments_merged);
+                yams::fmt_format("Compaction completed: removed {} vectors, merged {} segments",
+                                 result.vectors_removed, result.segments_merged);
 
             // Record in history
             optimization_history_.push_back(result);
@@ -135,7 +135,7 @@ public:
 
         } catch (const std::exception& e) {
             result.success = false;
-            result.message = fmt::format("Compaction failed: {}", e.what());
+            result.message = yams::fmt_format("Compaction failed: {}", e.what());
         }
 
         is_optimizing_ = false;
@@ -218,7 +218,7 @@ public:
 
         } catch (const std::exception& e) {
             result.success = false;
-            result.message = fmt::format("Rebalancing failed: {}", e.what());
+            result.message = yams::fmt_format("Rebalancing failed: {}", e.what());
         }
 
         is_optimizing_ = false;
@@ -297,7 +297,7 @@ public:
 
             result.success = true;
             result.message =
-                fmt::format("Rebuild completed: {} vectors reindexed", all_vectors.size());
+                yams::fmt_format("Rebuild completed: {} vectors reindexed", all_vectors.size());
             result.vectors_after = all_vectors.size();
 
             // Record in history
@@ -310,7 +310,7 @@ public:
 
         } catch (const std::exception& e) {
             result.success = false;
-            result.message = fmt::format("Rebuild failed: {}", e.what());
+            result.message = yams::fmt_format("Rebuild failed: {}", e.what());
         }
 
         is_optimizing_ = false;
@@ -447,7 +447,7 @@ public:
 
     std::string getOptimizationStatus() const {
         if (is_optimizing_) {
-            return fmt::format("Optimizing... {:.1f}% complete", optimization_progress_ * 100);
+            return yams::fmt_format("Optimizing... {:.1f}% complete", optimization_progress_ * 100);
         } else if (isOptimizationScheduled()) {
             return "Optimization scheduled";
         } else {

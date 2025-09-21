@@ -25,14 +25,23 @@ Use the preset (never build inside source). Artifacts + CTest run from inner dir
 conan profile detect --force
 ```
 
-## 4. Quick Loop (Conan)
+## 4. Quick Loop (Conan + Meson)
 ```bash
-# Debug
-conan install . -of build/yams-debug -s build_type=Debug -b missing \
-  -o yams/*:enable_onnx=True -o yams/*:use_conan_onnx=True
-cmake --preset yams-debug
-cmake --build --preset yams-debug -j
-ctest --preset yams-debug --output-on-failure
+# Debug dependencies
+conan install . -of build/debug -s build_type=Debug -b missing
+
+# Initial configure
+meson setup build/debug \
+  --prefix /usr/local \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
+
+# Reconfigure after option changes (idempotent)
+meson setup build/debug --reconfigure \
+  --prefix /usr/local \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
+
+meson compile -C build/debug
+meson test -C build/debug
 ```
 
 Release variant: swap preset/output folder + `-s build_type=Release`.
@@ -104,6 +113,10 @@ Disable clang-tidy (single configure):
 ```bash
 cmake --preset yams-debug -D CMAKE_CXX_CLANG_TIDY= -D CMAKE_C_CLANG_TIDY=
 ```
+
+## 9. Meson Notes
+
+Meson is now the primary build system. Conan generates `build/<cfg>/build-<cfg>/conan/conan_meson_native.ini` which is passed via `--native-file`. Use `--prefix /usr/local` so `meson install` places artifacts in a standard path and leverage `--reconfigure` for subsequent configuration changes (it is safe to run repeatedly).
 ````markdown
 docker run --rm -it ghcr.io/trvon/yams:latest --version
 docker run --rm -it -v $HOME/yams-data:/var/lib/yams ghcr.io/trvon/yams:latest yams init --non-interactive

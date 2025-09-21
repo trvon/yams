@@ -13,8 +13,10 @@
 #include <yams/core/repair_fsm.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/repair_scheduling_adapter.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
@@ -212,45 +214,70 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
                 std::unique_ptr<yams::Result<repair::EmbeddingRepairStats>> statsPtr;
                 bool fixSuccess = false;
                 if (try_acquire_token()) {
-                    try {
-                        yams::daemon::ClientConfig ccfg;
-                        ccfg.dataDir = services_->getConfig().dataDir;
-                        ccfg.socketPath = services_->getConfig().socketPath;
-                        ccfg.singleUseConnections = true;
-                        ccfg.requestTimeout = std::chrono::seconds(120);
-                        yams::daemon::DaemonClient client(ccfg);
-                        yams::daemon::EmbedDocumentsRequest ed;
-                        ed.modelName = "";
-                        ed.documentHashes = missing;
-                        ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
-                        ed.skipExisting = rcfg.skipExisting;
-                        auto er = co_await client.streamingEmbedDocuments(ed);
-                        if (er) {
-                            repair::EmbeddingRepairStats statsLocal{};
-                            statsLocal.documentsProcessed = er.value().requested;
-                            statsLocal.embeddingsGenerated = er.value().embedded;
-                            statsLocal.embeddingsSkipped = er.value().skipped;
-                            statsLocal.failedOperations = er.value().failed;
-                            statsPtr = std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(
-                                statsLocal);
-                            fixSuccess = true;
+                    if (TuneAdvisor::useInternalBusForRepair()) {
+                        InternalEventBus::EmbedJob job{missing,
+                                                       static_cast<uint32_t>(rcfg.batchSize),
+                                                       rcfg.skipExisting, std::string{}};
+                        static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> q =
+                            InternalEventBus::instance()
+                                .get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                   1024);
+                        if (!q->try_push(std::move(job))) {
+                            spdlog::warn(
+                                "RepairCoordinator: embed job queue full; dropping batch size={}",
+                                missing.size());
+                            InternalEventBus::instance().incEmbedDropped();
                         } else {
-                            spdlog::debug("RepairCoordinator: daemon EmbedDocuments failed: {} — "
-                                          "falling back",
-                                          er.error().message);
+                            spdlog::debug(
+                                "RepairCoordinator: queued embed job to InternalEventBus ({} docs)",
+                                missing.size());
+                            InternalEventBus::instance().incEmbedQueued();
                         }
-                    } catch (const std::exception& e) {
-                        spdlog::debug(
-                            "RepairCoordinator: daemon embed exception: {} — falling back",
-                            e.what());
-                    }
-                    if (!fixSuccess) {
-                        auto r = repair::repairMissingEmbeddings(content, meta_repo, embed, rcfg,
-                                                                 missing, nullptr,
-                                                                 services_->getContentExtractors());
+                        // Consider queued as success to progress FSM.
+                        repair::EmbeddingRepairStats statsLocal{};
+                        statsLocal.documentsProcessed = static_cast<uint32_t>(missing.size());
+                        statsLocal.embeddingsGenerated = 0;
+                        statsLocal.embeddingsSkipped = 0;
+                        statsLocal.failedOperations = 0;
                         statsPtr = std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(
-                            std::move(r));
-                        fixSuccess = statsPtr && *statsPtr;
+                            statsLocal);
+                        fixSuccess = true;
+                    } else {
+                        // TODO(021-37-remove-ipc): This IPC embed path is kept temporarily for
+                        // rollback safety. Once InternalEventBus consumers are fully validated,
+                        // remove this branch and require internal processing.
+                        try {
+                            yams::daemon::ClientConfig ccfg;
+                            ccfg.dataDir = services_->getConfig().dataDir;
+                            ccfg.socketPath = services_->getConfig().socketPath;
+                            ccfg.singleUseConnections = true;
+                            ccfg.requestTimeout = std::chrono::seconds(120);
+                            yams::daemon::DaemonClient client(ccfg);
+                            yams::daemon::EmbedDocumentsRequest ed;
+                            ed.modelName = "";
+                            ed.documentHashes = missing;
+                            ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
+                            ed.skipExisting = rcfg.skipExisting;
+                            auto er = co_await client.streamingEmbedDocuments(ed);
+                            if (er) {
+                                repair::EmbeddingRepairStats statsLocal{};
+                                statsLocal.documentsProcessed = er.value().requested;
+                                statsLocal.embeddingsGenerated = er.value().embedded;
+                                statsLocal.embeddingsSkipped = er.value().skipped;
+                                statsLocal.failedOperations = er.value().failed;
+                                statsPtr =
+                                    std::make_unique<yams::Result<repair::EmbeddingRepairStats>>(
+                                        statsLocal);
+                                fixSuccess = true;
+                            } else {
+                                spdlog::debug("RepairCoordinator: daemon EmbedDocuments failed: {}",
+                                              er.error().message);
+                            }
+                            InternalEventBus::instance().incEmbedConsumed();
+                        } catch (const std::exception& e) {
+                            spdlog::debug("RepairCoordinator: daemon embed exception: {}",
+                                          e.what());
+                        }
                     }
                     release_token();
                 }

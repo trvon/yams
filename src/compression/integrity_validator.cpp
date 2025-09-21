@@ -163,8 +163,6 @@ public:
             return validationResult;
 
         } catch (const std::exception& ex) {
-            auto end = std::chrono::steady_clock::now();
-
             updateFailureStats();
 
             return ValidationResult::failure(type,
@@ -230,8 +228,6 @@ public:
             return result;
 
         } catch (const std::exception& ex) {
-            auto end = std::chrono::steady_clock::now();
-
             updateFailureStats();
 
             return ValidationResult::failure(
@@ -297,8 +293,6 @@ public:
             return result;
 
         } catch (const std::exception& ex) {
-            auto end = std::chrono::steady_clock::now();
-
             updateFailureStats();
 
             return ValidationResult::failure(
@@ -427,9 +421,6 @@ public:
             return result;
 
         } catch (const std::exception& ex) {
-            auto end = std::chrono::steady_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
             return ValidationResult::failure(ValidationType::Deep,
                                              fmt::format("Deep analysis exception: {}", ex.what()));
         }

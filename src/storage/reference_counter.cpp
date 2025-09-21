@@ -276,8 +276,126 @@ Result<void> ReferenceCounter::initializeDatabase() {
                 LEFT JOIN ref_transaction_ops o ON t.transaction_id = o.transaction_id
                 GROUP BY t.transaction_id
                 ORDER BY t.start_timestamp DESC;
+
+                -- Composite index to accelerate GC/list operations
+                CREATE INDEX IF NOT EXISTS idx_unref_order ON block_references(ref_count, last_accessed);
+
+                -- Triggers to maintain materialized counters in ref_statistics
+                CREATE TRIGGER IF NOT EXISTS trg_blocks_after_insert
+                AFTER INSERT ON block_references
+                BEGIN
+                    UPDATE ref_statistics SET stat_value = stat_value + 1, updated_at=strftime('%s','now')
+                      WHERE stat_name='total_blocks';
+                    UPDATE ref_statistics SET stat_value = stat_value + NEW.block_size, updated_at=strftime('%s','now')
+                      WHERE stat_name='total_bytes';
+                    UPDATE ref_statistics SET stat_value = stat_value + NEW.ref_count, updated_at=strftime('%s','now')
+                      WHERE stat_name='total_references';
+                    UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN NEW.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_blocks';
+                    UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN NEW.ref_count=0 THEN NEW.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_bytes';
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_blocks_after_update_ref
+                AFTER UPDATE OF ref_count ON block_references
+                BEGIN
+                    -- Adjust total references by the delta
+                    UPDATE ref_statistics SET stat_value = stat_value + (NEW.ref_count - OLD.ref_count), updated_at=strftime('%s','now')
+                      WHERE stat_name='total_references';
+                    -- Transition 0 -> >0 (leaving unreferenced)
+                    UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 AND NEW.ref_count>0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_blocks';
+                    UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 AND NEW.ref_count>0 THEN OLD.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_bytes';
+                    -- Transition >0 -> 0 (becoming unreferenced)
+                    UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN OLD.ref_count>0 AND NEW.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_blocks';
+                    UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN OLD.ref_count>0 AND NEW.ref_count=0 THEN NEW.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_bytes';
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_blocks_after_delete
+                AFTER DELETE ON block_references
+                BEGIN
+                    UPDATE ref_statistics SET stat_value = stat_value - 1, updated_at=strftime('%s','now')
+                      WHERE stat_name='total_blocks';
+                    UPDATE ref_statistics SET stat_value = stat_value - OLD.block_size, updated_at=strftime('%s','now')
+                      WHERE stat_name='total_bytes';
+                    UPDATE ref_statistics SET stat_value = stat_value - OLD.ref_count, updated_at=strftime('%s','now')
+                      WHERE stat_name='total_references';
+                    UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_blocks';
+                    UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 THEN OLD.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                      WHERE stat_name='unreferenced_bytes';
+                END;
+
+                -- One-time backfill to initialize counters from existing data
+                INSERT OR REPLACE INTO ref_statistics(stat_name, stat_value, updated_at)
+                VALUES
+                  ('total_blocks', (SELECT COUNT(*) FROM block_references), strftime('%s','now')),
+                  ('total_references', (SELECT IFNULL(SUM(ref_count),0) FROM block_references), strftime('%s','now')),
+                  ('total_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references), strftime('%s','now')),
+                  ('unreferenced_blocks', (SELECT COUNT(*) FROM block_references WHERE ref_count=0), strftime('%s','now')),
+                  ('unreferenced_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references WHERE ref_count=0), strftime('%s','now'));
             )");
         }
+
+        // Ensure stats materialization objects exist even when schema was loaded from file
+        pImpl->db->execute(R"(
+            CREATE INDEX IF NOT EXISTS idx_unref_order ON block_references(ref_count, last_accessed);
+            CREATE TRIGGER IF NOT EXISTS trg_blocks_after_insert
+            AFTER INSERT ON block_references
+            BEGIN
+                UPDATE ref_statistics SET stat_value = stat_value + 1, updated_at=strftime('%s','now')
+                  WHERE stat_name='total_blocks';
+                UPDATE ref_statistics SET stat_value = stat_value + NEW.block_size, updated_at=strftime('%s','now')
+                  WHERE stat_name='total_bytes';
+                UPDATE ref_statistics SET stat_value = stat_value + NEW.ref_count, updated_at=strftime('%s','now')
+                  WHERE stat_name='total_references';
+                UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN NEW.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_blocks';
+                UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN NEW.ref_count=0 THEN NEW.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_bytes';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_blocks_after_update_ref
+            AFTER UPDATE OF ref_count ON block_references
+            BEGIN
+                UPDATE ref_statistics SET stat_value = stat_value + (NEW.ref_count - OLD.ref_count), updated_at=strftime('%s','now')
+                  WHERE stat_name='total_references';
+                UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 AND NEW.ref_count>0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_blocks';
+                UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 AND NEW.ref_count>0 THEN OLD.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_bytes';
+                UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN OLD.ref_count>0 AND NEW.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_blocks';
+                UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN OLD.ref_count>0 AND NEW.ref_count=0 THEN NEW.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_bytes';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_blocks_after_delete
+            AFTER DELETE ON block_references
+            BEGIN
+                UPDATE ref_statistics SET stat_value = stat_value - 1, updated_at=strftime('%s','now')
+                  WHERE stat_name='total_blocks';
+                UPDATE ref_statistics SET stat_value = stat_value - OLD.block_size, updated_at=strftime('%s','now')
+                  WHERE stat_name='total_bytes';
+                UPDATE ref_statistics SET stat_value = stat_value - OLD.ref_count, updated_at=strftime('%s','now')
+                  WHERE stat_name='total_references';
+                UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_blocks';
+                UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 THEN OLD.block_size ELSE 0 END), updated_at=strftime('%s','now')
+                  WHERE stat_name='unreferenced_bytes';
+            END;
+
+            INSERT OR REPLACE INTO ref_statistics(stat_name, stat_value, updated_at)
+            VALUES
+              ('total_blocks', (SELECT COUNT(*) FROM block_references), strftime('%s','now')),
+              ('total_references', (SELECT IFNULL(SUM(ref_count),0) FROM block_references), strftime('%s','now')),
+              ('total_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references), strftime('%s','now')),
+              ('unreferenced_blocks', (SELECT COUNT(*) FROM block_references WHERE ref_count=0), strftime('%s','now')),
+              ('unreferenced_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references WHERE ref_count=0), strftime('%s','now'));
+        )");
 
         // Create statement cache
         pImpl->stmtCache = std::make_unique<StatementCache>(*pImpl->db);
@@ -363,7 +481,8 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
 // Get reference count
 Result<uint64_t> ReferenceCounter::getRefCount(std::string_view blockHash) const {
     try {
-        std::shared_lock lock(pImpl->dbMutex);
+        // Database handle opened with SQLITE_OPEN_NOMUTEX; ensure exclusive access per connection
+        std::unique_lock lock(pImpl->dbMutex);
 
         auto& stmt = pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT, "");
         stmt.bind(1, blockHash);
@@ -391,19 +510,21 @@ Result<bool> ReferenceCounter::hasReferences(std::string_view blockHash) const {
 // Get statistics
 Result<RefCountStats> ReferenceCounter::getStats() const {
     try {
-        std::shared_lock lock(pImpl->dbMutex);
+        // Ensure exclusive connection use to avoid cross-thread stepping on NOMUTEX connections
+        std::unique_lock lock(pImpl->dbMutex);
 
         RefCountStats stats{};
 
-        // Use the block_statistics view
+        // Read materialized counters from ref_statistics (single-row result via scalar subselects)
         auto stmt = pImpl->db->prepare(R"(
-            SELECT 
-                total_blocks,
-                total_references,
-                total_bytes,
-                unreferenced_blocks,
-                unreferenced_bytes
-            FROM block_statistics
+            SELECT
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='total_blocks'),
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='total_references'),
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='total_bytes'),
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_blocks'),
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_bytes'),
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_completed'),
+              (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_rolled_back')
         )");
 
         if (stmt.step()) {
@@ -412,18 +533,8 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
             stats.totalBytes = static_cast<uint64_t>(stmt.getInt64(2));
             stats.unreferencedBlocks = static_cast<uint64_t>(stmt.getInt64(3));
             stats.unreferencedBytes = static_cast<uint64_t>(stmt.getInt64(4));
-        }
-
-        // Get transaction stats
-        auto txnStmt = pImpl->db->prepare(R"(
-            SELECT 
-                (SELECT stat_value FROM ref_statistics WHERE stat_name = 'transactions_completed'),
-                (SELECT stat_value FROM ref_statistics WHERE stat_name = 'transactions_rolled_back')
-        )");
-
-        if (txnStmt.step()) {
-            stats.transactions = static_cast<uint64_t>(txnStmt.getInt64(0));
-            stats.rollbacks = static_cast<uint64_t>(txnStmt.getInt64(1));
+            stats.transactions = static_cast<uint64_t>(stmt.getInt64(5));
+            stats.rollbacks = static_cast<uint64_t>(stmt.getInt64(6));
         }
 
         return stats;
@@ -437,7 +548,8 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
 Result<std::vector<std::string>>
 ReferenceCounter::getUnreferencedBlocks(size_t limit, std::chrono::seconds minAge) const {
     try {
-        std::shared_lock lock(pImpl->dbMutex);
+        // Ensure exclusive access to the underlying connection (NOMUTEX mode)
+        std::unique_lock lock(pImpl->dbMutex);
 
         std::vector<std::string> blocks;
         blocks.reserve(limit);
@@ -738,7 +850,8 @@ Result<void> ReferenceCounter::analyze() {
 // Backup and restore
 Result<void> ReferenceCounter::backup(const std::filesystem::path& destPath) {
     try {
-        std::shared_lock lock(pImpl->dbMutex);
+        // Integrity check must be exclusive on this connection
+        std::unique_lock lock(pImpl->dbMutex);
         pImpl->db->backup(destPath);
         spdlog::debug("Database backed up to {}", destPath.string());
         return {};
@@ -771,7 +884,8 @@ Result<void> ReferenceCounter::restore(const std::filesystem::path& srcPath) {
 // Verify integrity
 Result<bool> ReferenceCounter::verifyIntegrity() const {
     try {
-        std::shared_lock lock(pImpl->dbMutex);
+        // Exclusive lock: underlying SQLite handle is NOMUTEX
+        std::unique_lock lock(pImpl->dbMutex);
         return pImpl->db->checkIntegrity();
     } catch (const std::exception& e) {
         spdlog::error("Failed to verify database integrity: {}", e.what());

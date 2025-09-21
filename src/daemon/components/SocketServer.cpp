@@ -30,8 +30,10 @@ void set_current_thread_name(const std::string& name) {
 #include <spdlog/spdlog.h>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/write.hpp>
@@ -69,32 +71,35 @@ Result<void> SocketServer::start() {
     try {
         spdlog::info("Starting socket server on {}", config_.socketPath.string());
 
-        // Ensure we have at least one IO worker thread; a zero value would prevent
-        // the io_context from ever running the accept loop and handlers, leading to
-        // client connections that time out on reads.
         if (config_.workerThreads == 0) {
             config_.workerThreads = 1;
             spdlog::warn("SocketServer: workerThreads was 0; coercing to 1");
         }
 
-        // Remove existing socket file
+        // Normalize to an absolute path to avoid surprises after daemon chdir("/")
+        std::filesystem::path sockPath = config_.socketPath;
+        if (!sockPath.is_absolute()) {
+            try {
+                sockPath = std::filesystem::absolute(sockPath);
+            } catch (...) {
+                // fallback: keep original
+            }
+        }
+
         std::error_code ec;
-        std::filesystem::remove(config_.socketPath, ec);
+        std::filesystem::remove(sockPath, ec);
         if (ec && ec != std::errc::no_such_file_or_directory) {
             spdlog::warn("Failed to remove existing socket: {}", ec.message());
         }
 
-        // Ensure parent directory exists
-        auto parent = config_.socketPath.parent_path();
+        auto parent = sockPath.parent_path();
         if (!parent.empty() && !std::filesystem::exists(parent)) {
             std::filesystem::create_directories(parent);
         }
 
-        // Create acceptor and bind
 #ifndef _WIN32
-        // Guard against AF_UNIX sun_path length limit (~108 bytes on Linux)
         {
-            std::string sp = config_.socketPath.string();
+            std::string sp = sockPath.string();
             if (sp.size() >= sizeof(sockaddr_un::sun_path)) {
                 running_ = false;
                 return Error{
@@ -104,27 +109,23 @@ Result<void> SocketServer::start() {
             }
         }
 #endif
-        // Ensure io_context is fresh and kept alive while we spin up threads
         io_context_.restart();
         work_guard_.emplace(io_context_.get_executor());
 
         acceptor_ = std::make_unique<local::acceptor>(io_context_);
-        local::endpoint endpoint(config_.socketPath.string());
+        local::endpoint endpoint(sockPath.string());
         acceptor_->open(endpoint.protocol());
         acceptor_->bind(endpoint);
         acceptor_->listen(boost::asio::socket_base::max_listen_connections);
 
-        // Set socket permissions
-        std::filesystem::permissions(config_.socketPath, std::filesystem::perms::owner_all |
-                                                             std::filesystem::perms::group_read |
-                                                             std::filesystem::perms::group_write);
+        std::filesystem::permissions(sockPath, std::filesystem::perms::owner_all |
+                                                   std::filesystem::perms::group_read |
+                                                   std::filesystem::perms::group_write);
 
-        actualSocketPath_ = config_.socketPath;
+        actualSocketPath_ = sockPath;
 
-        // Start accept loop before spawning worker threads to ensure pending work exists
         co_spawn(io_context_, accept_loop(), detached);
 
-        // Clamp worker thread count to centralized recommendation to avoid oversubscription
         try {
             auto rec = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
             if (rec > 0) {
@@ -134,7 +135,6 @@ Result<void> SocketServer::start() {
         } catch (...) {
         }
 
-        // Start worker threads (exit-aware)
         for (size_t i = 0; i < config_.workerThreads; ++i) {
             auto flag = std::make_shared<std::atomic<bool>>(false);
             IoWorker w{};
@@ -144,8 +144,6 @@ Result<void> SocketServer::start() {
                 try {
                     while (!stopping_.load(std::memory_order_relaxed) &&
                            !flag->load(std::memory_order_relaxed)) {
-                        // Use run_for to efficiently process events for a short duration
-                        // before re-checking the stop flag. This avoids busy-spinning.
                         io_context_.run_for(std::chrono::milliseconds(100));
                     }
                 } catch (const std::exception& e) {
@@ -158,10 +156,8 @@ Result<void> SocketServer::start() {
             }
         }
 
-        // Start IO reconciler thread (PoolManager-driven autoscaling for IPC IO)
         start_io_reconciler();
 
-        // Update state if available
         if (state_) {
             state_->readiness.ipcServerReady.store(true);
             try {
@@ -173,7 +169,7 @@ Result<void> SocketServer::start() {
             }
         }
 
-        spdlog::info("Socket server listening on {}", config_.socketPath.string());
+        spdlog::info("Socket server listening on {}", sockPath.string());
         return {};
 
     } catch (const std::exception& e) {
@@ -191,7 +187,6 @@ Result<void> SocketServer::stop() {
     spdlog::info("Stopping socket server");
     stopping_ = true;
 
-    // Close acceptor first to stop new connections
     if (acceptor_ && acceptor_->is_open()) {
         boost::system::error_code ec;
         acceptor_->close(ec);
@@ -200,7 +195,6 @@ Result<void> SocketServer::stop() {
         }
     }
 
-    // Stop IO reconciler and signal workers to exit
     stop_io_reconciler();
     {
         std::lock_guard<std::mutex> lk(workersMutex_);
@@ -209,10 +203,8 @@ Result<void> SocketServer::stop() {
                 w.exit->store(true, std::memory_order_relaxed);
         }
     }
-    // Stop io_context and release work guard so threads can exit on next loop turn
     io_context_.stop();
 
-    // Join all worker threads
     for (auto& w : workers_) {
         if (w.th.joinable()) {
             w.th.join();
@@ -221,12 +213,10 @@ Result<void> SocketServer::stop() {
     workers_.clear();
     work_guard_.reset();
 
-    // Update state
     if (state_) {
         state_->readiness.ipcServerReady.store(false);
     }
 
-    // Remove socket file
     if (!actualSocketPath_.empty()) {
         std::error_code ec;
         std::filesystem::remove(actualSocketPath_, ec);
@@ -244,11 +234,8 @@ void SocketServer::start_io_reconciler() {
     try {
         ioReconThread_ = yams::compat::jthread([this](yams::compat::stop_token st) {
             using namespace std::chrono_literals;
-            // Best-effort autoscaling loop
             while (!st.stop_requested() && running_.load(std::memory_order_relaxed)) {
                 try {
-                    // Desired size driven by PoolManager("ipc_io") if available; fallback to
-                    // current.
                     std::uint32_t desired = 0;
                     try {
                         desired =
@@ -257,7 +244,6 @@ void SocketServer::start_io_reconciler() {
                         desired = 0;
                     }
                     if (desired == 0) {
-                        // Initialize at least one IO worker if unconfigured
                         desired = static_cast<std::uint32_t>(
                             std::max<std::size_t>(1, config_.workerThreads));
                     }
@@ -267,7 +253,6 @@ void SocketServer::start_io_reconciler() {
                         current = workers_.size();
                     }
                     if (desired > current) {
-                        // Scale up: spawn additional workers
                         const std::size_t add = desired - current;
                         for (std::size_t i = 0; i < add; ++i) {
                             auto flag = std::make_shared<std::atomic<bool>>(false);
@@ -292,9 +277,7 @@ void SocketServer::start_io_reconciler() {
                                         timer.expires_after(std::chrono::milliseconds(poll_ms));
                                         timer.async_wait([](const boost::system::error_code&) {});
                                         io_context_.run_one();
-                                        boost::system::error_code ec;
-                                        (void)ec;
-                                        timer.cancel(ec);
+                                        timer.cancel();
                                     }
                                 } catch (const std::exception& e) {
                                     spdlog::error("Worker thread exception: {}", e.what());
@@ -304,7 +287,6 @@ void SocketServer::start_io_reconciler() {
                             workers_.emplace_back(std::move(w));
                         }
                     } else if (desired < current) {
-                        // Scale down: signal some workers to retire and join them
                         const std::size_t remove = current - desired;
                         for (std::size_t i = 0; i < remove; ++i) {
                             IoWorker victim;
@@ -317,8 +299,7 @@ void SocketServer::start_io_reconciler() {
                             }
                             if (victim.exit)
                                 victim.exit->store(true, std::memory_order_relaxed);
-                            // Poke the context to wake the thread
-                            io_context_.post([] {});
+                            boost::asio::post(io_context_, [] {});
                             if (victim.th.joinable())
                                 victim.th.join();
                         }
@@ -329,7 +310,6 @@ void SocketServer::start_io_reconciler() {
             }
         });
     } catch (...) {
-        // best-effort only
     }
 }
 
@@ -353,14 +333,12 @@ awaitable<void> SocketServer::accept_loop() {
         auto backoff_ms = config_.acceptBackoffMs;
 
         try {
-            // Backpressure: if worker queue or mux bytes exceed thresholds, delay accepts
             try {
                 uint32_t delay_ms = 0;
                 uint64_t maxWorkerQueue = 0;
                 uint64_t maxMuxBytes = TuneAdvisor::maxMuxBytes();
                 uint64_t maxActiveConn = TuneAdvisor::maxActiveConn();
 
-                // Derive auto defaults
                 if (maxWorkerQueue == 0 && dispatcher_) {
                     try {
                         if (auto sm = dispatcher_->getServiceManager()) {
@@ -390,8 +368,6 @@ awaitable<void> SocketServer::accept_loop() {
                 bool bp_conn = (maxActiveConn > 0 && activeConn > maxActiveConn);
 
                 if (bp_worker || bp_mux || bp_conn) {
-                    // Pre-accept backpressure: clamp to a very small delay to reduce ECONNREFUSED
-                    // and prefer post-accept handling in the request path.
                     uint32_t base = 5;
                     uint32_t extra = 0;
                     if (bp_worker)
@@ -414,11 +390,8 @@ awaitable<void> SocketServer::accept_loop() {
                     continue;
                 }
             } catch (...) {
-                // ignore backpressure calculation errors
             }
-            // Check connection limit
             if (activeConnections_.load() >= config_.maxConnections) {
-                // Brief, clamped delay when at capacity
                 if (state_) {
                     state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -435,12 +408,10 @@ awaitable<void> SocketServer::accept_loop() {
 
             spdlog::debug("New connection accepted, active: {}", current);
 
-            // Update metrics
             if (state_) {
                 state_->stats.activeConnections.store(current);
             }
 
-            // Handle connection in parallel
             co_spawn(acceptor_->get_executor(), handle_connection(std::move(socket)), detached);
 
         } catch (const boost::system::system_error& e) {
@@ -454,33 +425,26 @@ awaitable<void> SocketServer::accept_loop() {
             static int einval_streak = 0;
 #if defined(__APPLE__)
             if (e.code().value() == EINVAL) {
-                // On macOS, AF_UNIX accept can enter a bad state returning EINVAL repeatedly
-                // (e.g., after a crash/restart or kqueue race). Rebuild the acceptor after a few
-                // hits.
                 ++einval_streak;
                 spdlog::debug("Accept error (EINVAL): {} (streak={})", e.what(), einval_streak);
                 if (einval_streak >= 3) {
                     try {
-                        // Close and rebuild acceptor
                         boost::system::error_code ec;
                         if (acceptor_)
                             acceptor_->close(ec);
-                        // Remove any stale socket path
                         std::filesystem::remove(config_.socketPath, ec);
-                        // Recreate and listen again
                         acceptor_ = std::make_unique<local::acceptor>(io_context_);
                         local::endpoint endpoint(config_.socketPath.string());
                         acceptor_->open(endpoint.protocol());
                         acceptor_->bind(endpoint);
                         acceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                        // Mute noisy warnings after the first rebuild; allow opt-in via env
                         static std::atomic<bool> s_warned_once{false};
                         static const bool s_quiet = []() {
                             if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
                                 return *v != '\0' && std::string(v) != "0" &&
                                        strcasecmp(v, "false") != 0;
                             }
-                            return true; // default to quiet (debug) after first occurrence
+                            return true;
                         }();
                         if (!s_quiet && !s_warned_once.exchange(true)) {
                             spdlog::warn("Rebuilt IPC acceptor after repeated EINVAL on {}",
@@ -489,7 +453,6 @@ awaitable<void> SocketServer::accept_loop() {
                             spdlog::debug("Rebuilt IPC acceptor after repeated EINVAL on {}",
                                           config_.socketPath.string());
                         }
-                        // Bump recovery metric
                         if (state_) {
                             state_->stats.ipcEinvalRebuilds.fetch_add(1, std::memory_order_relaxed);
                         }
@@ -514,14 +477,12 @@ awaitable<void> SocketServer::accept_loop() {
             break;
         }
 
-        // Delay outside of catch block if needed
         if (need_delay) {
             boost::asio::steady_timer timer(io_context_);
             timer.expires_after(backoff_ms);
             try {
                 co_await timer.async_wait(use_awaitable);
             } catch (const boost::system::system_error&) {
-                // Timer cancelled, continue
             }
 
             if (!running_ || stopping_)
@@ -536,7 +497,6 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
 #if defined(TRACY_ENABLE)
     ZoneScopedN("SocketServer::handle_connection");
 #endif
-    // Ensure cleanup on exit
     struct CleanupGuard {
         SocketServer* server;
         ~CleanupGuard() {
@@ -549,39 +509,28 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
     } guard{this};
 
     try {
-        // Create request handler for this connection with streaming support
         RequestHandler::Config handlerConfig;
         handlerConfig.enable_streaming = true;
-        handlerConfig.enable_multiplexing = true; // Default: multiplex per connection
-        // Wire worker executor from dispatcher so StreamingRequestProcessor can offload
-        // heavy compute (search/list/grep and generic requests) off the IO threads.
+        handlerConfig.enable_multiplexing = true;
         if (dispatcher_) {
             try {
                 handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
                 handlerConfig.worker_job_signal = dispatcher_->getWorkerJobSignal();
             } catch (...) {
-                // Leave defaults if dispatcher cannot provide an executor
             }
         }
-        // Chunk size: honor TuneAdvisor; larger chunks improve throughput for uploads/add
-        // Default TuneAdvisor::chunkSize is 512 KiB; do not cap to 32 KiB here.
         handlerConfig.chunk_size = TuneAdvisor::chunkSize();
-        // Persistent connections; client may issue multiple requests sequentially
         handlerConfig.close_after_response = false;
         handlerConfig.graceful_half_close = true;
-        // Increase idle read timeout to 5 minutes to avoid dropping persistent CLI connections
         handlerConfig.read_timeout = std::chrono::seconds(300);
-        // Keep in sync with centralized serverMaxInflightPerConn
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-        handlerConfig.writer_budget_bytes_per_turn = TuneAdvisor::writerBudgetBytesPerTurn();
+        handlerConfig.writer_budget_bytes_per_turn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestDispatcher* disp = nullptr;
         {
             std::lock_guard<std::mutex> lk(dispatcherMutex_);
             disp = dispatcher_;
         }
-        // If a worker pool is available through the dispatcher, pass its executor BEFORE handler
-        // construction
         try {
             if (disp) {
                 handlerConfig.worker_executor = disp->getWorkerExecutor();
@@ -591,16 +540,12 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         }
         RequestHandler handler(disp, handlerConfig);
 
-        // Create a stop_source for this connection
         yams::compat::stop_token token{};
 
-        // Delegate connection handling to RequestHandler which supports streaming
         co_await handler.handle_connection(std::move(socket), token);
     } catch (const std::exception& e) {
         spdlog::debug("Connection handler error: {}", e.what());
     }
-
-    // Socket will be closed when it goes out of scope
 }
 
 } // namespace yams::daemon

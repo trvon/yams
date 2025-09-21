@@ -58,6 +58,15 @@
 
 #define YAMS_STORAGE_ZONE(operation) YAMS_ZONE_SCOPED_NC("Storage::" operation, 0x0080FF)
 
+// Fibers/coroutines (optional). If Tracy provides fiber APIs, use them; else no-op.
+#ifdef TracyFiberEnter
+#define YAMS_FIBER_ENTER(name) TracyFiberEnter(name)
+#define YAMS_FIBER_LEAVE() TracyFiberLeave
+#else
+#define YAMS_FIBER_ENTER(name)
+#define YAMS_FIBER_LEAVE()
+#endif
+
 #else
 // No-op macros when profiling is disabled
 #define YAMS_ZONE_SCOPED()
@@ -91,5 +100,9 @@
 #define YAMS_WORKER_QUEUE_PLOT(size)
 #define YAMS_ONNX_ZONE(operation)
 #define YAMS_STORAGE_ZONE(operation)
+
+// Fibers no-op when profiling disabled
+#define YAMS_FIBER_ENTER(name)
+#define YAMS_FIBER_LEAVE()
 
 #endif // TRACY_ENABLE

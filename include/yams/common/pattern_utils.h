@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -62,6 +63,237 @@ concept StringLike = requires(T&& t) { std::string_view{std::forward<T>(t)}; };
     return p == plen;
 }
 
+/** Normalize a filesystem path for glob matching.
+ * - Converts '\\' to '/'
+ * - Collapses consecutive '/'
+ * - Removes trailing '/' (except when the path is just "/")
+ */
+[[nodiscard]] inline std::string normalize_path(std::string_view path) {
+    std::string out;
+    out.reserve(path.size());
+    char prev = 0;
+    for (char c : path) {
+        char d = (c == '\\') ? '/' : c;
+        if (d == '/' && prev == '/') {
+            continue; // collapse
+        }
+        out.push_back(d);
+        prev = d;
+    }
+    // strip trailing '/'
+    if (out.size() > 1 && out.back() == '/')
+        out.pop_back();
+    return out;
+}
+
+/** Expand simple brace sets like "{cpp,hpp}" or nested like "{a,{b,c}}".
+ * Returns a list of expanded patterns. If no braces are present, returns the input pattern.
+ */
+inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& out) {
+    size_t open = std::string_view::npos;
+    size_t level = 0;
+    for (size_t i = 0; i < pat.size(); ++i) {
+        if (pat[i] == '{') {
+            if (level == 0)
+                open = i;
+            ++level;
+        } else if (pat[i] == '}') {
+            if (level == 0)
+                break; // unmatched; treat literally
+            --level;
+            if (level == 0 && open != std::string_view::npos) {
+                // split inner by commas (not handling escapes)
+                std::string prefix{pat.substr(0, open)};
+                std::string_view inner = pat.substr(open + 1, i - open - 1);
+                std::string suffix{pat.substr(i + 1)};
+                size_t start = 0;
+                while (start <= inner.size()) {
+                    size_t pos = inner.find(',', start);
+                    std::string_view tok = (pos == std::string_view::npos)
+                                               ? inner.substr(start)
+                                               : inner.substr(start, pos - start);
+                    std::string merged;
+                    merged.reserve(prefix.size() + tok.size() + suffix.size());
+                    merged.append(prefix);
+                    merged.append(tok);
+                    merged.append(suffix);
+                    brace_expand_impl(merged, out);
+                    if (pos == std::string_view::npos)
+                        break;
+                    start = pos + 1;
+                }
+                return;
+            }
+        }
+    }
+    // no (more) braces
+    out.emplace_back(pat);
+}
+
+[[nodiscard]] inline std::vector<std::string> brace_expand(std::string_view pattern) {
+    std::vector<std::string> out;
+    brace_expand_impl(pattern, out);
+    return out;
+}
+
+/** Match a single segment (no '/') supporting *, ?, and character classes [] and [!]. */
+[[nodiscard]] inline bool match_segment(std::string_view text, std::string_view pat) {
+    size_t ti = 0, pi = 0;
+    size_t tlen = text.size(), plen = pat.size();
+    size_t star = std::string_view::npos, backtrack = 0;
+    auto match_charclass = [&](char c, size_t& pidx) {
+        bool neg = false;
+        if (pidx < plen && pat[pidx] == '!') {
+            neg = true;
+            ++pidx;
+        }
+        bool ok = false;
+        while (pidx < plen && pat[pidx] != ']') {
+            if (pidx + 2 < plen && pat[pidx + 1] == '-') {
+                char a = pat[pidx];
+                char b = pat[pidx + 2];
+                if (a <= c && c <= b)
+                    ok = true;
+                pidx += 3;
+            } else {
+                if (pat[pidx] == c)
+                    ok = true;
+                ++pidx;
+            }
+        }
+        if (pidx < plen && pat[pidx] == ']')
+            ++pidx; // consume ']'
+        return neg ? !ok : ok;
+    };
+
+    while (ti < tlen) {
+        if (pi < plen) {
+            char pc = pat[pi];
+            if (pc == '?') {
+                ++ti;
+                ++pi;
+                continue;
+            }
+            if (pc == '*') {
+                star = pi++;
+                backtrack = ti;
+                continue;
+            }
+            if (pc == '[') {
+                ++pi; // consume '['
+                if (ti < tlen && match_charclass(text[ti], pi)) {
+                    ++ti;
+                    continue;
+                }
+            } else if (pc == text[ti]) {
+                ++ti;
+                ++pi;
+                continue;
+            }
+        }
+        if (star != std::string_view::npos) {
+            pi = star + 1;
+            ++backtrack;
+            ti = backtrack;
+            continue;
+        }
+        return false;
+    }
+    while (pi < plen && pat[pi] == '*')
+        ++pi;
+    return pi == plen;
+}
+
+/** Glob match for normalized paths supporting ** across segments and brace sets. */
+[[nodiscard]] inline bool glob_match_path(std::string_view path, std::string_view pattern) {
+    // Anchor handling: leading '^' anchors at beginning
+    bool anchored = false;
+    if (!pattern.empty() && pattern.front() == '^') {
+        anchored = true;
+        pattern.remove_prefix(1);
+    }
+
+    std::string npath = normalize_path(path);
+    std::string npat = normalize_path(pattern);
+
+    // Brace expand into alternatives
+    auto expanded = brace_expand(npat);
+    for (const auto& patAlt : expanded) {
+        // Split into segments
+        std::vector<std::string_view> pseg;
+        size_t start = 0;
+        std::string_view pv{patAlt};
+        while (start <= pv.size()) {
+            size_t pos = pv.find('/', start);
+            pseg.emplace_back(
+                pv.substr(start, pos == std::string_view::npos ? pv.size() - start : pos - start));
+            if (pos == std::string_view::npos) {
+                break;
+            }
+            start = pos + 1;
+        }
+        // Path segments
+        std::vector<std::string_view> tseg;
+        std::string_view tv{npath};
+        start = 0;
+        while (start <= tv.size()) {
+            size_t pos = tv.find('/', start);
+            tseg.emplace_back(
+                tv.substr(start, pos == std::string_view::npos ? tv.size() - start : pos - start));
+            if (pos == std::string_view::npos) {
+                break;
+            }
+            start = pos + 1;
+        }
+
+        // DP-style match with '**'
+        size_t i = 0, j = 0; // i: tseg, j: pseg
+        size_t starI = std::string_view::npos, starJ = std::string_view::npos;
+        // If anchored, pattern must match from beginning; else allow leading skip via implicit '**'
+        if (!anchored && !pseg.empty() && pseg[0] != "**") {
+            // emulate implicit leading '**' by advancing i until first segment can match
+            size_t ii = 0;
+            bool found = false;
+            for (; ii < tseg.size(); ++ii) {
+                if (match_segment(tseg[ii], pseg[0])) {
+                    i = ii;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                continue; // try next alt
+        }
+
+        while (i < tseg.size()) {
+            if (j < pseg.size()) {
+                if (pseg[j] == "**") {
+                    starI = i;
+                    starJ = j++;
+                    continue;
+                }
+                if (match_segment(tseg[i], pseg[j])) {
+                    ++i;
+                    ++j;
+                    continue;
+                }
+            }
+            if (starJ != std::string_view::npos) {
+                i = ++starI;
+                j = starJ + 1;
+                continue;
+            }
+            goto next_alt;
+        }
+        while (j < pseg.size() && pseg[j] == "**")
+            ++j;
+        if (j == pseg.size())
+            return true;
+    next_alt:;
+    }
+    return false;
+}
+
 /**
  * Returns true if the pattern contains any wildcard metacharacters.
  */
@@ -84,6 +316,17 @@ requires StringLike<std::ranges::range_value_t<Range>>
         if (wildcard_match(text, std::string_view{pat})) {
             return true;
         }
+    }
+    return false;
+}
+
+/** Path-aware any-match using glob_match_path on each pattern. */
+template <std::ranges::input_range Range>
+requires StringLike<std::ranges::range_value_t<Range>>
+[[nodiscard]] inline bool matches_any_path(std::string_view path, const Range& patterns) {
+    for (const auto& pat : patterns) {
+        if (glob_match_path(path, std::string_view{pat}))
+            return true;
     }
     return false;
 }
