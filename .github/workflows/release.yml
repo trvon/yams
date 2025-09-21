@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
+          submodules: false  # All workflows intentionally avoid submodules; prevents stale gitlink (cloudflare) errors
       - name: Skip non-linux entries under act (warm)
         if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
         shell: bash

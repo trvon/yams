@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          submodules: false # Publishing does not require submodule contents
 
       - name: Download release artifacts (apt/yum + manifest)
         uses: actions/download-artifact@v4

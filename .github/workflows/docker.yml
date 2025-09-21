@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Ensure tags are available for version derivation
+          submodules: false # Submodules not needed for Docker build
 
       - name: Determine version
         id: version

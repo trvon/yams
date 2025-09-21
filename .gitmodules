@@ -4,3 +4,6 @@
 [submodule "homebrew-yams"]
   path = homebrew-yams
   url = https://github.com/trvon/homebrew-yams.git
+[submodule "yams-repo"]
+  path = cloudflare
+  url = git@github.com:trvon/yams-repo

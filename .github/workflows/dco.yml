@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: false # DCO check only needs commit metadata, not submodules
       - name: Verify DCO sign-off on all commits in PR
         shell: bash
         run: |

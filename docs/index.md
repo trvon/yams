@@ -73,11 +73,6 @@ meson setup build/debug \
   --prefix /usr/local \
   --native-file build/debug/build-debug/conan/conan_meson_native.ini
 
-# Reconfigure (later changes)
-meson setup build/debug --reconfigure \
-  --prefix /usr/local \
-  --native-file build/debug/build-debug/conan/conan_meson_native.ini
-
 # 3. Build
 meson compile -C build/debug
 

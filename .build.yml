@@ -58,13 +58,14 @@ packages:
   - libtag1-dev       # enables taglib (audio metadata) detection
   - libsqlite3-dev    # enables SQLite database support
   - libssl-dev
-  - libcurl4-openssl-dev
+  - libcurl4-gnutls-dev # use gnutls variant; required by libmediainfo-dev (conflicts with openssl variant)
   - libsqlite3-dev
   - libncurses-dev
   - protobuf-compiler
   - libprotobuf-dev
   - libmediainfo-dev  # enables MediaInfo-based video metadata extraction
   - mediainfo         # MediaInfo CLI tool used at runtime for JSON output
+
 
 tasks:
   - normalize_submodules: |

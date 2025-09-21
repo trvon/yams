@@ -39,15 +39,6 @@ meson setup build/release \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
   --buildtype=release
 
-# (Optional) Fast mode (skip ONNX + tests) reconfigure
-FAST_MODE=1 meson setup build/release --reconfigure \
-  --native-file build/release/build-release/conan/conan_meson_native.ini
-
-# (Optional) Inject display version
-meson setup build/release --reconfigure \
-  -Dyams-version="$(git describe --tags --always)" \
-  --native-file build/release/build-release/conan/conan_meson_native.ini
-
 # 3. Build
 meson compile -C build/release
 
