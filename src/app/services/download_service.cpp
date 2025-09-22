@@ -92,11 +92,12 @@ public:
 
             // Convert downloader result to service response
             const auto& finalResult = result.value();
-            spdlog::info(
-                "DownloadService: Download completed successfully. Hash: {}, Size: {} bytes",
-                finalResult.hash, finalResult.sizeBytes);
+            spdlog::info("DownloadService: Download completed successfully. DownloadedHash: {}, "
+                         "Size: {} bytes",
+                         finalResult.hash, finalResult.sizeBytes);
             DownloadServiceResponse response;
             // Ingest into ContentStore and index metadata/tags for MCP/CLI parity
+            std::optional<std::string> ingestedHash;
             try {
                 if (ctx_.store) {
                     auto storeRes = ctx_.store->store(finalResult.storedPath);
@@ -104,6 +105,7 @@ public:
                         spdlog::warn("DownloadService: ContentStore store() failed: {}",
                                      storeRes.error().message);
                     } else if (ctx_.metadataRepo) {
+                        ingestedHash = storeRes.value().contentHash;
                         metadata::DocumentInfo docInfo;
 
                         // Derive friendly filename/indexName (server-suggested or URL basename)
@@ -252,8 +254,16 @@ public:
             } catch (const std::exception& ex) {
                 spdlog::warn("DownloadService: Ingest/metadata exception: {}", ex.what());
             }
+            // Prefer the ingested content hash for downstream retrieval; fall back to downloaded
+            // hash
+            if (ingestedHash) {
+                spdlog::info("DownloadService: Ingested content hash: {} (Downloaded: {})",
+                             *ingestedHash, finalResult.hash);
+                response.hash = *ingestedHash;
+            } else {
+                response.hash = finalResult.hash;
+            }
             response.url = finalResult.url;
-            response.hash = finalResult.hash;
             response.storedPath = finalResult.storedPath;
             response.sizeBytes = finalResult.sizeBytes;
             response.success = finalResult.success;

@@ -546,6 +546,12 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 }
                 co_return response;
             } else {
+                // Validate single-file add request before enqueuing for async processing.
+                // Must provide either a valid path, or (content + name).
+                if (req.path.empty() && (req.content.empty() || req.name.empty())) {
+                    co_return ErrorResponse{ErrorCode::InvalidArgument,
+                                            "Provide either 'path' or 'content' + 'name'"};
+                }
                 auto channel = InternalEventBus::instance()
                                    .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
                                        "store_document_tasks", 4096);

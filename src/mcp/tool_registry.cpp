@@ -252,7 +252,8 @@ MCPDownloadRequest MCPDownloadRequest::fromJson(const json& j) {
     req.overwrite = j.value("overwrite", std::string{"never"});
 
     // Post-index fields
-    req.postIndex = j.value("post_index", false);
+    // Default to true so that the returned hash is ingest-ready for retrieval
+    req.postIndex = j.value("post_index", true);
 
     if (j.contains("tags") && j["tags"].is_array()) {
         for (const auto& t : j["tags"]) {

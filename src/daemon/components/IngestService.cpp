@@ -56,6 +56,14 @@ void IngestService::workerLoop(yams::compat::stop_token token) {
             }
             bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
 
+            // Drop clearly invalid tasks early to avoid churn and potential crashes
+            // in downstream services. Requirements: either a path, or (content + name).
+            if (!isDir && req.path.empty() && (req.content.empty() || req.name.empty())) {
+                spdlog::warn("Failed to store document from ingest queue: {}",
+                             "Provide either 'path' or 'content' + 'name'");
+                continue;
+            }
+
             if ((req.recursive || isDir) && !req.path.empty() && isDir) {
                 app::services::AddDirectoryRequest serviceReq;
                 serviceReq.directoryPath = req.path;

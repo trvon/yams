@@ -10,15 +10,11 @@
 
 image: debian/trixie
 
-# Explicitly control how the repository is checked out to avoid recursive
-# submodule updates (which can fail for private submodules). SourceHut will
-# still pin the ref to the pushed commit when the job is triggered via
-# git.sr.ht integration.
+secrets:
+  - 46f739e5-4538-45dd-a79f-bf173b7a2ed9
+
 sources:
   - https://git.sr.ht/~trevon/yams
-# Other possible images:
-# image: ubuntu/22.04
-# image: debian/stable
 
 # Static metadata for search and badges (unrelated to Git tags)
 tags:

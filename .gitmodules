@@ -1,18 +1,9 @@
-[submodule]
-  # CI default: make no submodule active so pre-clone
-  # "git submodule update --init --recursive" skips cloning.
-  # Developers can still initialize explicitly with paths.
-  active = path:__ci_skip_all__
-
 [submodule "plugins/yams-ghidra-plugin"]
 	path = plugins/yams-ghidra-plugin
 	url = git@github.com:trvon/yams-ghidra-plugin.git
-  active = false
 [submodule "homebrew-yams"]
   path = homebrew-yams
   url = https://github.com/trvon/homebrew-yams.git
-  active = false
 [submodule "yams-repo"]
   path = cloudflare
   url = git@github.com:trvon/yams-repo
-  active = false

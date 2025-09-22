@@ -1520,8 +1520,13 @@ json MCPServer::listTools() {
         props["proxy"] = makeProp("string", "");
         props["follow_redirects"] = makeProp("boolean", "");
         props["follow_redirects"]["default"] = true;
-        props["store_only"] = makeProp("boolean", "");
+        props["store_only"] = makeProp("boolean", "Store file in CAS without exporting to a path");
         props["store_only"]["default"] = true;
+        // When true (default), also ingest into YAMS and return the ingested hash
+        props["post_index"] =
+            makeProp("boolean",
+                     "After download, ingest into YAMS (daemon add) and return the ingested hash");
+        props["post_index"]["default"] = true;
         props["export_path"] = makeProp("string", "Optional export path");
         props["overwrite"] = makeProp("string", "Overwrite policy: never|if-different-etag|always");
         props["overwrite"]["default"] = "never";
