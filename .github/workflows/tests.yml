@@ -158,6 +158,13 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
+      - name: Install pkg-config (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew update
+          brew install pkg-config cmake ninja || true
+
       - name: Tune Conan client (parallel downloads)
         shell: bash
         run: |
@@ -175,6 +182,10 @@ jobs:
             -o yams/*:build_tests=True \
             -o yams/*:enable_onnx=False \
             --build=missing
+          # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
+          if [ -f "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh" ]; then
+            source "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh"
+          fi
           # Robust Meson toolchain detection across Conan versions
           TOOLCHAIN_DIR="${{ env.BUILD_DIR }}/build-debug/conan"
           NATIVE_FILE="$TOOLCHAIN_DIR/conan_meson_native.ini"
@@ -196,7 +207,7 @@ jobs:
               exit 1
             fi
           fi
-          meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" ${{ matrix.extra_meson_flags }}
+          meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
           meson compile -C ${{ env.BUILD_DIR }}
 
       - name: Run Tests with Meson

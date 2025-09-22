@@ -37,6 +37,7 @@ environment:
 packages:
   # Build dependencies (Debian/apt)
   - build-essential # gcc, make, etc.
+  - cmake
   - meson
   - ninja-build
   - zip
