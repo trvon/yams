@@ -548,7 +548,7 @@ jobs:
             HOST_PROFILE="./conan/profiles/host-linux-clang"
           fi
           BUILD_PROFILE="default"
-          CONAN_ARGS="-of build/release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing -c tools.cmake.cmaketoolchain:cache_variables.CMAKE_POLICY_VERSION_MINIMUM=3.5"
+          CONAN_ARGS="-of build/release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing -c tools.cmake.cmaketoolchain:cache_variables={'CMAKE_POLICY_VERSION_MINIMUM':'3.5'}"
           if [ "$RUNNER_OS" = "macOS" ]; then
             case "${{ matrix.suffix }}" in
               macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;

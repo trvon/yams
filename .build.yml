@@ -29,7 +29,7 @@ tags:
 environment:
   # Define consistent directories.
   BUILD_DIR: build/release
-  STAGE_DIR: stage
+  STAGE_DIR: stage  # relative to BUILD_DIR (Meson --destdir uses builddir as base)
   # Optional: set this to "nightly" or "weekly" via scheduler/env to produce
   # date/week-based releases on non-tag builds.
   # RELEASE_CHANNEL:
@@ -241,8 +241,7 @@ tasks:
       # Build the project.
       meson compile -C "${BUILD_DIR}"
 
-      # Install the built artifacts into the staging directory.
-      mkdir -p "${STAGE_DIR}"
+      # Install the built artifacts into build-local staging directory (BUILD_DIR/STAGE_DIR).
       meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
 
       # Show ccache stats after build (if available)
@@ -296,7 +295,13 @@ tasks:
       cd "${REPO_DIR}"
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging the release..."
-      cd "${STAGE_DIR}"
+      # Package from the staged install under BUILD_DIR/STAGE_DIR
+      if [ ! -d "${BUILD_DIR}/${STAGE_DIR}" ]; then
+        echo "ERROR: Stage directory ${BUILD_DIR}/${STAGE_DIR} not found" >&2
+        ls -al "${BUILD_DIR}" || true
+        exit 1
+      fi
+      cd "${BUILD_DIR}/${STAGE_DIR}"
       tar -czf "../yams-${CLEAN_VERSION}-linux-x86_64.tar.gz" .
       echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
       # Also publish a raw stage archive for debugging/inspection
@@ -325,8 +330,11 @@ tasks:
       cd "${REPO_DIR}"
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging with Meson..."
-      chmod +x scripts/build-deb.sh
-      scripts/build-deb.sh "${CLEAN_VERSION}" "${BUILD_DIR}"
+      if [ -x scripts/build-deb.sh ]; then
+        scripts/build-deb.sh "${CLEAN_VERSION}" "${BUILD_DIR}"
+      else
+        echo "scripts/build-deb.sh not found; skipping distro package step"
+      fi
 
   - collect_artifacts: |
       set -e
@@ -376,12 +384,12 @@ tasks:
       # Fallback for CI branches: if no artifacts were collected (packaging gated),
       # compress the staged install to provide a basic artifact for inspection.
       if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
-        if [ -d "${REPO_DIR}/${STAGE_DIR}" ]; then
-          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${STAGE_DIR}" >&2
-          tar -C "${REPO_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
+        if [ -d "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" ]; then
+          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" >&2
+          tar -C "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
           ls -l "${ART_DIR}" || true
         else
-          echo "WARNING: Stage dir ${REPO_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
+          echo "WARNING: Stage dir ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
         fi
       fi
 
