@@ -5,6 +5,7 @@ gtest_dep = dependency('gtest', required: true)
 gmock_dep = dependency('gmock', required: false)
 
 # Normalize CLI11 discovery across environments (pkg-config -> Conan/CMake)
+# (touch) reconfigure to drop/accept test file changes [2]
 fs = import('fs')
 cli11_dep = dependency('cli11', required: false)
 if not cli11_dep.found()

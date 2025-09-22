@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -137,12 +139,88 @@ public:
 
             s.entity = clamp01(entity);
             s.structural = clamp01(structural);
+            // Auxiliary, normalized features
+            // Overlap ratios relative to candidate and query sets (when non-zero)
+            const float cand_den =
+                cand_nodes.empty() ? 0.0f : static_cast<float>(cand_nodes.size());
+            const float qry_den =
+                query_nodes.empty() ? 0.0f : static_cast<float>(query_nodes.size());
+            if (cand_den > 0.0f) {
+                s.features["feature_entity_overlap_ratio"] = std::min(
+                    1.0f, static_cast<float>(intersectionSize(query_nodes, cand_nodes)) / cand_den);
+                s.features["feature_neighbor_overlap_ratio"] = s.structural; // same normalization
+            }
+            if (qry_den > 0.0f) {
+                s.features["feature_query_coverage_ratio"] = std::min(
+                    1.0f, static_cast<float>(intersectionSize(query_nodes, cand_nodes)) / qry_den);
+            }
+
+            // Relation diversity: count distinct relations from candidate nodes that touch the
+            // query neighborhood (or query nodes directly), honoring basic allow/block filters.
+            if (!cand_nodes.empty() && (!query_neighbor_union.empty() || !query_nodes.empty())) {
+                std::unordered_set<std::string> rels;
+                auto accepts = [&](std::string_view rel) {
+                    if (!cfg_.relation_allow.empty()) {
+                        bool ok = false;
+                        for (const auto& a : cfg_.relation_allow) {
+                            if (rel == a) {
+                                ok = true;
+                                break;
+                            }
+                        }
+                        if (!ok)
+                            return false;
+                    }
+                    for (const auto& b : cfg_.relation_block) {
+                        if (rel == b)
+                            return false;
+                    }
+                    return true;
+                };
+
+                for (auto nid : cand_nodes) {
+                    if (timedOut(t0))
+                        break;
+                    auto edgesR = store_->getEdgesFrom(nid, std::nullopt, cfg_.max_neighbors, 0);
+                    if (!edgesR) {
+                        continue;
+                    }
+                    for (const auto& e : edgesR.value()) {
+                        if (!accepts(e.relation))
+                            continue;
+                        if (query_neighbor_union.find(e.dstNodeId) != query_neighbor_union.end() ||
+                            query_nodes.find(e.dstNodeId) != query_nodes.end()) {
+                            rels.insert(e.relation);
+                        }
+                    }
+                }
+                if (!rels.empty()) {
+                    // Normalize by allowed relation universe when provided, else by a soft cap.
+                    const float denom = !cfg_.relation_allow.empty()
+                                            ? static_cast<float>(cfg_.relation_allow.size())
+                                            : 8.0f;
+                    s.features["feature_relation_diversity_ratio"] =
+                        std::min(1.0f, static_cast<float>(rels.size()) / std::max(1.0f, denom));
+                }
+
+                // Path support score (budget-aware; optional)
+                if (cfg_.enable_path_enumeration && cfg_.max_hops > 0) {
+                    s.features["feature_path_support_score"] =
+                        pathSupportScore(query_nodes, cand_nodes, t0);
+                }
+            }
             out.emplace(cid, s);
 
             // Explanations (best-effort)
             if (!query_nodes.empty() && !cand_nodes.empty()) {
                 expl.components["entity_jaccard"] = static_cast<double>(s.entity);
                 expl.components["neighbor_overlap"] = static_cast<double>(s.structural);
+                if (auto it = s.features.find("feature_entity_overlap_ratio");
+                    it != s.features.end())
+                    expl.components["entity_overlap_ratio"] = it->second;
+                if (auto it = s.features.find("feature_query_coverage_ratio");
+                    it != s.features.end())
+                    expl.components["query_coverage_ratio"] = it->second;
                 if (s.entity > 0.0f) {
                     expl.reasons.emplace_back("Shares linked entities with query");
                 }
@@ -223,6 +301,24 @@ private:
         return static_cast<float>(inter) / static_cast<float>(uni);
     }
 
+    static std::size_t intersectionSize(const std::unordered_set<std::int64_t>& a,
+                                        const std::unordered_set<std::int64_t>& b) {
+        if (a.empty() || b.empty())
+            return 0;
+        const auto* small = &a;
+        const auto* large = &b;
+        if (b.size() < a.size()) {
+            small = &b;
+            large = &a;
+        }
+        std::size_t inter = 0;
+        for (auto x : *small) {
+            if (large->find(x) != large->end())
+                ++inter;
+        }
+        return inter;
+    }
+
     static float structuralOverlap(const std::unordered_set<std::int64_t>& neighbor_union,
                                    const std::unordered_set<std::int64_t>& cand_nodes) {
         if (neighbor_union.empty() || cand_nodes.empty())
@@ -238,6 +334,98 @@ private:
         return cand_nodes.empty() ? 0.0f
                                   : std::min(1.0f, static_cast<float>(overlap) /
                                                        static_cast<float>(cand_nodes.size()));
+    }
+
+    // Budget-aware, small-path support score. Enumerate paths up to cfg_.max_hops from query
+    // nodes toward candidate nodes. Each discovered path contributes hop_decay^length. The final
+    // score is normalized by max_paths (soft cap) and clamped to [0,1]. Relation filters are
+    // honored when present by expanding via getEdgesFrom; otherwise we use fast neighbors().
+    float pathSupportScore(const std::unordered_set<std::int64_t>& query_nodes,
+                           const std::unordered_set<std::int64_t>& cand_nodes,
+                           const std::chrono::steady_clock::time_point& t0) {
+        if (!cfg_.enable_path_enumeration || cfg_.max_hops == 0 || query_nodes.empty() ||
+            cand_nodes.empty()) {
+            return 0.0f;
+        }
+        const float decay = std::max(0.0f, std::min(1.0f, cfg_.hop_decay));
+        const std::size_t max_paths = std::max<std::size_t>(1, cfg_.max_paths);
+        std::size_t paths_found = 0;
+        double score_acc = 0.0;
+
+        auto accepts = [&](std::string_view rel) {
+            if (!cfg_.relation_allow.empty()) {
+                bool ok = false;
+                for (const auto& a : cfg_.relation_allow) {
+                    if (rel == a) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if (!ok)
+                    return false;
+            }
+            for (const auto& b : cfg_.relation_block) {
+                if (rel == b)
+                    return false;
+            }
+            return true;
+        };
+
+        for (auto q : query_nodes) {
+            if (timedOut(t0))
+                break;
+            // BFS up to max_hops
+            std::queue<std::pair<std::int64_t, std::size_t>> qq;
+            std::unordered_set<std::int64_t> visited;
+            qq.emplace(q, 0);
+            visited.insert(q);
+            while (!qq.empty()) {
+                if (timedOut(t0))
+                    break;
+                auto [node, depth] = qq.front();
+                qq.pop();
+                if (depth > cfg_.max_hops)
+                    continue;
+                if (depth > 0 && cand_nodes.find(node) != cand_nodes.end()) {
+                    // Found a path of length=depth
+                    score_acc += std::pow(decay, static_cast<double>(depth));
+                    if (++paths_found >= max_paths)
+                        goto end_enum;
+                    // Continue search to possibly find different candidates; do not early return
+                }
+                if (depth == cfg_.max_hops)
+                    continue;
+
+                if (!cfg_.relation_allow.empty() || !cfg_.relation_block.empty()) {
+                    auto edgesR = store_->getEdgesFrom(node, std::nullopt, cfg_.max_neighbors, 0);
+                    if (!edgesR)
+                        continue;
+                    for (const auto& e : edgesR.value()) {
+                        if (!accepts(e.relation))
+                            continue;
+                        if (!visited.insert(e.dstNodeId).second)
+                            continue;
+                        qq.emplace(e.dstNodeId, depth + 1);
+                    }
+                } else {
+                    auto nbR = store_->neighbors(node, cfg_.max_neighbors);
+                    if (!nbR)
+                        continue;
+                    for (auto nxt : nbR.value()) {
+                        if (!visited.insert(nxt).second)
+                            continue;
+                        qq.emplace(nxt, depth + 1);
+                    }
+                }
+            }
+        }
+
+    end_enum:
+        if (paths_found == 0)
+            return 0.0f;
+        double norm = static_cast<double>(max_paths);
+        double out = std::min(1.0, score_acc / norm);
+        return static_cast<float>(out);
     }
 
     // Very simple tokenizer: lowercase alnum sequences as aliases + join bigrams

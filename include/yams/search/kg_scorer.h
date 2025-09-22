@@ -19,8 +19,14 @@ namespace yams::search {
  * Both scores are expected to be in [0, 1] where higher is better.
  */
 struct KGScore {
-    float entity = 0.0f;
-    float structural = 0.0f;
+    float entity = 0.0f;     // [0,1] entity similarity
+    float structural = 0.0f; // [0,1] structural prior
+    // Optional auxiliary features (normalized when possible). Keys are implementation-defined
+    // but recommended examples include:
+    //  - feature_entity_overlap_ratio
+    //  - feature_query_coverage_ratio
+    //  - feature_neighbor_overlap_ratio
+    std::unordered_map<std::string, float> features;
 };
 
 /**
@@ -43,9 +49,20 @@ struct KGExplain {
  * budget         - time budget for KG scoring; implementations should best-effort honor it
  */
 struct KGScoringConfig {
-    size_t max_neighbors = 32;
-    size_t max_hops = 1;
-    std::chrono::milliseconds budget{20};
+    // Neighborhood controls
+    size_t max_neighbors = 32;            // Per-node neighbor cap
+    size_t max_hops = 1;                  // Structural depth (1 = neighbors only)
+    std::chrono::milliseconds budget{20}; // Best-effort time budget
+
+    // Relation filters (optional). If non-empty, scorer MAY honor allow/block lists
+    // to restrict traversals or entity matching to specific relation types.
+    std::vector<std::string> relation_allow; // Empty = allow all
+    std::vector<std::string> relation_block; // Empty = block none
+
+    // Path enumeration flags (optional, implementation-defined)
+    bool enable_path_enumeration = false; // If true, scorer MAY enumerate paths within budget
+    size_t max_paths = 64;                // Soft cap for number of paths to consider
+    float hop_decay = 1.0f;               // Weight decay per hop (1.0 = no decay)
 };
 
 /**

@@ -9,6 +9,15 @@
 # - Install Conan via pipx (or venv fallback), since Debian doesn't provide python3-conan.
 
 image: debian/trixie
+
+# Explicitly control how the repository is checked out to avoid recursive
+# submodule updates (which can fail for private submodules). SourceHut will
+# still pin the ref to the pushed commit when the job is triggered via
+# git.sr.ht integration.
+sources:
+  - source: git+https://git.sr.ht/~trevon/yams
+    destination: yams
+    submodules: false
 # Other possible images:
 # image: ubuntu/22.04
 # image: debian/stable

@@ -10,6 +10,7 @@ yams_search = static_library('yams_search',
     'search_results.cpp',
     'search_filters.cpp',
     'result_ranker.cpp',
+    'chunk_coverage.cpp',
     'search_executor.cpp',
     'cache_key.cpp',
     'search_cache.cpp',
@@ -38,4 +39,3 @@ yams_search_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_search', yams_search_dep)
-

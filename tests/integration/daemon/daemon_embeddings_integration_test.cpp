@@ -10,7 +10,7 @@
 #include <string>
 #include <thread>
 
-#include "daemon_preflight.h"
+#include "common/daemon_preflight.h"
 #include "test_async_helpers.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>

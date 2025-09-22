@@ -28,6 +28,13 @@ protected:
         fs::create_directories(storageDir_);
         fs::create_directories(xdgRuntimeDir_);
 
+        // Ensure test daemon never kills any existing user/system daemon
+#if defined(_WIN32)
+        _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
+#else
+        setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
+#endif
+
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = storageDir_;
         cfg.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
@@ -43,6 +50,10 @@ protected:
     void TearDown() override {
         if (daemon_)
             daemon_->stop();
+        // Best-effort removal of test socket and pid file
+        std::error_code ec2;
+        std::filesystem::remove(xdgRuntimeDir_ / "yams-daemon.sock", ec2);
+        std::filesystem::remove(testRoot_ / "daemon.pid", ec2);
         std::error_code ec;
         fs::remove_all(testRoot_, ec);
     }
