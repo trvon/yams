@@ -58,6 +58,7 @@ class YamsConan(ConanFile):
         if self.options.enable_pdf:
             self.requires("pdfium/95.0.4629")
             self.requires("libmediainfo/22.03")
+            # Prefer latest available on ConanCenter; keep single-version override for the graph
             self.requires("openjpeg/2.5.3", override=True)
 
     def build_requirements(self):

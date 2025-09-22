@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python3 -m venv /opt/venv \
   && /opt/venv/bin/pip install --upgrade pip \
-  && /opt/venv/bin/pip install "conan==2.3.*" "meson==1.4.*" "ninja==1.11.*"
+  && /opt/venv/bin/pip install "conan==2.5.*" "meson==1.4.*" "ninja==1.11.*"
 ENV PATH="/opt/venv/bin:${PATH}"
 WORKDIR /src
 
@@ -34,6 +34,9 @@ COPY conan/ ./conan/
 # Detect profile + install dependencies (cached via BuildKit cache mount)
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
+  conan --version; \
+  # Speed up fetching from ConanCenter
+  conan config set general.parallel_downloads=8 || true; \
   conan profile detect --force; \
   sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' /root/.conan2/profiles/default; \
   echo '=== Conan remotes (before ensure) ==='; conan remote list || true; \
@@ -41,13 +44,20 @@ RUN --mount=type=cache,target=/root/.conan2 \
   if ! conan remote list | grep -q 'conancenter'; then \
   conan remote add conancenter https://center.conan.io; \
   fi; \
+  # Ensure the URL is correct (update in-place if needed)
+  conan remote update conancenter https://center.conan.io || true; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
+  echo '=== Searching for openjpeg/2.5.3 (pre-install) ==='; conan search openjpeg/2.5.3 -r=conancenter || true; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
-  if ! conan install . --output-folder=build/yams-release -s build_type=Release --build=missing; then \
+  if ! conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
+    --output-folder=build/yams-release -s build_type=Release --build=missing; then \
   echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
   conan cache clean --temp --locks || true; \
+  # Re-try resolution of openjpeg prior to full install for clearer diagnostics
+  conan search openjpeg -r=conancenter || true; \
   conan search libarchive -r=conancenter || true; \
-  conan install . --output-folder=build/yams-release -s build_type=Release --build=missing; \
+  conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
+    --output-folder=build/yams-release -s build_type=Release --build=missing; \
   fi
 
 # Stage 2: full build
@@ -58,9 +68,19 @@ ARG BUILD_DOCS=false
 COPY . .
 # Configure & build (reuse Conan cache) — keep runtime lean by default
 RUN --mount=type=cache,target=/root/.conan2 \
-  conan install . --output-folder=build/yams-release -s build_type=Release --build=missing && \
+  conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
+    --output-folder=build/yams-release -s build_type=Release --build=missing && \
   meson setup build/yams-release \
-  --native-file build/yams-release/build-release/conan/conan_meson_native.ini \
+  $( \
+    TOOLCHAIN_DIR=build/yams-release/build-release/conan; \
+    if [ -f "$TOOLCHAIN_DIR/conan_meson_native.ini" ]; then \
+      echo --native-file "$TOOLCHAIN_DIR/conan_meson_native.ini"; \
+    elif [ -f "$TOOLCHAIN_DIR/conan_meson_cross.ini" ]; then \
+      echo --cross-file "$TOOLCHAIN_DIR/conan_meson_cross.ini"; \
+    else \
+      echo "Conan Meson toolchain file not found in $TOOLCHAIN_DIR" >&2; \
+      exit 1; \
+    fi ) \
   -Dbuild-tests=${BUILD_TESTS} || (echo 'Meson setup failed' && cat build/yams-release/meson-logs/meson-log.txt && false) && \
   meson compile -C build/yams-release && \
   meson install -C build/yams-release --destdir /opt/yams

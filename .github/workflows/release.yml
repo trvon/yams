@@ -495,6 +495,29 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
+      - name: Tune Conan client (parallel downloads)
+        shell: bash
+        run: |
+          conan config set general.parallel_downloads=8 || true
+          conan --version
+
+      - name: Warm key Conan packages (best-effort)
+        if: ${{ matrix.hosted }}
+        shell: bash
+        run: |
+          set +e
+          # Try to prefetch heavy packages to minimize build-time compiles
+          for ref in \
+            openjpeg/2.5.3 \
+            pdfium/95.0.4629 \
+            onnxruntime/1.18.1 \
+            icu/74.1 \
+            libarchive/3.7.6; do
+            echo "Prefetching $ref ..." || true
+            conan download "$ref" -r=conancenter || true
+          done
+          set -e
+
       # Release build for ALL targets
       - name: Configure and Build Release (Optimized)
         shell: bash
@@ -526,8 +549,30 @@ jobs:
             esac
           fi
           conan install . $CONAN_ARGS
-          meson setup build/release \
-            --native-file build/release/build-release/conan/conan_meson_native.ini \
+          # Resolve Conan Meson toolchain file robustly across Conan versions
+          TOOLCHAIN_DIR="build/release/build-release/conan"
+          NATIVE_FILE="$TOOLCHAIN_DIR/conan_meson_native.ini"
+          CROSS_FILE="$TOOLCHAIN_DIR/conan_meson_cross.ini"
+          if [ -f "$NATIVE_FILE" ]; then
+            MESON_TOOL_ARG=(--native-file "$NATIVE_FILE")
+          elif [ -f "$CROSS_FILE" ]; then
+            MESON_TOOL_ARG=(--cross-file "$CROSS_FILE")
+          else
+            echo "Meson toolchain file not found in $TOOLCHAIN_DIR; listing directory for diagnostics:" >&2
+            ls -al "$TOOLCHAIN_DIR" >&2 || true
+            # Last resort: search within build/release for either native or cross file
+            FOUND=$(find build/release -maxdepth 3 -type f \( -name 'conan_meson_native.ini' -o -name 'conan_meson_cross.ini' \) | head -n1)
+            if [ -n "$FOUND" ]; then
+              case "$FOUND" in
+                *native*) MESON_TOOL_ARG=(--native-file "$FOUND") ;;
+                *cross*) MESON_TOOL_ARG=(--cross-file "$FOUND") ;;
+              esac
+            else
+              echo "ERROR: Cannot find specified Meson toolchain file" >&2
+              exit 1
+            fi
+          fi
+          meson setup build/release "${MESON_TOOL_ARG[@]}" \
             -Dwerror=true -Dwarning_level=3 -Denable-lzma=auto
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV

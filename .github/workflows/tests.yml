@@ -158,6 +158,12 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
+      - name: Tune Conan client (parallel downloads)
+        shell: bash
+        run: |
+          conan config set general.parallel_downloads=8 || true
+          conan --version
+
       - name: Configure and Build with Meson
         shell: bash
         run: |
@@ -169,7 +175,28 @@ jobs:
             -o yams/*:build_tests=True \
             -o yams/*:enable_onnx=False \
             --build=missing
-          meson setup ${{ env.BUILD_DIR }} --native-file ${{ env.BUILD_DIR }}/build-debug/conan/conan_meson_native.ini ${{ matrix.extra_meson_flags }}
+          # Robust Meson toolchain detection across Conan versions
+          TOOLCHAIN_DIR="${{ env.BUILD_DIR }}/build-debug/conan"
+          NATIVE_FILE="$TOOLCHAIN_DIR/conan_meson_native.ini"
+          CROSS_FILE="$TOOLCHAIN_DIR/conan_meson_cross.ini"
+          if [ -f "$NATIVE_FILE" ]; then
+            MESON_TOOL_ARG=(--native-file "$NATIVE_FILE")
+          elif [ -f "$CROSS_FILE" ]; then
+            MESON_TOOL_ARG=(--cross-file "$CROSS_FILE")
+          else
+            echo "Meson toolchain file not found in $TOOLCHAIN_DIR; searching..." >&2
+            FOUND=$(find "${{ env.BUILD_DIR }}" -maxdepth 3 -type f \( -name 'conan_meson_native.ini' -o -name 'conan_meson_cross.ini' \) | head -n1)
+            if [ -n "$FOUND" ]; then
+              case "$FOUND" in
+                *native*) MESON_TOOL_ARG=(--native-file "$FOUND") ;;
+                *cross*) MESON_TOOL_ARG=(--cross-file "$FOUND") ;;
+              esac
+            else
+              echo "ERROR: Conan Meson toolchain file not found" >&2
+              exit 1
+            fi
+          fi
+          meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" ${{ matrix.extra_meson_flags }}
           meson compile -C ${{ env.BUILD_DIR }}
 
       - name: Run Tests with Meson
