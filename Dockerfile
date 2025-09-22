@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7-labs
 
 # Stage 0: base build dependencies & toolchain
-# FROM ubuntu:22.04 AS deps
-FROM debian:trixie-slim AS deps
+FROM ubuntu:22.04 AS deps
+# FROM debian:trixie-slim AS deps
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential git curl pkg-config ca-certificates \
@@ -39,15 +39,15 @@ RUN --mount=type=cache,target=/root/.conan2 \
   echo '=== Conan remotes (before ensure) ==='; conan remote list || true; \
   # Ensure conancenter remote exists (some base images may have empty config)
   if ! conan remote list | grep -q 'conancenter'; then \
-    conan remote add conancenter https://center.conan.io; \
+  conan remote add conancenter https://center.conan.io; \
   fi; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
   if ! conan install . --output-folder=build/yams-release -s build_type=Release --build=missing; then \
-    echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
-    conan cache clean --temp --locks || true; \
-    conan search libarchive -r=conancenter || true; \
-    conan install . --output-folder=build/yams-release -s build_type=Release --build=missing; \
+  echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
+  conan cache clean --temp --locks || true; \
+  conan search libarchive -r=conancenter || true; \
+  conan install . --output-folder=build/yams-release -s build_type=Release --build=missing; \
   fi
 
 # Stage 2: full build
@@ -60,8 +60,8 @@ COPY . .
 RUN --mount=type=cache,target=/root/.conan2 \
   conan install . --output-folder=build/yams-release -s build_type=Release --build=missing && \
   meson setup build/yams-release \
-    --native-file build/yams-release/build-release/conan/conan_meson_native.ini \
-    -Dbuild-tests=${BUILD_TESTS} || (echo 'Meson setup failed' && cat build/yams-release/meson-logs/meson-log.txt && false) && \
+  --native-file build/yams-release/build-release/conan/conan_meson_native.ini \
+  -Dbuild-tests=${BUILD_TESTS} || (echo 'Meson setup failed' && cat build/yams-release/meson-logs/meson-log.txt && false) && \
   meson compile -C build/yams-release && \
   meson install -C build/yams-release --destdir /opt/yams
 

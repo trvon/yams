@@ -53,40 +53,20 @@ packages:
   - libtinfo-dev
   - pkg-config
   # Optional feature dependencies (enable async I/O, archive extraction, media metadata)
-  - liburing-dev      # enables io_uring async path instead of fallback
-  - libarchive-dev    # enables archive extraction features
-  - libtag1-dev       # enables taglib (audio metadata) detection
-  - libsqlite3-dev    # enables SQLite database support
+  - liburing-dev # enables io_uring async path instead of fallback
+  - libarchive-dev # enables archive extraction features
+  - libtag1-dev # enables taglib (audio metadata) detection
+  - libsqlite3-dev # enables SQLite database support
   - libssl-dev
   - libcurl4-gnutls-dev # use gnutls variant; required by libmediainfo-dev (conflicts with openssl variant)
   - libsqlite3-dev
   - libncurses-dev
   - protobuf-compiler
   - libprotobuf-dev
-  - libmediainfo-dev  # enables MediaInfo-based video metadata extraction
-  - mediainfo         # MediaInfo CLI tool used at runtime for JSON output
-
+  - libmediainfo-dev # enables MediaInfo-based video metadata extraction
+  - mediainfo # MediaInfo CLI tool used at runtime for JSON output
 
 tasks:
-  - normalize_submodules: |
-      set -e
-      # On SourceHut, SSH-based submodule URLs fail. Rewrite to HTTPS before any submodule ops.
-      if [ -f .gitmodules ]; then
-        sed -i 's#git@github.com:#https://github.com/#g' .gitmodules || true
-        git submodule sync --recursive || true
-      fi
-      # Prevent automatic submodule recursion from causing failures
-      git config --global submodule.recurse false || true
-      # If submodules were initialized by the runner, deinit private ones to avoid fetch attempts
-      if git config -f .gitmodules --get-regexp '^submodule\..*\.url' >/dev/null 2>&1; then
-        while read -r name url; do
-          case "$url" in
-            *homebrew-yams*|*yams-ghidra-plugin*)
-              git submodule deinit -f "$(echo "$name" | sed -E 's/^submodule\.([^.]*)\.url/\1/')" || true ;;
-          esac
-        done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.url')
-      fi
-
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.
   - compute_version: |
       set -e

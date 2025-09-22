@@ -9,9 +9,21 @@ Thanks for your interest in contributing!
 - Please include: version/commit, platform, repro steps, expected/actual behavior, logs. For security issues, see SECURITY.md.
 
 ## Development workflow
-- Toolchain: CMake + Conan 2, C++20
-- Build: `cmake --preset yams-release && cmake --build --preset yams-release`
-- Tests: `ctest --test-dir build/yams-release`
+- Toolchain: Meson + Conan 2 (primary), Ninja; CMake presets available; C++20.
+- Quick loop (Debug):
+  ```bash
+  conan install . -of build/debug -s build_type=Debug -b missing
+  meson setup build/debug \
+    --prefix /usr/local \
+    --native-file build/debug/build/Debug/generators/conan_meson_native.ini
+  meson compile -C build/debug
+  meson test -C build/debug
+  ```
+- CMake alternative (optional):
+  - Build: `cmake --preset yams-release && cmake --build --preset yams-release`
+  - Tests: `ctest --preset yams-release` (or `ctest --test-dir build/yams-release`)
+- GCC flow: see `docs/BUILD-GCC.md`.
+- Full build guide: see `docs/developer/build_system.md`.
 - For CI/test speed and stability: `export YAMS_DISABLE_MODEL_PRELOAD=1`
 
 ## Style and lint
