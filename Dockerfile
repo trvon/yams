@@ -59,6 +59,7 @@ RUN --mount=type=cache,target=/root/.conan2 \
     fi; \
   fi; \
   if ! conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
+    -c tools.cmake.cmaketoolchain:cache_variables.CMAKE_POLICY_VERSION_MINIMUM=3.5 \
     --output-folder=build/yams-release -s build_type=Release --build=missing; then \
   echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
   conan cache clean --temp --locks || true; \
@@ -66,6 +67,7 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan search openjpeg -r=conancenter || true; \
   conan search libarchive -r=conancenter || true; \
   conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
+    -c tools.cmake.cmaketoolchain:cache_variables.CMAKE_POLICY_VERSION_MINIMUM=3.5 \
     --output-folder=build/yams-release -s build_type=Release --build=missing; \
   fi
 
@@ -84,6 +86,7 @@ RUN --mount=type=cache,target=/root/.conan2 \
     export YAMS_OPENJPEG_VERSION=2.5.0; \
   fi; \
   conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
+    -c tools.cmake.cmaketoolchain:cache_variables.CMAKE_POLICY_VERSION_MINIMUM=3.5 \
     --output-folder=build/yams-release -s build_type=Release --build=missing && \
   meson setup build/yams-release \
   $( \

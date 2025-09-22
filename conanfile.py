@@ -59,8 +59,14 @@ class YamsConan(ConanFile):
         if self.options.enable_pdf:
             self.requires("pdfium/95.0.4629")
             self.requires("libmediainfo/22.03")
-            # Do not pin/override openjpeg here; rely on pdfium's transitive requirement to avoid
-            # version conflicts when certain remotes lack newer openjpeg recipes.
+            # macOS builds hit a CMake policy issue when pdfium resolves openjpeg/2.5.0.
+            # Prefer openjpeg/2.5.3 on macOS only (ConanCenter provides it), while leaving
+            # Linux/Docker unpinned to avoid remote-resolution failures.
+            try:
+                if str(self.settings.os) == "Macos":
+                    self.requires("openjpeg/2.5.3", override=True)
+            except Exception:
+                pass
 
     def build_requirements(self):
         if self.options.build_tests:
