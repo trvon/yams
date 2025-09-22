@@ -186,6 +186,8 @@ jobs:
           if [ -f "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh" ]; then
             source "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh"
           fi
+          # Relax noisy third-party warnings observed in CI (e.g., sign-compare from gtest)
+          export CXXFLAGS="$CXXFLAGS -Wno-sign-compare -Wno-unused-result"
           # Robust Meson toolchain detection across Conan versions
           TOOLCHAIN_DIR="${{ env.BUILD_DIR }}/build-debug/conan"
           NATIVE_FILE="$TOOLCHAIN_DIR/conan_meson_native.ini"

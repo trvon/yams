@@ -4,3 +4,6 @@
 [submodule "homebrew-yams"]
   path = homebrew-yams
   url = https://github.com/trvon/homebrew-yams.git
+[submodule "yams-sdk"]
+  path = external/yams-sdk
+  url = git@git.sr.ht:~trvon/yams-sdk

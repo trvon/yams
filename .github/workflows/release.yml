@@ -615,9 +615,13 @@ jobs:
             echo "BUILD_DIR not found at $BUILD_DIR, attempting fallback to build/release (legacy path build/yams-release no longer used)." >&2
             exit 1
           fi
-          meson install -C "$BUILD_DIR" --destdir stage
-          if [ ! -d stage ]; then
-            echo "Stage directory missing after meson install" >&2; ls -al "$BUILD_DIR" >&2 || true; exit 1; fi
+          # Install into a stage directory under BUILD_DIR and validate its presence
+          meson install -C "$BUILD_DIR" --destdir "$BUILD_DIR/stage"
+          if [ ! -d "$BUILD_DIR/stage" ]; then
+            echo "Stage directory missing after meson install" >&2
+            ls -al "$BUILD_DIR" >&2 || true
+            exit 1
+          fi
 
       - name: Generate release summary
         shell: bash

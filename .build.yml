@@ -176,20 +176,9 @@ tasks:
       fi
       cd "${REPO_DIR}"
 
-      # Configure the Conan profile.
-      # Prefer clang to avoid GCC 15 regressions with onnxruntime
-      export CC=clang
-      export CXX=clang++
-      echo "CC=clang" >> ~/.buildenv
-      echo "CXX=clang++" >> ~/.buildenv
-
+      # Configure Conan (use explicit GCC host/build profiles for Debian CI)
       conan --version
       conan profile detect --force || true
-      # Ensure default profile uses clang and libstdc++11
-      conan profile update settings.compiler=clang default || true
-      conan profile update settings.compiler.libcxx=libstdc++11 default || true
-      # Keep C++20
-      sed -i 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' ~/.conan2/profiles/default || true
 
       echo "Conan profile configured (clang):"
       conan profile show -pr default || conan profile show || true
@@ -225,7 +214,8 @@ tasks:
       # Fetch dependencies and generate Meson toolchain/deps.
       conan install . \
         -of "${BUILD_DIR}" \
-        -pr:h=./conan/profiles/host-linux-clang \
+        -pr:h=./conan/profiles/host-linux-gcc \
+        -pr:b=./conan/profiles/host-linux-gcc \
         -s build_type=Release \
         -c tools.build:jobs="${CONAN_CPU_COUNT}" \
         --build=missing
