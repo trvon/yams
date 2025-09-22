@@ -15,9 +15,7 @@ image: debian/trixie
 # still pin the ref to the pushed commit when the job is triggered via
 # git.sr.ht integration.
 sources:
-  - source: git+https://git.sr.ht/~trevon/yams
-    destination: yams
-    submodules: false
+  - https://git.sr.ht/~trevon/yams
 # Other possible images:
 # image: ubuntu/22.04
 # image: debian/stable
@@ -61,7 +59,6 @@ packages:
   - libncurses-dev
   - libtinfo-dev
   - pkg-config
-  # Optional feature dependencies (enable async I/O, archive extraction, media metadata)
   - liburing-dev # enables io_uring async path instead of fallback
   - libarchive-dev # enables archive extraction features
   - libtag1-dev # enables taglib (audio metadata) detection
