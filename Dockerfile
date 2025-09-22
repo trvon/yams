@@ -49,6 +49,16 @@ RUN --mount=type=cache,target=/root/.conan2 \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
   echo '=== Searching for openjpeg/2.5.3 (pre-install) ==='; conan search openjpeg/2.5.3 -r=conancenter || true; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
+  # Align custom host profile's compiler.version with detected clang and Conan's supported settings
+  if command -v clang >/dev/null 2>&1; then \
+    CLANG_MAJOR=$(clang --version | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p' | head -1); \
+    if [ -z "$CLANG_MAJOR" ]; then CLANG_MAJOR=$(clang -dumpversion | cut -d. -f1); fi; \
+    if [ -n "$CLANG_MAJOR" ]; then \
+      # Cap at 18 if Conan settings don't yet include newer versions
+      if [ "$CLANG_MAJOR" -gt 18 ]; then CLANG_MAJOR=18; fi; \
+      sed -i -E "s/^compiler.version=.*/compiler.version=${CLANG_MAJOR}/" ./conan/profiles/host-linux-clang || true; \
+    fi; \
+  fi; \
   if ! conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
     --output-folder=build/yams-release -s build_type=Release --build=missing; then \
   echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
