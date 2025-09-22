@@ -404,6 +404,22 @@ jobs:
             brew install ccache || true
           fi
 
+      - name: Ensure meson and ninja (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # If meson or ninja are not on PATH, install via Homebrew for robustness
+          NEED_INSTALL=0
+          command -v meson >/dev/null 2>&1 || NEED_INSTALL=1
+          command -v ninja >/dev/null 2>&1 || NEED_INSTALL=1
+          if [ "$NEED_INSTALL" -eq 1 ]; then
+            brew update || true
+            brew install meson ninja || true
+          fi
+          echo "meson version (post-check): $(meson --version || echo 'missing')"
+          echo "ninja version (post-check): $(ninja --version || echo 'missing')"
+
       - name: Setup ccache env
         shell: bash
         run: |
@@ -512,7 +528,7 @@ jobs:
           conan install . $CONAN_ARGS
           meson setup build/release \
             --native-file build/release/build-release/conan/conan_meson_native.ini \
-            -Dwerror=true -Dwarning_level=3 -Denable-lzma=true
+            -Dwerror=true -Dwarning_level=3 -Denable-lzma=auto
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV
 
