@@ -3,7 +3,12 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
+#if __has_include(<CLI/CLI.hpp>)
 #include <CLI/CLI.hpp>
+#define YAMS_HAS_CLI11 1
+#else
+#define YAMS_HAS_CLI11 0
+#endif
 
 #include <filesystem>
 #include <fstream>
@@ -87,42 +92,95 @@ int main(int argc, char* argv[]) {
     // Install fatal handlers as early as possible
     setup_fatal_handlers();
 
-    CLI::App app{"YAMS Daemon - background service"};
-
-    // Configuration options
     yams::daemon::DaemonConfig config;
     std::string configPath;
     // Capture CLI-provided data dir separately to enforce precedence (config > env > CLI)
     std::filesystem::path cliDataDir;
-
-    app.add_option("--config", configPath, "Configuration file path");
-    app.add_option("--socket", config.socketPath, "Unix domain socket path");
-    auto* dataDirOpt =
-        app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
-
-    app.add_option("--pid-file", config.pidFile, "PID file path");
-
-    app.add_option("--log-file", config.logFile, "Log file path");
-
-    // Worker threads: avoid overriding DaemonConfig default (4) with an accidental 0.
-    // If the user does not provide this flag, keep the compiled default; if they do and set 0,
-    // we will coerce to at least 1 later to ensure the socket server can accept connections.
-    app.add_option("--workers", config.workerThreads, "Number of worker threads");
-
-    app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")->default_val(8);
-
-    app.add_option("--log-level", config.logLevel, "Log level (trace/debug/info/warn/error)")
-        ->default_val("info");
-
-    // Plugin configuration options
-    app.add_option("--plugin-dir", config.pluginDir, "Directory containing plugins");
+    bool cliProvidedDataDir = false;
     bool noPlugins = false;
-    app.add_flag("--no-plugins", noPlugins, "Disable plugin loading");
-
     bool foreground = false;
-    app.add_flag("-f,--foreground", foreground, "Run in foreground (don't daemonize)");
 
-    CLI11_PARSE(app, argc, argv);
+#if YAMS_HAS_CLI11
+    {
+        CLI::App app{"YAMS Daemon - background service"};
+        app.add_option("--config", configPath, "Configuration file path");
+        app.add_option("--socket", config.socketPath, "Unix domain socket path");
+        auto* dataDirOpt =
+            app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
+        app.add_option("--pid-file", config.pidFile, "PID file path");
+        app.add_option("--log-file", config.logFile, "Log file path");
+        app.add_option("--workers", config.workerThreads, "Number of worker threads");
+        app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")
+            ->default_val(8);
+        app.add_option("--log-level", config.logLevel, "Log level (trace/debug/info/warn/error)")
+            ->default_val("info");
+        app.add_option("--plugin-dir", config.pluginDir, "Directory containing plugins");
+        app.add_flag("--no-plugins", noPlugins, "Disable plugin loading");
+        app.add_flag("-f,--foreground", foreground, "Run in foreground (don't daemonize)");
+        CLI11_PARSE(app, argc, argv);
+        cliProvidedDataDir = (dataDirOpt && dataDirOpt->count() > 0);
+    }
+#else
+    // Minimal fallback parser for environments without CLI11 (e.g., some Linux builds)
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        auto has_next = [&](int idx) { return idx + 1 < argc; };
+        auto next_str = [&](std::string& out) {
+            if (has_next(i)) {
+                out = argv[++i];
+                return true;
+            }
+            return false;
+        };
+        if (arg == "--config") {
+            (void)next_str(configPath);
+        } else if (arg == "--socket") {
+            std::string v;
+            if (next_str(v))
+                config.socketPath = v;
+        } else if (arg == "--data-dir" || arg == "--storage") {
+            std::string v;
+            if (next_str(v))
+                cliDataDir = v, cliProvidedDataDir = true;
+        } else if (arg == "--pid-file") {
+            std::string v;
+            if (next_str(v))
+                config.pidFile = v;
+        } else if (arg == "--log-file") {
+            std::string v;
+            if (next_str(v))
+                config.logFile = v;
+        } else if (arg == "--workers") {
+            std::string v;
+            if (next_str(v)) {
+                try {
+                    config.workerThreads = static_cast<size_t>(std::stoul(v));
+                } catch (...) {
+                }
+            }
+        } else if (arg == "--max-memory") {
+            std::string v;
+            if (next_str(v)) {
+                try {
+                    config.maxMemoryGb = static_cast<size_t>(std::stoul(v));
+                } catch (...) {
+                }
+            }
+        } else if (arg == "--log-level") {
+            (void)next_str(config.logLevel);
+        } else if (arg == "--plugin-dir") {
+            std::string v;
+            if (next_str(v))
+                config.pluginDir = v;
+        } else if (arg == "--no-plugins") {
+            noPlugins = true;
+        } else if (arg == "-f" || arg == "--foreground") {
+            foreground = true;
+        }
+    }
+    if (config.logLevel.empty())
+        config.logLevel = "info";
+#endif
 
     // Apply the no-plugins flag
     if (noPlugins) {
@@ -318,6 +376,23 @@ int main(int argc, char* argv[]) {
                         c = static_cast<char>(std::tolower(c));
                     bool en = (v == "1" || v == "true" || v == "on");
                     yams::daemon::TuneAdvisor::setUseInternalBusForPostIngest(en);
+                }
+
+                // Tuning profile (efficient|balanced|aggressive)
+                if (auto it = tune.find("profile"); it != tune.end()) {
+                    std::string v = it->second;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    if (v == "efficient" || v == "conservative") {
+                        yams::daemon::TuneAdvisor::setTuningProfile(
+                            yams::daemon::TuneAdvisor::Profile::Efficient);
+                    } else if (v == "aggressive") {
+                        yams::daemon::TuneAdvisor::setTuningProfile(
+                            yams::daemon::TuneAdvisor::Profile::Aggressive);
+                    } else if (v == "balanced") {
+                        yams::daemon::TuneAdvisor::setTuningProfile(
+                            yams::daemon::TuneAdvisor::Profile::Balanced);
+                    }
                 }
 
                 // Map tuning config to DaemonConfig.tuning (controller + queue policy)
@@ -591,7 +666,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Lastly, if still not specified and CLI provided --data-dir, use it as the lowest priority
-    if (config.dataDir.empty() && dataDirOpt && dataDirOpt->count() > 0) {
+    if (config.dataDir.empty() && cliProvidedDataDir && !cliDataDir.empty()) {
         config.dataDir = cliDataDir;
     }
 

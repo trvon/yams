@@ -19,8 +19,15 @@ public:
 
     enum class Profile { Efficient, Balanced, Aggressive };
 
-    // Resolve tuning profile from env (YAMS_TUNING_PROFILE). Defaults to Balanced.
+    // Resolve tuning profile (override -> env -> default Balanced).
     static Profile tuningProfile() {
+        int ov = tuningProfileOverride_.load(std::memory_order_relaxed);
+        if (ov == 1)
+            return Profile::Efficient;
+        if (ov == 2)
+            return Profile::Balanced;
+        if (ov == 3)
+            return Profile::Aggressive;
         if (const char* s = std::getenv("YAMS_TUNING_PROFILE")) {
             std::string v{s};
             for (auto& c : v)
@@ -31,6 +38,22 @@ public:
                 return Profile::Aggressive;
         }
         return Profile::Balanced;
+    }
+
+    static void setTuningProfile(Profile p) {
+        int code = 0;
+        switch (p) {
+            case Profile::Efficient:
+                code = 1;
+                break;
+            case Profile::Balanced:
+                code = 2;
+                break;
+            case Profile::Aggressive:
+                code = 3;
+                break;
+        }
+        tuningProfileOverride_.store(code, std::memory_order_relaxed);
     }
 
     // Scale factor applied to several heuristics
@@ -48,6 +71,16 @@ public:
                 return 1.0;
         }
     }
+
+    // Public accessors for embedding-related knobs (used outside daemon module)
+    // These forward to internal tunables while keeping implementation details private.
+    static double getEmbedSafety() { return embedSafety(); }
+    static std::size_t getEmbedDocCap() { return embedDocCap(); }
+    static unsigned getEmbedPauseMs() { return embedPauseMs(); }
+    static uint32_t getEmbedMaxConcurrency() { return embedMaxConcurrency(); }
+
+public:
+    static inline std::atomic<int> tuningProfileOverride_{0};
 
     // -------- Runtime-tunable policy (defaults chosen conservatively) --------
     static AutoEmbedPolicy autoEmbedPolicy() {

@@ -81,4 +81,4 @@ AGENTS.md
 gitlab-ci.yml
 .project
 .cproject
-.aiassistant/
+builddir

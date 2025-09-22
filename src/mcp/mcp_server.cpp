@@ -2287,43 +2287,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
 
-    // Parity with CLI: race streaming vs delayed unary and use whichever returns first.
+    // Streaming-only path for search to match CLI and reduce protocol complexity.
     // Body timeout may be overridden via env YAMS_MCP_SEARCH_BODY_TIMEOUT_MS (default 60000).
     Result<yams::daemon::SearchResponse> res(Error{ErrorCode::Unknown, "uninitialized"});
     {
-        std::shared_ptr<std::atomic_bool> decided = std::make_shared<std::atomic_bool>(false);
-        std::shared_ptr<std::promise<Result<yams::daemon::SearchResponse>>> prom =
-            std::make_shared<std::promise<Result<yams::daemon::SearchResponse>>>();
-        auto fut = prom->get_future();
-
-        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-        // Launch streaming
-        boost::asio::co_spawn(
-            io,
-            [&, decided, prom]() -> boost::asio::awaitable<void> {
-                auto sr = co_await daemon_client_->streamingSearch(dreq);
-                if (!decided->exchange(true))
-                    prom->set_value(std::move(sr));
-                co_return;
-            },
-            boost::asio::detached);
-
-        // Launch delayed unary fallback (2 seconds)
-        boost::asio::co_spawn(
-            io,
-            [&, decided, prom]() -> boost::asio::awaitable<void> {
-                boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
-                t.expires_after(std::chrono::seconds(2));
-                co_await t.async_wait(boost::asio::use_awaitable);
-                if (!decided->load()) {
-                    auto ur = co_await daemon_client_->call(dreq);
-                    if (!decided->exchange(true))
-                        prom->set_value(std::move(ur));
-                }
-                co_return;
-            },
-            boost::asio::detached);
-
         int wait_ms = 60000;
         if (const char* env = std::getenv("YAMS_MCP_SEARCH_BODY_TIMEOUT_MS")) {
             try {
@@ -2333,6 +2300,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             } catch (...) {
             }
         }
+        std::promise<Result<yams::daemon::SearchResponse>> prom;
+        auto fut = prom.get_future();
+        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+        boost::asio::co_spawn(
+            io,
+            [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
+                auto sr = co_await daemon_client_->streamingSearch(dreq);
+                pr.set_value(std::move(sr));
+                co_return;
+            },
+            boost::asio::detached);
         if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
             res = fut.get();
         } else {
@@ -2344,22 +2322,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         ::setenv("YAMS_SESSION_CURRENT", "", 1);
     }
     if (!res) {
-        // Retry unary on streaming read timeout like CLI
-        const auto& err = res.error();
-        if (err.code == ErrorCode::Timeout &&
-            err.message.find("Read timeout") != std::string::npos) {
-            try {
-                daemon_client_config_.headerTimeout = std::chrono::milliseconds(60000);
-                daemon_client_->setHeaderTimeout(daemon_client_config_.headerTimeout);
-            } catch (...) {
-            }
-            auto ur = co_await daemon_client_->call(dreq);
-            if (!ur)
-                co_return ur.error();
-            res = ur;
-        } else {
-            co_return res.error();
-        }
+        co_return res.error();
     }
     const auto& r = res.value();
     out.total = r.totalCount;
@@ -3061,6 +3024,7 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
             mcp_response.indexed = true;
             const auto& addok = addres.value();
             spdlog::info("[MCP] post-index: indexed path='{}' hash='{}'", addReq.path, addok.hash);
+            mcp_response.hash = addok.hash; // Update with the definitive hash from indexing
         }
     }
 
@@ -3122,10 +3086,28 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             // default to ready if key missing
         }
         if (!csr) {
-            std::string hint = "Content store not ready. Check daemon status and config.";
-            if (!s.contentStoreError.empty())
-                hint += std::string(" Error: ") + s.contentStoreError;
-            co_return Error{ErrorCode::InvalidState, hint};
+            // Graceful bounded wait for content_store readiness to avoid transient I/O failures
+            using namespace std::chrono_literals;
+            const auto ready_timeout = 2s;
+            const auto poll_interval = 150ms;
+            auto exec = co_await boost::asio::this_coro::executor;
+            boost::asio::steady_timer timer{exec};
+            auto start = std::chrono::steady_clock::now();
+            for (;;) {
+                auto s2 = co_await daemon_client_->status();
+                if (s2) {
+                    const auto& ss = s2.value();
+                    auto it2 = ss.readinessStates.find("content_store");
+                    if (it2 == ss.readinessStates.end() || it2->second) {
+                        break; // proceed when ready or key missing
+                    }
+                }
+                if (std::chrono::steady_clock::now() - start >= ready_timeout) {
+                    break; // proceed and rely on retry/backoff below
+                }
+                timer.expires_after(poll_interval);
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            }
         }
         // If model provider isn't ready, prefer graceful degradation by disabling embeddings.
         if (!modelReadyFlag) {
@@ -3272,24 +3254,17 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             daemon_req.metadata[key] = value.dump();
         }
     }
-    // Single-path daemon call with bounded retries; no local fallback
+    // Single-path daemon call with bounded retries; always use streaming path
     {
         using namespace std::chrono_literals;
         auto exec = co_await boost::asio::this_coro::executor;
         boost::asio::steady_timer timer{exec};
         const int maxAttempts = 3;
         bool hasContent = !daemon_req.content.empty();
-        // Detect directory to choose IPC mode
-        bool isDir = false;
-        if (!hasContent && !daemon_req.path.empty()) {
-            std::error_code __ec;
-            isDir = std::filesystem::is_directory(daemon_req.path, __ec);
-        }
         for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+            // Use streamingAddDocument for parity with CLI and to avoid unary-path edge cases
             Result<yams::daemon::AddDocumentResponse> addRes =
-                (hasContent || isDir || daemon_req.recursive)
-                    ? co_await daemon_client_->streamingAddDocument(daemon_req)
-                    : co_await daemon_client_->call(daemon_req);
+                co_await daemon_client_->streamingAddDocument(daemon_req);
             if (addRes) {
                 MCPStoreDocumentResponse out;
                 // For directory adds, return empty hash to signal multi-file op

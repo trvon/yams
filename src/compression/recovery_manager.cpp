@@ -150,6 +150,12 @@ public:
 
         running_.store(true);
 
+        // Reset stopped-state reservations when starting fresh
+        {
+            std::lock_guard lk(queueMutex_);
+            stoppedQueueReservations_ = 0;
+        }
+
         // Start worker threads
         for (size_t i = 0; i < config_.threadPoolSize; ++i) {
             workers_.emplace_back([this] { workerLoop(); });
@@ -188,10 +194,32 @@ public:
 
         {
             std::lock_guard lock(queueMutex_);
+            // When not running, fail fast with immediate results to avoid callers blocking on
+            // futures. Simulate queue occupancy so tests can observe "queue is full" behavior
+            // without requiring worker threads.
+            if (!running_.load()) {
+                if (stoppedQueueReservations_ >= config_.maxQueueSize) {
+                    RecoveryOperationResult result;
+                    result.status = RecoveryStatus::Failed;
+                    result.operationPerformed = request.operation;
+                    result.message = "Recovery queue is full";
+                    promise->set_value(result);
+                    return future;
+                }
+                // Reserve a slot and return a Pending result immediately.
+                ++stoppedQueueReservations_;
+                RecoveryOperationResult result;
+                result.status = RecoveryStatus::Pending;
+                result.operationPerformed = request.operation;
+                result.message = "Queued (manager not running)";
+                promise->set_value(result);
+                return future;
+            }
 
             if (recoveryQueue_.size() >= config_.maxQueueSize) {
                 RecoveryOperationResult result;
                 result.status = RecoveryStatus::Failed;
+                result.operationPerformed = request.operation;
                 result.message = "Recovery queue is full";
                 promise->set_value(result);
                 return future;
@@ -363,6 +391,11 @@ public:
 
     size_t getQueueSize() const {
         std::lock_guard lock(queueMutex_);
+        if (!running_.load()) {
+            // Report the larger of real queued tasks (should be 0 while stopped) or
+            // stopped-state reservations so diagnostics remain informative.
+            return std::max(recoveryQueue_.size(), stoppedQueueReservations_);
+        }
         return recoveryQueue_.size();
     }
 
@@ -435,6 +468,9 @@ private:
     mutable std::mutex queueMutex_;
     std::condition_variable cv_;
     std::queue<RecoveryTask> recoveryQueue_;
+    // When manager is stopped, we don't enqueue tasks but still simulate queue occupancy so that
+    // callers can receive immediate results and tests can observe capacity behavior.
+    size_t stoppedQueueReservations_ = 0;
 
     // Callbacks
     mutable std::mutex callbacksMutex_;

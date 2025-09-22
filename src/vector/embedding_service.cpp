@@ -682,12 +682,12 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         DynamicBatcherConfig bcfg;
         bcfg.maxSequenceLengthTokens = modelMaxSeq;
         // TuneAdvisor-provided safety factor (env can still override via TuneAdvisor setters)
-        double safety = yams::daemon::TuneAdvisor::embedSafety();
+        double safety = yams::daemon::TuneAdvisor::getEmbedSafety();
         bcfg.safetyFactor = safety;
         bcfg.advisoryDocCap = advisoryDocCap;
         // Optional advisory upper bound for docs per batch via env
         if (bcfg.advisoryDocCap == 0) {
-            auto capTa = yams::daemon::TuneAdvisor::embedDocCap();
+            auto capTa = yams::daemon::TuneAdvisor::getEmbedDocCap();
             if (capTa > 0)
                 bcfg.advisoryDocCap = capTa;
         }
@@ -698,7 +698,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         size_t failed = 0;
 
         // Allow configurable pause between batches to reduce sustained CPU pressure
-        unsigned pause_ms = yams::daemon::TuneAdvisor::embedPauseMs();
+        unsigned pause_ms = yams::daemon::TuneAdvisor::getEmbedPauseMs();
 
         for (size_t i = 0; i < documentHashes.size();) {
             std::vector<std::string> texts;

@@ -1989,7 +1989,7 @@ private:
                 int cap = 0;
                 // Prefer centralized TuneAdvisor when available
                 try {
-                    cap = static_cast<int>(yams::daemon::TuneAdvisor::embedMaxConcurrency());
+                    cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
                 } catch (...) {
                 }
                 if (cap <= 0) {

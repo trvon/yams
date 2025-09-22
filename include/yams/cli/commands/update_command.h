@@ -50,6 +50,8 @@ private:
     std::string hash_;
     std::string name_;
     std::vector<std::string> metadata_;
+    std::vector<std::string> add_tags_;
+    std::vector<std::string> remove_tags_;
     bool verbose_ = false;
     bool latest_ = false;
     bool oldest_ = false;

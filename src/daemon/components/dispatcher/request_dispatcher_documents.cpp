@@ -4,6 +4,7 @@
 #include <sstream>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -551,10 +552,40 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 InternalEventBus::StoreDocumentTask task{req};
                 if (channel->try_push(std::move(task))) {
                     AddDocumentResponse response;
-                    response.hash = ""; // Hash is not known yet
+                    response.hash = ""; // compute best-effort hash for single-file adds
                     response.path = req.path.empty() ? req.name : req.path;
                     response.documentsAdded = 1;
                     response.message = "Document accepted for asynchronous processing.";
+
+                    // Best-effort: when adding a single file (non-directory), compute
+                    // the expected content hash up-front so clients can verify immediately.
+                    // This keeps the fast return (asynchronous processing) while providing
+                    // a stable identifier for follow-up operations.
+                    try {
+                        std::unique_ptr<yams::crypto::IContentHasher> hasher;
+                        hasher = yams::crypto::createSHA256Hasher();
+                        if (!req.content.empty()) {
+                            // Hash provided content
+                            hasher->init();
+                            auto data = std::span<const std::byte>(
+                                reinterpret_cast<const std::byte*>(req.content.data()),
+                                req.content.size());
+                            hasher->update(data);
+                            response.hash = hasher->finalize();
+                            response.size = req.content.size();
+                        } else if (!req.path.empty()) {
+                            std::error_code ec;
+                            if (std::filesystem::is_regular_file(req.path, ec) && !ec) {
+                                response.hash = hasher->hashFile(req.path);
+                                response.size =
+                                    static_cast<size_t>(std::filesystem::file_size(req.path, ec));
+                                if (ec)
+                                    response.size = 0;
+                            }
+                        }
+                    } catch (...) {
+                        // Non-fatal: leave hash/size defaults when hashing fails
+                    }
                     co_return response;
                 } else {
                     co_return ErrorResponse{ErrorCode::ResourceExhausted,

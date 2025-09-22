@@ -1411,16 +1411,15 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
 }
 
 boost::asio::awaitable<Result<void>>
-RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket,
-                             const Response& response, uint64_t request_id, bool flush,
-                             ConnectionFsm* fsm) {
+RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket, Response response,
+                             uint64_t request_id, bool flush, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
     // Create message envelope for response header
     Message response_msg;
     response_msg.version = PROTOCOL_VERSION;
     response_msg.requestId = request_id;
     response_msg.timestamp = std::chrono::steady_clock::now();
-    response_msg.payload = response;
+    response_msg.payload = std::move(response);
     // Debug header write (shows message type and flush status)
     spdlog::debug("stream: write_header req_id={} type={} flush={}", request_id,
                   static_cast<int>(getMessageType(response)), flush);
@@ -1453,16 +1452,15 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
 }
 
 boost::asio::awaitable<Result<void>>
-RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
-                            const Response& response, uint64_t request_id, bool last_chunk,
-                            bool flush, ConnectionFsm* fsm) {
+RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket, Response response,
+                            uint64_t request_id, bool last_chunk, bool flush, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
     // Create message envelope for response chunk
     Message response_msg;
     response_msg.version = PROTOCOL_VERSION;
     response_msg.requestId = request_id;
     response_msg.timestamp = std::chrono::steady_clock::now();
-    response_msg.payload = response;
+    response_msg.payload = std::move(response);
     if (config_.enable_multiplexing) {
         auto framed = framer_.frame_message_chunk(response_msg, last_chunk);
         if (!framed)

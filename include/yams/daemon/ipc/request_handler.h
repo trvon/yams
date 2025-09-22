@@ -163,12 +163,12 @@ private:
 
     // Write a header frame and optionally flush
     [[nodiscard]] boost::asio::awaitable<Result<void>>
-    write_header(boost::asio::local::stream_protocol::socket& socket, const Response& response,
+    write_header(boost::asio::local::stream_protocol::socket& socket, Response response,
                  uint64_t request_id, bool flush = true, ConnectionFsm* fsm = nullptr);
 
     // Write a chunk frame and optionally flush
     [[nodiscard]] boost::asio::awaitable<Result<void>>
-    write_chunk(boost::asio::local::stream_protocol::socket& socket, const Response& response,
+    write_chunk(boost::asio::local::stream_protocol::socket& socket, Response response,
                 uint64_t request_id, bool last_chunk = false, bool flush = true,
                 ConnectionFsm* fsm = nullptr);
 
