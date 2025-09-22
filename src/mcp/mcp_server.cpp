@@ -78,6 +78,7 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 } // namespace
 
 thread_local std::string MCPServer::tlsSessionId_;
+thread_local nlohmann::json MCPServer::tlsProgressToken_ = nullptr;
 
 // In-band logging helper (level + message variant) - YAMS extension, not standard MCP
 static nlohmann::json createLogNotification(const std::string& level, const std::string& message) {
@@ -226,6 +227,17 @@ StdioTransport::StdioTransport() {
     state_.store(TransportState::Connected);
     // Writer thread retired; unified outbound path in MCPServer handles ordering
     writerRunning_.store(false);
+    // Configure content type header for framed messages
+    try {
+        if (const char* ct = std::getenv("YAMS_MCP_CONTENT_TYPE"); ct && *ct) {
+            contentTypeHeader_ = ct;
+        } else {
+            // Default to LSP-compatible header for broad client compatibility
+            contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
+        }
+    } catch (...) {
+        contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
+    }
 }
 
 StdioTransport::~StdioTransport() {
@@ -251,9 +263,9 @@ void StdioTransport::send(const json& message) {
             if (outbuf_) {
                 (void)std::cout.rdbuf(outbuf_);
             }
-            // Minimal LSP/MCP framing, always including Content-Type
+            // Minimal MCP framing, always including Content-Type header for interop
             std::cout << "Content-Length: " << payload.size() << "\r\n";
-            std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+            std::cout << "Content-Type: " << contentTypeHeader_ << "\r\n";
             std::cout << "\r\n";
             std::cout << payload;
             std::cout.flush();
@@ -303,7 +315,7 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
             (void)std::cout.rdbuf(outbuf_);
         }
         std::cout << "Content-Length: " << payload.size() << "\r\n";
-        std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+        std::cout << "Content-Type: " << contentTypeHeader_ << "\r\n";
         std::cout << "\r\n";
         std::cout << payload;
         std::cout.flush();
@@ -792,12 +804,27 @@ void MCPServer::start() {
                 const auto toolName = params.value("name", "");
                 const auto toolArgs = params.value("arguments", json::object());
                 auto id_copy = request.value("id", json{});
-                // Emit start progress
-                sendProgress("tool", 0.0, std::string("calling ") + toolName);
+                // Extract spec progress token if provided via params._meta.progressToken
+                std::optional<json> progressToken;
+                try {
+                    if (params.contains("_meta") && params["_meta"].is_object()) {
+                        const auto& meta = params["_meta"];
+                        if (meta.contains("progressToken")) {
+                            progressToken = meta["progressToken"];
+                        }
+                    }
+                } catch (...) {
+                    // ignore malformed _meta
+                }
+                // Emit start progress (spec-compliant when token present)
+                sendProgress("tool", 0.0, std::string("calling ") + toolName, progressToken);
                 auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
                 boost::asio::co_spawn(
                     io,
-                    [this, toolName, toolArgs, id_copy]() -> boost::asio::awaitable<void> {
+                    [this, toolName, toolArgs, id_copy,
+                     progressToken]() -> boost::asio::awaitable<void> {
+                        if (progressToken)
+                            MCPServer::tlsProgressToken_ = *progressToken;
                         try {
                             json raw = co_await callToolAsync(toolName, toolArgs);
                             if (raw.is_object() && raw.contains("error")) {
@@ -808,7 +835,8 @@ void MCPServer::start() {
                             } else {
                                 sendResponse(createResponse(id_copy, raw));
                             }
-                            sendProgress("tool", 100.0, std::string("completed ") + toolName);
+                            sendProgress("tool", 100.0, std::string("completed ") + toolName,
+                                         progressToken);
                         } catch (const std::exception& e) {
                             json err = {{"code", -32603}, {"message", e.what()}};
                             sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
@@ -820,6 +848,7 @@ void MCPServer::start() {
                                           {"error", err},
                                           {"id", id_copy}});
                         }
+                        MCPServer::tlsProgressToken_ = nullptr;
                         co_return;
                     },
                     boost::asio::detached);
@@ -5387,8 +5416,28 @@ void MCPServer::handleCancelRequest(const nlohmann::json& params,
     sendProgress("cancel", 100.0, "Cancellation acknowledged");
 }
 
-void MCPServer::sendProgress(const std::string& phase, double percent, const std::string& message) {
-    json p = {{"phase", phase}, {"percent", percent}};
+void MCPServer::sendProgress(const std::string& /*phase*/, double percent,
+                             const std::string& message,
+                             std::optional<nlohmann::json> progressToken) {
+    // Per MCP spec, notifications/progress MUST include a progressToken from the request's
+    // params._meta.progressToken. If absent, do not emit a progress notification.
+    nlohmann::json token = nullptr;
+    if (progressToken)
+        token = *progressToken;
+    else if (!MCPServer::tlsProgressToken_.is_null())
+        token = MCPServer::tlsProgressToken_;
+
+    if (token.is_null()) {
+        return; // No valid token available; skip
+    }
+
+    double clamped = percent;
+    if (clamped < 0.0)
+        clamped = 0.0;
+    if (clamped > 100.0)
+        clamped = 100.0;
+
+    json p = {{"progressToken", token}, {"progress", clamped}, {"total", 100.0}};
     if (!message.empty())
         p["message"] = message;
     sendResponse({{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", p}});

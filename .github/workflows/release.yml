@@ -583,6 +583,8 @@ jobs:
               exit 1
             fi
           fi
+          # Ensure pkg-config is discoverable in cross build; use Homebrew path explicitly
+          export PKG_CONFIG=${PKG_CONFIG:-/opt/homebrew/bin/pkg-config}
           meson setup build/release "${MESON_TOOL_ARG[@]}" \
             -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto
           meson compile -C build/release
@@ -615,8 +617,8 @@ jobs:
             echo "BUILD_DIR not found at $BUILD_DIR, attempting fallback to build/release (legacy path build/yams-release no longer used)." >&2
             exit 1
           fi
-          # Install into a stage directory under BUILD_DIR and validate its presence
-          meson install -C "$BUILD_DIR" --destdir "$BUILD_DIR/stage"
+          # Install into 'stage' under the build dir (destdir is relative to builddir)
+          meson install -C "$BUILD_DIR" --destdir stage
           if [ ! -d "$BUILD_DIR/stage" ]; then
             echo "Stage directory missing after meson install" >&2
             ls -al "$BUILD_DIR" >&2 || true

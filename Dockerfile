@@ -47,13 +47,6 @@ RUN --mount=type=cache,target=/root/.conan2 \
   # Ensure the URL is correct (update in-place if needed)
   conan remote update conancenter https://center.conan.io || true; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
-  echo '=== Searching for openjpeg/2.5.3 (pre-install) ==='; conan search openjpeg/2.5.3 -r=conancenter || true; \
-  # Decide OpenJPEG version dynamically based on remote availability
-  if conan search openjpeg/2.5.3 -r=conancenter >/dev/null 2>&1; then \
-    export YAMS_OPENJPEG_VERSION=2.5.3; \
-  else \
-    export YAMS_OPENJPEG_VERSION=2.5.0; \
-  fi; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
   # Align custom host profile's compiler.version with detected clang and Conan's supported settings
   if command -v clang >/dev/null 2>&1; then \

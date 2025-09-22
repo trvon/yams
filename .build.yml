@@ -191,8 +191,12 @@ tasks:
         REPO_DIR="."
       fi
       cd "${REPO_DIR}"
-      echo "Running YAMS semver guard..."
-      python3 scripts/ci/check_yams_semver.py
+      if [ -f scripts/ci/check_yams_semver.py ]; then
+        echo "Running YAMS semver guard..."
+        python3 scripts/ci/check_yams_semver.py
+      else
+        echo "No semver guard script found; skipping."
+      fi
 
   - build: |
       set -e
@@ -246,6 +250,33 @@ tasks:
         ccache -s || true
       fi
 
+  - test: |
+      set -e
+      # Run test suite; do not fail the build solely due to test failures so we can publish logs
+      if [ -d yams ] && [ -f yams/meson.build ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
+      mkdir -p artifacts || true
+      if [ -d "${BUILD_DIR}" ]; then
+        echo "Running meson tests in ${BUILD_DIR}..."
+        meson test -C "${BUILD_DIR}" --print-errorlogs || true
+        # Collect logs and common debug info
+        if [ -d "${BUILD_DIR}/meson-logs" ]; then
+          tar -C "${BUILD_DIR}" -czf artifacts/meson-logs.tar.gz meson-logs || true
+          cp -vf "${BUILD_DIR}/meson-logs/testlog.txt" artifacts/testlog.txt 2>/dev/null || true
+          cp -vf "${BUILD_DIR}/meson-logs/meson-log.txt" artifacts/meson-log.txt 2>/dev/null || true
+        fi
+        # Export compile_commands if generated
+        if [ -f "${BUILD_DIR}/compile_commands.json" ]; then
+          cp -vf "${BUILD_DIR}/compile_commands.json" artifacts/compile_commands.json || true
+        fi
+      else
+        echo "BUILD_DIR ${BUILD_DIR} missing; skipping meson tests" | tee artifacts/test-notes.txt
+      fi
+
   - package: |
       set -e
       # Package on tag builds or when explicitly channelized as nightly/weekly
@@ -271,7 +302,12 @@ tasks:
       # Also publish a raw stage archive for debugging/inspection
       tar -czf "../yams-${CLEAN_VERSION}-stage.tar.gz" .
       if command -v zip >/dev/null 2>&1; then
-        zip -qry "../yams-${CLEAN_VERSION}-stage.zip" .
+        # Only attempt zip if there are regular files to include; otherwise zip exits with "Nothing to do!"
+        if find . -type f -print -quit | grep -q .; then
+          zip -qry "../yams-${CLEAN_VERSION}-stage.zip" . || echo "zip failed; continuing (tarball already created)"
+        else
+          echo "Stage contains no regular files; skipping zip archive"
+        fi
       fi
 
   - package_meson: |
@@ -355,3 +391,7 @@ artifacts:
   - "artifacts/yams.tar.gz"
   - "artifacts/yams.deb"
   - "artifacts/yams.rpm"
+  - "artifacts/meson-logs.tar.gz"
+  - "artifacts/testlog.txt"
+  - "artifacts/meson-log.txt"
+  - "artifacts/compile_commands.json"

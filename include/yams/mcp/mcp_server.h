@@ -92,6 +92,8 @@ private:
 
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};
+    // Outbound content type header for framed messages (configurable via YAMS_MCP_CONTENT_TYPE)
+    std::string contentTypeHeader_;
 
     // Mutex for thread-safe output operations (sending only)
     static std::mutex out_mutex_;
@@ -231,7 +233,8 @@ private:
     // Cancel request handler (JSON-RPC "cancel" -> params { "id": <original request id> })
     void handleCancelRequest(const nlohmann::json& params, const nlohmann::json& id);
     // Progress notification helper (emits "notifications/progress")
-    void sendProgress(const std::string& phase, double percent, const std::string& message = "");
+    void sendProgress(const std::string& phase, double percent, const std::string& message = "",
+                      std::optional<nlohmann::json> progressToken = std::nullopt);
     // Auto-ready scheduling (fallback when client omits 'initialized')
     void scheduleAutoReady();
     bool shouldAutoInitialize() const;
@@ -260,6 +263,8 @@ private:
 
     // Notification routing for HTTP mode
     static thread_local std::string tlsSessionId_;
+    // Spec-compliant progress token associated with the current in-flight request (if any)
+    static thread_local nlohmann::json tlsProgressToken_;
     std::function<void(const std::string&, const nlohmann::json&)> httpPublisher_;
 
     // Telemetry counters (FSM-integrated)
