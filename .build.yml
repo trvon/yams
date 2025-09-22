@@ -72,8 +72,8 @@ tasks:
   # Determine version from the Git ref and persist to ~/.buildenv for later tasks.
   - compute_version: |
       set -e
-      # Detect repository root (some runners check out into ./, others into ./yams)
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      # Detect repository root (sr.ht often checks out into ./yams). Support Meson or CMake projects.
+      if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
@@ -168,7 +168,7 @@ tasks:
       echo "CONAN_CPU_COUNT=${CONAN_CPU_COUNT}" >> ~/.buildenv
 
       # Detect and move into repository root
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
@@ -195,7 +195,7 @@ tasks:
 
   - yams_semver_guard: |
       set -e
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
@@ -266,7 +266,7 @@ tasks:
         echo "Skipping packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
         exit 0
       fi
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
@@ -306,7 +306,7 @@ tasks:
       ART_DIR="artifacts"
       rm -rf "${ART_DIR}" && mkdir -p "${ART_DIR}"
       # Determine repository root
-      if [ -d yams ] && [ -f yams/CMakeLists.txt ]; then
+      if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"
       else
         REPO_DIR="."

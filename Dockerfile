@@ -48,6 +48,12 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan remote update conancenter https://center.conan.io || true; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
   echo '=== Searching for openjpeg/2.5.3 (pre-install) ==='; conan search openjpeg/2.5.3 -r=conancenter || true; \
+  # Decide OpenJPEG version dynamically based on remote availability
+  if conan search openjpeg/2.5.3 -r=conancenter >/dev/null 2>&1; then \
+    export YAMS_OPENJPEG_VERSION=2.5.3; \
+  else \
+    export YAMS_OPENJPEG_VERSION=2.5.0; \
+  fi; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
   # Align custom host profile's compiler.version with detected clang and Conan's supported settings
   if command -v clang >/dev/null 2>&1; then \
@@ -78,6 +84,12 @@ ARG BUILD_DOCS=false
 COPY . .
 # Configure & build (reuse Conan cache) — keep runtime lean by default
 RUN --mount=type=cache,target=/root/.conan2 \
+  # Re-evaluate OpenJPEG version in builder stage as a safeguard
+  if conan search openjpeg/2.5.3 -r=conancenter >/dev/null 2>&1; then \
+    export YAMS_OPENJPEG_VERSION=2.5.3; \
+  else \
+    export YAMS_OPENJPEG_VERSION=2.5.0; \
+  fi; \
   conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
     --output-folder=build/yams-release -s build_type=Release --build=missing && \
   meson setup build/yams-release \
