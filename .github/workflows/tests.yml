@@ -198,7 +198,6 @@ jobs:
             -pr:b=default \
             -s build_type=Debug \
             -o yams/*:build_tests=True \
-            -c tools.cmake.cmaketoolchain:extra_variables.cmake_policy_version_minimum=3.5 \
             -o yams/*:enable_onnx=False \
             --build=missing
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
