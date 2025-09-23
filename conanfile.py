@@ -59,12 +59,14 @@ class YamsConan(ConanFile):
         if self.options.enable_pdf:
             self.requires("pdfium/95.0.4629")
             self.requires("libmediainfo/22.03")
-            # Allow environment-controlled OpenJPEG version to accommodate remote availability.
-            # Default to 2.5.0 for broadest compatibility; set YAMS_OPENJPEG_VERSION=2.5.3 when available.
-            # Default to 2.5.3 (works with modern CMake). Docker CI can override to 2.5.0 only
-            # when 2.5.3 is unavailable in the remote.
-            oj_ver = os.getenv("YAMS_OPENJPEG_VERSION", "2.5.3").strip() or "2.5.3"
-            self.requires(f"openjpeg/{oj_ver}", override=True)
+            # macOS builds hit a CMake policy issue when pdfium resolves openjpeg/2.5.0.
+            # Prefer openjpeg/2.5.3 on macOS only (ConanCenter provides it), while leaving
+            # Linux/Docker unpinned to avoid remote-resolution failures.
+            try:
+                if str(self.settings.os) == "Macos":
+                    self.requires("openjpeg/2.5.3", override=True)
+            except Exception:
+                pass
 
     def build_requirements(self):
         if self.options.build_tests:

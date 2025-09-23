@@ -47,6 +47,11 @@ public:
     Result callJsonExport(const std::string& exportName, const std::string& a,
                           const std::string& b);
 
+    // GraphAdapter v1 convenience wrappers (JSON-bridged exports)
+    Result callGraphAdapter(const std::string& method, const std::string& a, const std::string& b);
+    Result callGraphAdapterListGraphs(const std::string& filterJson);
+    Result callGraphAdapterExportGraph(const std::string& graphId, const std::string& optionsJson);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl_;

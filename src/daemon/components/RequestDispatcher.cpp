@@ -157,14 +157,21 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
     if (lifecycleSnapshot.state != LifecycleState::Ready &&
         lifecycleSnapshot.state != LifecycleState::Degraded &&
         !std::holds_alternative<GetStatsRequest>(req)) {
-        // Core services must be ready to proceed.
-        bool coreReady = state_ && state_->readiness.metadataRepoReady.load() &&
-                         state_->readiness.contentStoreReady.load();
-        if (!coreReady) {
-            // If not ready, return a status response to inform the client.
+        // Core services must be ready to proceed. However, for AddDocumentRequest we can
+        // accept the request early as long as the content store is ready; the operation is
+        // asynchronous and metadata indexing will catch up when the repository is ready.
+        bool csReady = state_ && state_->readiness.contentStoreReady.load();
+        bool dbReady = state_ && state_->readiness.metadataRepoReady.load();
+        bool coreReady = csReady && dbReady;
+        const bool isAddDoc = std::holds_alternative<AddDocumentRequest>(req);
+        if (!coreReady && !(isAddDoc && csReady)) {
+            // If not ready (and not an early-accepted add), return a status response.
             StatusRequest statusReq;
             statusReq.detailed = true;
             co_return co_await handleStatusRequest(statusReq);
+        } else if (!coreReady && isAddDoc && csReady) {
+            spdlog::debug(
+                "Proceeding with AddDocument during initialization (content store ready)");
         } else {
             spdlog::debug("Proceeding with request during initialization (core ready)");
         }

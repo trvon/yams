@@ -29,7 +29,7 @@ tags:
 environment:
   # Define consistent directories.
   BUILD_DIR: build/release
-  STAGE_DIR: stage
+  STAGE_DIR: stage  # relative to BUILD_DIR (Meson --destdir uses builddir as base)
   # Optional: set this to "nightly" or "weekly" via scheduler/env to produce
   # date/week-based releases on non-tag builds.
   # RELEASE_CHANNEL:
@@ -191,8 +191,12 @@ tasks:
         REPO_DIR="."
       fi
       cd "${REPO_DIR}"
-      echo "Running YAMS semver guard..."
-      python3 scripts/ci/check_yams_semver.py
+      if [ -f scripts/ci/check_yams_semver.py ]; then
+        echo "Running YAMS semver guard..."
+        python3 scripts/ci/check_yams_semver.py
+      else
+        echo "No semver guard script found; skipping."
+      fi
 
   - build: |
       set -e
@@ -237,13 +241,39 @@ tasks:
       # Build the project.
       meson compile -C "${BUILD_DIR}"
 
-      # Install the built artifacts into the staging directory.
-      mkdir -p "${STAGE_DIR}"
+      # Install the built artifacts into build-local staging directory (BUILD_DIR/STAGE_DIR).
       meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
 
       # Show ccache stats after build (if available)
       if command -v ccache >/dev/null 2>&1; then
         ccache -s || true
+      fi
+
+  - test: |
+      set -e
+      # Run test suite; do not fail the build solely due to test failures so we can publish logs
+      if [ -d yams ] && [ -f yams/meson.build ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
+      mkdir -p artifacts || true
+      if [ -d "${BUILD_DIR}" ]; then
+        echo "Running meson tests in ${BUILD_DIR}..."
+        meson test -C "${BUILD_DIR}" --print-errorlogs || true
+        # Collect logs and common debug info
+        if [ -d "${BUILD_DIR}/meson-logs" ]; then
+          tar -C "${BUILD_DIR}" -czf artifacts/meson-logs.tar.gz meson-logs || true
+          cp -vf "${BUILD_DIR}/meson-logs/testlog.txt" artifacts/testlog.txt 2>/dev/null || true
+          cp -vf "${BUILD_DIR}/meson-logs/meson-log.txt" artifacts/meson-log.txt 2>/dev/null || true
+        fi
+        # Export compile_commands if generated
+        if [ -f "${BUILD_DIR}/compile_commands.json" ]; then
+          cp -vf "${BUILD_DIR}/compile_commands.json" artifacts/compile_commands.json || true
+        fi
+      else
+        echo "BUILD_DIR ${BUILD_DIR} missing; skipping meson tests" | tee artifacts/test-notes.txt
       fi
 
   - package: |
@@ -265,13 +295,24 @@ tasks:
       cd "${REPO_DIR}"
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging the release..."
-      cd "${STAGE_DIR}"
+      # Package from the staged install under BUILD_DIR/STAGE_DIR
+      if [ ! -d "${BUILD_DIR}/${STAGE_DIR}" ]; then
+        echo "ERROR: Stage directory ${BUILD_DIR}/${STAGE_DIR} not found" >&2
+        ls -al "${BUILD_DIR}" || true
+        exit 1
+      fi
+      cd "${BUILD_DIR}/${STAGE_DIR}"
       tar -czf "../yams-${CLEAN_VERSION}-linux-x86_64.tar.gz" .
       echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
       # Also publish a raw stage archive for debugging/inspection
       tar -czf "../yams-${CLEAN_VERSION}-stage.tar.gz" .
       if command -v zip >/dev/null 2>&1; then
-        zip -qry "../yams-${CLEAN_VERSION}-stage.zip" .
+        # Only attempt zip if there are regular files to include; otherwise zip exits with "Nothing to do!"
+        if find . -type f -print -quit | grep -q .; then
+          zip -qry "../yams-${CLEAN_VERSION}-stage.zip" . || echo "zip failed; continuing (tarball already created)"
+        else
+          echo "Stage contains no regular files; skipping zip archive"
+        fi
       fi
 
   - package_meson: |
@@ -289,8 +330,11 @@ tasks:
       cd "${REPO_DIR}"
       CLEAN_VERSION="${YAMS_VERSION}"
       echo "Packaging with Meson..."
-      chmod +x scripts/build-deb.sh
-      scripts/build-deb.sh "${CLEAN_VERSION}" "${BUILD_DIR}"
+      if [ -x scripts/build-deb.sh ]; then
+        scripts/build-deb.sh "${CLEAN_VERSION}" "${BUILD_DIR}"
+      else
+        echo "scripts/build-deb.sh not found; skipping distro package step"
+      fi
 
   - collect_artifacts: |
       set -e
@@ -317,11 +361,11 @@ tasks:
         fi
         # Fallback to tarball when packages are missing
         if ! compgen -G "${ART_DIR}/*" > /dev/null; then
-          for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
+          for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
         fi
       else
         # Nightly/weekly: publish only the primary tarball
-        for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
+        for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
       fi
       # Provide stable filenames expected by SourceHut (no globbing in artifacts list)
       if compgen -G "${ART_DIR}/*.tar.gz" > /dev/null; then
@@ -340,12 +384,12 @@ tasks:
       # Fallback for CI branches: if no artifacts were collected (packaging gated),
       # compress the staged install to provide a basic artifact for inspection.
       if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
-        if [ -d "${REPO_DIR}/${STAGE_DIR}" ]; then
-          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${STAGE_DIR}" >&2
-          tar -C "${REPO_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
+        if [ -d "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" ]; then
+          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" >&2
+          tar -C "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
           ls -l "${ART_DIR}" || true
         else
-          echo "WARNING: Stage dir ${REPO_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
+          echo "WARNING: Stage dir ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
         fi
       fi
 
@@ -355,3 +399,7 @@ artifacts:
   - "artifacts/yams.tar.gz"
   - "artifacts/yams.deb"
   - "artifacts/yams.rpm"
+  - "artifacts/meson-logs.tar.gz"
+  - "artifacts/testlog.txt"
+  - "artifacts/meson-log.txt"
+  - "artifacts/compile_commands.json"

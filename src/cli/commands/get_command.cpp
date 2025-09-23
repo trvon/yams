@@ -217,6 +217,31 @@ public:
                 return Result<void>();
             };
 
+            // If name-based retrieval was requested, prefer smart name resolution first
+            if (!name_.empty() && hash_.empty()) {
+                yams::app::services::RetrievalService rsvc;
+                yams::app::services::RetrievalOptions ropts;
+                if (cli_->hasExplicitDataDir()) {
+                    ropts.explicitDataDir = cli_->getDataPath();
+                }
+                ropts.requestTimeoutMs = 60000;
+                ropts.headerTimeoutMs = 30000;
+                ropts.bodyTimeoutMs = 120000;
+
+                auto smart = rsvc.getByNameSmart(name_, /*oldest*/ getOldest_,
+                                                 /*includeContent*/ !metadataOnly_,
+                                                 /*useSession*/ false, std::string{}, ropts);
+                if (smart) {
+                    auto rr = render(smart.value());
+                    if (!rr)
+                        return rr.error();
+                    return Result<void>();
+                }
+                spdlog::debug(
+                    "get --name: smart resolution failed ({}); continuing with daemon path",
+                    smart.error().message);
+            }
+
             // Primary path: RetrievalService via daemon
             {
                 yams::app::services::RetrievalService rsvc;

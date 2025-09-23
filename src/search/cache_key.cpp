@@ -74,12 +74,60 @@ void CacheKey::buildKey() {
 }
 
 bool CacheKey::matchesPattern(const std::string& pattern) const {
-    // Simple pattern matching (could be enhanced with regex)
-    if (pattern == "*")
+    // Support simple globbing with '*' wildcard (match any sequence, including empty).
+    // Examples:
+    //  - "*" matches everything
+    //  - "q:user:123*" matches any key starting with "q:user:123"
+    //  - "*profile" matches any key ending with "profile"
+    //  - "*user*profile*" matches if both substrings appear in order
+    if (pattern.empty() || pattern == "*")
         return true;
 
-    // Check if pattern is contained in key string
-    return keyString_.find(pattern) != std::string::npos;
+    // Fast-path: no wildcard -> substring check
+    if (pattern.find('*') == std::string::npos) {
+        return keyString_.find(pattern) != std::string::npos;
+    }
+
+    // Split pattern by '*', then ensure all parts appear in order
+    size_t pos = 0;
+    bool anchorStart = pattern.front() != '*';
+    bool anchorEnd = pattern.back() != '*';
+
+    size_t cursor = 0; // position in keyString_
+    bool first = true;
+    while (pos <= pattern.size()) {
+        size_t next = pattern.find('*', pos);
+        std::string token =
+            (next == std::string::npos) ? pattern.substr(pos) : pattern.substr(pos, next - pos);
+        if (!token.empty()) {
+            size_t found = keyString_.find(token, cursor);
+            if (found == std::string::npos)
+                return false;
+            if (first && anchorStart && found != 0)
+                return false; // must start with token
+            cursor = found + token.size();
+            first = false;
+        }
+        if (next == std::string::npos)
+            break;
+        pos = next + 1;
+    }
+
+    if (anchorEnd) {
+        // Last token must end at the end of keyString_
+        // If pattern ended with '*', anchorEnd=false and we skip this check
+        // Find last non-wildcard segment
+        size_t lastStar = pattern.find_last_of('*');
+        std::string tail = (lastStar == std::string::npos) ? pattern : pattern.substr(lastStar + 1);
+        if (!tail.empty()) {
+            if (keyString_.size() < tail.size())
+                return false;
+            if (keyString_.rfind(tail) != keyString_.size() - tail.size())
+                return false;
+        }
+    }
+
+    return true;
 }
 
 std::string CacheKey::serializeFilters(const SearchFilters* filters) {

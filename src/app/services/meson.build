@@ -1,3 +1,5 @@
+tl_expected_dep = dependency('tl-expected', required: true)
+
 yams_app_services_lib = static_library('yams_app_services',
   [
     'document_service.cpp',
@@ -25,6 +27,7 @@ yams_app_services_lib = static_library('yams_app_services',
     dependency('boost'),
     dependency('nlohmann_json'),
     dependency('spdlog'),
+    tl_expected_dep,
   ],
   include_directories: include_directories('../../../include'),
   install: true,

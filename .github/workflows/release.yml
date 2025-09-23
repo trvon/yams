@@ -505,7 +505,25 @@ jobs:
       - name: Tune Conan client (parallel downloads)
         shell: bash
         run: |
-          conan config set general.parallel_downloads=8 || true
+          set -euo pipefail
+          CONF_FILE="$HOME/.conan2/global.conf"
+          LINE="core.download:parallel=8"
+          mkdir -p "$(dirname "$CONF_FILE")"
+          if [ -f "$CONF_FILE" ]; then
+            TMP_FILE="$(mktemp)"
+            awk -v line="$LINE" '
+              BEGIN { replaced = 0 }
+              /^core\.download:parallel=/ { if (!replaced) { print line; replaced = 1 } ; next }
+              { print }
+              END { if (!replaced) print line }
+            ' "$CONF_FILE" > "$TMP_FILE"
+            mv "$TMP_FILE" "$CONF_FILE"
+          else
+            printf '%s\n' "$LINE" > "$CONF_FILE"
+          fi
+          echo "Configured $LINE in $CONF_FILE"
+          grep -n '^core.download:parallel=' "$CONF_FILE" || true
+          conan config show core.download:parallel 2>/dev/null || true
           conan --version
 
       - name: Warm key Conan packages (best-effort)
@@ -583,6 +601,8 @@ jobs:
               exit 1
             fi
           fi
+          # Ensure pkg-config is discoverable in cross build; use Homebrew path explicitly
+          export PKG_CONFIG=${PKG_CONFIG:-/opt/homebrew/bin/pkg-config}
           meson setup build/release "${MESON_TOOL_ARG[@]}" \
             -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto
           meson compile -C build/release
@@ -615,11 +635,12 @@ jobs:
             echo "BUILD_DIR not found at $BUILD_DIR, attempting fallback to build/release (legacy path build/yams-release no longer used)." >&2
             exit 1
           fi
-          # Install into a stage directory under BUILD_DIR and validate its presence
-          meson install -C "$BUILD_DIR" --destdir "$BUILD_DIR/stage"
-          if [ ! -d "$BUILD_DIR/stage" ]; then
+          # Install to an absolute stage path under the build dir to avoid path duplication
+          BD="$(cd "$BUILD_DIR" && pwd)"
+          meson install -C "$BD" --destdir "$BD/stage"
+          if [ ! -d "$BD/stage" ]; then
             echo "Stage directory missing after meson install" >&2
-            ls -al "$BUILD_DIR" >&2 || true
+            ls -al "$BD" >&2 || true
             exit 1
           fi
 

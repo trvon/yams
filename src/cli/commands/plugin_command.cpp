@@ -257,9 +257,37 @@ void PluginCommand::listPlugins() {
             std::cout << "Failed to query daemon for plugins\n";
             return;
         }
-        // Prefer typed providers if present
+        // Prefer typed providers if present, but merge in interface hints from plugins_json when
+        // available
         if (sres && !sres.value().providers.empty()) {
             const auto& st = sres.value();
+            // Optional: fetch plugins_json to enrich with interfaces
+            std::map<std::string, std::vector<std::string>> ifaceMap;
+            try {
+                auto gres = fetch_stats();
+                if (gres) {
+                    auto it = gres.value().additionalStats.find("plugins_json");
+                    if (it != gres.value().additionalStats.end()) {
+                        nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
+                        if (!pj.is_discarded()) {
+                            for (const auto& rec : pj) {
+                                auto name = rec.value("name", std::string{});
+                                if (!name.empty() && rec.contains("interfaces")) {
+                                    std::vector<std::string> v;
+                                    for (const auto& s : rec["interfaces"]) {
+                                        if (s.is_string())
+                                            v.push_back(s.get<std::string>());
+                                    }
+                                    if (!v.empty())
+                                        ifaceMap[name] = std::move(v);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+
             std::cout << "Loaded plugins (" << st.providers.size() << "):\n";
             for (const auto& p : st.providers) {
                 std::cout << "  - " << p.name;
@@ -273,6 +301,15 @@ void PluginCommand::listPlugins() {
                     std::cout << " models=" << p.modelsLoaded;
                 if (!p.error.empty())
                     std::cout << " error=\"" << p.error << "\"";
+                auto itf = ifaceMap.find(p.name);
+                if (itf != ifaceMap.end() && !itf->second.empty()) {
+                    std::cout << " interfaces=";
+                    for (size_t i = 0; i < itf->second.size(); ++i) {
+                        if (i)
+                            std::cout << ",";
+                        std::cout << itf->second[i];
+                    }
+                }
                 std::cout << "\n";
             }
             // When verbose, show skipped plugin diagnostics if present

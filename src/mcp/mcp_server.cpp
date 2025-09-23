@@ -78,6 +78,7 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 } // namespace
 
 thread_local std::string MCPServer::tlsSessionId_;
+thread_local nlohmann::json MCPServer::tlsProgressToken_ = nullptr;
 
 // In-band logging helper (level + message variant) - YAMS extension, not standard MCP
 static nlohmann::json createLogNotification(const std::string& level, const std::string& message) {
@@ -226,6 +227,17 @@ StdioTransport::StdioTransport() {
     state_.store(TransportState::Connected);
     // Writer thread retired; unified outbound path in MCPServer handles ordering
     writerRunning_.store(false);
+    // Configure content type header for framed messages
+    try {
+        if (const char* ct = std::getenv("YAMS_MCP_CONTENT_TYPE"); ct && *ct) {
+            contentTypeHeader_ = ct;
+        } else {
+            // Default to LSP-compatible header for broad client compatibility
+            contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
+        }
+    } catch (...) {
+        contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
+    }
 }
 
 StdioTransport::~StdioTransport() {
@@ -251,9 +263,9 @@ void StdioTransport::send(const json& message) {
             if (outbuf_) {
                 (void)std::cout.rdbuf(outbuf_);
             }
-            // Minimal LSP/MCP framing, always including Content-Type
+            // Minimal MCP framing, always including Content-Type header for interop
             std::cout << "Content-Length: " << payload.size() << "\r\n";
-            std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+            std::cout << "Content-Type: " << contentTypeHeader_ << "\r\n";
             std::cout << "\r\n";
             std::cout << payload;
             std::cout.flush();
@@ -303,7 +315,7 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
             (void)std::cout.rdbuf(outbuf_);
         }
         std::cout << "Content-Length: " << payload.size() << "\r\n";
-        std::cout << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+        std::cout << "Content-Type: " << contentTypeHeader_ << "\r\n";
         std::cout << "\r\n";
         std::cout << payload;
         std::cout.flush();
@@ -792,12 +804,27 @@ void MCPServer::start() {
                 const auto toolName = params.value("name", "");
                 const auto toolArgs = params.value("arguments", json::object());
                 auto id_copy = request.value("id", json{});
-                // Emit start progress
-                sendProgress("tool", 0.0, std::string("calling ") + toolName);
+                // Extract spec progress token if provided via params._meta.progressToken
+                std::optional<json> progressToken;
+                try {
+                    if (params.contains("_meta") && params["_meta"].is_object()) {
+                        const auto& meta = params["_meta"];
+                        if (meta.contains("progressToken")) {
+                            progressToken = meta["progressToken"];
+                        }
+                    }
+                } catch (...) {
+                    // ignore malformed _meta
+                }
+                // Emit start progress (spec-compliant when token present)
+                sendProgress("tool", 0.0, std::string("calling ") + toolName, progressToken);
                 auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
                 boost::asio::co_spawn(
                     io,
-                    [this, toolName, toolArgs, id_copy]() -> boost::asio::awaitable<void> {
+                    [this, toolName, toolArgs, id_copy,
+                     progressToken]() -> boost::asio::awaitable<void> {
+                        if (progressToken)
+                            MCPServer::tlsProgressToken_ = *progressToken;
                         try {
                             json raw = co_await callToolAsync(toolName, toolArgs);
                             if (raw.is_object() && raw.contains("error")) {
@@ -808,7 +835,8 @@ void MCPServer::start() {
                             } else {
                                 sendResponse(createResponse(id_copy, raw));
                             }
-                            sendProgress("tool", 100.0, std::string("completed ") + toolName);
+                            sendProgress("tool", 100.0, std::string("completed ") + toolName,
+                                         progressToken);
                         } catch (const std::exception& e) {
                             json err = {{"code", -32603}, {"message", e.what()}};
                             sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
@@ -820,6 +848,7 @@ void MCPServer::start() {
                                           {"error", err},
                                           {"id", id_copy}});
                         }
+                        MCPServer::tlsProgressToken_ = nullptr;
                         co_return;
                     },
                     boost::asio::detached);
@@ -1474,13 +1503,15 @@ json MCPServer::listTools() {
         props["files_with_matches"]["default"] = false;
         props["files_without_match"] = makeProp("boolean", "Show only filenames without matches");
         props["files_without_match"]["default"] = false;
-        props["after_context"] = makeProp("integer", "Lines after match");
+        props["after_context"] = makeProp("integer", "Lines after match (numeric; empty ignored)");
         props["after_context"]["default"] = 0;
-        props["before_context"] = makeProp("integer", "Lines before match");
+        props["before_context"] =
+            makeProp("integer", "Lines before match (numeric; empty ignored)");
         props["before_context"]["default"] = 0;
-        props["context"] = makeProp("integer", "Lines around match");
+        props["context"] = makeProp("integer", "Lines around match (numeric; empty ignored)");
         props["context"]["default"] = 0;
-        props["max_count"] = makeProp("integer", "Maximum matches per file");
+        props["max_count"] =
+            makeProp("integer", "Maximum matches per file (numeric; empty ignored)");
         props["color"] = makeProp("string", "Color highlighting (values: always, never, auto)");
         props["color"]["default"] = "auto";
         // Session scoping for name and path resolution
@@ -2479,6 +2510,52 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     if (req.maxCount)
         dreq.maxMatches = *req.maxCount;
 
+    // Pass include patterns to daemon and enable recursive by default
+    if (!req.includePatterns.empty()) {
+        dreq.includePatterns = req.includePatterns;
+        dreq.recursive = true;
+    }
+
+    std::vector<std::string> initial_paths = req.paths;
+    if (!req.name.empty()) {
+        initial_paths.push_back(req.name);
+    }
+
+    std::unordered_set<std::string> final_paths;
+    for (const auto& p : initial_paths) {
+        if (p.empty())
+            continue;
+
+        // Add original and normalized paths
+        final_paths.insert(p);
+        auto normalized = yams::app::services::utils::normalizeLookupPath(p);
+        if (normalized.changed) {
+            final_paths.insert(normalized.normalized);
+        }
+
+        // Add suffix match for non-wildcard paths
+        const bool has_wild =
+            (p.find('*') != std::string::npos) || (p.find('?') != std::string::npos);
+        if (!has_wild) {
+            if (req.subpath) {
+                final_paths.insert(std::string("*") + p);
+                if (normalized.changed) {
+                    final_paths.insert(std::string("*") + normalized.normalized);
+                }
+            }
+            // Basename fallback
+            std::string base = p;
+            try {
+                base = std::filesystem::path(p).filename().string();
+            } catch (...) {
+            }
+            if (!base.empty() && base != p) {
+                final_paths.insert(std::string("*") + base);
+            }
+        }
+    }
+    dreq.paths.assign(final_paths.begin(), final_paths.end());
+
     // Session scoping for grep: if no explicit paths, use session patterns
     if (req.useSession && dreq.paths.empty()) {
         auto sess = app::services::makeSessionService(nullptr);
@@ -3373,12 +3450,17 @@ boost::asio::awaitable<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
-    // Detect if MCP caller passed a concrete local file path; normalize to exact path pattern
-    if (!req.name.empty()) {
+    // Prioritize pattern, but fall back to name.
+    if (!req.pattern.empty()) {
+        auto normalized = yams::app::services::utils::normalizeLookupPath(req.pattern);
+        if (normalized.changed && !normalized.hasWildcards) {
+            daemon_req.namePattern = normalized.normalized;
+        } else {
+            daemon_req.namePattern = req.pattern;
+        }
+    } else if (!req.name.empty()) {
         auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
         daemon_req.namePattern = resolved.pattern.empty() ? req.name : resolved.pattern;
-    } else {
-        daemon_req.namePattern = req.pattern;
     }
     if (req.useSession && daemon_req.namePattern.empty()) {
         auto sess = app::services::makeSessionService(nullptr);
@@ -4282,10 +4364,21 @@ void MCPServer::initializeToolRegistry() {
         json{{"type", "object"},
              {"properties",
               {{"pattern", {{"type", "string"}, {"description", "Regex pattern to search"}}},
+               {"name",
+                {{"type", "string"},
+                 {"description", "Optional file name or subpath to scope search"}}},
                {"paths",
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
                  {"description", "Paths to search"}}},
+               {"include_patterns",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "File include globs (e.g., '*.md')"}}},
+               {"subpath",
+                {{"type", "boolean"},
+                 {"description", "Allow suffix match for path-like names"},
+                 {"default", true}}},
                {"ignore_case",
                 {{"type", "boolean"},
                  {"description", "Case insensitive search"},
@@ -4759,6 +4852,10 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         if (matches.empty() && req.subpath) {
             try_list(std::string("%/") + wanted);
         }
+        // Contains anywhere as a last resort before returning NotFound
+        if (matches.empty()) {
+            try_list(std::string("%") + wanted + "%");
+        }
 
         if (matches.empty()) {
             // If a path-like query yields no results, fail explicitly instead of falling through.
@@ -4977,10 +5074,16 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
     if (!req.name.empty()) {
         auto normalized = yams::app::services::utils::normalizeLookupPath(req.name);
         std::vector<std::string> candidates;
-        candidates.reserve(2);
-        if (normalized.changed)
+        candidates.reserve(4);
+        if (normalized.changed) {
             candidates.push_back(normalized.normalized);
+        }
         candidates.push_back(req.name);
+        // Add suffix match candidates, which getByNameSmart might use as patterns
+        candidates.push_back("%" + req.name);
+        if (normalized.changed) {
+            candidates.push_back("%" + normalized.normalized);
+        }
 
         std::optional<Error> lastNotFound;
         for (const auto& candidate : candidates) {
@@ -5387,8 +5490,28 @@ void MCPServer::handleCancelRequest(const nlohmann::json& params,
     sendProgress("cancel", 100.0, "Cancellation acknowledged");
 }
 
-void MCPServer::sendProgress(const std::string& phase, double percent, const std::string& message) {
-    json p = {{"phase", phase}, {"percent", percent}};
+void MCPServer::sendProgress(const std::string& /*phase*/, double percent,
+                             const std::string& message,
+                             std::optional<nlohmann::json> progressToken) {
+    // Per MCP spec, notifications/progress MUST include a progressToken from the request's
+    // params._meta.progressToken. If absent, do not emit a progress notification.
+    nlohmann::json token = nullptr;
+    if (progressToken)
+        token = *progressToken;
+    else if (!MCPServer::tlsProgressToken_.is_null())
+        token = MCPServer::tlsProgressToken_;
+
+    if (token.is_null()) {
+        return; // No valid token available; skip
+    }
+
+    double clamped = percent;
+    if (clamped < 0.0)
+        clamped = 0.0;
+    if (clamped > 100.0)
+        clamped = 100.0;
+
+    json p = {{"progressToken", token}, {"progress", clamped}, {"total", 100.0}};
     if (!message.empty())
         p["message"] = message;
     sendResponse({{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", p}});
@@ -5402,16 +5525,17 @@ bool MCPServer::shouldAutoInitialize() const {
     return false;
 }
 
-} // namespace yams::mcp
-
-void yams::mcp::MCPServer::beginSessionContext(
+// --- HTTP mode session context helpers ---
+void MCPServer::beginSessionContext(
     std::string sessionId,
     std::function<void(const std::string&, const nlohmann::json&)> publisher) {
     tlsSessionId_ = std::move(sessionId);
     httpPublisher_ = std::move(publisher);
 }
 
-void yams::mcp::MCPServer::endSessionContext() {
+void MCPServer::endSessionContext() {
     tlsSessionId_.clear();
     httpPublisher_ = nullptr;
 }
+
+} // namespace yams::mcp

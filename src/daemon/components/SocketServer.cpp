@@ -180,53 +180,85 @@ Result<void> SocketServer::start() {
 }
 
 Result<void> SocketServer::stop() {
-    if (!running_.exchange(false)) {
-        return Error{ErrorCode::InvalidState, "Socket server not running"};
-    }
-
-    spdlog::info("Stopping socket server");
-    stopping_ = true;
-
-    if (acceptor_ && acceptor_->is_open()) {
-        boost::system::error_code ec;
-        acceptor_->close(ec);
-        if (ec) {
-            spdlog::warn("Error closing acceptor: {}", ec.message());
+    // Wrap entire shutdown sequence to ensure no exception escapes and triggers std::terminate.
+    try {
+        if (!running_.exchange(false)) {
+            return Error{ErrorCode::InvalidState, "Socket server not running"};
         }
-    }
 
-    stop_io_reconciler();
-    {
-        std::lock_guard<std::mutex> lk(workersMutex_);
+        spdlog::info("Stopping socket server");
+        stopping_ = true;
+
+        try {
+            if (acceptor_ && acceptor_->is_open()) {
+                boost::system::error_code ec;
+                acceptor_->close(ec);
+                if (ec) {
+                    spdlog::warn("Error closing acceptor: {}", ec.message());
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Exception while closing acceptor: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Unknown exception while closing acceptor");
+        }
+
+        stop_io_reconciler();
+        try {
+            std::lock_guard<std::mutex> lk(workersMutex_);
+            for (auto& w : workers_) {
+                if (w.exit)
+                    w.exit->store(true, std::memory_order_relaxed);
+            }
+        } catch (...) {
+        }
+        try {
+            io_context_.stop();
+        } catch (...) {
+        }
+
+        // Join/detach worker threads safely.
+        const auto self_id = std::this_thread::get_id();
         for (auto& w : workers_) {
-            if (w.exit)
-                w.exit->store(true, std::memory_order_relaxed);
+            if (w.th.joinable()) {
+                if (w.th.get_id() == self_id) {
+                    try {
+                        w.th.detach();
+                    } catch (...) {
+                    }
+                } else {
+                    try {
+                        w.th.join();
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Worker join exception: {}", e.what());
+                    } catch (...) {
+                        spdlog::warn("Worker join unknown exception");
+                    }
+                }
+            }
         }
-    }
-    io_context_.stop();
+        workers_.clear();
+        work_guard_.reset();
 
-    for (auto& w : workers_) {
-        if (w.th.joinable()) {
-            w.th.join();
+        if (state_) {
+            state_->readiness.ipcServerReady.store(false);
         }
-    }
-    workers_.clear();
-    work_guard_.reset();
 
-    if (state_) {
-        state_->readiness.ipcServerReady.store(false);
-    }
-
-    if (!actualSocketPath_.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(actualSocketPath_, ec);
-        if (ec && ec != std::errc::no_such_file_or_directory) {
-            spdlog::warn("Failed to remove socket file: {}", ec.message());
+        if (!actualSocketPath_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(actualSocketPath_, ec);
+            if (ec && ec != std::errc::no_such_file_or_directory) {
+                spdlog::warn("Failed to remove socket file: {}", ec.message());
+            }
+            actualSocketPath_.clear();
         }
-        actualSocketPath_.clear();
-    }
 
-    spdlog::info("Socket server stopped");
+        spdlog::info("Socket server stopped");
+    } catch (const std::exception& e) {
+        spdlog::error("SocketServer::stop unhandled exception: {}", e.what());
+    } catch (...) {
+        spdlog::error("SocketServer::stop unknown exception");
+    }
     return {};
 }
 
