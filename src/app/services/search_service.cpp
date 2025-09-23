@@ -4,8 +4,10 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/services.hpp>
+#ifdef YAMS_ENABLE_DAEMON_FEATURES
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_host.h>
+#endif
 #include <yams/plugins/search_provider_v1.h>
 #include <yams/search/query_qualifiers.hpp>
 
@@ -126,7 +128,7 @@ static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
 static inline size_t recommendedWorkers(size_t items) {
     size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
     size_t rec = hw > 1 ? (hw - 1) : 1;
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
     double loads[3] = {0, 0, 0};
     if (getloadavg(loads, 3) == 3) {
         double capacity = std::max(0.0, static_cast<double>(hw) - loads[0]);
@@ -330,6 +332,7 @@ public:
         }
 
         // --- Plugin Search ---
+#ifdef YAMS_ENABLE_DAEMON_FEATURES
         if (ctx_.service_manager) {
             auto abi_host = ctx_.service_manager->getAbiPluginHost();
             if (abi_host) {
@@ -349,6 +352,7 @@ public:
                 }
             }
         }
+#endif
 
         co_return result;
     }

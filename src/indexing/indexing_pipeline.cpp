@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 #include <yams/crypto/hasher.h>
@@ -391,9 +392,9 @@ bool IndexingPipeline::indexContent(IndexingTask& task) {
 
                     metadataRepo_->setMetadata(existing.id, "snapshot_id",
                                                metadata::MetadataValue(snapshotId));
-                    metadataRepo_->setMetadata(
-                        existing.id, "snapshot_time",
-                        metadata::MetadataValue(timestamp.time_since_epoch().count()));
+                    metadataRepo_->setMetadata(existing.id, "snapshot_time",
+                                               metadata::MetadataValue(static_cast<int64_t>(
+                                                   timestamp.time_since_epoch().count())));
 
                     spdlog::info("Created automatic snapshot {} for duplicate content", snapshotId);
                 }

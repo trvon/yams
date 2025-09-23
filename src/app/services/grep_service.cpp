@@ -366,7 +366,7 @@ public:
         // Dynamic, bounded parallelism (config-free): cap to a conservative small number
         size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
         size_t rec = hw > 1 ? (hw - 1) : 1;
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__ANDROID__)
         double loads[3] = {0, 0, 0};
         if (getloadavg(loads, 3) == 3) {
             double load1 = loads[0];

@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 #include <yams/metadata/migration.h>
@@ -253,8 +254,8 @@ Result<void> MigrationManager::recordMigration(int version, const std::string& n
     auto now = std::chrono::system_clock::now().time_since_epoch();
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now).count();
 
-    auto bindResult =
-        stmt.bindAll(version, name, seconds, duration.count(), success ? 1 : 0, error);
+    auto bindResult = stmt.bindAll(version, name, static_cast<int64_t>(seconds),
+                                   static_cast<int64_t>(duration.count()), success ? 1 : 0, error);
     if (!bindResult)
         return bindResult;
 

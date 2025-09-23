@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <sstream>
 #include <yams/metadata/document_metadata.h>
@@ -1010,7 +1011,7 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
                 return stmtResult.error();
 
             Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, sinceUnix);
+            auto bindResult = stmt.bind(1, static_cast<int64_t>(sinceUnix));
             if (!bindResult)
                 return bindResult.error();
 

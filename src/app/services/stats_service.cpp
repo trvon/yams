@@ -1,7 +1,9 @@
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <yams/app/services/services.hpp>
+#ifdef YAMS_ENABLE_DAEMON_FEATURES
 #include <yams/daemon/components/PoolManager.h>
+#endif
 
 namespace yams::app::services {
 
@@ -73,6 +75,7 @@ public:
                     // Could add vector database stats here
                     response.additionalStats["vector_embeddings"] = 0; // placeholder
                 }
+#ifdef YAMS_ENABLE_DAEMON_FEATURES
                 // PoolManager stats (IPC component)
                 try {
                     auto stats = yams::daemon::PoolManager::instance().stats("ipc");
@@ -87,6 +90,7 @@ public:
                 } catch (...) {
                     // ignore if PoolManager not available
                 }
+#endif
             }
 
             return response;

@@ -31,10 +31,16 @@ inline std::string fmt_format(std::format_string<Args...> fmt, Args&&... args) {
 }
 } // namespace yams
 #else
-// Using {fmt} via external dependency (SPDLOG_FMT_EXTERNAL)
+// Using {fmt}. If spdlog bundles fmt (SPDLOG_FMT_EXTERNAL=0), include from spdlog path
+#if defined(SPDLOG_FMT_EXTERNAL) && SPDLOG_FMT_EXTERNAL
 #include <fmt/chrono.h>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#else
+#include <spdlog/fmt/bundled/chrono.h>
+#include <spdlog/fmt/bundled/format.h>
+#include <spdlog/fmt/bundled/ostream.h>
+#endif
 namespace yams {
 // Mirror std::format_signature using fmt::format_string for compile-time checking when available.
 template <typename... Args>
