@@ -1,6 +1,8 @@
 #include <yams/app/services/retrieval_service.h>
 
+#include <filesystem>
 #include <future>
+#include <optional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -234,7 +236,66 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         }
     }
 
-    // 2) Try session-aware list by name
+    // Helper: choose candidate by newest/oldest when multiple
+    auto pick_by_time = [&](const std::vector<yams::daemon::ListEntry>& items)
+        -> std::optional<yams::daemon::ListEntry> {
+        if (items.empty())
+            return std::nullopt;
+        const yams::daemon::ListEntry* chosen = nullptr;
+        for (const auto& it : items) {
+            if (!chosen) {
+                chosen = &it;
+            } else if (oldest) {
+                if (it.indexed < chosen->indexed)
+                    chosen = &it;
+            } else {
+                if (it.indexed > chosen->indexed)
+                    chosen = &it;
+            }
+        }
+        return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
+    };
+
+    // Helper: attempt a List with a SQL LIKE pattern and return best candidate
+    auto try_list_pattern = [&](const std::string& pat) -> std::optional<yams::daemon::ListEntry> {
+        yams::daemon::ListRequest lreq;
+        lreq.namePattern = pat;
+        lreq.limit = 1000;
+        lreq.pathsOnly = false;
+        auto lr = list(lreq, opts);
+        if (!lr || lr.value().items.empty())
+            return std::nullopt;
+        return pick_by_time(lr.value().items);
+    };
+
+    // 2) Path-like input: prefer exact path, then suffix subpath match
+    bool looksPathLike =
+        (name.find('/') != std::string::npos) || (name.find('\\') != std::string::npos);
+    if (looksPathLike) {
+        // Exact path
+        if (auto exact = try_list_pattern(name)) {
+            yams::daemon::GetRequest greq;
+            greq.hash = exact->hash;
+            greq.metadataOnly = !includeContent;
+            return get(greq, opts);
+        }
+        // Suffix by subpath (e.g., %/docs/delivery/13/tasks.md or %/tasks.md)
+        if (auto suffix = try_list_pattern(std::string("%/") + name)) {
+            yams::daemon::GetRequest greq;
+            greq.hash = suffix->hash;
+            greq.metadataOnly = !includeContent;
+            return get(greq, opts);
+        }
+        // Contains anywhere as a last resort before fuzzy search
+        if (auto contains = try_list_pattern(std::string("%") + name + "%")) {
+            yams::daemon::GetRequest greq;
+            greq.hash = contains->hash;
+            greq.metadataOnly = !includeContent;
+            return get(greq, opts);
+        }
+    }
+
+    // 3) Try session-aware list by (base)name equality
     if (useSession) {
         try {
             auto sess = makeSessionService(nullptr);
@@ -249,28 +310,44 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
                 auto lres = list(lreq, opts);
                 if (lres) {
                     const auto& items = lres.value().items;
-                    const auto* chosen = static_cast<const yams::daemon::ListEntry*>(nullptr);
+                    // Prefer exact basename match first within the session
+                    std::vector<yams::daemon::ListEntry> eq;
+                    eq.reserve(items.size());
                     for (const auto& item : items) {
-                        if (item.name == name && !item.hash.empty()) {
-                            if (!chosen) {
-                                chosen = &item;
-                            } else {
-                                if (oldest) {
-                                    if (item.indexed < chosen->indexed)
-                                        chosen = &item;
-                                } else {
-                                    if (item.indexed > chosen->indexed)
-                                        chosen = &item;
-                                }
+                        if (item.name == name && !item.hash.empty())
+                            eq.push_back(item);
+                    }
+                    if (!eq.empty()) {
+                        auto chosen = pick_by_time(eq);
+                        if (chosen) {
+                            yams::daemon::GetRequest greq;
+                            greq.hash = chosen->hash;
+                            greq.metadataOnly = !includeContent;
+                            return get(greq, opts);
+                        }
+                    }
+
+                    // If no exact match, allow session-scoped suffix matching on paths
+                    if (looksPathLike) {
+                        std::vector<yams::daemon::ListEntry> suffix;
+                        for (const auto& item : items) {
+                            if (!item.path.empty() && (item.path.size() >= name.size()) &&
+                                item.path.rfind(name) == item.path.size() - name.size()) {
+                                suffix.push_back(item);
+                            }
+                        }
+                        if (!suffix.empty()) {
+                            auto chosen = pick_by_time(suffix);
+                            if (chosen) {
+                                yams::daemon::GetRequest greq;
+                                greq.hash = chosen->hash;
+                                greq.metadataOnly = !includeContent;
+                                return get(greq, opts);
                             }
                         }
                     }
-                    if (chosen) {
-                        yams::daemon::GetRequest greq;
-                        greq.hash = chosen->hash;
-                        greq.metadataOnly = !includeContent;
-                        return get(greq, opts);
-                    }
+
+                    // Otherwise continue to general fallback below
                 }
             }
         } catch (...) {
@@ -278,7 +355,32 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         }
     }
 
-    // 3) Hybrid search fallback for best match
+    // 4) Base-name list fallback (portable and fast): "%/name", then stem, then contains
+    {
+        std::optional<yams::daemon::ListEntry> cand;
+        if (!looksPathLike) {
+            if (!cand)
+                cand = try_list_pattern(std::string("%/") + name);
+            if (!cand) {
+                std::string stem = name;
+                try {
+                    stem = std::filesystem::path(name).stem().string();
+                } catch (...) {
+                }
+                cand = try_list_pattern(std::string("%/") + stem + "%");
+            }
+            if (!cand)
+                cand = try_list_pattern(std::string("%") + name + "%");
+        }
+        if (cand) {
+            yams::daemon::GetRequest greq;
+            greq.hash = cand->hash;
+            greq.metadataOnly = !includeContent;
+            return get(greq, opts);
+        }
+    }
+
+    // 5) Hybrid search fallback for best match
     try {
         yams::daemon::DaemonClient client(makeClientConfig(opts));
         yams::daemon::SearchRequest sreq;

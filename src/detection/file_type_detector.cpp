@@ -157,7 +157,7 @@ public:
         return {};
     }
 
-    Result<FileSignature> detectWithLibMagic(std::span<const std::byte> data) {
+    Result<FileSignature> detectWithLibMagic(std::span<const std::byte> data [[maybe_unused]]) {
 #ifdef YAMS_HAS_LIBMAGIC
         std::lock_guard<std::mutex> lock(magicMutex); // Protect libmagic calls
 
@@ -200,6 +200,8 @@ public:
 
         return sig;
 #else
+        // Silence unused parameter warning when libmagic support is not compiled in
+        (void)data;
         return Error{ErrorCode::NotSupported, "libmagic not available"};
 #endif
     }

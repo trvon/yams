@@ -41,29 +41,6 @@ static std::string escapeRegex(const std::string& text) {
     return escaped;
 }
 
-// Simple glob matcher supporting '*' and '?'
-static bool wildcardMatch(const std::string& text, const std::string& pattern) {
-    // DP approach
-    const size_t n = text.size();
-    const size_t m = pattern.size();
-    std::vector<std::vector<bool>> dp(n + 1, std::vector<bool>(m + 1, false));
-    dp[0][0] = true;
-    for (size_t j = 1; j <= m; ++j) {
-        if (pattern[j - 1] == '*')
-            dp[0][j] = dp[0][j - 1];
-    }
-    for (size_t i = 1; i <= n; ++i) {
-        for (size_t j = 1; j <= m; ++j) {
-            if (pattern[j - 1] == '*') {
-                dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
-            } else if (pattern[j - 1] == '?' || pattern[j - 1] == text[i - 1]) {
-                dp[i][j] = dp[i - 1][j - 1];
-            }
-        }
-    }
-    return dp[n][m];
-}
-
 static bool hasWildcard(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
@@ -113,7 +90,7 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
         if (f.empty())
             continue;
         if (hasWildcard(f)) {
-            if (wildcardMatch(filePath, f))
+            if (yams::app::services::utils::matchGlob(filePath, f))
                 return true;
         } else {
             // Treat filter as prefix (dir) or exact path
@@ -411,7 +388,7 @@ public:
                     bool ok = false;
                     for (const auto& pattern : req.includePatterns) {
                         if (hasWildcard(pattern)) {
-                            if (wildcardMatch(doc.filePath, pattern)) {
+                            if (yams::app::services::utils::matchGlob(doc.filePath, pattern)) {
                                 ok = true;
                                 break;
                             }
@@ -679,7 +656,7 @@ public:
                                 bool ok = false;
                                 for (const auto& p : req.includePatterns) {
                                     if (hasWildcard(p)) {
-                                        if (wildcardMatch(path, p)) {
+                                        if (yams::app::services::utils::matchGlob(path, p)) {
                                             ok = true;
                                             break;
                                         }

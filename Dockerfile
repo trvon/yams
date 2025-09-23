@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libncurses-dev libcurl4-openssl-dev \
   python3 python3-venv python3-pip \
   gcc g++ ninja-build openssl lld llvm clang \
+  libc++-dev libc++abi-dev \
   liburing-dev ccache \
   cmake \
   && rm -rf /var/lib/apt/lists/*
@@ -22,6 +23,7 @@ WORKDIR /src
 
 # Stage 1: conan-base (only dependency graph resolution) — leveraged by warm-cache seeding
 FROM deps AS conan-base
+ARG DOCKERFILE_CONF_REV=3
 ARG YAMS_VERSION=dev
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
@@ -47,27 +49,27 @@ RUN --mount=type=cache,target=/root/.conan2 \
   # Ensure the URL is correct (update in-place if needed)
   conan remote update conancenter https://center.conan.io || true; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
+  # Provide a tiny user toolchain to relax minimum policy for legacy recipes (e.g., openjpeg/2.5.0)
+  POLICY_TC=/tmp/yams_policy_toolchain.cmake; echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
-  # Align custom host profile's compiler.version with detected clang and Conan's supported settings
-  if command -v clang >/dev/null 2>&1; then \
-    CLANG_MAJOR=$(clang --version | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p' | head -1); \
-    if [ -z "$CLANG_MAJOR" ]; then CLANG_MAJOR=$(clang -dumpversion | cut -d. -f1); fi; \
-    if [ -n "$CLANG_MAJOR" ]; then \
-      # Cap at 18 if Conan settings don't yet include newer versions
-      if [ "$CLANG_MAJOR" -gt 18 ]; then CLANG_MAJOR=18; fi; \
-      sed -i -E "s/^compiler.version=.*/compiler.version=${CLANG_MAJOR}/" ./conan/profiles/host-linux-clang || true; \
-    fi; \
+  # Choose profile based on host arch (amd64 vs arm64) and align compiler.version
+  PROFILE=./conan/profiles/host-linux-gcc; \
+  ARCH=$(uname -m); \
+  if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then PROFILE=./conan/profiles/host-linux-gcc-arm; fi; \
+  if command -v g++ >/dev/null 2>&1; then \
+    GCC_MAJOR=$(g++ -dumpfullversion -dumpversion | cut -d. -f1); \
+    if [ -n "$GCC_MAJOR" ]; then sed -i -E "s/^compiler.version=.*/compiler.version=${GCC_MAJOR}/" "$PROFILE" || true; fi; \
   fi; \
-  if ! conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
-    -c tools.cmake.cmaketoolchain:cache_variables={'CMAKE_POLICY_VERSION_MINIMUM':'3.5'} \
+  if ! conan install . -pr:h "$PROFILE" -pr:b=default \
+    -c tools.cmake.cmaketoolchain:user_toolchain+=$POLICY_TC \
     --output-folder=build/yams-release -s build_type=Release --build=missing; then \
   echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
   conan cache clean --temp --locks || true; \
   # Re-try resolution of openjpeg prior to full install for clearer diagnostics
   conan search openjpeg -r=conancenter || true; \
   conan search libarchive -r=conancenter || true; \
-  conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
-    -c tools.cmake.cmaketoolchain:cache_variables={'CMAKE_POLICY_VERSION_MINIMUM':'3.5'} \
+  conan install . -pr:h "$PROFILE" -pr:b=default \
+    -c tools.cmake.cmaketoolchain:user_toolchain+=$POLICY_TC \
     --output-folder=build/yams-release -s build_type=Release --build=missing; \
   fi
 
@@ -79,14 +81,11 @@ ARG BUILD_DOCS=false
 COPY . .
 # Configure & build (reuse Conan cache) — keep runtime lean by default
 RUN --mount=type=cache,target=/root/.conan2 \
-  # Re-evaluate OpenJPEG version in builder stage as a safeguard
-  if conan search openjpeg/2.5.3 -r=conancenter >/dev/null 2>&1; then \
-    export YAMS_OPENJPEG_VERSION=2.5.3; \
-  else \
-    export YAMS_OPENJPEG_VERSION=2.5.0; \
-  fi; \
-  conan install . -pr:h ./conan/profiles/host-linux-clang -pr:b=default \
-    -c tools.cmake.cmaketoolchain:cache_variables={'CMAKE_POLICY_VERSION_MINIMUM':'3.5'} \
+  POLICY_TC=/tmp/yams_policy_toolchain.cmake; echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"; \
+  PROFILE=./conan/profiles/host-linux-gcc; ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then PROFILE=./conan/profiles/host-linux-gcc-arm; fi; \
+  if command -v g++ >/dev/null 2>&1; then GCC_MAJOR=$(g++ -dumpfullversion -dumpversion | cut -d. -f1); if [ -n "$GCC_MAJOR" ]; then sed -i -E "s/^compiler.version=.*/compiler.version=${GCC_MAJOR}/" "$PROFILE" || true; fi; fi; \
+  conan install . -pr:h "$PROFILE" -pr:b=default \
+    -c tools.cmake.cmaketoolchain:user_toolchain+=$POLICY_TC \
     --output-folder=build/yams-release -s build_type=Release --build=missing && \
   meson setup build/yams-release \
   $( \

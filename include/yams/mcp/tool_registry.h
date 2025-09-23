@@ -113,6 +113,9 @@ struct MCPGrepRequest {
 
     std::string pattern;
     std::vector<std::string> paths;
+    std::vector<std::string> includePatterns; // file globs
+    std::string name;                         // optional path-like name to scope grep
+    bool subpath = true;                      // allow suffix-style subpath expansion
     bool ignoreCase = false;
     bool word = false;
     bool invert = false;

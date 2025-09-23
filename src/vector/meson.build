@@ -4,6 +4,7 @@ json_dep = dependency('nlohmann_json', required: true)
 fmt_dep = dependency('fmt', required: false)
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
+tl_expected_dep = dependency('tl-expected', required: true)
 fs = import('fs')
 
 onnx_opt = get_option('enable-onnx')
@@ -205,7 +206,7 @@ else
   vector_cppargs += ['-DSQLITE_VEC_STATIC=0']
 endif
 
-deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, yams_core, yams_metadata]
+deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, yams_core, yams_metadata, tl_expected_dep]
 if onnx_runtime_link
   deps_vec += onnx_dep
 endif

@@ -86,45 +86,59 @@ Result<void> LifecycleComponent::initialize() {
     if (isAnotherInstanceRunning()) {
         pid_t existingPid = 0;
         bool havePid = readPidFromFile(existingPid);
-        bool anotherStopped = false;
-        if (havePid && existingPid > 0) {
-            anotherStopped = requestExistingDaemonShutdown(existingPid);
+        // If the PID file points to our own process, this indicates another
+        // YamsDaemon instance is already running within this process. Do NOT
+        // treat it as stale; refuse to start to preserve single-instance
+        // semantics expected by DaemonTest.SingleInstance.
+        if (havePid && existingPid == getpid()) {
+            return Error{ErrorCode::InvalidState,
+                         "Another daemon instance is already running in this process"};
         } else {
-            spdlog::warn("Could not read PID from file '{}' while checking existing daemon.",
-                         pidFile_.string());
-        }
+            bool anotherStopped = false;
+            if (havePid && existingPid > 0) {
+                anotherStopped = requestExistingDaemonShutdown(existingPid);
+            } else {
+                spdlog::warn("Could not read PID from file '{}' while checking existing daemon.",
+                             pidFile_.string());
+            }
 
-        if (!anotherStopped) {
-            if (aggressiveModeEnabled()) {
-                spdlog::warn(
-                    "Another daemon instance detected. Aggressive mode enabled, attempting to "
-                    "terminate it.");
-                if (!havePid || existingPid <= 0) {
-                    havePid = readPidFromFile(existingPid);
-                }
-                if (havePid && existingPid > 0) {
-                    if (auto term = terminateProcess(existingPid); !term) {
-                        return term; // propagate error
+            if (!anotherStopped) {
+                if (aggressiveModeEnabled()) {
+                    spdlog::warn(
+                        "Another daemon instance detected. Aggressive mode enabled, attempting to "
+                        "terminate it.");
+                    if (!havePid || existingPid <= 0) {
+                        havePid = readPidFromFile(existingPid);
+                    }
+                    if (havePid && existingPid > 0) {
+                        // Avoid accidentally terminating our own process
+                        if (existingPid == getpid()) {
+                            spdlog::warn(
+                                "Existing PID matches current process ({}); skipping terminate.",
+                                existingPid);
+                        } else if (auto term = terminateProcess(existingPid); !term) {
+                            return term; // propagate error
+                        }
+                    } else {
+                        spdlog::warn(
+                            "Could not read PID from file '{}', will attempt to remove stale file.",
+                            pidFile_.string());
+                    }
+
+                    // Remove PID file if present (stale or after termination)
+                    if (auto rm = removePidFile(); !rm) {
+                        return rm;
                     }
                 } else {
-                    spdlog::warn(
-                        "Could not read PID from file '{}', will attempt to remove stale file.",
-                        pidFile_.string());
+                    return Error{ErrorCode::InvalidState,
+                                 "Another daemon instance is already running, check PID file: " +
+                                     pidFile_.string()};
                 }
-
-                // Remove PID file if present (stale or after termination)
+            } else {
+                // Ensure stale PID file is cleared before continuing.
                 if (auto rm = removePidFile(); !rm) {
                     return rm;
                 }
-            } else {
-                return Error{ErrorCode::InvalidState,
-                             "Another daemon instance is already running, check PID file: " +
-                                 pidFile_.string()};
-            }
-        } else {
-            // Ensure stale PID file is cleared before continuing.
-            if (auto rm = removePidFile(); !rm) {
-                return rm;
             }
         }
     }
@@ -394,8 +408,17 @@ bool LifecycleComponent::waitForProcessExit(pid_t pid, std::chrono::milliseconds
 }
 
 bool LifecycleComponent::aggressiveModeEnabled() {
-    // TODO: Make this configurable via config file/CLI flag and default to "safe" mode.
-    // For now, aggressive mode is the default to ensure tests don't pile up daemons.
+    // Test guard: allow unit/integration tests to disable kill-others behavior
+    // without changing the production default.
+    if (const char* test_guard = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+        test_guard && *test_guard) {
+        if (strcasecmp(test_guard, "1") == 0 || strcasecmp(test_guard, "true") == 0 ||
+            strcasecmp(test_guard, "on") == 0 || strcasecmp(test_guard, "yes") == 0) {
+            return false; // SAFE mode during tests
+        }
+    }
+
+    // Production default: aggressive ON unless explicitly opted out.
     const char* env = std::getenv("YAMS_DAEMON_KILL_OTHERS");
     if (!env || env[0] == '\0') {
         return true; // default ON

@@ -361,11 +361,11 @@ tasks:
         fi
         # Fallback to tarball when packages are missing
         if ! compgen -G "${ART_DIR}/*" > /dev/null; then
-          for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
+          for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
         fi
       else
         # Nightly/weekly: publish only the primary tarball
-        for f in "${REPO_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
+        for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
       fi
       # Provide stable filenames expected by SourceHut (no globbing in artifacts list)
       if compgen -G "${ART_DIR}/*.tar.gz" > /dev/null; then

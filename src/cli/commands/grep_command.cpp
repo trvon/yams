@@ -231,6 +231,23 @@ public:
                 if (dreq.paths.empty() && !sessionPatterns_.empty()) {
                     dreq.paths = sessionPatterns_;
                 }
+                // Expand concrete paths/basenames into suffix-matching globs for subpath use-cases
+                if (!dreq.paths.empty()) {
+                    std::vector<std::string> extra;
+                    for (const auto& p : dreq.paths) {
+                        if (p.find('*') == std::string::npos && p.find('?') == std::string::npos) {
+                            extra.push_back(std::string("*") + p); // suffix subpath
+                            std::string base = p;
+                            try {
+                                base = std::filesystem::path(p).filename().string();
+                            } catch (...) {
+                            }
+                            if (!base.empty() && base != p)
+                                extra.push_back(std::string("*") + base);
+                        }
+                    }
+                    dreq.paths.insert(dreq.paths.end(), extra.begin(), extra.end());
+                }
                 dreq.caseInsensitive = ignoreCase_;
                 dreq.invertMatch = invertMatch_;
 

@@ -180,7 +180,7 @@ jobs:
             -pr:b=default \
             -s build_type=Debug \
             -o yams/*:build_tests=True \
-            -c tools.cmake.cmaketoolchain:cache_variables={'CMAKE_POLICY_VERSION_MINIMUM':'3.5'} \
+            -c tools.cmake.cmaketoolchain:variables.CMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -o yams/*:enable_onnx=False \
             --build=missing
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)

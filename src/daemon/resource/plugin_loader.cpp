@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <yams/daemon/resource/graph_adapter.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_loader.h>
 
@@ -21,6 +22,32 @@ namespace fs = std::filesystem;
 
 // External function to register model providers
 extern void registerModelProvider(const std::string& name, ModelProviderFactory factory);
+
+// Simple in-process registry for GraphAdapters (backed by this TU)
+static std::unordered_map<std::string, GraphAdapterFactory>& _graph_registry() {
+    static std::unordered_map<std::string, GraphAdapterFactory> m;
+    return m;
+}
+
+void registerGraphAdapter(const std::string& name, GraphAdapterFactory factory) {
+    _graph_registry()[name] = std::move(factory);
+}
+std::vector<std::string> getRegisteredGraphAdapters() {
+    std::vector<std::string> out;
+    for (const auto& kv : _graph_registry())
+        out.push_back(kv.first);
+    return out;
+}
+std::unique_ptr<IGraphAdapter> createGraphAdapter(const std::string& preferred) {
+    if (!preferred.empty()) {
+        auto it = _graph_registry().find(preferred);
+        if (it != _graph_registry().end())
+            return it->second();
+    }
+    if (!_graph_registry().empty())
+        return _graph_registry().begin()->second();
+    return nullptr;
+}
 
 PluginLoader::PluginLoader() = default;
 
@@ -63,45 +90,57 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
             return Error{ErrorCode::InternalError, "Failed to load plugin: " + error};
         }
 
-        // Look for the required symbols
         // Reset errors
         dlerror();
 
-        // Get the provider name function
+        // Detect interfaces exposed by this shared object
+        bool registeredSomething = false;
+
+        // Model Provider (legacy)
         typedef const char* (*GetProviderNameFunc)();
         GetProviderNameFunc getProviderName =
             reinterpret_cast<GetProviderNameFunc>(dlsym(handle, "getProviderName"));
-
-        if (!getProviderName) {
-            dlclose(handle);
-            return Error{ErrorCode::InvalidArgument,
-                         "Plugin missing getProviderName function: " + pluginPath.string()};
-        }
-
-        // Get the factory function
         typedef IModelProvider* (*CreateProviderFunc)();
-        CreateProviderFunc createProvider =
-            reinterpret_cast<CreateProviderFunc>(dlsym(handle, "createOnnxProvider"));
-
-        if (!createProvider) {
-            // Try generic name
-            createProvider = reinterpret_cast<CreateProviderFunc>(dlsym(handle, "createProvider"));
+        CreateProviderFunc createProvider = nullptr;
+        std::string modelName;
+        if (getProviderName) {
+            createProvider =
+                reinterpret_cast<CreateProviderFunc>(dlsym(handle, "createOnnxProvider"));
+            if (!createProvider)
+                createProvider =
+                    reinterpret_cast<CreateProviderFunc>(dlsym(handle, "createProvider"));
+            if (createProvider) {
+                const char* pn = getProviderName();
+                if (pn && *pn)
+                    modelName = pn;
+            }
         }
 
-        if (!createProvider) {
+        // Graph Adapter v1
+        typedef const char* (*GetGraphAdapterNameFunc)();
+        typedef IGraphAdapter* (*CreateGraphAdapterFunc)();
+        GetGraphAdapterNameFunc getGraphAdapterName =
+            reinterpret_cast<GetGraphAdapterNameFunc>(dlsym(handle, "getGraphAdapterName"));
+        CreateGraphAdapterFunc createGraphAdapterFn = nullptr;
+        std::string graphName;
+        if (getGraphAdapterName) {
+            createGraphAdapterFn =
+                reinterpret_cast<CreateGraphAdapterFunc>(dlsym(handle, "createGraphAdapterV1"));
+            if (!createGraphAdapterFn)
+                createGraphAdapterFn =
+                    reinterpret_cast<CreateGraphAdapterFunc>(dlsym(handle, "createGraphAdapter"));
+            if (createGraphAdapterFn) {
+                const char* gn = getGraphAdapterName();
+                if (gn && *gn)
+                    graphName = gn;
+            }
+        }
+
+        if (modelName.empty() && graphName.empty()) {
             dlclose(handle);
             return Error{ErrorCode::InvalidArgument,
-                         "Plugin missing create function: " + pluginPath.string()};
+                         "Plugin does not expose a known interface: " + pluginPath.string()};
         }
-
-        // Get the provider name
-        const char* providerName = getProviderName();
-        if (!providerName || std::strlen(providerName) == 0) {
-            dlclose(handle);
-            return Error{ErrorCode::InvalidArgument, "Plugin returned invalid provider name"};
-        }
-
-        std::string name(providerName);
 
         // Decide precedence when the same provider is found in multiple files/dirs.
         auto scorePath = [](const fs::path& p) -> int {
@@ -125,35 +164,57 @@ Result<void> PluginLoader::loadPlugin(const std::filesystem::path& pluginPath) {
         };
 
         int newScore = scorePath(pluginPath);
-        auto it = plugins_.find(name);
-        if (it != plugins_.end() && it->second.loaded) {
-            int oldScore = scorePath(it->second.path);
-            if (newScore >= oldScore) {
-                // Existing provider has higher or equal priority; skip this one.
-                dlclose(handle);
-                spdlog::info(
-                    "Skipping duplicate provider '{}' from {} (kept {} with higher priority)", name,
-                    pluginPath.string(), it->second.path.string());
-                return Result<void>();
+
+        auto ensureRecord = [&](const std::string& logicalKey, const std::string& humanName,
+                                const std::string& ifaceTag) {
+            auto it = plugins_.find(logicalKey);
+            if (it != plugins_.end() && it->second.loaded) {
+                int oldScore = scorePath(it->second.path);
+                if (newScore >= oldScore) {
+                    dlclose(handle);
+                    spdlog::info("Skipping duplicate '{}' from {} (kept {} with higher priority)",
+                                 humanName, pluginPath.string(), it->second.path.string());
+                    return false;
+                }
+                (void)unloadPlugin(logicalKey);
             }
-            // Replace with higher-priority implementation
-            (void)unloadPlugin(name);
+            PluginInfo info;
+            info.name = humanName;
+            info.path = pluginPath;
+            info.handle = handle;
+            info.loaded = true;
+            info.interfaces.push_back(ifaceTag);
+            plugins_[logicalKey] = info;
+            return true;
+        };
+
+        if (!modelName.empty()) {
+            if (ensureRecord(std::string("model:") + modelName, modelName, "model_provider")) {
+                registerModelProvider(modelName,
+                                      [createProvider]() -> std::unique_ptr<IModelProvider> {
+                                          return std::unique_ptr<IModelProvider>(createProvider());
+                                      });
+                spdlog::info("Loaded model provider '{}' from {}", modelName, pluginPath.string());
+                registeredSomething = true;
+            }
+        }
+        if (!graphName.empty()) {
+            if (ensureRecord(std::string("graph:") + graphName, graphName, "graph_adapter_v1")) {
+                registerGraphAdapter(
+                    graphName, [createGraphAdapterFn]() -> std::unique_ptr<IGraphAdapter> {
+                        return std::unique_ptr<IGraphAdapter>(createGraphAdapterFn());
+                    });
+                spdlog::info("Loaded graph adapter '{}' from {}", graphName, pluginPath.string());
+                registeredSomething = true;
+            }
         }
 
-        // Register using a lambda that captures the function pointer (after dedup decision)
-        registerModelProvider(name, [createProvider]() -> std::unique_ptr<IModelProvider> {
-            return std::unique_ptr<IModelProvider>(createProvider());
-        });
+        if (!registeredSomething) {
+            dlclose(handle);
+            return Error{ErrorCode::InvalidArgument,
+                         "Plugin did not register any known interface: " + pluginPath.string()};
+        }
 
-        // Store plugin info
-        PluginInfo info;
-        info.name = name;
-        info.path = pluginPath;
-        info.handle = handle;
-        info.loaded = true;
-        plugins_[name] = info;
-
-        spdlog::info("Successfully loaded provider '{}' from {}", name, pluginPath.string());
         return Result<void>();
 
     } catch (const std::exception& e) {

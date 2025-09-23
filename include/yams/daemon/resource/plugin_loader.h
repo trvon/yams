@@ -21,6 +21,8 @@ struct PluginInfo {
     void* handle = nullptr; // dlopen handle
     bool loaded = false;
     std::string error;
+    // Optional: interfaces/types this plugin provides (e.g., "model_provider", "graph_adapter_v1")
+    std::vector<std::string> interfaces;
 };
 
 /**

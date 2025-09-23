@@ -2,22 +2,107 @@
 
 namespace yams::mcp {
 
+namespace {
+// Tolerant numeric parsing: accept number, numeric-like string; ignore empty string
+static int parse_int_tolerant(const json& j, const char* key, int def) {
+    if (!j.contains(key) || j[key].is_null())
+        return def;
+    if (j[key].is_number_integer())
+        return j[key].get<int>();
+    if (j[key].is_string()) {
+        auto s = j[key].get<std::string>();
+        if (s.empty())
+            return def;
+        try {
+            return std::stoi(s);
+        } catch (...) {
+            return def;
+        }
+    }
+    return def;
+}
+static size_t parse_size_tolerant(const json& j, const char* key, size_t def) {
+    if (!j.contains(key) || j[key].is_null())
+        return def;
+    if (j[key].is_number_unsigned())
+        return j[key].get<size_t>();
+    if (j[key].is_number_integer())
+        return static_cast<size_t>(j[key].get<long long>());
+    if (j[key].is_string()) {
+        auto s = j[key].get<std::string>();
+        if (s.empty())
+            return def;
+        try {
+            return static_cast<size_t>(std::stoll(s));
+        } catch (...) {
+            return def;
+        }
+    }
+    return def;
+}
+static double parse_double_tolerant(const json& j, const char* key, double def) {
+    if (!j.contains(key) || j[key].is_null())
+        return def;
+    if (j[key].is_number_float())
+        return j[key].get<double>();
+    if (j[key].is_number_integer())
+        return static_cast<double>(j[key].get<long long>());
+    if (j[key].is_string()) {
+        auto s = j[key].get<std::string>();
+        if (s.empty())
+            return def;
+        try {
+            return std::stod(s);
+        } catch (...) {
+            return def;
+        }
+    }
+    return def;
+}
+static std::string normalize_query(std::string q) {
+    for (char& c : q) {
+        if (c == '\n' || c == '\r')
+            c = ' ';
+    }
+    // collapse runs of spaces (simple pass)
+    std::string out;
+    out.reserve(q.size());
+    bool prev_space = false;
+    for (char c : q) {
+        bool is_space = (c == ' ' || c == '\t');
+        if (is_space) {
+            if (!prev_space)
+                out.push_back(' ');
+        } else {
+            out.push_back(c);
+        }
+        prev_space = is_space;
+    }
+    // trim
+    while (!out.empty() && (out.front() == ' ' || out.front() == '\t'))
+        out.erase(out.begin());
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\t'))
+        out.pop_back();
+    return out;
+}
+} // namespace
+
 // MCPSearchRequest implementation
 MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     MCPSearchRequest req;
-    req.query = j.value("query", std::string{});
-    req.limit = static_cast<size_t>(j.value("limit", 10));
+    req.query = normalize_query(j.value("query", std::string{}));
+    req.limit = parse_size_tolerant(j, "limit", 10);
     req.fuzzy = j.value("fuzzy", false);
-    req.similarity = j.value("similarity", 0.7f);
+    req.similarity = parse_double_tolerant(j, "similarity", 0.7);
     req.hash = j.value("hash", std::string{});
     req.type = j.value("type", std::string{"hybrid"});
     req.verbose = j.value("verbose", false);
     req.pathsOnly = j.value("paths_only", false);
     req.lineNumbers = j.value("line_numbers", false);
 
-    const int context = j.value("context", 0);
-    req.beforeContext = (context > 0) ? context : j.value("before_context", 0);
-    req.afterContext = (context > 0) ? context : j.value("after_context", 0);
+    const int context = parse_int_tolerant(j, "context", 0);
+    req.beforeContext = (context > 0) ? context : parse_int_tolerant(j, "before_context", 0);
+    req.afterContext = (context > 0) ? context : parse_int_tolerant(j, "after_context", 0);
     req.context = context;
 
     req.colorMode = j.value("color", std::string{"never"});
@@ -161,10 +246,26 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     MCPGrepRequest req;
     req.pattern = j.value("pattern", std::string{});
 
+    // Optional name/subpath helpers for path scoping
+    req.name = j.value("name", std::string{});
+    req.subpath = j.value("subpath", true);
+
     if (j.contains("paths") && j["paths"].is_array()) {
         for (const auto& path : j["paths"]) {
             if (path.is_string()) {
                 req.paths.push_back(path.get<std::string>());
+            }
+        }
+    }
+
+    // include_patterns may be a string or array
+    if (j.contains("include_patterns")) {
+        if (j["include_patterns"].is_string()) {
+            req.includePatterns.push_back(j["include_patterns"].get<std::string>());
+        } else if (j["include_patterns"].is_array()) {
+            for (const auto& p : j["include_patterns"]) {
+                if (p.is_string())
+                    req.includePatterns.push_back(p.get<std::string>());
             }
         }
     }
@@ -178,15 +279,17 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     req.filesWithMatches = j.value("files_with_matches", false);
     req.fastFirst = j.value("fast_first", false);
     req.filesWithoutMatch = j.value("files_without_match", false);
-    req.afterContext = j.value("after_context", 0);
-    req.beforeContext = j.value("before_context", 0);
-    req.context = j.value("context", 0);
+    req.afterContext = parse_int_tolerant(j, "after_context", 0);
+    req.beforeContext = parse_int_tolerant(j, "before_context", 0);
+    req.context = parse_int_tolerant(j, "context", 0);
     req.color = j.value("color", std::string{"auto"});
     req.useSession = j.value("use_session", true);
     req.sessionName = j.value("session", std::string{});
 
-    if (j.contains("max_count") && j["max_count"].is_number_integer()) {
-        req.maxCount = j["max_count"].get<int>();
+    if (j.contains("max_count")) {
+        int mc = parse_int_tolerant(j, "max_count", -1);
+        if (mc >= 0)
+            req.maxCount = mc;
     }
 
     return req;

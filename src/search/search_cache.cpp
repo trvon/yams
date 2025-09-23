@@ -31,7 +31,10 @@ std::optional<SearchResults> SearchCache::get(const CacheKey& key) {
         return std::nullopt;
     }
 
-    auto& entry = it->second;
+    // Copy the shared_ptr so it remains valid even if we erase the map entry later.
+    // Taking a reference to the map's value and then erasing would leave a dangling reference
+    // and can cause a use-after-free.
+    auto entry = it->second;
 
     // Check if expired
     if (entry->isExpired()) {
@@ -50,7 +53,8 @@ std::optional<SearchResults> SearchCache::get(const CacheKey& key) {
         if (config_.enableStatistics) {
             stats_.ttlExpirations.fetch_add(1);
             stats_.currentSize.fetch_sub(1);
-            currentMemoryUsage_.fetch_sub(entry->memorySize);
+            // Use the copied entry to account memory size after erase
+            currentMemoryUsage_.fetch_sub(entry ? entry->memorySize : 0);
             stats_.memoryUsage.store(currentMemoryUsage_.load());
         }
 
@@ -552,9 +556,15 @@ Result<void> SearchCache::loadFromDisk(const std::string& path) {
         }
 
         std::unique_lock<std::shared_mutex> lock(mutex_);
-
-        // Clear existing cache
-        clear();
+        // Clear existing cache WITHOUT re-locking (avoid deadlock). Inline the logic of clear().
+        cache_.clear();
+        lruList_.clear();
+        keyToListIter_.clear();
+        currentMemoryUsage_.store(0);
+        if (config_.enableStatistics) {
+            stats_.currentSize.store(0);
+            stats_.memoryUsage.store(0);
+        }
 
         // Read header
         size_t cacheSize;

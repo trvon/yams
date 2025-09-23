@@ -1503,13 +1503,15 @@ json MCPServer::listTools() {
         props["files_with_matches"]["default"] = false;
         props["files_without_match"] = makeProp("boolean", "Show only filenames without matches");
         props["files_without_match"]["default"] = false;
-        props["after_context"] = makeProp("integer", "Lines after match");
+        props["after_context"] = makeProp("integer", "Lines after match (numeric; empty ignored)");
         props["after_context"]["default"] = 0;
-        props["before_context"] = makeProp("integer", "Lines before match");
+        props["before_context"] =
+            makeProp("integer", "Lines before match (numeric; empty ignored)");
         props["before_context"]["default"] = 0;
-        props["context"] = makeProp("integer", "Lines around match");
+        props["context"] = makeProp("integer", "Lines around match (numeric; empty ignored)");
         props["context"]["default"] = 0;
-        props["max_count"] = makeProp("integer", "Maximum matches per file");
+        props["max_count"] =
+            makeProp("integer", "Maximum matches per file (numeric; empty ignored)");
         props["color"] = makeProp("string", "Color highlighting (values: always, never, auto)");
         props["color"]["default"] = "auto";
         // Session scoping for name and path resolution
@@ -2508,6 +2510,52 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     if (req.maxCount)
         dreq.maxMatches = *req.maxCount;
 
+    // Pass include patterns to daemon and enable recursive by default
+    if (!req.includePatterns.empty()) {
+        dreq.includePatterns = req.includePatterns;
+        dreq.recursive = true;
+    }
+
+    std::vector<std::string> initial_paths = req.paths;
+    if (!req.name.empty()) {
+        initial_paths.push_back(req.name);
+    }
+
+    std::unordered_set<std::string> final_paths;
+    for (const auto& p : initial_paths) {
+        if (p.empty())
+            continue;
+
+        // Add original and normalized paths
+        final_paths.insert(p);
+        auto normalized = yams::app::services::utils::normalizeLookupPath(p);
+        if (normalized.changed) {
+            final_paths.insert(normalized.normalized);
+        }
+
+        // Add suffix match for non-wildcard paths
+        const bool has_wild =
+            (p.find('*') != std::string::npos) || (p.find('?') != std::string::npos);
+        if (!has_wild) {
+            if (req.subpath) {
+                final_paths.insert(std::string("*") + p);
+                if (normalized.changed) {
+                    final_paths.insert(std::string("*") + normalized.normalized);
+                }
+            }
+            // Basename fallback
+            std::string base = p;
+            try {
+                base = std::filesystem::path(p).filename().string();
+            } catch (...) {
+            }
+            if (!base.empty() && base != p) {
+                final_paths.insert(std::string("*") + base);
+            }
+        }
+    }
+    dreq.paths.assign(final_paths.begin(), final_paths.end());
+
     // Session scoping for grep: if no explicit paths, use session patterns
     if (req.useSession && dreq.paths.empty()) {
         auto sess = app::services::makeSessionService(nullptr);
@@ -3402,12 +3450,17 @@ boost::asio::awaitable<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
-    // Detect if MCP caller passed a concrete local file path; normalize to exact path pattern
-    if (!req.name.empty()) {
+    // Prioritize pattern, but fall back to name.
+    if (!req.pattern.empty()) {
+        auto normalized = yams::app::services::utils::normalizeLookupPath(req.pattern);
+        if (normalized.changed && !normalized.hasWildcards) {
+            daemon_req.namePattern = normalized.normalized;
+        } else {
+            daemon_req.namePattern = req.pattern;
+        }
+    } else if (!req.name.empty()) {
         auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
         daemon_req.namePattern = resolved.pattern.empty() ? req.name : resolved.pattern;
-    } else {
-        daemon_req.namePattern = req.pattern;
     }
     if (req.useSession && daemon_req.namePattern.empty()) {
         auto sess = app::services::makeSessionService(nullptr);
@@ -4311,10 +4364,21 @@ void MCPServer::initializeToolRegistry() {
         json{{"type", "object"},
              {"properties",
               {{"pattern", {{"type", "string"}, {"description", "Regex pattern to search"}}},
+               {"name",
+                {{"type", "string"},
+                 {"description", "Optional file name or subpath to scope search"}}},
                {"paths",
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
                  {"description", "Paths to search"}}},
+               {"include_patterns",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "File include globs (e.g., '*.md')"}}},
+               {"subpath",
+                {{"type", "boolean"},
+                 {"description", "Allow suffix match for path-like names"},
+                 {"default", true}}},
                {"ignore_case",
                 {{"type", "boolean"},
                  {"description", "Case insensitive search"},
@@ -4788,6 +4852,10 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         if (matches.empty() && req.subpath) {
             try_list(std::string("%/") + wanted);
         }
+        // Contains anywhere as a last resort before returning NotFound
+        if (matches.empty()) {
+            try_list(std::string("%") + wanted + "%");
+        }
 
         if (matches.empty()) {
             // If a path-like query yields no results, fail explicitly instead of falling through.
@@ -5006,10 +5074,16 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
     if (!req.name.empty()) {
         auto normalized = yams::app::services::utils::normalizeLookupPath(req.name);
         std::vector<std::string> candidates;
-        candidates.reserve(2);
-        if (normalized.changed)
+        candidates.reserve(4);
+        if (normalized.changed) {
             candidates.push_back(normalized.normalized);
+        }
         candidates.push_back(req.name);
+        // Add suffix match candidates, which getByNameSmart might use as patterns
+        candidates.push_back("%" + req.name);
+        if (normalized.changed) {
+            candidates.push_back("%" + normalized.normalized);
+        }
 
         std::optional<Error> lastNotFound;
         for (const auto& candidate : candidates) {
@@ -5451,16 +5525,17 @@ bool MCPServer::shouldAutoInitialize() const {
     return false;
 }
 
-} // namespace yams::mcp
-
-void yams::mcp::MCPServer::beginSessionContext(
+// --- HTTP mode session context helpers ---
+void MCPServer::beginSessionContext(
     std::string sessionId,
     std::function<void(const std::string&, const nlohmann::json&)> publisher) {
     tlsSessionId_ = std::move(sessionId);
     httpPublisher_ = std::move(publisher);
 }
 
-void yams::mcp::MCPServer::endSessionContext() {
+void MCPServer::endSessionContext() {
     tlsSessionId_.clear();
     httpPublisher_ = nullptr;
 }
+
+} // namespace yams::mcp

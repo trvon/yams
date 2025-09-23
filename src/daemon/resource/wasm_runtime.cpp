@@ -3,6 +3,7 @@
 #include <cstring>
 #include <random>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 #include <yams/daemon/resource/wasm_runtime.h>
@@ -229,6 +230,24 @@ WasmRuntime::Result WasmRuntime::load(const std::filesystem::path& wasmFile,
 WasmRuntime::Result WasmRuntime::callHeadObject(const std::string& key,
                                                 const std::string& optsJson) {
     return callJsonExport("object_storage_v1_head", key, optsJson);
+}
+
+// Convenience wrappers for GraphAdapter v1 JSON-bridged exports.
+// Export names follow the pattern: graph_adapter_v1_<method>
+// Each export is assumed to accept two (ptr,len) string pairs and return (ptr,len) packed in i64.
+WasmRuntime::Result WasmRuntime::callGraphAdapter(const std::string& method, const std::string& a,
+                                                  const std::string& b) {
+    std::string exportName = std::string("graph_adapter_v1_") + method;
+    return callJsonExport(exportName, a, b);
+}
+
+WasmRuntime::Result WasmRuntime::callGraphAdapterListGraphs(const std::string& filterJson) {
+    return callGraphAdapter("list_graphs", filterJson, "");
+}
+
+WasmRuntime::Result WasmRuntime::callGraphAdapterExportGraph(const std::string& graphId,
+                                                             const std::string& optionsJson) {
+    return callGraphAdapter("export_graph", graphId, optionsJson);
 }
 
 WasmRuntime::Result WasmRuntime::callJsonExport([[maybe_unused]] const std::string& exportName,
