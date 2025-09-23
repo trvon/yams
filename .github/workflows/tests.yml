@@ -170,13 +170,13 @@ jobs:
         run: |
           set -euo pipefail
           CONF_FILE="$HOME/.conan2/global.conf"
-          LINE="general.parallel_downloads=8"
+          LINE="core.download:parallel=8"
           mkdir -p "$(dirname "$CONF_FILE")"
           if [ -f "$CONF_FILE" ]; then
             TMP_FILE="$(mktemp)"
             awk -v line="$LINE" '
               BEGIN { replaced = 0 }
-              /^general\.parallel_downloads=/ { if (!replaced) { print line; replaced = 1 } ; next }
+              /^core\.download:parallel=/ { if (!replaced) { print line; replaced = 1 } ; next }
               { print }
               END { if (!replaced) print line }
             ' "$CONF_FILE" > "$TMP_FILE"
@@ -185,8 +185,8 @@ jobs:
             printf '%s\n' "$LINE" > "$CONF_FILE"
           fi
           echo "Configured $LINE in $CONF_FILE"
-          grep -n '^general.parallel_downloads=' "$CONF_FILE" || true
-          conan config show general.parallel_downloads 2>/dev/null || true
+          grep -n '^core.download:parallel=' "$CONF_FILE" || true
+          conan config show core.download:parallel 2>/dev/null || true
           conan --version
 
       - name: Configure and Build with Meson
