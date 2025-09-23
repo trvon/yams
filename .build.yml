@@ -339,7 +339,8 @@ tasks:
   - collect_artifacts: |
       set -e
       ART_DIR="artifacts"
-      rm -rf "${ART_DIR}" && mkdir -p "${ART_DIR}"
+      mkdir -p "${ART_DIR}"
+      rm -f "${ART_DIR}/yams"*.tar.gz "${ART_DIR}/yams"*.deb "${ART_DIR}/yams"*.rpm 2>/dev/null || true
       # Determine repository root
       if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"

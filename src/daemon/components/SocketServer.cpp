@@ -68,6 +68,8 @@ Result<void> SocketServer::start() {
         return Error{ErrorCode::InvalidState, "Socket server already running"};
     }
 
+    stopping_.store(false, std::memory_order_relaxed);
+
     try {
         spdlog::info("Starting socket server on {}", config_.socketPath.string());
 
@@ -259,6 +261,7 @@ Result<void> SocketServer::stop() {
     } catch (...) {
         spdlog::error("SocketServer::stop unknown exception");
     }
+    stopping_.store(false, std::memory_order_relaxed);
     return {};
 }
 
@@ -464,12 +467,17 @@ awaitable<void> SocketServer::accept_loop() {
                         boost::system::error_code ec;
                         if (acceptor_)
                             acceptor_->close(ec);
-                        std::filesystem::remove(config_.socketPath, ec);
+                        auto rebuildPath = actualSocketPath_;
+                        if (rebuildPath.empty()) {
+                            rebuildPath = config_.socketPath;
+                        }
+                        std::filesystem::remove(rebuildPath, ec);
                         acceptor_ = std::make_unique<local::acceptor>(io_context_);
-                        local::endpoint endpoint(config_.socketPath.string());
+                        local::endpoint endpoint(rebuildPath.string());
                         acceptor_->open(endpoint.protocol());
                         acceptor_->bind(endpoint);
                         acceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                        actualSocketPath_ = rebuildPath;
                         static std::atomic<bool> s_warned_once{false};
                         static const bool s_quiet = []() {
                             if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
@@ -554,7 +562,16 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         handlerConfig.chunk_size = TuneAdvisor::chunkSize();
         handlerConfig.close_after_response = false;
         handlerConfig.graceful_half_close = true;
-        handlerConfig.read_timeout = std::chrono::seconds(300);
+        auto connectionTimeout = config_.connectionTimeout;
+        if (connectionTimeout.count() == 0) {
+            connectionTimeout = std::chrono::milliseconds(30000);
+        }
+        auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
+        if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {
+            timeoutSeconds = std::chrono::seconds(1);
+        }
+        handlerConfig.read_timeout = timeoutSeconds;
+        handlerConfig.write_timeout = timeoutSeconds;
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
         handlerConfig.writer_budget_bytes_per_turn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);

@@ -24,6 +24,13 @@ name: Release
         description: "Limit matrix to macOS variants only (skip linux-hosted)"
         required: false
         default: "false"
+  workflow_run:
+    workflows:
+      - Tests
+    branches:
+      - main
+    types:
+      - completed
 
 permissions:
   contents: write
@@ -326,24 +333,24 @@ jobs:
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
 
       - name: Download CI benchmark artifacts (-yams, if available)
-        if: github.event_name == 'workflow_run' && github.actor != 'nektos/act'
+        if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          workflow: ci.yml
-          workflow_conclusion: success
-          name: benchmark-results-${{ matrix.os }}-yams
+          run_id: ${{ github.event.workflow_run.id }}
+          workflow_conclusion: completed
+          name: benchmark-results-linux-hosted-yams
           path: ci-artifacts/benchmarks
           if_no_artifact_found: warn
 
       - name: Download CI benchmark artifacts (legacy -conan, fallback)
-        if: github.event_name == 'workflow_run' && github.actor != 'nektos/act'
+        if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          workflow: ci.yml
-          workflow_conclusion: success
-          name: benchmark-results-${{ matrix.os }}-conan
+          run_id: ${{ github.event.workflow_run.id }}
+          workflow_conclusion: completed
+          name: benchmark-results-linux-hosted-conan
           path: ci-artifacts/benchmarks
           if_no_artifact_found: warn
 
@@ -352,8 +359,8 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          workflow: ci.yml
-          workflow_conclusion: success
+          run_id: ${{ github.event.workflow_run.id }}
+          workflow_conclusion: completed
           name: coverage-report
           path: ci-artifacts/coverage
           if_no_artifact_found: warn
@@ -643,6 +650,7 @@ jobs:
             ls -al "$BD" >&2 || true
             exit 1
           fi
+          echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
 
       - name: Generate release summary
         shell: bash
@@ -710,7 +718,13 @@ jobs:
         if: ${{ inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
         shell: bash
         run: |
-          cd "$GITHUB_WORKSPACE/${{ env.STAGE_DIR }}"
+          STAGE_PATH="${{ env.STAGE_DIR }}"
+          if [ ! -d "$STAGE_PATH" ]; then
+            echo "Stage directory not found at $STAGE_PATH" >&2
+            ls -al "$BUILD_DIR" >&2 || true
+            exit 1
+          fi
+          cd "$STAGE_PATH"
           VERSION="${{ steps.meta.outputs.version }}"
           SUFFIX="${{ matrix.suffix }}"
           OUTDIR="$GITHUB_WORKSPACE"

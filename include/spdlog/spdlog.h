@@ -1,10 +1,6 @@
 #pragma once
 
-// Prefer spdlog bundled {fmt} on iOS to avoid dependency/version skew
-// Ensure any externally defined SPDLOG_FMT_EXTERNAL is cleared
-#ifdef SPDLOG_FMT_EXTERNAL
-#undef SPDLOG_FMT_EXTERNAL
-#endif
-
-// Defer to the next available spdlog header in the include search path
+// Defer to the next available spdlog header in the include search path.
+// Rely on upstream configuration (e.g., Conan) to decide whether to use
+// spdlog's bundled {fmt} or an external fmt library.
 #include_next <spdlog/spdlog.h>

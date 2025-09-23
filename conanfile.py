@@ -86,6 +86,7 @@ class YamsConan(ConanFile):
         self.options["openssl"].shared = False
         self.options["libarchive"].shared = False
         self.options["taglib"].shared = False
+        self.options["spdlog"].header_only = False
 
     def validate(self):
         check_min_cppstd(self, "20")
