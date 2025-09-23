@@ -168,7 +168,25 @@ jobs:
       - name: Tune Conan client (parallel downloads)
         shell: bash
         run: |
-          conan config set general.parallel_downloads=8 || true
+          set -euo pipefail
+          CONF_FILE="$HOME/.conan2/global.conf"
+          LINE="general.parallel_downloads=8"
+          mkdir -p "$(dirname "$CONF_FILE")"
+          if [ -f "$CONF_FILE" ]; then
+            TMP_FILE="$(mktemp)"
+            awk -v line="$LINE" '
+              BEGIN { replaced = 0 }
+              /^general\.parallel_downloads=/ { if (!replaced) { print line; replaced = 1 } ; next }
+              { print }
+              END { if (!replaced) print line }
+            ' "$CONF_FILE" > "$TMP_FILE"
+            mv "$TMP_FILE" "$CONF_FILE"
+          else
+            printf '%s\n' "$LINE" > "$CONF_FILE"
+          fi
+          echo "Configured $LINE in $CONF_FILE"
+          grep -n '^general.parallel_downloads=' "$CONF_FILE" || true
+          conan config show general.parallel_downloads 2>/dev/null || true
           conan --version
 
       - name: Configure and Build with Meson
@@ -180,7 +198,7 @@ jobs:
             -pr:b=default \
             -s build_type=Debug \
             -o yams/*:build_tests=True \
-            -c tools.cmake.cmaketoolchain:variables.CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -c tools.cmake.cmaketoolchain:variables.cmake_policy_version_minimum=3.5 \
             -o yams/*:enable_onnx=False \
             --build=missing
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
