@@ -75,7 +75,7 @@ jobs:
       - name: Cache Conan packages
         if: github.actor != 'nektos/act'
         id: cache_conan
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
@@ -90,7 +90,7 @@ jobs:
             conan2-${{ runner.os }}-
       - name: Cache ccache
         if: github.actor != 'nektos/act'
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
@@ -133,7 +133,7 @@ jobs:
                 cp "$HOST_PROFILE" "$HOST_PROFILE.x86_64"
                 sed -i '' -E 's/^arch=.*/arch=x86_64/' "$HOST_PROFILE.x86_64"
                 HOST_PROFILE="$HOST_PROFILE.x86_64"
-                ;;;
+                ;;
             esac
           else
             HOST_PROFILE="./conan/profiles/host-linux-clang"
@@ -187,7 +187,7 @@ jobs:
       STAGE_DIR: stage
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Skip non-linux entries under act (build)
@@ -220,7 +220,7 @@ jobs:
       - name: Cache Conan packages
         if: github.actor != 'nektos/act'
         id: cache_conan
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
@@ -248,7 +248,7 @@ jobs:
           done
       - name: Cache macOS build directory
         if: runner.os == 'macOS' && github.actor != 'nektos/act'
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: build/release
           key: macos-build-${{ matrix.suffix }}-${{ hashFiles('meson.build', 'meson_options.txt') }}-${{ hashFiles('src/**', 'include/**') }}
@@ -257,7 +257,7 @@ jobs:
 
       - name: Cache ccache
         if: github.actor != 'nektos/act'
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
@@ -919,7 +919,7 @@ jobs:
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -1069,19 +1069,19 @@ jobs:
           curl -Ls -o "$TARBALL" "$ARCHIVE_URL"
           SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
           echo "Computed sha256: $SHA256" >&2
-          TEMPLATE_PATH="packaging/homebrew/yams.rb"
+          TEMPLATE_PATH="packaging/homebrew/yams.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
             echo "ERROR: Homebrew template not found at $TEMPLATE_PATH" >&2
             exit 1
           fi
           OUT_FORMULA="$FORMULA_DIR/yams.rb"
-          # Update url & sha256 lines (simple sed in-place replacement)
+          # Replace template placeholders with release metadata
           sed \
-            -e 's|^  url ".*"|  url "$ARCHIVE_URL"|' \
-            -e 's|^  sha256 ".*"|  sha256 "$SHA256"|' \
+            -e "s|__VERSION__|$VERSION|g" \
+            -e "s|__SHA256__|$SHA256|g" \
             "$TEMPLATE_PATH" > "$OUT_FORMULA"
           echo "Updated formula at $OUT_FORMULA:" >&2
-          grep -E 'url "|sha256 "' "$OUT_FORMULA" >&2 || true
+          grep -E 'version\s+"|sha256 "' "$OUT_FORMULA" >&2 || true
           # Create quick install instructions file
           cat > "$FORMULA_DIR/README.txt" <<EOF
           Homebrew formula generated for YAMS $VERSION

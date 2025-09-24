@@ -39,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `version`, `is_latest`, `series_key`. Duplicate (same hash) re‑ingest does not create a new
   version; alternate locations and timestamps are updated.
 
+- CLI Search: grouped multi‑version presentation (default on) with new controls.
+  - Groups results by canonical path when multiple versions of the same file are returned.
+  - New flags:
+    - `--no-group-versions` — disable grouping and show the flat list.
+    - `--versions <latest|all>` — choose best only (default: latest) or list versions per path.
+    - `--versions-topk <N>` — cap versions shown per path when `--versions=all` (default: 3).
+    - `--versions-sort <score|path|title>` — sort versions within a group (default: score).
+    - `--no-tools` — hide per‑version tool hints.
+    - `--json-grouped` — emit grouped JSON; plain `--json` remains flat and backward compatible.
+  - Tool hints shown per version (when grouped):
+    `yams get --hash <hash> | yams cat --hash <hash> | yams restore --hash <hash>`;
+    if a local file path is resolved, a `yams diff --hash <hash> <local-path>` hint is added.
+  - Environment toggles: `YAMS_NO_GROUP_VERSIONS=1` and `YAMS_NO_GROUP_TOOLS=1` to flip defaults.
+  - Note: This is a presentation‑layer change; service/daemon APIs are unchanged.
+
 ### Changed
 - **Build System**
   - The primary build system has been migrated from CMake to Meson. All build, test, and packaging scripts have been updated to use the new Meson-based workflow.
@@ -62,6 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and emits KG nodes/edges best‑effort.
 - Status/Stats: JSON correctness improvements; omit misleading savings when physical size
   unknown; surface post‑ingest bus usage and document counters.
+- CLI Search: grouping of multiple versions per path is enabled by default; paths‑only output
+  and flat JSON remain unchanged unless `--json-grouped` is specified.
 
 ### Fixed
 - Many tuning optimizations for daemon usage

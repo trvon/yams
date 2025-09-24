@@ -8,6 +8,7 @@
 #include <iterator>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/retrieval_service.h>
@@ -107,6 +108,14 @@ private:
     bool noSession_{false};
     // Force thorough, non-streaming execution (disables streaming guard)
     bool cold_{false};
+
+    // Grouping of multiple versions per path (UI-only feature)
+    bool groupVersions_{true};           // default: enabled
+    std::string versionsMode_{"latest"}; // latest | all
+    std::size_t versionsTopk_{3};        // cap per-path versions when showing all
+    std::string versionsSort_{"score"};  // score | path | title
+    bool showTools_{true};               // show per-version tool hints
+    bool jsonGrouped_{false};            // emit grouped JSON instead of flat
 
     // Helper function to truncate snippet to a maximum length at word boundary
     std::string truncateSnippet(const std::string& snippet, size_t maxLength) {
@@ -322,6 +331,25 @@ public:
         cmd->add_flag("--paths-only", pathsOnly_,
                       "Output only file paths, one per line (useful for scripting)");
 
+        // Grouping / versions presentation controls (default grouping enabled)
+        bool noGroupVersions = false; // local flag to flip default-on grouping
+        cmd->add_flag("--no-group-versions", noGroupVersions,
+                      "Disable grouping of multiple versions per path");
+        cmd->add_option("--versions", versionsMode_,
+                        "Which versions to show when grouped: latest|all")
+            ->check(CLI::IsMember({"latest", "all"}))
+            ->default_val("latest");
+        cmd->add_option("--versions-topk", versionsTopk_,
+                        "Max versions to show per path when --versions=all")
+            ->default_val(3);
+        cmd->add_option("--versions-sort", versionsSort_, "Per-path version sort: score|path|title")
+            ->check(CLI::IsMember({"score", "path", "title"}))
+            ->default_val("score");
+        bool noTools = false; // local flag to hide tool hints
+        cmd->add_flag("--no-tools", noTools, "Hide per-version tool hints in grouped output");
+        cmd->add_flag("--json-grouped", jsonGrouped_,
+                      "Emit grouped JSON (preserves flat JSON unless this is set)");
+
         // Session scoping controls
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
@@ -400,6 +428,34 @@ public:
                 // When --cold is provided, prefer non-streaming thorough execution
                 disableStreaming_ = true;
             }
+            // Apply local inversion flags captured above
+            // Note: CLI11 stores flag states; re-fetch via app to avoid capture issues
+            // but here we use simple locals and rely on evaluation order pre-callback.
+            // If these locals are optimized away, we can revisit.
+            // For now, mirror intent: default ON, disable when --no-group-versions present;
+            // default show tools, disable when --no-tools present.
+            groupVersions_ = true;
+            showTools_ = true;
+            // These environment variables allow forcing defaults at runtime if needed
+            if (const char* envNoGroup = std::getenv("YAMS_NO_GROUP_VERSIONS")) {
+                std::string v(envNoGroup);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                if (v == "1" || v == "true" || v == "yes" || v == "on")
+                    groupVersions_ = false;
+            }
+            if (const char* envNoTools = std::getenv("YAMS_NO_GROUP_TOOLS")) {
+                std::string v(envNoTools);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                if (v == "1" || v == "true" || v == "yes" || v == "on")
+                    showTools_ = false;
+            }
+            // CLI flags override env defaults when present
+            if (cmd->count("--no-group-versions") > 0)
+                groupVersions_ = false;
+            if (cmd->count("--no-tools") > 0)
+                showTools_ = false;
         });
     }
 
@@ -627,7 +683,8 @@ public:
                     }
                     return Result<void>();
                 }
-                if (jsonOutput_ || verbose_) {
+                if ((jsonOutput_ && !jsonGrouped_) ||
+                    (!groupVersions_ && (jsonOutput_ || verbose_))) {
                     json output;
                     output["query"] = query_;
                     output["method"] = "daemon";
@@ -649,26 +706,147 @@ public:
                     output["results"] = results;
                     std::cout << output.dump(2) << std::endl;
                 } else {
+                    // Grouped or flat human-readable output
                     if (items.empty()) {
                         std::cout << "(no results)" << std::endl;
                         return Result<void>();
                     }
-                    for (const auto& r : items) {
-                        std::cout << r.score << "  ";
-                        if (!r.path.empty()) {
-                            std::cout << r.path;
-                        } else if (!r.title.empty()) {
-                            std::cout << r.title;
+                    if (!groupVersions_) {
+                        for (const auto& r : items) {
+                            std::cout << r.score << "  ";
+                            if (!r.path.empty())
+                                std::cout << r.path;
+                            else if (!r.title.empty())
+                                std::cout << r.title;
+                            else
+                                std::cout << r.id;
+                            if (!r.snippet.empty()) {
+                                std::cout << "\n    " << truncateSnippet(r.snippet, 200);
+                            }
+                            std::cout << "\n";
+                        }
+                        std::cout << "Found " << resp.totalCount << " results in "
+                                  << resp.elapsed.count() << "ms" << std::endl;
+                    } else {
+                        // Build groups keyed by canonical path
+                        std::unordered_map<std::string, std::vector<yams::daemon::SearchResult>>
+                            groups;
+                        groups.reserve(items.size());
+                        auto getPath = [](const yams::daemon::SearchResult& r) {
+                            auto it = r.metadata.find("path");
+                            if (it != r.metadata.end() && !it->second.empty())
+                                return it->second;
+                            if (!r.path.empty())
+                                return r.path;
+                            if (!r.title.empty())
+                                return r.title; // fallback
+                            return r.id;
+                        };
+                        for (const auto& r : items) {
+                            groups[getPath(r)].push_back(r);
+                        }
+                        // Optional grouped JSON
+                        if (jsonOutput_ && jsonGrouped_) {
+                            json output;
+                            output["query"] = query_;
+                            output["method"] = "daemon";
+                            output["total_groups"] = groups.size();
+                            json groupsArr = json::array();
+                            for (auto& [path, vec] : groups) {
+                                // sort versions by selected key (default score desc)
+                                auto sorter = [&](const auto& a, const auto& b) {
+                                    if (versionsSort_ == "path")
+                                        return a.path < b.path;
+                                    if (versionsSort_ == "title")
+                                        return a.title < b.title;
+                                    return a.score > b.score;
+                                };
+                                std::stable_sort(vec.begin(), vec.end(), sorter);
+                                const auto& best = vec.front();
+                                json g;
+                                g["path"] = path;
+                                g["total_versions"] = vec.size();
+                                json bestJ;
+                                bestJ["id"] = best.id;
+                                bestJ["title"] = best.title;
+                                bestJ["path"] = best.path;
+                                bestJ["score"] = best.score;
+                                auto itH = best.metadata.find("hash");
+                                if (itH != best.metadata.end())
+                                    bestJ["hash"] = itH->second;
+                                if (!best.snippet.empty())
+                                    bestJ["snippet"] = truncateSnippet(best.snippet, 200);
+                                g["best"] = bestJ;
+                                json vers = json::array();
+                                std::size_t cap = versionsMode_ == "all" ? versionsTopk_ : 1;
+                                for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
+                                    const auto& v = vec[i];
+                                    json vj;
+                                    vj["id"] = v.id;
+                                    vj["title"] = v.title;
+                                    vj["path"] = v.path;
+                                    vj["score"] = v.score;
+                                    auto itHv = v.metadata.find("hash");
+                                    if (itHv != v.metadata.end())
+                                        vj["hash"] = itHv->second;
+                                    if (!v.snippet.empty())
+                                        vj["snippet"] = truncateSnippet(v.snippet, 200);
+                                    vers.push_back(vj);
+                                }
+                                g["versions"] = vers;
+                                groupsArr.push_back(g);
+                            }
+                            output["groups"] = groupsArr;
+                            std::cout << output.dump(2) << std::endl;
                         } else {
-                            std::cout << r.id;
+                            // Human readable grouped table
+                            for (auto& [path, vec] : groups) {
+                                auto sorter = [&](const auto& a, const auto& b) {
+                                    if (versionsSort_ == "path")
+                                        return a.path < b.path;
+                                    if (versionsSort_ == "title")
+                                        return a.title < b.title;
+                                    return a.score > b.score;
+                                };
+                                std::stable_sort(vec.begin(), vec.end(), sorter);
+                                const auto& best = vec.front();
+                                std::cout << best.score << "  " << path << "  (" << vec.size()
+                                          << " versions)\n";
+                                std::size_t cap = (versionsMode_ == "all") ? versionsTopk_ : 1;
+                                for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
+                                    const auto& v = vec[i];
+                                    std::string hash8;
+                                    auto itHv = v.metadata.find("hash");
+                                    if (itHv != v.metadata.end() && itHv->second.size() >= 8)
+                                        hash8 = itHv->second.substr(0, 8);
+                                    std::cout << "  - "
+                                              << (hash8.empty() ? std::string("[--------]")
+                                                                : ("[" + hash8 + "]"))
+                                              << "  " << v.score << "  ";
+                                    if (!v.title.empty())
+                                        std::cout << v.title;
+                                    if (!v.snippet.empty())
+                                        std::cout << "\n      " << truncateSnippet(v.snippet, 200);
+                                    if (showTools_ && !hash8.empty()) {
+                                        std::cout << "\n      tools: yams get --hash "
+                                                  << itHv->second << " | yams cat --hash "
+                                                  << itHv->second << " | yams restore --hash "
+                                                  << itHv->second;
+                                        if (resolvedLocalFilePath_.has_value()) {
+                                            std::cout << " | yams diff --hash " << itHv->second
+                                                      << " " << *resolvedLocalFilePath_;
+                                        }
+                                    }
+                                    std::cout << "\n";
+                                }
+                                if (versionsMode_ == "all" && vec.size() > cap) {
+                                    std::cout << "    (+" << (vec.size() - cap) << " more)\n";
+                                }
+                            }
+                            std::cout << "Found " << resp.totalCount << " results in "
+                                      << resp.elapsed.count() << "ms" << std::endl;
                         }
-                        if (!r.snippet.empty()) {
-                            std::cout << "\n    " << truncateSnippet(r.snippet, 200);
-                        }
-                        std::cout << "\n";
                     }
-                    std::cout << "Found " << resp.totalCount << " results in "
-                              << resp.elapsed.count() << "ms" << std::endl;
                 }
                 return Result<void>();
             };
@@ -775,7 +953,8 @@ public:
                 }
 
                 // Output results (JSON or table format)
-                if (jsonOutput_ || verbose_) {
+                if ((jsonOutput_ && !jsonGrouped_) ||
+                    (!groupVersions_ && (jsonOutput_ || verbose_))) {
                     json output;
                     output["query"] = query_;
                     output["method"] = resp.type;
@@ -815,23 +994,130 @@ public:
                     output["results"] = results;
                     std::cout << output.dump(2) << std::endl;
                 } else {
-                    // Simple output
-                    for (const auto& item : resp.results) {
-                        std::cout << item.score << "  ";
-                        if (!item.path.empty()) {
-                            std::cout << item.path;
-                        } else if (!item.title.empty()) {
-                            std::cout << item.title;
+                    if (!groupVersions_) {
+                        // Simple flat output
+                        for (const auto& item : resp.results) {
+                            std::cout << item.score << "  ";
+                            if (!item.path.empty())
+                                std::cout << item.path;
+                            else if (!item.title.empty())
+                                std::cout << item.title;
+                            else
+                                std::cout << item.id;
+                            if (showHash_ && !item.hash.empty())
+                                std::cout << " [" << item.hash.substr(0, 8) << "]";
+                            if (!item.snippet.empty())
+                                std::cout << "\n    " << item.snippet;
+                            std::cout << "\n";
+                        }
+                    } else {
+                        // Group by path
+                        std::unordered_map<std::string, std::vector<app::services::SearchItem>>
+                            groups;
+                        groups.reserve(resp.results.size());
+                        auto getPath = [](const app::services::SearchItem& v) {
+                            if (!v.path.empty())
+                                return v.path;
+                            if (!v.title.empty())
+                                return v.title;
+                            return std::to_string(v.id);
+                        };
+                        for (const auto& v : resp.results)
+                            groups[getPath(v)].push_back(v);
+
+                        if (jsonOutput_ && jsonGrouped_) {
+                            nlohmann::json output;
+                            output["query"] = query_;
+                            output["method"] = resp.type;
+                            output["total_groups"] = groups.size();
+                            nlohmann::json groupsArr = nlohmann::json::array();
+                            for (auto& [path, vec] : groups) {
+                                auto sorter = [&](const auto& a, const auto& b) {
+                                    if (versionsSort_ == "path")
+                                        return a.path < b.path;
+                                    if (versionsSort_ == "title")
+                                        return a.title < b.title;
+                                    return a.score > b.score;
+                                };
+                                std::stable_sort(vec.begin(), vec.end(), sorter);
+                                const auto& best = vec.front();
+                                nlohmann::json g;
+                                g["path"] = path;
+                                g["total_versions"] = vec.size();
+                                nlohmann::json bestJ;
+                                bestJ["id"] = best.id;
+                                bestJ["title"] = best.title;
+                                bestJ["path"] = best.path;
+                                bestJ["score"] = best.score;
+                                if (showHash_ && !best.hash.empty())
+                                    bestJ["hash"] = best.hash;
+                                if (!best.snippet.empty())
+                                    bestJ["snippet"] = best.snippet;
+                                g["best"] = bestJ;
+                                nlohmann::json vers = nlohmann::json::array();
+                                std::size_t cap = versionsMode_ == "all" ? versionsTopk_ : 1;
+                                for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
+                                    const auto& v = vec[i];
+                                    nlohmann::json vj;
+                                    vj["id"] = v.id;
+                                    vj["title"] = v.title;
+                                    vj["path"] = v.path;
+                                    vj["score"] = v.score;
+                                    if (showHash_ && !v.hash.empty())
+                                        vj["hash"] = v.hash;
+                                    if (!v.snippet.empty())
+                                        vj["snippet"] = v.snippet;
+                                    vers.push_back(vj);
+                                }
+                                g["versions"] = vers;
+                                groupsArr.push_back(g);
+                            }
+                            output["groups"] = groupsArr;
+                            std::cout << output.dump(2) << std::endl;
                         } else {
-                            std::cout << item.id;
+                            for (auto& [path, vec] : groups) {
+                                auto sorter = [&](const auto& a, const auto& b) {
+                                    if (versionsSort_ == "path")
+                                        return a.path < b.path;
+                                    if (versionsSort_ == "title")
+                                        return a.title < b.title;
+                                    return a.score > b.score;
+                                };
+                                std::stable_sort(vec.begin(), vec.end(), sorter);
+                                const auto& best = vec.front();
+                                std::cout << best.score << "  " << path << "  (" << vec.size()
+                                          << " versions)\n";
+                                std::size_t cap = (versionsMode_ == "all") ? versionsTopk_ : 1;
+                                for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
+                                    const auto& v = vec[i];
+                                    std::string hash8 =
+                                        (showHash_ && !v.hash.empty() && v.hash.size() >= 8)
+                                            ? v.hash.substr(0, 8)
+                                            : std::string();
+                                    std::cout << "  - "
+                                              << (hash8.empty() ? std::string("[--------]")
+                                                                : ("[" + hash8 + "]"))
+                                              << "  " << v.score << "  ";
+                                    if (!v.title.empty())
+                                        std::cout << v.title;
+                                    if (!v.snippet.empty())
+                                        std::cout << "\n      " << v.snippet;
+                                    if (showTools_ && !v.hash.empty()) {
+                                        std::cout << "\n      tools: yams get --hash " << v.hash
+                                                  << " | yams cat --hash " << v.hash
+                                                  << " | yams restore --hash " << v.hash;
+                                        if (resolvedLocalFilePath_.has_value()) {
+                                            std::cout << " | yams diff --hash " << v.hash << " "
+                                                      << *resolvedLocalFilePath_;
+                                        }
+                                    }
+                                    std::cout << "\n";
+                                }
+                                if (versionsMode_ == "all" && vec.size() > cap) {
+                                    std::cout << "    (+" << (vec.size() - cap) << " more)\n";
+                                }
+                            }
                         }
-                        if (showHash_ && !item.hash.empty()) {
-                            std::cout << " [" << item.hash.substr(0, 8) << "]";
-                        }
-                        if (!item.snippet.empty()) {
-                            std::cout << "\n    " << item.snippet;
-                        }
-                        std::cout << "\n";
                     }
                 }
 

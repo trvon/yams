@@ -30,7 +30,7 @@ jobs:
       - name: Cache Conan packages (warm)
         if: github.actor != 'nektos/act'
         id: cache_conan_warm
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
@@ -45,7 +45,7 @@ jobs:
             conan2-${{ runner.os }}-
       - name: Cache ccache (warm)
         if: github.actor != 'nektos/act'
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
@@ -122,7 +122,7 @@ jobs:
           echo "Installed system Boost headers/libs for module-mode fallback"
       - name: Cache Conan packages
         id: cache_conan
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.conan2/p
@@ -140,7 +140,7 @@ jobs:
           du -sh ~/.conan2/p 2>/dev/null || true
           ls ~/.conan2/r 2>/dev/null | head || true
       - name: Cache ccache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ccache
@@ -315,7 +315,7 @@ jobs:
             --xml --output "${{ env.BUILD_DIR }}/coverage.xml"
       - name: Upload Coverage Report
         if: matrix.coverage == true
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: ${{ env.BUILD_DIR }}/coverage.html
@@ -323,7 +323,7 @@ jobs:
           retention-days: 5
       - name: Upload Coverage XML
         if: matrix.coverage == true
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-xml
           path: ${{ env.BUILD_DIR }}/coverage.xml
@@ -331,7 +331,7 @@ jobs:
           retention-days: 5
       - name: Upload Benchmark Results
         if: github.actor != 'nektos/act' && matrix.arch == 'x86_64'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-linux-hosted-yams
           path: |
