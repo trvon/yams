@@ -219,7 +219,6 @@ if all_unit.length() > 0
   # - ResourcePoolTest.MaxSizeEnforcement occasionally trips a platform-specific CV/queue edge case.
   # - StreamingProcessorTest.* depends on optional model plumbing and can be flaky locally.
   # - ZstandardCompressorTest.DecompressionPerformance is environment-sensitive on developer machines.
-  # - SearchCacheTest.MemoryLimitEnforcement can transiently exceed limit due to container overhead.
   # GoogleTest filter syntax is:
   #   <positive patterns>-<negative patterns>
   # Patterns are colon-separated; only a single '-' separates the two sections.
@@ -229,9 +228,7 @@ if all_unit.length() > 0
     'ResourcePoolTest.MaxSizeEnforcement:' +
     'StreamingProcessorTest.*:' +
     'ZstandardCompressorTest.DecompressionPerformance:' +
-    'SearchCacheTest.MemoryLimitEnforcement:' +
     'DatabaseTest.Migrations:' +
-    'HybridSearchEngineTest.FuseResultsLinearCombination:' +
     'SearchExecutorTest.*:' +
     'ResultRankerTest.RankingResults:' +
     'CompressedStorageStatsTest.*:' +

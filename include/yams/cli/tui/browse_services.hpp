@@ -33,9 +33,9 @@ public:
 
     /**
      * Load all documents from the metadata repository (falls back to content store if needed).
-     * Updates status_message with a short summary (e.g., "N documents loaded").
+     * Updates state.status with a short summary (e.g., "N documents loaded").
      */
-    std::vector<DocEntry> loadAllDocuments(std::string* status_message);
+    std::vector<DocEntry> loadAllDocuments(BrowseState& state);
 
     /**
      * Fuzzy search using the metadata repository (if available). Returns converted entries.
@@ -100,20 +100,22 @@ public:
      * Open content in an external pager.
      * - Uses $PAGER if set, otherwise falls back to "less -R".
      * - If 'text' has value, it is written to a temporary file; otherwise raw_bytes are used.
-     * - Returns true on success; on failure, writes error message when provided.
+     * - Returns true on success; on failure, updates state.status with an error.
      *
      * Note: This variant does NOT suspend the TUI. Prefer openInPagerWithSuspend when possible.
      */
-    bool openInPager(const std::string& name, const std::optional<std::string>& text,
-                     const std::vector<std::byte>& raw_bytes, std::string* error_message);
+    bool openInPager(BrowseState& state, const std::string& name,
+                     const std::optional<std::string>& text,
+                     const std::vector<std::byte>& raw_bytes);
 
     /**
      * Open content in an external pager while suspending the TUI via the provided suspend callback.
      * The suspend callback is responsible for restoring terminal state after pager exits.
      */
-    bool openInPagerWithSuspend(const std::string& name, const std::optional<std::string>& text,
+    bool openInPagerWithSuspend(BrowseState& state, const std::string& name,
+                                const std::optional<std::string>& text,
                                 const std::vector<std::byte>& raw_bytes,
-                                const SuspendRunner& suspend, std::string* error_message);
+                                const SuspendRunner& suspend);
 
 private:
     yams::cli::YamsCLI* _cli; // non-owning

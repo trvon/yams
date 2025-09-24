@@ -17,6 +17,10 @@ SearchExecutor::SearchExecutor(std::shared_ptr<metadata::Database> database,
 Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
     auto startTime = std::chrono::high_resolution_clock::now();
 
+    if (request.query.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Query must not be empty"};
+    }
+
     // Check cache first
     std::string cacheKey = generateCacheKey(request);
     if (config_.enableQueryCache) {
@@ -167,8 +171,9 @@ Result<std::vector<std::string>> SearchExecutor::getSuggestions(const std::strin
     try {
         // Query for similar terms using FTS5's term suggestion capabilities
         std::string sql = R"(
-            SELECT DISTINCT term FROM documents_fts 
-            WHERE term LIKE ? || '%' 
+            SELECT DISTINCT term FROM documents_fts_vocab
+            WHERE term LIKE ? || '%'
+            ORDER BY term
             LIMIT ?
         )";
 
@@ -178,10 +183,27 @@ Result<std::vector<std::string>> SearchExecutor::getSuggestions(const std::strin
         }
 
         auto stmt = std::move(stmtResult).value();
-        stmt.bind(1, partialQuery);
-        stmt.bind(2, static_cast<int>(maxSuggestions));
 
-        while (stmt.step()) {
+        auto bindPrefix = stmt.bind(1, partialQuery);
+        if (!bindPrefix) {
+            return Error{bindPrefix.error()};
+        }
+
+        auto bindLimit = stmt.bind(2, static_cast<int>(maxSuggestions));
+        if (!bindLimit) {
+            return Error{bindLimit.error()};
+        }
+
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return Error{stepResult.error()};
+            }
+
+            if (!stepResult.value()) {
+                break;
+            }
+
             suggestions.push_back(stmt.getString(0));
         }
 
@@ -219,10 +241,17 @@ SearchExecutor::executeFTSQuery(const std::string& ftsQuery, const SearchRequest
         // Execute FTS5 query
         std::string sql = R"(
             SELECT 
-                d.id, d.title, d.path, d.content_type, d.file_size,
-                d.last_modified, d.indexed_at, d.detected_language, d.language_confidence,
+                d.id,
+                d.file_name AS title,
+                d.file_path AS path,
+                d.mime_type AS content_type,
+                d.file_size,
+                d.modified_time,
+                d.indexed_time,
+                '' AS detected_language,
+                0.0 AS language_confidence,
                 bm25(documents_fts) as relevance_score,
-                snippet(documents_fts, 0, '<mark>', '</mark>', '...', 32) as snippet
+                snippet(documents_fts, 1, '<mark>', '</mark>', '...', 32) as snippet
             FROM documents_fts 
             JOIN documents d ON documents_fts.rowid = d.id
             WHERE documents_fts MATCH ?
@@ -236,10 +265,25 @@ SearchExecutor::executeFTSQuery(const std::string& ftsQuery, const SearchRequest
         }
 
         auto stmt = std::move(stmtResult).value();
-        stmt.bind(1, ftsQuery);
-        stmt.bind(2, static_cast<int>(config_.maxResults));
+        auto bindQuery = stmt.bind(1, ftsQuery);
+        if (!bindQuery) {
+            return Error{bindQuery.error()};
+        }
 
-        while (stmt.step()) {
+        auto bindLimit = stmt.bind(2, static_cast<int>(config_.maxResults));
+        if (!bindLimit) {
+            return Error{bindLimit.error()};
+        }
+
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return Error{stepResult.error()};
+            }
+            if (!stepResult.value()) {
+                break;
+            }
+
             SearchResultItem item;
 
             item.documentId = stmt.getInt64(0);
@@ -248,13 +292,21 @@ SearchExecutor::executeFTSQuery(const std::string& ftsQuery, const SearchRequest
             item.contentType = stmt.getString(3);
             item.fileSize = static_cast<size_t>(stmt.getInt64(4));
 
-            // Parse timestamps
-            auto lastModStr = stmt.getString(5);
-            auto indexedStr = stmt.getString(6);
+            auto modifiedSeconds = stmt.isNull(5) ? int64_t{0} : stmt.getInt64(5);
+            if (modifiedSeconds > 0) {
+                item.lastModified =
+                    std::chrono::system_clock::time_point{std::chrono::seconds{modifiedSeconds}};
+            } else {
+                item.lastModified = std::chrono::system_clock::now();
+            }
 
-            // Convert ISO strings to time_points (simplified)
-            item.lastModified = std::chrono::system_clock::now(); // TODO: Parse ISO timestamp
-            item.indexedAt = std::chrono::system_clock::now();    // TODO: Parse ISO timestamp
+            auto indexedSeconds = stmt.isNull(6) ? int64_t{0} : stmt.getInt64(6);
+            if (indexedSeconds > 0) {
+                item.indexedAt =
+                    std::chrono::system_clock::time_point{std::chrono::seconds{indexedSeconds}};
+            } else {
+                item.indexedAt = std::chrono::system_clock::now();
+            }
 
             item.detectedLanguage = stmt.getString(7);
             item.languageConfidence = static_cast<float>(stmt.getDouble(8));

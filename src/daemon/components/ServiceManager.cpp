@@ -412,6 +412,13 @@ void ServiceManager::shutdown() {
         }
     } catch (...) {
     }
+    try {
+        if (lifecycleReadyWatchdog_.joinable()) {
+            lifecycleReadyWatchdog_.request_stop();
+            lifecycleReadyWatchdog_.join();
+        }
+    } catch (...) {
+    }
     if (initThread_.joinable()) {
         initThread_.request_stop();
         initThread_.join();
@@ -1301,8 +1308,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Watchdog: promote lifecycle if core infra is ready
     try {
-        std::thread([this]() {
+        lifecycleReadyWatchdog_ = yams::compat::jthread([this](yams::compat::stop_token st) {
+            if (st.stop_requested())
+                return;
             std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+            if (st.stop_requested())
+                return;
             if (initCompleteCallback_ && state_.readiness.databaseReady.load() &&
                 state_.readiness.metadataRepoReady.load()) {
                 spdlog::info("Lifecycle Ready watchdog: promoting state based on core readiness");
@@ -1312,7 +1323,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 }
                 initCompleteCallback_ = nullptr;
             }
-        }).detach();
+        });
     } catch (...) {
     }
 

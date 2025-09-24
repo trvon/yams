@@ -1,175 +1,402 @@
 #!/usr/bin/env bash
 # Debian local runner for SourceHut .build.yml (trixie)
-# - Mirrors the CI tasks using apt packages and Clang toolchain
+# - Mirrors the CI tasks using Meson + Conan toolchain
+# - Produces tarball, .deb, and .rpm artifacts for tagged builds
 # - Intended to run inside a Debian trixie container with your repo mounted at /workspace/yams
 #
 # Example:
 #   docker run --rm -it \
-#     -e GIT_REF=refs/tags/v1.2.3 \            # optional, enables packaging flow
-#     -e CONAN_CPU_COUNT=2 \                    # optional, defaults to 2
-#     -e CMAKE_BUILD_PARALLEL_LEVEL=2 \         # optional, defaults to 2
+#     -e GIT_REF=refs/tags/v1.2.3 \
+#     -e CONAN_CPU_COUNT=2 \
+#     -e MESON_EXTRA_ARGS="-Denable-onnx=disabled" \
 #     -v "$PWD":/workspace/yams \
 #     -w /workspace \
 #     debian:trixie bash -lc '/workspace/yams/scripts/srht-debian.sh'
 #
 # Artifacts:
-#   - /workspace/yams/yams-*.tar.gz
-#   - /workspace/yams/build/yams-release/*.deb
-#   - /workspace/yams/build/yams-release/*.rpm
+#   - /workspace/yams/build/release/yams-*.tar.gz
+#   - /workspace/yams/build/release/yams-*.deb
+#   - /workspace/yams/build/release/yams-*.rpm
 set -euo pipefail
 set -x
 
 export DEBIAN_FRONTEND=noninteractive
-
-# 0) Base system and required packages (mirror .build.yml for Debian)
-apt-get update -y
-apt-get install -y --no-install-recommends \
-  build-essential \
-  cmake \
-  ninja-build \
-  zip \
-  lld \
-  clang \
-  llvm \
-  python3 \
-  python3-venv \
-  python3-pip \
-  python3-numpy \
-  pipx \
-  git \
-  ca-certificates \
-  libncurses-dev \
-  libtinfo-dev \
-  pkg-config
-
-# Ensure pipx-installed apps are on PATH
 export PATH="${HOME}/.local/bin:${PATH}"
 
-# Install Conan v2 via pipx, with venv fallback if needed
-if ! command -v conan >/dev/null 2>&1; then
-  if command -v pipx >/dev/null 2>&1; then
-    pipx install 'conan<3' || true
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -d /workspace/yams ]; then
+  REPO_ROOT="/workspace/yams"
+else
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+
+normalize_arch_label() {
+  local arch="$1"
+  case "${arch}" in
+    amd64|x86_64) echo "x86_64" ;;
+    arm64|aarch64) echo "aarch64" ;;
+    *) echo "${arch}" ;;
+  esac
+}
+
+append_buildenv() {
+  echo "$1" >> "${HOME}/.buildenv"
+}
+
+persist_env_defaults() {
+  export BUILD_DIR="${BUILD_DIR:-build/release}"
+  export STAGE_DIR="${STAGE_DIR:-stage}"
+  local default_jobs
+  if command -v nproc >/dev/null 2>&1; then
+    default_jobs="$(nproc)"
+  else
+    default_jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
   fi
-fi
-if ! command -v conan >/dev/null 2>&1; then
-  python3 -m venv /opt/conan
-  . /opt/conan/bin/activate
-  python -m pip install --upgrade pip setuptools wheel
-  python -m pip install 'conan<3'
-  export PATH="/opt/conan/bin:${PATH}"
-  hash -r
-fi
+  export CONAN_CPU_COUNT="${CONAN_CPU_COUNT:-${default_jobs}}"
+  : > "${HOME}/.buildenv"
+  append_buildenv "export BUILD_DIR=${BUILD_DIR}"
+  append_buildenv "export STAGE_DIR=${STAGE_DIR}"
+  append_buildenv "export CONAN_CPU_COUNT=${CONAN_CPU_COUNT}"
+  append_buildenv "export PATH=${HOME}/.local/bin:\\$PATH"
+}
 
-# 1) Mirror manifest environment
-#    - Persist to ~/.buildenv so subsequent shell subsessions see the variables,
-#      similar to SR.ht’s behavior.
-export BUILD_DIR="${BUILD_DIR:-build/yams-release}"
-export STAGE_DIR="${STAGE_DIR:-stage}"
-export CONAN_CPU_COUNT="${CONAN_CPU_COUNT:-2}"
-export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
-: > "${HOME}/.buildenv"
-{
-  echo "export BUILD_DIR=${BUILD_DIR}"
-  echo "export STAGE_DIR=${STAGE_DIR}"
-  echo "export CONAN_CPU_COUNT=${CONAN_CPU_COUNT}"
-  echo "export CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}"
-} >> "${HOME}/.buildenv"
+ensure_base_packages() {
+  apt-get update -y
+  apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    meson \
+    ninja-build \
+    zip \
+    ccache \
+    dpkg-dev \
+    fakeroot \
+    rpm \
+    lld \
+    clang \
+    llvm \
+    python3 \
+    python3-venv \
+    python3-pip \
+    python3-numpy \
+    pipx \
+    git \
+    ca-certificates \
+    libncurses-dev \
+    libtinfo-dev \
+    pkg-config \
+    liburing-dev \
+    libarchive-dev \
+    libtag1-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    libcurl4-gnutls-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    libmediainfo-dev \
+    mediainfo
+}
 
-# 2) compute_version task
-cd /workspace/yams
-if [[ "${GIT_REF:-}" =~ ^refs/tags/ ]]; then
-  RAW_TAG="${GIT_REF#refs/tags/}"
-else
-  RAW_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0-dev)"
-fi
-CLEAN_VERSION="${RAW_TAG#v}"
-echo "export YAMS_VERSION=${CLEAN_VERSION}" >> "${HOME}/.buildenv"
-echo "Computed YAMS_VERSION=${CLEAN_VERSION} (GIT_REF=${GIT_REF:-n/a})"
+install_conan() {
+  if ! command -v conan >/dev/null 2>&1; then
+    if command -v pipx >/dev/null 2>&1; then
+      pipx install 'conan<3' --pip-args='--upgrade' || true
+    fi
+  fi
+  if ! command -v conan >/dev/null 2>&1; then
+    python3 -m pip install --user --upgrade 'conan<3' || true
+    hash -r || true
+  fi
+  if ! command -v conan >/dev/null 2>&1; then
+    python3 -m venv /opt/conan
+    . /opt/conan/bin/activate
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install 'conan<3'
+    export PATH="/opt/conan/bin:${PATH}"
+    hash -r
+  fi
+  if command -v conan >/dev/null 2>&1; then
+    append_buildenv "export PATH=$(dirname "$(command -v conan)"):\\$PATH"
+  else
+    echo "Conan installation failed" >&2
+    exit 1
+  fi
+}
 
-# Load the updated buildenv into current shell (SR.ht does this per task)
-# shellcheck disable=SC1090
-. "${HOME}/.buildenv"
+compute_version() {
+  cd "${REPO_ROOT}"
+  local raw_tag
+  if [[ "${GIT_REF:-}" =~ ^refs/tags/ ]]; then
+    raw_tag="${GIT_REF#refs/tags/}"
+  else
+    raw_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0-dev)"
+  fi
+  CLEAN_VERSION="${raw_tag#v}"
+  export YAMS_VERSION="${CLEAN_VERSION}"
+  append_buildenv "export YAMS_VERSION=${CLEAN_VERSION}"
+  echo "Computed YAMS_VERSION=${CLEAN_VERSION} (GIT_REF=${GIT_REF:-n/a})"
+}
 
-# 3) setup task (prefer Clang toolchain)
-export CC=clang
-export CXX=clang++
-echo "export CC=clang"  >> "${HOME}/.buildenv"
-echo "export CXX=clang++" >> "${HOME}/.buildenv"
+configure_conan_profile() {
+  conan --version
+  conan profile detect --force || true
+  conan profile show -pr default || conan profile show || true
+}
 
-# Re-detect the default Conan profile with Clang toolchain in env
-conan profile detect --force
-# Ensure profile reflects our expectations
-conan profile update settings.compiler=clang default || true
-conan profile update settings.compiler.libcxx=libstdc++11 default || true
-# Keep C++20
-# Note: Conan v2 stores default profile at ~/.conan2/profiles/default
-sed -i 's/^settings\.compiler\.cppstd=.*/settings.compiler.cppstd=20/' "${HOME}/.conan2/profiles/default" || true
-echo "Conan profile configured (clang):"
-conan profile show -pr default || conan profile show || true
+run_conan_install() {
+  cd "${REPO_ROOT}"
+  conan install . \
+    -of "${BUILD_DIR}" \
+    -pr:h=./conan/profiles/host-linux-gcc \
+    -pr:b=./conan/profiles/host-linux-gcc \
+    -s build_type=Release \
+    -c tools.build:jobs="${CONAN_CPU_COUNT}" \
+    --build=missing
+}
 
-# 4) build task
-export YAMS_DISABLE_MODEL_PRELOAD=1
-CLEAN_VERSION="${YAMS_VERSION}"
-echo "Starting build for version ${CLEAN_VERSION}"
+run_meson_build() {
+  cd "${REPO_ROOT}"
+  export YAMS_DISABLE_MODEL_PRELOAD=1
+  local native_file="${BUILD_DIR}/build-release/conan/conan_meson_native.ini"
+  local meson_args=()
+  if [ -n "${MESON_EXTRA_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    meson_args=(${MESON_EXTRA_ARGS})
+  fi
+  meson setup "${BUILD_DIR}" \
+    --prefix=/usr \
+    --buildtype=release \
+    --native-file "${native_file}" \
+    --wipe \
+    "${meson_args[@]}"
+  meson compile -C "${BUILD_DIR}"
+  meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
+}
 
-# Fetch dependencies and generate CMake toolchain/deps.
-conan install . \
-  -of "${BUILD_DIR}" \
-  -pr:h=./conan/profiles/host.jinja \
-  -s build_type=Release \
-  -c tools.build:jobs="${CONAN_CPU_COUNT}" \
-  --build=missing
+prepare_stage_docs() {
+  local stage_root="$1"
+  install -Dm644 "${REPO_ROOT}/LICENSE" "${stage_root}/usr/share/doc/yams/LICENSE"
+  if [ -f "${REPO_ROOT}/README.md" ]; then
+    install -Dm644 "${REPO_ROOT}/README.md" "${stage_root}/usr/share/doc/yams/README.md"
+  fi
+}
 
-# Configure with CMake (uses preset toolchain path under ${BUILD_DIR}).
-cmake --preset yams-release --fresh \
-  -DYAMS_VERSION="${CLEAN_VERSION}" \
-  -DCURSES_NEED_NCURSES=ON \
-  -DCURSES_NEED_WIDE=ON
+package_tarball() {
+  local version="$1"
+  local build_dir="$2"
+  local stage_root="$3"
+  local arch_label
+  arch_label="$(normalize_arch_label "$(uname -m)")"
+  local tar_name="yams-${version}-linux-${arch_label}.tar.gz"
+  tar -C "${stage_root}" -czf "${build_dir}/${tar_name}" .
+  echo "Created tarball: ${build_dir}/${tar_name}"
+}
 
-# Build the project.
-cmake --build --preset yams-release
+package_deb() {
+  if ! command -v dpkg-deb >/dev/null 2>&1; then
+    echo "dpkg-deb not available; skipping .deb packaging" >&2
+    return
+  fi
+  local version="$1"
+  local build_dir="$2"
+  local stage_root="$3"
+  local deb_arch
+  deb_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+  local work_dir="${build_dir}/deb-work"
+  rm -rf "${work_dir}"
+  mkdir -p "${work_dir}"
+  cp -a "${stage_root}/." "${work_dir}/"
+  mkdir -p "${work_dir}/DEBIAN"
+  local control="${work_dir}/DEBIAN/control"
+  cat > "${control}" <<'__DEB_CONTROL__'
+Package: yams
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: __ARCH__
+Maintainer: YAMS Contributors <git@trevon.dev>
+Homepage: https://git.sr.ht/~trevon/yams
+Depends: @DEPENDENCIES@
+Description: Yet Another Memory System - persistent memory for LLMs
+ YAMS provides content-addressed storage, deduplication, and search for long-term LLM memory.
+__DEB_CONTROL__
+  sed -i "s|__VERSION__|${version}|" "${control}"
+  sed -i "s|__ARCH__|${deb_arch}|" "${control}"
 
-# Install the built artifacts into the staging directory.
-cmake --install "${BUILD_DIR}" --config Release
+  local -a binaries=()
+  mapfile -d '' binaries < <(find "${work_dir}" -type f \( -perm -111 -o -name '*.so*' \) -print0) || true
+  local depends_fallback="libc6 (>= 2.31), libstdc++6 (>= 12)"
+  if command -v dpkg-shlibdeps >/dev/null 2>&1 && ((${#binaries[@]} > 0)); then
+    set +e
+    local shlib_output
+    shlib_output="$(dpkg-shlibdeps -O "${binaries[@]}" 2>&1)"
+    local shlib_status=$?
+    set -e
+    if [ "${shlib_status}" -eq 0 ] && [[ "${shlib_output}" =~ shlibs:Depends=(.*) ]]; then
+      depends_fallback="${BASH_REMATCH[1]}"
+    else
+      echo "${shlib_output}" >&2
+    fi
+  fi
+  sed -i "s|@DEPENDENCIES@|${depends_fallback}|" "${control}"
 
-echo "Build complete."
+  find "${work_dir}" -type d -exec chmod 0755 {} +
+  find "${work_dir}" -type f -exec chmod 0644 {} +
+  if ((${#binaries[@]} > 0)); then
+    for bin in "${binaries[@]}"; do
+      chmod 0755 "${bin}"
+    done
+  fi
 
-# 5) package task (only on tag builds)
-if [[ "${GIT_REF:-}" == refs/tags/* ]]; then
-  cd /workspace/yams
-  CLEAN_VERSION="${YAMS_VERSION}"
-  echo "Packaging the release..."
-  mkdir -p "${STAGE_DIR}"
-  cd "${STAGE_DIR}"
-  tar -czf "../yams-${CLEAN_VERSION}-linux-x86_64.tar.gz" .
-  echo "Created asset: yams-${CLEAN_VERSION}-linux-x86_64.tar.gz"
-else
-  echo "Skipping packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
-fi
+  local deb_name="yams-${version}-linux-$(normalize_arch_label "${deb_arch}")".deb
+  if command -v fakeroot >/dev/null 2>&1; then
+    fakeroot dpkg-deb --build "${work_dir}" "${build_dir}/${deb_name}"
+  else
+    dpkg-deb --build "${work_dir}" "${build_dir}/${deb_name}"
+  fi
+  rm -rf "${work_dir}"
+  echo "Created Debian package: ${build_dir}/${deb_name}"
+}
 
-# 6) package_cpack task (only on tag builds)
-if [[ "${GIT_REF:-}" == refs/tags/* ]]; then
-  cd /workspace/yams
-  CLEAN_VERSION="${YAMS_VERSION}"
-  echo "Packaging with CPack..."
-  cd "${BUILD_DIR}"
-
-  # Ensure RPM tooling exists if we want RPM output
+package_rpm() {
   if ! command -v rpmbuild >/dev/null 2>&1; then
-    apt-get update -y
-    apt-get install -y --no-install-recommends rpm
+    echo "rpmbuild not available; skipping .rpm packaging" >&2
+    return
+  fi
+  local version="$1"
+  local build_dir="$2"
+  local stage_root="$3"
+  local rpm_arch
+  rpm_arch="$(rpm --eval '%{_arch}' 2>/dev/null || uname -m)"
+  local rpm_root="${build_dir}/rpmbuild"
+  rm -rf "${rpm_root}"
+  mkdir -p "${rpm_root}/"{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+  local source_dir="${rpm_root}/SOURCES/yams-${version}"
+  mkdir -p "${source_dir}"
+  cp -a "${stage_root}/." "${source_dir}/"
+  tar -C "${rpm_root}/SOURCES" -czf "${rpm_root}/SOURCES/yams-${version}.tar.gz" "yams-${version}"
+  rm -rf "${source_dir}"
+
+  local rpm_filelist="${rpm_root}/SOURCES/filelist"
+  (
+    cd "${stage_root}"
+    find . -type d -printf "%P\n" | LC_ALL=C sort | while read -r dir; do
+      [ -z "${dir}" ] && continue
+      echo "%dir /${dir}"
+    done
+    find . \( -type f -o -type l \) -printf "%P\n" | LC_ALL=C sort | while read -r file; do
+      [ -z "${file}" ] && continue
+      echo "/${file}"
+    done
+  ) > "${rpm_filelist}"
+
+  local spec="${rpm_root}/SPECS/yams.spec"
+  cat > "${spec}" <<'__RPM_SPEC__'
+%global debug_package %{nil}
+%global __strip /bin/true
+Name: yams
+Version: __VERSION__
+Release: 1%{?dist}
+Summary: Yet Another Memory System
+License: Apache-2.0
+URL: https://git.sr.ht/~trevon/yams
+Source0: %{name}-%{version}.tar.gz
+BuildArch: __RPM_ARCH__
+
+%description
+Yet Another Memory System (YAMS) provides content-addressed storage with deduplication and search designed for long-term large language model memory.
+
+%prep
+%setup -q
+
+%build
+# Upstream build executed via Meson prior to packaging.
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}
+cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
+
+%files -f %{_sourcedir}/filelist
+%defattr(-,root,root,-)
+__RPM_SPEC__
+  sed -i "s|__VERSION__|${version}|" "${spec}"
+  sed -i "s|__RPM_ARCH__|${rpm_arch}|" "${spec}"
+
+  rpmbuild --define "_topdir ${rpm_root}" -bb "${spec}"
+  local built_rpm
+  built_rpm="$(find "${rpm_root}/RPMS" -type f -name 'yams-*.rpm' -print -quit)"
+  if [ -n "${built_rpm}" ]; then
+    local rpm_name="yams-${version}-linux-$(normalize_arch_label "${rpm_arch}")".rpm
+    cp -f "${built_rpm}" "${build_dir}/${rpm_name}"
+    echo "Created RPM package: ${build_dir}/${rpm_name}"
+  else
+    echo "rpmbuild completed but RPM artifact not found" >&2
+  fi
+  rm -rf "${rpm_root}"
+}
+
+package_all() {
+  local version="$1"
+  local build_dir="$2"
+  local stage_dir="$3"
+  local force="${4:-0}"
+
+  if [[ "${force}" != "1" && "${GIT_REF:-}" != refs/tags/* ]]; then
+    echo "Skipping packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
+    return
   fi
 
-  # Generate DEB package
-  cpack -G DEB -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" || true
-  # Generate RPM package
-  cpack -G RPM -D CPACK_PACKAGE_VERSION="${CLEAN_VERSION}" || true
-else
-  echo "Skipping CPack packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
-fi
+  if [[ "${build_dir}" != /* ]]; then
+    build_dir="${REPO_ROOT}/${build_dir}"
+  fi
+  build_dir="$(readlink -f "${build_dir}")"
+  local stage_root="${build_dir}/${stage_dir}"
+  if [ ! -d "${stage_root}" ]; then
+    echo "Stage directory ${stage_root} not found" >&2
+    exit 1
+  fi
 
-# Cleanup apt caches in ephemeral containers
-apt-get clean
-rm -rf /var/lib/apt/lists/* || true
+  prepare_stage_docs "${stage_root}"
+  package_tarball "${version}" "${build_dir}" "${stage_root}"
+  package_deb "${version}" "${build_dir}" "${stage_root}"
+  package_rpm "${version}" "${build_dir}" "${stage_root}"
+}
 
-echo "All tasks finished."
+cleanup_apt() {
+  apt-get clean
+  rm -rf /var/lib/apt/lists/* || true
+}
+
+package_only_main() {
+  shift
+  if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "Usage: $0 package_only <version> <build_dir> [stage_dir]" >&2
+    exit 1
+  fi
+  local version="$1"
+  local build_dir="$2"
+  local stage_dir="${3:-stage}"
+  package_all "${version}" "${build_dir}" "${stage_dir}" 1
+  exit 0
+}
+
+main() {
+  if [ "${1:-}" = "package_only" ]; then
+    package_only_main "$@"
+  fi
+
+  ensure_base_packages
+  persist_env_defaults
+  install_conan
+  compute_version
+  configure_conan_profile
+  run_conan_install
+  run_meson_build
+  package_all "${CLEAN_VERSION}" "${BUILD_DIR}" "${STAGE_DIR}" 0
+  cleanup_apt
+  echo "All tasks finished."
+}
+
+main "$@"

@@ -55,12 +55,10 @@ public:
      *
      * @param cmd             Command string without leading ':' (e.g., "open", "q", "refresh").
      * @param state           Browser UI state to mutate based on the command.
-     * @param exit_requested  Set to true if the command requests exiting the TUI.
      * @param actions         Optional side-effect implementations for commands that need I/O.
      * @return                true if a known command was executed; false if unknown.
      */
-    bool execute(const std::string& cmd, BrowseState& state, bool& exit_requested,
-                 const CommandActions& actions = {});
+    bool execute(const std::string& cmd, BrowseState& state, const CommandActions& actions = {});
 };
 
 } // namespace yams::cli::tui

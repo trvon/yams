@@ -654,18 +654,38 @@ inline bool operator!=(const yams::daemon::ClientConfig& lhs,
     return !(lhs == rhs);
 }
 
+inline std::mutex& cli_pool_mutex() {
+    static std::mutex gMutex;
+    return gMutex;
+}
+
+inline std::shared_ptr<DaemonClientPool>& cli_pool_instance() {
+    static std::shared_ptr<DaemonClientPool> gPool;
+    return gPool;
+}
+
+inline yams::daemon::ClientConfig& cli_pool_config() {
+    static yams::daemon::ClientConfig gConfig;
+    return gConfig;
+}
+
+inline bool& cli_pool_initialized() {
+    static bool initialized = false;
+    return initialized;
+}
+
 inline Result<DaemonClientPool::Lease>
 acquire_cli_daemon_client(const yams::daemon::ClientConfig& cfg, size_t min_clients = 1,
                           size_t max_clients = 12) {
-    static std::mutex gMutex;
-    static std::unique_ptr<DaemonClientPool> gPool;
-    static yams::daemon::ClientConfig gConfig;
-    static bool initialized = false;
+    auto& gMutex = cli_pool_mutex();
+    auto& gPool = cli_pool_instance();
+    auto& gConfig = cli_pool_config();
+    auto& initialized = cli_pool_initialized();
 
-    DaemonClientPool* poolPtr = nullptr;
+    std::shared_ptr<DaemonClientPool> poolStrong;
     {
         std::lock_guard<std::mutex> lk(gMutex);
-        if (!initialized || cfg != gConfig) {
+        if (!initialized || cfg != gConfig || !gPool) {
             DaemonClientPool::Config pcfg;
             // Allow environment overrides to modulate pool pressure under heavy ops
             size_t env_min = 0, env_max = 0;
@@ -682,14 +702,18 @@ acquire_cli_daemon_client(const yams::daemon::ClientConfig& cfg, size_t min_clie
             pcfg.min_clients = std::max<size_t>(1, env_min ? env_min : min_clients);
             pcfg.max_clients = std::max(pcfg.min_clients, env_max ? env_max : max_clients);
             pcfg.client_config = cfg;
-            gPool = std::make_unique<DaemonClientPool>(pcfg);
+            gPool = std::make_shared<DaemonClientPool>(pcfg);
             gConfig = cfg;
             initialized = true;
         }
-        poolPtr = gPool.get();
+        poolStrong = gPool;
     }
 
-    return poolPtr->acquire();
+    if (!poolStrong) {
+        return Error{ErrorCode::InternalError, "Daemon client pool unavailable"};
+    }
+
+    return poolStrong->acquire();
 }
 
 inline Result<std::shared_ptr<DaemonClientPool::Lease>>
@@ -698,7 +722,24 @@ acquire_cli_daemon_client_shared(const yams::daemon::ClientConfig& cfg, size_t m
     auto lease = acquire_cli_daemon_client(cfg, min_clients, max_clients);
     if (!lease)
         return lease.error();
-    return std::make_shared<DaemonClientPool::Lease>(std::move(lease.value()));
+
+    std::shared_ptr<DaemonClientPool> poolStrong;
+    {
+        std::lock_guard<std::mutex> lk(cli_pool_mutex());
+        poolStrong = cli_pool_instance();
+    }
+
+    if (!poolStrong) {
+        return Error{ErrorCode::InternalError, "Daemon client pool unavailable"};
+    }
+
+    auto sharedLease = std::shared_ptr<DaemonClientPool::Lease>(
+        new DaemonClientPool::Lease(std::move(lease.value())),
+        [poolStrong = std::move(poolStrong)](DaemonClientPool::Lease* leasePtr) {
+            delete leasePtr;
+            (void)poolStrong;
+        });
+    return sharedLease;
 }
 
 // Generic runner for any boost::asio::awaitable<Result<T>>. Optional timeout (0 => no timeout).

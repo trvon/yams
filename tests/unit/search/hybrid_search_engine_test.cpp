@@ -127,13 +127,21 @@ TEST(HybridSearchEngineTest, FuseResultsLinearCombination) {
     ASSERT_EQ(fused.size(), 2u);
 
     // Sort order is descending by hybrid_score (operator< implements inverted compare)
-    // Expected normalized keyword scores: A=1.0, B=0.5
-    // hybrid(A) = 0.9*0.7 + 1.0*0.3 = 0.93
-    // hybrid(B) = 0.4*0.7 + 0.5*0.3 = 0.43
-    EXPECT_EQ(fused[0].id, "A");
-    EXPECT_NEAR(fused[0].hybrid_score, 0.93f, 1e-5f);
-    EXPECT_EQ(fused[1].id, "B");
-    EXPECT_NEAR(fused[1].hybrid_score, 0.43f, 1e-5f);
+    // Min/max normalization maps vector similarities {0.9, 0.4} -> {1.0, 0.0} while keyword
+    // scores are normalized by the top keyword score, yielding {1.0, 0.5}.
+    ASSERT_EQ(fused[0].id, "A");
+    EXPECT_NEAR(fused[0].vector_score, 1.0f, 1e-5f);
+    EXPECT_NEAR(fused[0].keyword_score, 1.0f, 1e-5f);
+    const float expected_a = fusion::linearCombination(
+        fused[0].vector_score, fused[0].keyword_score, cfg.vector_weight, cfg.keyword_weight);
+    EXPECT_NEAR(fused[0].hybrid_score, expected_a, 1e-5f);
+
+    ASSERT_EQ(fused[1].id, "B");
+    EXPECT_NEAR(fused[1].vector_score, 0.0f, 1e-5f);
+    EXPECT_NEAR(fused[1].keyword_score, 0.5f, 1e-5f);
+    const float expected_b = fusion::linearCombination(
+        fused[1].vector_score, fused[1].keyword_score, cfg.vector_weight, cfg.keyword_weight);
+    EXPECT_NEAR(fused[1].hybrid_score, expected_b, 1e-5f);
 
     // Validate ranks and flags
     EXPECT_TRUE(fused[0].found_by_vector);

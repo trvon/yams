@@ -52,6 +52,7 @@ struct BrowseState {
     bool fuzzySearch = true;
     bool commandMode = false;
     bool deleteConfirm = false;
+    bool exit_requested = false;
 
     // Input buffers
     std::string searchQuery;
@@ -62,6 +63,32 @@ struct BrowseState {
 
     // Degraded flags (for subsystems)
     bool embeddingDegraded = false; // when true, UI should avoid offering embedding actions
+
+    // Quits the TUI
+    void quit() { exit_requested = true; }
+
+    // Status represents a message to the user, with a level (Info, Warning, Error)
+    // and an optional duration.
+    struct Status {
+        enum Level { Info, Warning, Error };
+        Level level = Info;
+        std::string message;
+        std::chrono::steady_clock::time_point expires;
+
+        bool isExpired() const {
+            return expires != std::chrono::steady_clock::time_point{} &&
+                   std::chrono::steady_clock::now() > expires;
+        }
+    };
+    Status status;
+
+    void setStatus(std::string message, Status::Level level = Status::Info,
+                   std::chrono::seconds duration = std::chrono::seconds(0)) {
+        status = {level, std::move(message)};
+        if (duration.count() > 0) {
+            status.expires = std::chrono::steady_clock::now() + duration;
+        }
+    }
 
     // Preview pane
     std::vector<std::string> previewLines;

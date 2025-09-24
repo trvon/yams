@@ -1,8 +1,7 @@
 {
   "recommendations": [
-    "ms-vscode.cmake-tools",
+    "mesonbuild.mesonbuild",
     "ms-vscode.cpptools",
-    "twxs.cmake",
     "llvmlite.llvm-vs-code-extensions"
   ]
 }

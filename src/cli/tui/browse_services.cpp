@@ -46,14 +46,13 @@ BrowseServices::BrowseServices(yams::cli::YamsCLI* cli) noexcept : _cli(cli) {}
 
 // ------------- Documents listing -------------
 
-std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_message) {
+std::vector<DocEntry> BrowseServices::loadAllDocuments(BrowseState& state) {
     std::vector<DocEntry> all;
     std::string status;
 
     if (!_cli) {
         spdlog::error("TUI Services: CLI not available");
-        if (status_message)
-            *status_message = "Internal error: CLI not available";
+        state.setStatus("Internal error: CLI not available", BrowseState::Status::Error);
         return all;
     }
 
@@ -145,12 +144,9 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(std::string* status_messa
     constexpr size_t MAX_TUI_DOCS = 2000;
     if (all.size() > MAX_TUI_DOCS) {
         all.resize(MAX_TUI_DOCS);
-        if (status_message) {
-            status += " (capped to " + std::to_string(MAX_TUI_DOCS) + " for TUI)";
-        }
+        status += " (capped to " + std::to_string(MAX_TUI_DOCS) + " for TUI)";
     }
-    if (status_message)
-        *status_message = std::move(status);
+    state.setStatus(std::move(status));
     return all;
 }
 
@@ -390,9 +386,9 @@ std::vector<std::string> BrowseServices::makePreviewLines(const DocEntry& doc, P
 
 // ------------- External pager -------------
 
-bool BrowseServices::openInPager(const std::string& name, const std::optional<std::string>& text,
-                                 const std::vector<std::byte>& raw_bytes,
-                                 std::string* error_message) {
+bool BrowseServices::openInPager(BrowseState& state, const std::string& name,
+                                 const std::optional<std::string>& text,
+                                 const std::vector<std::byte>& raw_bytes) {
 #if defined(__unix__) || defined(__APPLE__)
     // Determine pager
     const char* env_pager = std::getenv("PAGER");
@@ -402,8 +398,7 @@ bool BrowseServices::openInPager(const std::string& name, const std::optional<st
     char tmpl[] = "/tmp/yams-pager-XXXXXX";
     int fd = mkstemp(tmpl);
     if (fd == -1) {
-        if (error_message)
-            *error_message = "Failed to create temporary file";
+        state.setStatus("Failed to create temporary file", BrowseState::Status::Error);
         return false;
     }
     std::string tmp_path = tmpl;
@@ -412,8 +407,8 @@ bool BrowseServices::openInPager(const std::string& name, const std::optional<st
     {
         std::ofstream ofs(tmp_path, std::ios::binary);
         if (!ofs) {
-            if (error_message)
-                *error_message = "Failed to open temporary file for writing";
+            state.setStatus("Failed to open temporary file for writing",
+                            BrowseState::Status::Error);
             ::close(fd);
             std::remove(tmp_path.c_str());
             return false;
@@ -441,8 +436,7 @@ bool BrowseServices::openInPager(const std::string& name, const std::optional<st
     std::remove(tmp_path.c_str());
 
     if (rc == -1) {
-        if (error_message)
-            *error_message = "Failed to execute pager";
+        state.setStatus("Failed to execute pager", BrowseState::Status::Error);
         return false;
     }
     return true;
@@ -450,30 +444,25 @@ bool BrowseServices::openInPager(const std::string& name, const std::optional<st
     (void)name;
     (void)text;
     (void)raw_bytes;
-    if (error_message)
-        *error_message = "External pager not supported on this platform";
+    state.setStatus("External pager not supported on this platform", BrowseState::Status::Error);
     return false;
 #endif
 }
 
-bool BrowseServices::openInPagerWithSuspend(const std::string& name,
+bool BrowseServices::openInPagerWithSuspend(BrowseState& state, const std::string& name,
                                             const std::optional<std::string>& text,
                                             const std::vector<std::byte>& raw_bytes,
-                                            const SuspendRunner& suspend,
-                                            std::string* error_message) {
+                                            const SuspendRunner& suspend) {
     if (suspend) {
         bool ok = true;
-        std::string err;
         suspend([&]() {
-            if (!openInPager(name, text, raw_bytes, &err)) {
+            if (!openInPager(state, name, text, raw_bytes)) {
                 ok = false;
             }
         });
-        if (!ok && error_message)
-            *error_message = err;
         return ok;
     }
-    return openInPager(name, text, raw_bytes, error_message);
+    return openInPager(state, name, text, raw_bytes);
 }
 
 } // namespace yams::cli::tui

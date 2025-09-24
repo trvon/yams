@@ -342,6 +342,7 @@ private:
     std::shared_ptr<WorkerPool> workerPool_;
     // Phase 6: background reconciler for PoolManager stats (logging only)
     yams::compat::jthread poolReconThread_;
+    yams::compat::jthread lifecycleReadyWatchdog_;
     // Worker pool metrics
     std::atomic<std::size_t> poolActive_{0};
     std::atomic<std::size_t> poolPosted_{0};

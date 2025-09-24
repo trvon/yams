@@ -35,10 +35,8 @@ inline std::string toLower(std::string_view sv) {
 
 } // namespace
 
-bool BrowseCommands::execute(const std::string& raw_cmd, BrowseState& state, bool& exit_requested,
+bool BrowseCommands::execute(const std::string& raw_cmd, BrowseState& state,
                              const CommandActions& actions) {
-    exit_requested = false;
-
     // Normalize command: strip leading ':', trim spaces, lowercase
     std::string cmd = raw_cmd;
     if (!cmd.empty() && cmd.front() == ':') {
@@ -53,7 +51,7 @@ bool BrowseCommands::execute(const std::string& raw_cmd, BrowseState& state, boo
 
     // Quit commands
     if (lc == "q" || lc == "q!" || lc == "quit" || lc == "wq") {
-        exit_requested = true;
+        state.quit();
         return true;
     }
 

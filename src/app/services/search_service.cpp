@@ -612,8 +612,6 @@ private:
             tasks.emplace_back(boost::asio::co_spawn(
                 ctx_.workerExecutor,
                 [&, doc]() -> boost::asio::awaitable<void> {
-                    if (req.limit > 0 && foundPaths.size() >= req.limit)
-                        co_return;
                     if (!req.query.empty() && doc.filePath.find(req.query) == std::string::npos &&
                         doc.fileName.find(req.query) == std::string::npos) {
                         co_return;
