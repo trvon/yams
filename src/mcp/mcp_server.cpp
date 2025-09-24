@@ -22,6 +22,7 @@
 
 #include <future>
 #include <mutex>
+#include <thread>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -392,34 +393,42 @@ MessageResult StdioTransport::receive() {
     if (state_.load() != TransportState::Connected) {
         return Error{ErrorCode::NetworkError, "Transport not connected"};
     }
-    std::istream in(std::cin.rdbuf());
+    std::streambuf* inputBuffer = std::cin.rdbuf();
+    std::istream in(inputBuffer);
+    auto* stringBuffer = dynamic_cast<std::stringbuf*>(inputBuffer);
+    constexpr std::size_t kTestingIdleSpinLimit = 200;
+    std::size_t idleIterations = 0;
 
     while (state_.load() != TransportState::Closing) {
-        // In test builds, allow cin rdbuf-based availability checks to
-        // support StringStream-driven unit tests without polling STDIN.
-#ifdef YAMS_TESTING
-        if (std::cin.rdbuf()->in_avail() <= 0) {
-            if (externalShutdown_ && *externalShutdown_) {
-                state_.store(TransportState::Closing);
-                return Error{ErrorCode::NetworkError, "External shutdown requested"};
+        if (stringBuffer) {
+            if (stringBuffer->in_avail() <= 0) {
+                if (externalShutdown_ && *externalShutdown_) {
+                    state_.store(TransportState::Closing);
+                    return Error{ErrorCode::NetworkError, "External shutdown requested"};
+                }
+                if (idleIterations++ >= kTestingIdleSpinLimit) {
+                    state_.store(TransportState::Disconnected);
+                    return Error{ErrorCode::NetworkError, "No stdin data available"};
+                }
+                std::this_thread::yield();
+                continue;
             }
-            continue;
-        }
-#else
-        if (!isInputAvailable(recvTimeoutMs_)) {
-            if (externalShutdown_ && *externalShutdown_) {
-                state_.store(TransportState::Closing);
-                return Error{ErrorCode::NetworkError, "External shutdown requested"};
+            idleIterations = 0;
+        } else {
+            if (!isInputAvailable(recvTimeoutMs_)) {
+                if (externalShutdown_ && *externalShutdown_) {
+                    state_.store(TransportState::Closing);
+                    return Error{ErrorCode::NetworkError, "External shutdown requested"};
+                }
+                continue;
             }
-            continue;
         }
-#endif
 
         // Attempt to read framed headers; fallback to single-line JSON (non-seekable safe)
         std::size_t contentLength = 0;
         std::string line;
 
-        // Read first non-empty line
+        // Read first non-empty line, but avoid blocking forever on empty input buffers (tests)
         do {
             if (!std::getline(in, line)) {
                 // Client closed stdin (EOF). Treat as normal shutdown; avoid alarming logs.
@@ -429,6 +438,26 @@ MessageResult StdioTransport::receive() {
             }
             if (!line.empty() && line.back() == '\r')
                 line.pop_back();
+
+            if (line.empty()) {
+                // For stringbuf-backed streams (tests/act), detect the "no more buffered data" case
+                // so we can bail out instead of blocking on std::getline forever.
+                if (stringBuffer && stringBuffer->in_avail() <= 0) {
+                    recordError();
+                    if (!shouldRetryAfterError())
+                        state_.store(TransportState::Disconnected);
+                    return Error{ErrorCode::NetworkError, "No stdin data available"};
+                }
+                // For real stdin, fall back to the usual readiness check before looping.
+                if (!stringBuffer && !isInputAvailable(recvTimeoutMs_)) {
+                    if (externalShutdown_ && *externalShutdown_) {
+                        state_.store(TransportState::Closing);
+                        return Error{ErrorCode::NetworkError, "External shutdown requested"};
+                    }
+                    // Timeout waiting for more data – treat as transient; continue outer loop.
+                    continue;
+                }
+            }
         } while (line.empty());
 
         spdlog::debug("StdioTransport: Read line: '{}'", line);
@@ -886,14 +915,15 @@ boost::asio::awaitable<void> MCPServer::startAsync() {
 }
 
 void MCPServer::stop() {
-    if (!running_.exchange(false)) {
-        return; // Already stopped
+    running_.store(false);
+
+    if (transport_) {
+        // Always close the transport first so any in-flight worker tasks can
+        // observe shutdown and finish promptly before we join the pool.
+        transport_->close();
     }
 
     stopThreadPool();
-    if (transport_) {
-        transport_->close();
-    }
 }
 
 MessageResult MCPServer::handleRequest(const json& request) {
@@ -2193,6 +2223,9 @@ boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
 // Modern C++20 tool handler implementations
 boost::asio::awaitable<Result<MCPSearchResponse>>
 MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     yams::daemon::SearchRequest dreq;
     // Preserve the user's query as-is; rely on dedicated fields for filters
     dreq.query = req.query;
@@ -2492,6 +2525,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
 boost::asio::awaitable<Result<MCPGrepResponse>>
 MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     yams::daemon::GrepRequest dreq;
     dreq.pattern = req.pattern;
     dreq.paths = req.paths;
@@ -3122,6 +3158,10 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
                         "No content or path provided. Set 'path' to a file or provide 'content'."};
     }
 
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
     // Lightweight throttle: limit concurrent add/store operations to avoid stressing the IPC FSM
     {
         using namespace std::chrono_literals;
@@ -3383,6 +3423,9 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
 
 boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>
 MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     // Convert MCP request to daemon request
     daemon::GetRequest daemon_req;
     daemon_req.hash = req.hash;
@@ -3448,6 +3491,9 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
 
 boost::asio::awaitable<Result<MCPListDocumentsResponse>>
 MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     daemon::ListRequest daemon_req;
     // Map MCP filters to daemon ListRequest
     // Prioritize pattern, but fall back to name.
@@ -3606,6 +3652,9 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
 
 boost::asio::awaitable<Result<MCPStatsResponse>>
 MCPServer::handleGetStats(const MCPStatsRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     daemon::GetStatsRequest daemon_req;
     daemon_req.showFileTypes = req.fileTypes;
     daemon_req.detailed = req.verbose;
@@ -3635,6 +3684,9 @@ MCPServer::handleGetStats(const MCPStatsRequest& req) {
 boost::asio::awaitable<Result<MCPStatusResponse>>
 MCPServer::handleGetStatus(const MCPStatusRequest& req) {
     (void)req;
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     auto sres = co_await daemon_client_->status();
     if (!sres)
         co_return sres.error();
@@ -3722,6 +3774,10 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
                         "Path is not a directory: " + dir_path.string()};
     }
 
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
     // Wait briefly for daemon readiness (content_store) to avoid transient startup errors
     {
         using namespace std::chrono_literals;
@@ -3800,6 +3856,9 @@ boost::asio::awaitable<Result<MCPDoctorResponse>>
 MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     (void)req;
     // Fetch daemon status first
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     auto sres = co_await daemon_client_->status();
     if (!sres)
         co_return sres.error();
@@ -3888,6 +3947,9 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                 daemon_req.metadata[key] = value.get<std::string>();
             else
                 daemon_req.metadata[key] = value.dump();
+        }
+        if (auto ensure = ensureDaemonClient(); !ensure) {
+            co_return ensure.error();
         }
         auto dres = co_await daemon_client_->updateDocument(daemon_req);
         if (!dres)
@@ -4037,6 +4099,9 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                 else
                     daemon_req.metadata[key] = value.dump();
             }
+            if (auto ensure = ensureDaemonClient(); !ensure) {
+                co_return ensure.error();
+            }
             auto dres = co_await daemon_client_->updateDocument(daemon_req);
             if (!dres)
                 co_return dres.error();
@@ -4061,6 +4126,9 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                 daemon_req.metadata[key] = value.get<std::string>();
             else
                 daemon_req.metadata[key] = value.dump();
+        }
+        if (auto ensure = ensureDaemonClient(); !ensure) {
+            co_return ensure.error();
         }
         auto dres = co_await daemon_client_->updateDocument(daemon_req);
         if (!dres)
@@ -4203,11 +4271,15 @@ MCPServer::handleSessionStart(const MCPSessionStartRequest& req) {
         dreq.aggressive = req.aggressive;
         dreq.limit = static_cast<std::size_t>(req.limit);
         dreq.snippetLen = static_cast<std::size_t>(req.snippetLen);
-
-        auto resp = co_await daemon_client_->call<yams::daemon::PrepareSessionRequest>(dreq);
-        if (resp) {
-            warmed = resp.value().warmedCount;
-        } else {
+        bool needFallback = true;
+        if (auto ensure = ensureDaemonClient(); ensure) {
+            auto resp = co_await daemon_client_->call<yams::daemon::PrepareSessionRequest>(dreq);
+            if (resp) {
+                warmed = resp.value().warmedCount;
+                needFallback = false;
+            }
+        }
+        if (needFallback) {
             // Fallback to local prepare (will be no-op without app context)
             app::services::PrepareBudget b{req.cores, req.memoryGb, req.timeMs, req.aggressive};
             warmed = sessionSvc->prepare(b, static_cast<std::size_t>(req.limit),
@@ -5047,6 +5119,9 @@ MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
     daemon_req.names = req.names;
     daemon_req.pattern = req.pattern;
     daemon_req.dryRun = req.dryRun;
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
     auto dres = co_await daemon_client_->remove(daemon_req);
     if (!dres)
         co_return dres.error();

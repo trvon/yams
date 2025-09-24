@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <regex>
 #include <sstream>
@@ -170,11 +171,12 @@ public:
                     for (;;) {
                         yams::daemon::StatusRequest sreq;
                         sreq.detailed = true;
-                        std::promise<Result<yams::daemon::StatusResponse>> prom;
-                        auto fut = prom.get_future();
-                        auto work = [&, sreq]() -> boost::asio::awaitable<void> {
+                        auto prom =
+                            std::make_shared<std::promise<Result<yams::daemon::StatusResponse>>>();
+                        auto fut = prom->get_future();
+                        auto work = [prom, &client, sreq]() -> boost::asio::awaitable<void> {
                             auto r = co_await client.call(sreq);
-                            prom.set_value(std::move(r));
+                            prom->set_value(std::move(r));
                             co_return;
                         };
                         boost::asio::co_spawn(boost::asio::system_executor{}, work(),

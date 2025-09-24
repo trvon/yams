@@ -105,6 +105,7 @@ test_deps = [
   dependency('yams_app_services'),
   dependency('yams_daemon_client'),
   dependency('yams_daemon'),
+  dependency('yams_mcp'),
 ]
 
 if gmock_dep.found()
@@ -133,7 +134,7 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
 # Collect sources recursively using run_command per directory (no user functions)
 unit_srcs = []
 # Exclude temporarily-outdated tests until ported
-_ru = run_command('sh', '-c', 'find unit -type f -name "*.cpp" ! -path "unit/api/metadata_api_test.cpp" ! -path "unit/compression/error_handler_test_simple.cpp" ! -path "unit/compression/error_handler_test.cpp" ! -path "unit/compression/integrity_validator_test_simple.cpp" ! -path "unit/compression/integrity_validator_test.cpp" ! -path "unit/content/*" ! -path "unit/crypto/*" ! -path "unit/daemon/multiplex_client_test.cpp" ! -path "unit/daemon/request_dispatcher_plugin_test.cpp" ! -path "unit/daemon/onnx_*" ! -path "unit/manifest/manifest_test.cpp" ! -path "unit/integrity/integrity_verifier_test.cpp" ! -path "unit/storage/storage_engine_test.cpp" ! -path "unit/storage/compressed_storage_engine_test.cpp" ! -path "unit/wal/wal_manager_test.cpp" ! -path "unit/cli/*" ! -path "unit/mcp/*" ! -path "unit/detection/*" 2>/dev/null | sort', check: false)
+_ru = run_command('sh', '-c', 'find unit -type f -name "*.cpp" ! -path "unit/api/metadata_api_test.cpp" ! -path "unit/compression/error_handler_test_simple.cpp" ! -path "unit/compression/error_handler_test.cpp" ! -path "unit/compression/integrity_validator_test_simple.cpp" ! -path "unit/compression/integrity_validator_test.cpp" ! -path "unit/content/*" ! -path "unit/crypto/*" ! -path "unit/daemon/multiplex_client_test.cpp" ! -path "unit/daemon/request_dispatcher_plugin_test.cpp" ! -path "unit/daemon/onnx_*" ! -path "unit/manifest/manifest_test.cpp" ! -path "unit/integrity/integrity_verifier_test.cpp" ! -path "unit/storage/storage_engine_test.cpp" ! -path "unit/storage/compressed_storage_engine_test.cpp" ! -path "unit/wal/wal_manager_test.cpp" ! -path "unit/cli/*" ! -path "unit/detection/*" 2>/dev/null | sort', check: false)
 if _ru.returncode() == 0
   _out = _ru.stdout()
   if _out != ''
@@ -211,7 +212,7 @@ if all_unit.length() > 0
   unit_exe = executable('yams_unit_tests', all_unit + test_main,
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
-    cpp_args: test_cpp_noerror_args,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     install: false,
   )
   # Give the aggregated unit binary more time; default 30s was tight on CI/macOS
@@ -357,6 +358,7 @@ if all_integration.length() > 0
   integ_exe = executable('yams_integration_smoke_tests', all_integration + files('test_main.cpp'),
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
+    cpp_args: ['-DYAMS_TESTING=1'],
     install: false,
   )
   test('integration_smoke', integ_exe,
@@ -370,6 +372,7 @@ if all_stress.length() > 0
   stress_exe = executable('yams_stress_tests', all_stress + test_main,
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
+    cpp_args: ['-DYAMS_TESTING=1'],
     install: false,
   )
   test('stress', stress_exe, suite: 'stress', timeout: 1800)

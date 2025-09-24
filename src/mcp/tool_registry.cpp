@@ -168,6 +168,13 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
             r.score = result.value("score", 0.0f);
             r.snippet = result.value("snippet", std::string{});
 
+            if (result.contains("diff") && !result["diff"].is_null()) {
+                r.diff = result["diff"];
+            }
+            if (result.contains("local_input_file") && result["local_input_file"].is_string()) {
+                r.localInputFile = result["local_input_file"].get<std::string>();
+            }
+
             if (result.contains("score_breakdown")) {
                 const auto& breakdown = result["score_breakdown"];
                 if (breakdown.contains("vector_score")) {

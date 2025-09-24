@@ -2,9 +2,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <string>
+#include <system_error>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -55,40 +58,84 @@ auto run_awaitable_with_timeout(Awaitable aw, std::chrono::milliseconds timeout)
 
 // Ensure async tool handlers return robustly (error or value), not crash/hang, when daemon is
 // unavailable in test environment.
-TEST(MCPAsyncExecTest, HandlersReturnErrorsWithoutDaemon) {
+TEST(MCPAsyncExecTest, ToolsReturnStructuredErrorsWithoutDaemon) {
+    setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
+    setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
 
-    // Search
-    yams::mcp::MCPSearchRequest sreq;
-    sreq.query = "foo";
-    auto sres = run_awaitable_with_timeout(server->testHandleSearchDocuments(sreq), 3s);
-    ASSERT_TRUE(sres.has_value()) << "Search handler timed out";
-    EXPECT_FALSE(static_cast<bool>(sres.value())) << "Expected error without daemon";
+    const auto uniqueName =
+        std::string("yams-mcp-test-") +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock";
+    const auto socketPath = std::filesystem::temp_directory_path() / uniqueName;
+    setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
 
-    // Grep
-    yams::mcp::MCPGrepRequest grep;
-    grep.pattern = "bar";
-    auto gres = run_awaitable_with_timeout(server->testHandleGrepDocuments(grep), 3s);
-    ASSERT_TRUE(gres.has_value()) << "Grep handler timed out";
-    EXPECT_FALSE(static_cast<bool>(gres.value())) << "Expected error without daemon";
+    yams::daemon::ClientConfig cfg;
+    cfg.autoStart = false;
+    cfg.maxRetries = 0;
+    cfg.connectTimeout = std::chrono::milliseconds{50};
+    cfg.requestTimeout = std::chrono::milliseconds{50};
+    cfg.socketPath = socketPath;
+    std::error_code ec;
+    std::filesystem::remove(cfg.socketPath, ec);
+    server->testConfigureDaemonClient(cfg);
 
-    // Retrieve by non-existent name
-    yams::mcp::MCPRetrieveDocumentRequest rreq;
-    rreq.name = "does-not-exist.txt";
-    auto rres = run_awaitable_with_timeout(server->testHandleRetrieveDocument(rreq), 3s);
-    ASSERT_TRUE(rres.has_value()) << "Retrieve handler timed out";
-    EXPECT_FALSE(static_cast<bool>(rres.value())) << "Expected error without daemon";
+    auto expectAsyncCompletion = [&](auto makeAwaitable, const std::string& toolName) {
+        auto result = run_awaitable_with_timeout(makeAwaitable(), std::chrono::seconds(3));
+        ASSERT_TRUE(result.has_value()) << toolName << " handler timed out";
+        if (result->has_value()) {
+            SUCCEED() << toolName << " handler completed successfully";
+        } else {
+            const auto& error = result->error();
+            EXPECT_FALSE(error.message.empty()) << toolName << " error message missing";
+        }
+    };
 
-    // List documents (repo not initialized)
-    yams::mcp::MCPListDocumentsRequest lreq;
-    auto lres = run_awaitable_with_timeout(server->testHandleListDocuments(lreq), 3s);
-    ASSERT_TRUE(lres.has_value()) << "ListDocuments handler timed out";
-    EXPECT_FALSE(static_cast<bool>(lres.value())) << "Expected error without daemon";
+    expectAsyncCompletion(
+        [&]() -> boost::asio::awaitable<yams::Result<yams::mcp::MCPSearchResponse>> {
+            yams::mcp::MCPSearchRequest req;
+            req.query = "foo";
+            co_return co_await server->testHandleSearchDocuments(req);
+        },
+        "search");
 
-    // Stats
-    yams::mcp::MCPStatsRequest streq;
-    auto stres = run_awaitable_with_timeout(server->testHandleGetStats(streq), 3s);
-    ASSERT_TRUE(stres.has_value()) << "GetStats handler timed out";
-    EXPECT_FALSE(static_cast<bool>(stres.value())) << "Expected error without daemon";
+    expectAsyncCompletion(
+        [&]() -> boost::asio::awaitable<yams::Result<yams::mcp::MCPGrepResponse>> {
+            yams::mcp::MCPGrepRequest req;
+            req.pattern = "bar";
+            co_return co_await server->testHandleGrepDocuments(req);
+        },
+        "grep");
+
+    expectAsyncCompletion(
+        [&]() -> boost::asio::awaitable<yams::Result<yams::mcp::MCPRetrieveDocumentResponse>> {
+            yams::mcp::MCPRetrieveDocumentRequest req;
+            req.hash = "deadbeef";
+            co_return co_await server->testHandleRetrieveDocument(req);
+        },
+        "retrieve");
+
+    expectAsyncCompletion(
+        [&]() -> boost::asio::awaitable<yams::Result<yams::mcp::MCPListDocumentsResponse>> {
+            yams::mcp::MCPListDocumentsRequest req;
+            co_return co_await server->testHandleListDocuments(req);
+        },
+        "list");
+
+    expectAsyncCompletion(
+        [&]() -> boost::asio::awaitable<yams::Result<yams::mcp::MCPStatsResponse>> {
+            yams::mcp::MCPStatsRequest req;
+            co_return co_await server->testHandleGetStats(req);
+        },
+        "stats");
+
+    auto syncResult = server->callToolPublic("search", nlohmann::json{{"query", "foo"}});
+    ASSERT_TRUE(syncResult.is_object());
+    ASSERT_TRUE(syncResult.contains("error"));
+    const auto& error = syncResult["error"];
+    ASSERT_TRUE(error.contains("message"));
+    EXPECT_FALSE(error["message"].get<std::string>().empty());
+
+    server->testShutdown();
 }

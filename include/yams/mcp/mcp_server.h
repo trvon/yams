@@ -283,6 +283,21 @@ public:
     // Public testing interface - only available when building tests
     json testListTools() { return listTools(); }
 
+    boost::asio::awaitable<json> testCallToolAsync(const std::string& name, const json& arguments) {
+        return callToolAsync(name, arguments);
+    }
+
+    void testShutdown() {
+        running_.store(false);
+        stopThreadPool();
+    }
+
+    void testConfigureDaemonClient(const yams::daemon::ClientConfig& cfg) {
+        daemon_client_config_ = cfg;
+        daemon_client_ = nullptr;
+        daemon_client_lease_.reset();
+    }
+
     // Expose modern handle* methods for testing
     // Request types are already in the yams::mcp namespace
 

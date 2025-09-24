@@ -56,26 +56,26 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           submodules: false
       - name: Skip non-linux entries under act (warm)
-        if: github.actor == "nektos/act" && matrix.os != "linux-hosted"
+        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
         shell: bash
         run: |
           echo "Skipping warm job for ${{ matrix.os }} under act"
           exit 0
       - name: Skip linux-hosted when macos_only=true
-        if: inputs.macos_only == "true" && matrix.os == "linux-hosted"
+        if: inputs.macos_only == 'true' && matrix.os == 'linux-hosted'
         shell: bash
         run: |
           echo "macos_only=true: skipping linux-hosted warm job entry"
           exit 0
       - name: Cache Conan packages
-        if: github.actor != "nektos/act"
+        if: github.actor != 'nektos/act'
         id: cache_conan
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         continue-on-error: true
         with:
           path: |
@@ -89,8 +89,8 @@ jobs:
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
             conan2-${{ runner.os }}-
       - name: Cache ccache
-        if: github.actor != "nektos/act"
-        uses: actions/cache@v4
+        if: github.actor != 'nektos/act'
+        uses: actions/cache@v3
         continue-on-error: true
         with:
           path: |
@@ -101,12 +101,12 @@ jobs:
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-
       - name: Install dependencies (Linux)
-        if: runner.os == "Linux"
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-pip python3-setuptools git ccache pkg-config
       - name: Install dependencies (macOS)
-        if: runner.os == "macOS"
+        if: runner.os == 'macOS'
         run: |
           brew install ccache pkg-config
       - name: Install Conan
@@ -187,23 +187,23 @@ jobs:
       STAGE_DIR: stage
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
       - name: Skip non-linux entries under act (build)
-        if: github.actor == "nektos/act" && matrix.os != "linux-hosted"
+        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
         shell: bash
         run: |
           echo "Skipping build-release job steps for ${{ matrix.os }} under act"
           exit 0
       - name: Skip linux-hosted when macos_only=true
-        if: inputs.macos_only == "true" && matrix.os == "linux-hosted"
+        if: inputs.macos_only == 'true' && matrix.os == 'linux-hosted'
         shell: bash
         run: |
           echo "macos_only=true: skipping linux-hosted build-release job entry"
           exit 0
       - name: Verify runner architecture (act diagnostics)
-        if: github.actor == "nektos/act" && matrix.os == "linux-hosted"
+        if: github.actor == 'nektos/act' && matrix.os == 'linux-hosted'
         shell: bash
         run: |
           set -euo pipefail
@@ -218,9 +218,9 @@ jobs:
           fi
 
       - name: Cache Conan packages
-        if: github.actor != "nektos/act"
+        if: github.actor != 'nektos/act'
         id: cache_conan
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         continue-on-error: true
         with:
           path: |
@@ -247,8 +247,8 @@ jobs:
             fi
           done
       - name: Cache macOS build directory
-        if: runner.os == "macOS" && github.actor != "nektos/act"
-        uses: actions/cache@v4
+        if: runner.os == 'macOS' && github.actor != 'nektos/act'
+        uses: actions/cache@v3
         with:
           path: build/release
           key: macos-build-${{ matrix.suffix }}-${{ hashFiles('meson.build', 'meson_options.txt') }}-${{ hashFiles('src/**', 'include/**') }}
@@ -256,8 +256,8 @@ jobs:
             macos-build-${{ matrix.suffix }}-
 
       - name: Cache ccache
-        if: github.actor != "nektos/act"
-        uses: actions/cache@v4
+        if: github.actor != 'nektos/act'
+        uses: actions/cache@v3
         continue-on-error: true
         with:
           path: |
@@ -269,7 +269,7 @@ jobs:
             ccache-${{ runner.os }}-
 
       - name: Install optional system dependencies (Linux only)
-        if: runner.os == "Linux"
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -296,7 +296,7 @@ jobs:
           echo "CXX=clang++" >> $GITHUB_ENV
 
       - name: Sanitize stdlib flags (macOS only)
-        if: runner.os == "macOS"
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -456,7 +456,7 @@ jobs:
           fi
 
       - name: Ensure meson and ninja (macOS)
-        if: runner.os == "macOS"
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -547,7 +547,7 @@ jobs:
           fi
 
       - name: Install pkg-config (macOS)
-        if: runner.os == "macOS"
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           brew update
@@ -919,7 +919,7 @@ jobs:
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
