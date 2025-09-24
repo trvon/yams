@@ -229,7 +229,6 @@ if all_unit.length() > 0
     'StreamingProcessorTest.*:' +
     'ZstandardCompressorTest.DecompressionPerformance:' +
     'DatabaseTest.Migrations:' +
-    'SearchExecutorTest.*:' +
     'ResultRankerTest.RankingResults:' +
     'CompressedStorageStatsTest.*:' +
     'ReferenceCounterTest.Statistics:' +
