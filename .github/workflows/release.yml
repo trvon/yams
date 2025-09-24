@@ -1,4 +1,3 @@
----
 # yamllint disable rule:line-length
 name: Release
 
@@ -60,22 +59,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false  # All workflows intentionally avoid submodules; prevents stale gitlink (cloudflare) errors
+          submodules: false
       - name: Skip non-linux entries under act (warm)
-        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
+        if: github.actor == "nektos/act" && matrix.os != "linux-hosted"
         shell: bash
         run: |
           echo "Skipping warm job for ${{ matrix.os }} under act"
           exit 0
       - name: Skip linux-hosted when macos_only=true
-        if: inputs.macos_only == 'true' && matrix.os == 'linux-hosted'
+        if: inputs.macos_only == "true" && matrix.os == "linux-hosted"
         shell: bash
         run: |
           echo "macos_only=true: skipping linux-hosted warm job entry"
           exit 0
-      - name: Cache Conan packages (warm)
-        if: github.actor != 'nektos/act'
-        id: cache_conan_warm
+      - name: Cache Conan packages
+        if: github.actor != "nektos/act"
+        id: cache_conan
         uses: actions/cache@v4
         continue-on-error: true
         with:
@@ -85,28 +84,73 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
-            warm-conan2-${{ runner.os }}-${{ matrix.suffix }}-
-            warm-conan2-${{ runner.os }}-
+            conan2-${{ runner.os }}-${{ matrix.suffix }}-
             conan2-${{ runner.os }}-
-      - name: Cache ccache (warm)
-        if: github.actor != 'nektos/act'
+      - name: Cache ccache
+        if: github.actor != "nektos/act"
         uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
-            warm-ccache-${{ runner.os }}-${{ matrix.suffix }}-
-            warm-ccache-${{ runner.os }}-
+            ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-
+      - name: Install dependencies (Linux)
+        if: runner.os == "Linux"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pip python3-setuptools git ccache pkg-config
+      - name: Install dependencies (macOS)
+        if: runner.os == "macOS"
+        run: |
+          brew install ccache pkg-config
+      - name: Install Conan
+        run: |
+          python3 -m pip install --user pipx
+          python3 -m pipx ensurepath
+          pipx install conan
+      - name: Setup Conan
+        shell: bash
+        run: |
+          set -e
+          conan profile detect --force
+      - name: Warm Conan dependencies
+        shell: bash
+        run: |
+          echo "Warming Conan dependencies for ${{ matrix.suffix }}"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
+            case "${{ matrix.suffix }}" in
+              macos-arm64)
+                sed -i '' -E 's/^arch=.*/arch=armv8/' "$HOST_PROFILE"
+                ;;
+              macos-x86_64)
+                cp "$HOST_PROFILE" "$HOST_PROFILE.x86_64"
+                sed -i '' -E 's/^arch=.*/arch=x86_64/' "$HOST_PROFILE.x86_64"
+                HOST_PROFILE="$HOST_PROFILE.x86_64"
+                ;;;
+            esac
+          else
+            HOST_PROFILE="./conan/profiles/host-linux-clang"
+          fi
+          BUILD_PROFILE="default"
+          CONAN_ARGS="-of build/warm-release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -b missing"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            case "${{ matrix.suffix }}" in
+              macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
+              macos-x86_64) CONAN_ARGS="$CONAN_ARGS -s:h arch=x86_64" ;;
+            esac
+          fi
+          conan install . $CONAN_ARGS
       - name: Warm summary
         shell: bash
         run: |
-          echo "Conan cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}" || true
+          echo "Conan cache hit: ${{ steps.cache_conan.outputs.cache-hit }}" || true
           du -sh ~/.conan2/p 2>/dev/null || true
           du -sh ~/.cache/ccache 2>/dev/null || true
 
@@ -147,19 +191,19 @@ jobs:
         with:
           fetch-depth: 0
       - name: Skip non-linux entries under act (build)
-        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
+        if: github.actor == "nektos/act" && matrix.os != "linux-hosted"
         shell: bash
         run: |
           echo "Skipping build-release job steps for ${{ matrix.os }} under act"
           exit 0
       - name: Skip linux-hosted when macos_only=true
-        if: inputs.macos_only == 'true' && matrix.os == 'linux-hosted'
+        if: inputs.macos_only == "true" && matrix.os == "linux-hosted"
         shell: bash
         run: |
           echo "macos_only=true: skipping linux-hosted build-release job entry"
           exit 0
       - name: Verify runner architecture (act diagnostics)
-        if: github.actor == 'nektos/act' && matrix.os == 'linux-hosted'
+        if: github.actor == "nektos/act" && matrix.os == "linux-hosted"
         shell: bash
         run: |
           set -euo pipefail
@@ -173,9 +217,9 @@ jobs:
             exit 1
           fi
 
-      - name: Cache Conan packages (early)
-        if: github.actor != 'nektos/act'
-        id: cache_conan_early
+      - name: Cache Conan packages
+        if: github.actor != "nektos/act"
+        id: cache_conan
         uses: actions/cache@v4
         continue-on-error: true
         with:
@@ -185,27 +229,25 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          # Use same key pattern as tests workflow for maximum cross-workflow reuse
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
             conan2-${{ runner.os }}-
-            conan-${{ runner.os }}-
-      - name: Conan cache diagnostics (early)
+      - name: Conan cache diagnostics
         if: always()
         shell: bash
         run: |
-          echo "Early cache hit: ${{ steps.cache_conan_early.outputs.cache-hit }}"
+          echo "Cache hit: ${{ steps.cache_conan.outputs.cache-hit }}"
           for d in p r recipes metadata s; do
             if [ -d "$HOME/.conan2/$d" ]; then
-              echo "Directory $d present: $(find $HOME/.conan2/$d -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') entries" || true
+              echo "Directory $d present: $(find $HOME/.conan2/$d -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" entries || true
               du -sh $HOME/.conan2/$d 2>/dev/null || true
             else
               echo "Directory $d missing"
             fi
           done
       - name: Cache macOS build directory
-        if: runner.os == 'macOS' && github.actor != 'nektos/act'
+        if: runner.os == "macOS" && github.actor != "nektos/act"
         uses: actions/cache@v4
         with:
           path: build/release
@@ -214,20 +256,20 @@ jobs:
             macos-build-${{ matrix.suffix }}-
 
       - name: Cache ccache
-        if: github.actor != 'nektos/act'
+        if: github.actor != "nektos/act"
         uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan.lock', 'conanfile.py', 'meson.build') }}
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-
 
       - name: Install optional system dependencies (Linux only)
-        if: runner.os == 'Linux'
+        if: runner.os == "Linux"
         shell: bash
         run: |
           set -euo pipefail
@@ -254,7 +296,7 @@ jobs:
           echo "CXX=clang++" >> $GITHUB_ENV
 
       - name: Sanitize stdlib flags (macOS only)
-        if: runner.os == 'macOS'
+        if: runner.os == "macOS"
         shell: bash
         run: |
           set -euo pipefail
@@ -276,9 +318,9 @@ jobs:
           set -euo pipefail
 
           EVENT="${{ github.event_name }}"
-          # When schedule triggers, this contains the cron expression that matched
           SCHEDULE_CRON="${{ github.event.schedule || '' }}"
           INPUT_CHANNEL="${{ inputs.channel || '' }}"
+          SHORT_HASH=$(git rev-parse --short HEAD)
 
           channel=""
           if [ "$EVENT" = "push" ]; then
@@ -289,14 +331,12 @@ jobs:
               *) channel="nightly" ;;
             esac
           elif [ "$EVENT" = "schedule" ]; then
-            # Tie channel to the configured crons above
             if [ "$SCHEDULE_CRON" = "0 3 * * 1" ]; then
               channel="weekly"
             else
               channel="nightly"
             fi
           else
-            # Fallback for workflow_run or any other event
             channel="stable"
           fi
 
@@ -305,25 +345,28 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
             VERSION="${TAG#v}"
             TAG_OUT="${GITHUB_REF_NAME}"
+            RELEASE_NAME="YAMS ${VERSION}"
           elif [ "$channel" = "nightly" ]; then
-            DATE="$(date -u +%Y%m%d)"
-            VERSION="nightly-${DATE}"
-            TAG_OUT="$VERSION"
+            DATE_ISO=$(date -u +%Y-%m-%d)
+            DATE_COMPACT=$(date -u +%Y%m%d)
+            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
           else # weekly
-            YEAR="$(date -u +%G)"   # ISO week-numbering year
-            WEEK="$(date -u +%V)"   # ISO week number 01-53
-            VERSION="weekly-${YEAR}w${WEEK}"
+            YEAR=$(date -u +%G)   # ISO week-numbering year
+            WEEK=$(date -u +%V)   # ISO week number 01-53
+            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
             TAG_OUT="$VERSION"
+            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
           fi
 
-          # Derive a strictly numeric semantic base version for packaging (DEB/RPM require this);
-          # fall back to 0.0.0 if no tag history exists.
           BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
           BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
 
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
           echo "base_version=$BASE_NUMERIC_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$channel" = "stable" ]; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -331,7 +374,7 @@ jobs:
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
+          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
       - name: Download CI benchmark artifacts (-yams, if available)
         if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
@@ -413,7 +456,7 @@ jobs:
           fi
 
       - name: Ensure meson and ninja (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == "macOS"
         shell: bash
         run: |
           set -euo pipefail
@@ -451,9 +494,9 @@ jobs:
           set -euo pipefail
           # Prefer clang++, fallback to clang
             if command -v clang++ >/dev/null 2>&1; then
-              RAW_VER=$(clang++ --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+              RAW_VER=$(clang++ --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
             elif command -v clang >/dev/null 2>&1; then
-              RAW_VER=$(clang --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+              RAW_VER=$(clang --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
             else
               RAW_VER=""
             fi
@@ -473,9 +516,9 @@ jobs:
             PROFILE_VER="(missing profile)"
           fi
           if command -v clang++ >/dev/null 2>&1; then
-            SYS_VER=$(clang++ --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+            SYS_VER=$(clang++ --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
           elif command -v clang >/dev/null 2>&1; then
-            SYS_VER=$(clang --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1 || true)
+            SYS_VER=$(clang --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
           else
             SYS_VER="unknown"
           fi
@@ -504,7 +547,7 @@ jobs:
           fi
 
       - name: Install pkg-config (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == "macOS"
         shell: bash
         run: |
           brew update
@@ -521,7 +564,7 @@ jobs:
             TMP_FILE="$(mktemp)"
             awk -v line="$LINE" '
               BEGIN { replaced = 0 }
-              /^core\.download:parallel=/ { if (!replaced) { print line; replaced = 1 } ; next }
+              /^core.download:parallel=/ { if (!replaced) { print line; replaced = 1 } ; next }
               { print }
               END { if (!replaced) print line }
             ' "$CONF_FILE" > "$TMP_FILE"
@@ -568,7 +611,7 @@ jobs:
                 cp "$HOST_PROFILE" "$HOST_PROFILE.x86_64"
                 sed -i '' -E 's/^arch=.*/arch=x86_64/' "$HOST_PROFILE.x86_64"
                 HOST_PROFILE="$HOST_PROFILE.x86_64"
-                ;;
+                ;;;
             esac
           else
             HOST_PROFILE="./conan/profiles/host-linux-clang"
@@ -674,7 +717,7 @@ jobs:
             echo "### Test Coverage" >> "$SUMMARY_FILE"
             echo "" >> "$SUMMARY_FILE"
             # Extract line-rate="0.8234" attribute and convert to percent with one decimal
-            raw_rate=$(grep -Eo 'line-rate="[0-9.]+"' ci-artifacts/coverage/coverage.xml | head -1 | sed -E 's/.*="([0-9.]+)"/\1/' ) || raw_rate=""
+            raw_rate=$(grep -Eo 'line-rate="[0-9.]+"' ci-artifacts/coverage/coverage.xml | head -1 | sed -E 's/.*="([0-9.]+)"/\1/') || raw_rate=""
             if [ -n "$raw_rate" ]; then
               # Use awk for safe float multiplication & formatting
               coverage_pct=$(awk -v r="$raw_rate" 'BEGIN{ printf("%.1f%%", r*100) }')
@@ -693,7 +736,7 @@ jobs:
             echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
             if command -v jq >/dev/null 2>&1; then
               for json_file in "$BUILD_DIR/bench_results"/*.json; do
-                jq -r '.benchmarks[]? | "| \(.name // \"Unknown\") | \(.real_time // 0 | floor) | \(.cpu_time // 0 | floor) | \n"' "$json_file" 2>/dev/null | while IFS= read -r line; do
+                jq -r '.benchmarks[]? | "| ".name // "Unknown" | ".real_time // 0 | floor) | ".cpu_time // 0 | floor) | "' "$json_file" 2>/dev/null | while IFS= read -r line; do
                   name=$(echo "$line" | cut -d'|' -f2 | sed 's/^ *//;s/ *$//')
                   rtime=$(echo "$line" | cut -d'|' -f3 | tr -d ' ')
                   ctime=$(echo "$line" | cut -d'|' -f4 | tr -d ' ')
@@ -819,6 +862,7 @@ jobs:
           EVENT="${{ github.event_name }}"
           SCHEDULE_CRON="${{ github.event.schedule || '' }}"
           INPUT_CHANNEL="${{ inputs.channel || '' }}"
+          SHORT_HASH=$(git rev-parse --short HEAD)
 
           channel=""
           if [ "$EVENT" = "push" ]; then
@@ -838,27 +882,33 @@ jobs:
             channel="stable"
           fi
 
+          # Derive version and tag
           if [ "$channel" = "stable" ]; then
             TAG="${GITHUB_REF_NAME}"
             VERSION="${TAG#v}"
             TAG_OUT="${GITHUB_REF_NAME}"
+            RELEASE_NAME="YAMS ${VERSION}"
           elif [ "$channel" = "nightly" ]; then
-            DATE="$(date -u +%Y%m%d)"
-            VERSION="nightly-${DATE}"
+            DATE_ISO=$(date -u +%Y-%m-%d)
+            DATE_COMPACT=$(date -u +%Y%m%d)
+            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
+          else # weekly
+            YEAR=$(date -u +%G)   # ISO week-numbering year
+            WEEK=$(date -u +%V)   # ISO week number 01-53
+            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
             TAG_OUT="$VERSION"
-          else
-            YEAR="$(date -u +%G)"
-            WEEK="$(date -u +%V)"
-            VERSION="weekly-${YEAR}w${WEEK}"
-            TAG_OUT="$VERSION"
+            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
           fi
+
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
 
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
-          # Derive numeric base version (used for packaging metadata). Fallback 0.0.0
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
-          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
           echo "base_version=$BASE_NUMERIC_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$channel" = "stable" ]; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -866,7 +916,7 @@ jobs:
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT"
+          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -947,7 +997,7 @@ jobs:
           # Resolve bucket name: prefer secret R2_BUCKET, else parse wrangler.toml if present
           BUCKET="${R2_BUCKET:-}"
           if [ -z "$BUCKET" ] && [ -f "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" ]; then
-            BUCKET=$(sed -n 's/^bucket_name\s*=\s*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
+            BUCKET=$(sed -n 's/^bucket_name\s*=\s*"\(.*\)"/ recently1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
           fi
           if [ -z "$BUCKET" ]; then
             echo "Skipping R2 upload: no R2_BUCKET secret and wrangler.toml missing or without bucket_name." >&2
@@ -1027,8 +1077,8 @@ jobs:
           OUT_FORMULA="$FORMULA_DIR/yams.rb"
           # Update url & sha256 lines (simple sed in-place replacement)
           sed \
-            -e "s|^  url \".*\"|  url \"$ARCHIVE_URL\"|" \
-            -e "s|^  sha256 \".*\"|  sha256 \"$SHA256\"|" \
+            -e 's|^  url ".*"|  url "$ARCHIVE_URL"|' \
+            -e 's|^  sha256 ".*"|  sha256 "$SHA256"|' \
             "$TEMPLATE_PATH" > "$OUT_FORMULA"
           echo "Updated formula at $OUT_FORMULA:" >&2
           grep -E 'url "|sha256 "' "$OUT_FORMULA" >&2 || true
@@ -1318,11 +1368,11 @@ jobs:
           echo "" >> "$GROUPED_FILE"
 
           # Parse CHANGELOG.md and extract all sections matching the minor version
-          awk -v minor="$MINOR_VERSION" '
+          awk -v minor="$MINOR_VERSION" ' 
             /^## \[v?[0-9]+\.[0-9]+\.[0-9]+/ {
               version_str = $2
-              gsub(/\ \[v?/, "", version_str)
-              gsub(/\ /, "", version_str)
+              gsub(/ \[v?/, "", version_str)
+              gsub(/ /, "", version_str)
               split(version_str, version_parts, ".")
               version_minor = version_parts[1] "." version_parts[2]
 
@@ -1347,8 +1397,7 @@ jobs:
         run: |
           mkdir -p assets
           # Collect all release files
-          for dir in release-artifacts/release-*;
-          do
+          for dir in release-artifacts/release-*; do
             if [ -d "$dir" ]; then
               # Move main archive
               mv $dir/*.{tar.gz,zip} assets/ 2>/dev/null || true
@@ -1378,11 +1427,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: YAMS ${{ steps.meta.outputs.version }}
+          name: ${{ steps.meta.outputs.release_name }}
           body_path: CHANGELOG.md
           files: assets/*
           draft: true
-          allowUpdates: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1400,7 +1448,7 @@ jobs:
           fi
           TAG="${{ steps.meta.outputs.tag }}"
           # publish the release after assets are uploaded
-          gh release edit "$TAG" --draft=false --notes-file CHANGELOG.md \
+          gh release edit "$TAG" --draft=false --title "${{ steps.meta.outputs.release_name }}" --notes-file CHANGELOG.md \
             ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }}
 
       - name: List release assets (post-upload)

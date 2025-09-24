@@ -51,8 +51,9 @@ jobs:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          key: ccache-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.arch }}-
             ccache-${{ runner.os }}-
       - name: Install Conan (latest)
         shell: bash
@@ -75,13 +76,6 @@ jobs:
           set -euo pipefail
           export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
           conan install . -of build/warm-debug -pr:b=default -s build_type=Debug -o yams/*:build_tests=True -o yams/*:enable_onnx=False -b missing
-      - name: Warm Release dependencies (x86_64 only)
-        if: matrix.arch == 'x86_64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
-          conan install . -of build/warm-release -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Release -b missing || true
       - name: Warm summary
         shell: bash
         run: |
@@ -151,9 +145,9 @@ jobs:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('conanfile.py', 'conan.lock', 'CMakePresets.json') }}
+          key: ccache-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-
+            ccache-${{ runner.os }}-${{ matrix.arch }}-
       - name: Install Conan (latest)
         shell: bash
         run: |
@@ -161,21 +155,6 @@ jobs:
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
-      - name: Install Debug deps (pre)
-        shell: bash
-        run: |
-          # Only Debug is required for test job; skipping Release halves cold start time.
-          # Disable ONNX to reduce dependency graph & build time.
-          conan profile detect --force
-          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
-          conan install . -of build/warm-debug -pr:b=default -s build_type=Debug -o yams/*:build_tests=True -o yams/*:enable_onnx=False -b missing
-      - name: Install Release deps (seed) (x86_64 only)
-        if: matrix.arch == 'x86_64'
-        shell: bash
-        run: |
-          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
-          conan install . -of build/warm-release -pr:h=conan/profiles/host-linux-clang -pr:b=default -s build_type=Release -b missing || true
 
       # Continue directly with build/test steps (single job path)
       - name: Set build dir env
@@ -258,7 +237,7 @@ jobs:
             TMP_FILE="$(mktemp)"
             awk -v line="$LINE" '
               BEGIN { replaced = 0 }
-              /^core\.download:parallel=/ { if (!replaced) { print line; replaced = 1 } ; next }
+              /^core.download:parallel=/ { if (!replaced) { print line; replaced = 1 } ; next }
               { print }
               END { if (!replaced) print line }
             ' "$CONF_FILE" > "$TMP_FILE"
@@ -275,12 +254,12 @@ jobs:
         shell: bash
         run: |
           rm -rf ${{ env.BUILD_DIR }}
-          conan install . \
-            --output-folder=${{ env.BUILD_DIR }} \
-            -pr:b=default \
-            -s build_type=Debug \
-            -o yams/*:build_tests=True \
-            -o yams/*:enable_onnx=False \
+          conan install .
+            --output-folder=${{ env.BUILD_DIR }}
+            -pr:b=default
+            -s build_type=Debug
+            -o yams/*:build_tests=True
+            -o yams/*:enable_onnx=False
             --build=missing
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
           if [ -f "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh" ]; then
