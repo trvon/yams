@@ -254,12 +254,12 @@ jobs:
         shell: bash
         run: |
           rm -rf ${{ env.BUILD_DIR }}
-          conan install .
-            --output-folder=${{ env.BUILD_DIR }}
-            -pr:b=default
-            -s build_type=Debug
-            -o yams/*:build_tests=True
-            -o yams/*:enable_onnx=False
+          conan install . \
+            --output-folder="${{ env.BUILD_DIR }}" \
+            -pr:b=default \
+            -s build_type=Debug \
+            -o "yams/*:build_tests=True" \
+            -o "yams/*:enable_onnx=False" \
             --build=missing
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
           if [ -f "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh" ]; then

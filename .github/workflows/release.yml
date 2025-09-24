@@ -110,10 +110,26 @@ jobs:
         run: |
           brew install ccache pkg-config
       - name: Install Conan
+        shell: bash
         run: |
-          python3 -m pip install --user pipx
-          python3 -m pipx ensurepath
-          pipx install conan
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew update
+            brew install pipx || true
+            # Ensure pipx runner PATH and shims are available
+            python3 -m pipx ensurepath || true
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends pipx || true
+            python3 -m pipx ensurepath || true
+          fi
+          # Add common user bin to PATH for this job
+          [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
+          export PATH="$HOME/.local/bin:$PATH"
+          pipx --version || true
+          pipx install --python python3 conan || pipx install conan
+          which conan
+          conan --version
       - name: Setup Conan
         shell: bash
         run: |
@@ -423,11 +439,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pipx install conan 2>/dev/null || python3 -m pip install --user --upgrade conan || python -m pip install --user --upgrade conan || pip3 install --user --upgrade conan
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew update
+            brew install pipx || true
+            python3 -m pipx ensurepath || true
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends pipx || true
+            python3 -m pipx ensurepath || true
+          fi
           PY_USER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
           [ -d "$PY_USER_BIN" ] && echo "$PY_USER_BIN" >> "$GITHUB_PATH" || true
           [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
           export PATH="$HOME/.local/bin:$PY_USER_BIN:$PATH"
+          pipx --version || true
+          pipx install --python python3 conan || pipx install conan
           which conan || { echo 'Conan not found on PATH after installation'; ls -al "$HOME/.local/bin" || true; exit 127; }
           conan --version
           mkdir -p ~/.conan2
@@ -439,21 +465,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          add_user_bin_to_path() {
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew update || true
+            brew install meson ninja ccache || true
+          else
+            python3 -m pip install --user --upgrade meson 'ninja>=1.10' || python -m pip install --user --upgrade meson 'ninja>=1.10'
             if [ -n "${GITHUB_PATH:-}" ]; then
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
             else
               export PATH="$HOME/.local/bin:$PATH"
             fi
-          }
-          python3 -m pip install --user --upgrade meson 'ninja>=1.10' || python -m pip install --user --upgrade meson 'ninja>=1.10'
-          add_user_bin_to_path
+          fi
           echo "meson version: $(meson --version || true)"
           echo "ninja version: $(ninja --version || true)"
-          # Install ccache on macOS if missing
-          if [ "$RUNNER_OS" = "macOS" ] && ! command -v ccache >/dev/null 2>&1; then
-            brew install ccache || true
-          fi
 
       - name: Ensure meson and ninja (macOS)
         if: runner.os == 'macOS'
