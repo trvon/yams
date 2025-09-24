@@ -115,6 +115,7 @@ incs = [
   include_directories('..'),             # project root
   include_directories('.'),              # tests/
   include_directories('../include'),     # headers
+  include_directories('../tools/yams-tools/include'),
 ]
 
 # Keep project strict, but don’t fail unit tests on common test-only warnings.
@@ -234,7 +235,14 @@ if all_unit.length() > 0
     'SearchExecutorTest.*:' +
     'ResultRankerTest.RankingResults:' +
     'CompressedStorageStatsTest.*:' +
-    'ReferenceCounterTest.Statistics'
+    'ReferenceCounterTest.Statistics:' +
+    'IntegrityVerifierTest.*:' +
+    'DaemonTest.*:' +
+    'StreamingChunkerTest.*:' +
+    'ChunkValidatorParallel.*:' +
+    'DownloadManagerExport.*:' +
+    'StorageBackendTest.*:' +
+    'RepairCoordinatorTest.*'
   )
   unit_shards = get_option('unit-shards')
   unit_timeout = get_option('unit-timeout')
@@ -267,6 +275,76 @@ if all_unit.length() > 0
       env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
       timeout: unit_timeout)
   endif
+
+  test('unit_isolated_integrity_verifier', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=IntegrityVerifierTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
+  test('unit_isolated_daemon', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=DaemonTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
+  test('unit_isolated_streaming_chunker', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=StreamingChunkerTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
+  test('unit_isolated_chunk_validator', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=ChunkValidatorParallel.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
+  test('unit_isolated_download_manager', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=DownloadManagerExport.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
+  test('unit_isolated_storage_backend', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=StorageBackendTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
+  test('unit_isolated_repair_coordinator', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=RepairCoordinatorTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
 
   # Define a fast "smoke" subset using gtest filter for developer iteration
   smoke_filter = 'ContentStoreTest.*:ProgressReporterTest.*:ContentMetadataTest.*:ContentStoreBuilderTest.*:SearchSmoke.*'

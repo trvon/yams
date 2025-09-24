@@ -3,10 +3,13 @@
 #include <yams/downloader/downloader.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <random>
 #include <string>
@@ -15,6 +18,7 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+using namespace yams::downloader;
 
 namespace {
 
@@ -190,6 +194,205 @@ private:
     fs::path path_;
 };
 
+class TrackingResumeStore final : public IResumeStore {
+public:
+    std::optional<State> initialState;
+    std::vector<State> savedStates;
+    std::vector<std::string> savedUrls;
+    std::vector<std::string> loadUrls;
+    std::optional<std::string> removedUrl;
+
+    Expected<std::optional<State>> load(std::string_view url) override {
+        loadUrls.emplace_back(url);
+        return initialState;
+    }
+
+    Expected<void> save(std::string_view url, const State& state) override {
+        savedUrls.emplace_back(url);
+        savedStates.push_back(state);
+        initialState = state;
+        return {};
+    }
+
+    void remove(std::string_view url) noexcept override {
+        removedUrl = std::string(url);
+        initialState.reset();
+    }
+};
+
+class TestHttpAdapter final : public IHttpAdapter {
+public:
+    bool resumeSupported{true};
+    std::optional<std::uint64_t> contentLength{};
+    std::optional<std::string> etag{};
+    std::optional<std::string> lastModified{};
+    std::vector<std::uint64_t> requestedOffsets;
+    std::vector<std::uint64_t> requestedSizes;
+    std::vector<std::byte> payload;
+
+    Expected<void> probe(std::string_view, const std::vector<Header>&, bool& resumeSupportedOut,
+                         std::optional<std::uint64_t>& contentLengthOut,
+                         std::optional<std::string>& etagOut,
+                         std::optional<std::string>& lastModifiedOut,
+                         std::optional<std::string>& contentTypeOut,
+                         std::optional<std::string>& suggestedFilenameOut, const TlsConfig&,
+                         const std::optional<std::string>&, std::chrono::milliseconds) override {
+        resumeSupportedOut = resumeSupported;
+        contentLengthOut = contentLength;
+        etagOut = etag;
+        lastModifiedOut = lastModified;
+        contentTypeOut.reset();
+        suggestedFilenameOut.reset();
+        return {};
+    }
+
+    Expected<void> fetchRange(std::string_view, const std::vector<Header>&, std::uint64_t offset,
+                              std::uint64_t size, const TlsConfig&,
+                              const std::optional<std::string>&, std::chrono::milliseconds,
+                              const std::function<Expected<void>(std::span<const std::byte>)>& sink,
+                              const ShouldCancel&, const ProgressCallback& onProgress) override {
+        requestedOffsets.push_back(offset);
+        requestedSizes.push_back(size);
+        if (onProgress) {
+            ProgressEvent ev;
+            ev.downloadedBytes = 0;
+            ev.stage = ProgressStage::Downloading;
+            onProgress(ev);
+        }
+        if (!payload.empty()) {
+            auto res = sink(std::span<const std::byte>(payload.data(), payload.size()));
+            if (!res.ok())
+                return res;
+        }
+        return {};
+    }
+};
+
+class FakeDiskWriter final : public IDiskWriter {
+public:
+    explicit FakeDiskWriter(StorageConfig storage) : storage_(std::move(storage)) {}
+
+    void setInitialData(const std::vector<std::byte>& data) { initialData_ = data; }
+
+    const std::vector<std::byte>& stagedData() const { return data_; }
+
+    const fs::path& lastFinalPath() const { return lastFinalPath_; }
+
+    Expected<fs::path> createStagingFile(const StorageConfig&, std::string_view sessionId,
+                                         std::string_view tempExtension) override {
+        currentPath_ = stagingPath(sessionId, tempExtension);
+        data_.clear();
+        writeToFile();
+        return currentPath_;
+    }
+
+    Expected<fs::path> createOrOpenStagingFile(const StorageConfig&, std::string_view sessionId,
+                                               std::string_view tempExtension,
+                                               std::optional<std::uint64_t> expectedSize,
+                                               std::uint64_t& currentSize) override {
+        currentPath_ = stagingPath(sessionId, tempExtension);
+        data_ = initialData_;
+        currentSize = data_.size();
+        writeToFile();
+        if (expectedSize && currentSize == 0) {
+            std::error_code ec;
+            std::filesystem::resize_file(currentPath_, static_cast<std::uint64_t>(*expectedSize),
+                                         ec);
+            if (!ec) {
+                data_.resize(static_cast<std::size_t>(*expectedSize));
+                writeToFile();
+            }
+        }
+        return currentPath_;
+    }
+
+    Expected<void> writeAt(const fs::path&, std::uint64_t offset,
+                           std::span<const std::byte> data) override {
+        const auto end = offset + static_cast<std::uint64_t>(data.size());
+        if (end > data_.size()) {
+            data_.resize(static_cast<std::size_t>(end));
+        }
+        std::memcpy(data_.data() + offset, data.data(), data.size());
+        writeToFile();
+        return {};
+    }
+
+    Expected<void> sync(const fs::path&, const StorageConfig&) override { return {}; }
+
+    Expected<fs::path> finalizeToCas(const fs::path&, std::string_view hashHex,
+                                     const StorageConfig&) override {
+        lastFinalPath_ = casPathForSha256(storage_.objectsDir, hashHex);
+        std::error_code ec;
+        std::filesystem::create_directories(lastFinalPath_.parent_path(), ec);
+        std::ofstream out(lastFinalPath_, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return Error{ErrorCode::IoError,
+                         "Failed to write CAS object: " + lastFinalPath_.string()};
+        }
+        if (!data_.empty()) {
+            out.write(reinterpret_cast<const char*>(data_.data()),
+                      static_cast<std::streamsize>(data_.size()));
+        }
+        return lastFinalPath_;
+    }
+
+    void cleanup(const fs::path& stagingFile) noexcept override {
+        std::error_code ec;
+        std::filesystem::remove(stagingFile, ec);
+    }
+
+private:
+    fs::path stagingPath(std::string_view sessionId, std::string_view ext) const {
+        fs::path dir = storage_.stagingDir / "downloader";
+        std::filesystem::create_directories(dir);
+        std::string fn(sessionId);
+        if (!ext.empty()) {
+            if (ext.front() == '.')
+                fn.append(ext);
+            else {
+                fn.push_back('.');
+                fn.append(ext);
+            }
+        } else {
+            fn.append(".part");
+        }
+        return dir / fn;
+    }
+
+    void writeToFile() {
+        if (currentPath_.empty())
+            return;
+        std::error_code ec;
+        std::filesystem::create_directories(currentPath_.parent_path(), ec);
+        std::ofstream out(currentPath_, std::ios::binary | std::ios::trunc);
+        if (!out)
+            return;
+        if (!data_.empty()) {
+            out.write(reinterpret_cast<const char*>(data_.data()),
+                      static_cast<std::streamsize>(data_.size()));
+        }
+    }
+
+private:
+    StorageConfig storage_;
+    std::vector<std::byte> initialData_{};
+    std::vector<std::byte> data_{};
+    fs::path currentPath_{};
+    fs::path lastFinalPath_{};
+};
+
+std::vector<std::byte> to_bytes(std::string_view s) {
+    std::vector<std::byte> out(s.size());
+    std::memcpy(out.data(), s.data(), s.size());
+    return out;
+}
+
+constexpr const char kExportMetaSuffix[] = ".yams.meta.json";
+
+fs::path meta_path_for(const fs::path& exportPath) {
+    return fs::path(exportPath.string() + kExportMetaSuffix);
+}
+
 } // namespace
 
 // ----------------------------
@@ -305,4 +508,143 @@ TEST(CASHelpers, CasPathAndIdFormatting) {
 
     auto id = yams::downloader::makeSha256Id(digest);
     EXPECT_EQ(id, "sha256:" + digest);
+}
+
+TEST(DownloadManagerResume, PersistsAndCleansRanges) {
+    auto tempDir = make_temp_dir();
+    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+    DownloaderConfig cfg;
+    cfg.defaultChunkSizeBytes = 4;
+
+    auto http = std::make_unique<TestHttpAdapter>();
+    auto* httpPtr = http.get();
+    httpPtr->resumeSupported = true;
+    httpPtr->contentLength = 10;
+    httpPtr->etag = "etag-123";
+    httpPtr->payload = to_bytes("WORLD");
+
+    auto disk = std::make_unique<FakeDiskWriter>(storage);
+    auto* diskPtr = disk.get();
+    diskPtr->setInitialData(to_bytes("HELLO"));
+
+    auto resume = std::make_unique<TrackingResumeStore>();
+    auto* resumePtr = resume.get();
+    IResumeStore::State initial;
+    initial.totalBytes = 10;
+    initial.completedRanges.emplace_back(0, 5);
+    initial.etag = "etag-123";
+    resumePtr->initialState = initial;
+
+    auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
+                                                  nullptr, std::move(resume), nullptr);
+
+    DownloadRequest req;
+    req.url = "https://example.com/file.bin";
+    req.resume = true;
+    req.chunkSizeBytes = 5;
+
+    auto result = dm->download(req);
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    auto final = result.value();
+
+    ASSERT_EQ(httpPtr->requestedOffsets.size(), 1u);
+    EXPECT_EQ(httpPtr->requestedOffsets.front(), 5u);
+
+    ASSERT_FALSE(resumePtr->savedStates.empty());
+    const auto& lastState = resumePtr->savedStates.back();
+    ASSERT_EQ(lastState.completedRanges.size(), 1u);
+    EXPECT_EQ(lastState.completedRanges.front().first, 0u);
+    EXPECT_EQ(lastState.completedRanges.front().second, 10u);
+    ASSERT_TRUE(resumePtr->removedUrl.has_value());
+    EXPECT_EQ(*resumePtr->removedUrl, req.url);
+
+    ASSERT_FALSE(diskPtr->lastFinalPath().empty());
+    std::ifstream finalFile(diskPtr->lastFinalPath(), std::ios::binary);
+    ASSERT_TRUE(finalFile.good());
+    std::string contents((std::istreambuf_iterator<char>(finalFile)),
+                         std::istreambuf_iterator<char>());
+    EXPECT_EQ(contents, "HELLOWORLD");
+
+    EXPECT_TRUE(final.hash.rfind("sha256:", 0) == 0);
+    EXPECT_EQ(final.sizeBytes, 10u);
+}
+
+TEST(DownloadManagerExport, SkipsCopyWhenEtagMatches) {
+    auto tempDir = make_temp_dir();
+    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+    DownloaderConfig cfg;
+
+    auto http = std::make_unique<TestHttpAdapter>();
+    auto* httpPtr = http.get();
+    httpPtr->resumeSupported = false;
+    httpPtr->contentLength = 5;
+    httpPtr->etag = "tag-777";
+    httpPtr->payload = to_bytes("ABCDE");
+
+    auto disk = std::make_unique<FakeDiskWriter>(storage);
+    auto* diskPtr = disk.get();
+
+    auto resume = std::make_unique<TrackingResumeStore>();
+    auto* resumePtr = resume.get();
+
+    auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
+                                                  nullptr, std::move(resume), nullptr);
+
+    fs::path exportDir = tempDir / "exports";
+    fs::create_directories(exportDir);
+    fs::path exportPath = exportDir / "file.bin";
+    {
+        std::ofstream out(exportPath, std::ios::binary | std::ios::trunc);
+        out << "OLD";
+    }
+    auto metaPath = meta_path_for(exportPath);
+    {
+        json meta;
+        meta["etag"] = "tag-777";
+        meta["hash"] = "placeholder";
+        std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+        out << meta.dump(2);
+    }
+
+    DownloadRequest req;
+    req.url = "https://example.com/export.bin";
+    req.exportPath = exportPath;
+    req.overwrite = OverwritePolicy::IfDifferentEtag;
+
+    auto result = dm->download(req);
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    auto final = result.value();
+
+    std::string exported;
+    {
+        std::ifstream in(exportPath, std::ios::binary);
+        exported.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    EXPECT_EQ(exported, "OLD");
+
+    json metaUpdated;
+    {
+        std::ifstream in(metaPath);
+        ASSERT_TRUE(in.good());
+        in >> metaUpdated;
+    }
+    ASSERT_TRUE(metaUpdated.contains("hash"));
+    std::string expectedHex;
+    if (final.hash.rfind("sha256:", 0) == 0) {
+        expectedHex = final.hash.substr(7);
+    } else {
+        expectedHex = final.hash;
+    }
+    EXPECT_EQ(metaUpdated["hash"].get<std::string>(), expectedHex);
+    ASSERT_TRUE(metaUpdated.contains("etag"));
+    EXPECT_EQ(metaUpdated["etag"].get<std::string>(), "tag-777");
+
+    ASSERT_FALSE(diskPtr->lastFinalPath().empty());
+    std::ifstream casFile(diskPtr->lastFinalPath(), std::ios::binary);
+    std::string casData((std::istreambuf_iterator<char>(casFile)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_EQ(casData, "ABCDE");
+
+    EXPECT_TRUE(resumePtr->savedStates.empty());
+    EXPECT_EQ(httpPtr->requestedOffsets.size(), 1u);
 }

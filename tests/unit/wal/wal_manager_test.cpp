@@ -190,3 +190,57 @@ TEST_F(WALManagerTest, CurrentState) {
     auto shutdownResult_currentState = wal->shutdown();
     ASSERT_TRUE(shutdownResult_currentState.has_value());
 }
+
+TEST_F(WALManagerTest, CompressedRotationRecovery) {
+    WALManager::Config config{.walDirectory = walDir,
+                              .maxLogSize = 256,
+                              .syncInterval = 1,
+                              .syncTimeout = std::chrono::milliseconds(10),
+                              .compressOldLogs = true};
+
+    wal = std::make_unique<WALManager>(config);
+    ASSERT_TRUE(wal->initialize().has_value());
+
+    // Write a transaction so the current log has content.
+    {
+        auto txn = wal->beginTransaction();
+        ASSERT_NE(txn, nullptr);
+
+        ASSERT_TRUE(txn->storeBlock("compressed_hash", 4096, 1).has_value());
+        ASSERT_TRUE(txn->commit().has_value());
+    }
+
+    const auto originalLogPath = wal->getCurrentLogPath();
+    ASSERT_FALSE(originalLogPath.empty());
+    ASSERT_TRUE(std::filesystem::exists(originalLogPath));
+
+    // Force a rotation to trigger compression of the previous log file.
+    ASSERT_TRUE(wal->rotateLogs().has_value());
+
+    const auto compressedLogPath = originalLogPath.string() + ".zst";
+    EXPECT_TRUE(std::filesystem::exists(compressedLogPath));
+    EXPECT_FALSE(std::filesystem::exists(originalLogPath));
+
+    // Shutdown the writer before running recovery.
+    ASSERT_TRUE(wal->shutdown().has_value());
+
+    // Recover with a fresh WAL manager instance.
+    WALManager recoveryWal(config);
+    ASSERT_TRUE(recoveryWal.initialize().has_value());
+
+    size_t storeOps = 0;
+    auto recoverResult = recoveryWal.recover([&](const WALEntry& entry) -> Result<void> {
+        if (entry.header.operation == WALEntry::OpType::StoreBlock) {
+            ++storeOps;
+        }
+        return {};
+    });
+
+    ASSERT_TRUE(recoverResult.has_value());
+    const auto stats = recoverResult.value();
+    EXPECT_GT(stats.entriesProcessed, 0u);
+    EXPECT_EQ(storeOps, 1u);
+
+    ASSERT_TRUE(recoveryWal.shutdown().has_value());
+    EXPECT_TRUE(std::filesystem::exists(compressedLogPath));
+}

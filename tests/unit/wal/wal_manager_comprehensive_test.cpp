@@ -398,7 +398,10 @@ TEST_F(WALManagerComprehensiveTest, TransactionAutoAbort) {
 
 // Test max log size rotation
 TEST_F(WALManagerComprehensiveTest, LogRotation) {
-    WALManager::Config config{.walDirectory = walDir,
+    auto tmp = std::filesystem::path{"/tmp"} / ("waltest_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(tmp);
+
+    WALManager::Config config{.walDirectory = tmp,
                               .maxLogSize = 10 * 1024, // 10KB - small for testing
                               .syncInterval = 1000,
                               .syncTimeout = 100ms};
@@ -421,12 +424,16 @@ TEST_F(WALManagerComprehensiveTest, LogRotation) {
 
     // Verify multiple log files exist
     int logFileCount = 0;
-    for (const auto& entry : fs::directory_iterator(walDir)) {
-        if (entry.path().extension() == ".log") {
+    for (const auto& entry : fs::directory_iterator(tmp)) {
+        auto ext = entry.path().extension();
+        if (ext == ".log" || ext == ".zst") {
             logFileCount++;
         }
     }
-    EXPECT_GT(logFileCount, 1);
+    EXPECT_GT(logFileCount, 1) << "Expected rotated WAL segments (.log or .log.zst)";
+
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
 }
 
 // Performance test

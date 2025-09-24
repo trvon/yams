@@ -21,6 +21,8 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +34,145 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+namespace yams::downloader {
+std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
+}
+
+namespace {
+
+using Range = std::pair<std::uint64_t, std::uint64_t>;
+
+const char* kExportMetaSuffix = ".yams.meta.json";
+
+void normalizeRanges(std::vector<Range>& ranges) {
+    if (ranges.empty())
+        return;
+    std::sort(ranges.begin(), ranges.end(),
+              [](const Range& a, const Range& b) { return a.first < b.first; });
+    std::vector<Range> merged;
+    merged.reserve(ranges.size());
+    for (const auto& [offset, length] : ranges) {
+        if (length == 0)
+            continue;
+        if (merged.empty()) {
+            merged.emplace_back(offset, length);
+            continue;
+        }
+        auto& back = merged.back();
+        const auto backEnd = back.first + back.second;
+        const auto currentEnd = offset + length;
+        if (offset <= backEnd) {
+            if (currentEnd > backEnd) {
+                back.second = currentEnd - back.first;
+            }
+        } else {
+            merged.emplace_back(offset, length);
+        }
+    }
+    ranges.swap(merged);
+}
+
+void appendRange(std::vector<Range>& ranges, std::uint64_t offset, std::uint64_t length) {
+    if (length == 0)
+        return;
+    if (!ranges.empty()) {
+        auto& back = ranges.back();
+        const auto backEnd = back.first + back.second;
+        const auto currentEnd = offset + length;
+        if (offset <= backEnd) {
+            if (currentEnd > backEnd) {
+                back.second = currentEnd - back.first;
+            }
+            return;
+        }
+    }
+    ranges.emplace_back(offset, length);
+}
+
+std::uint64_t contiguousPrefixLength(const std::vector<Range>& ranges) {
+    std::uint64_t cursor = 0;
+    for (const auto& [offset, length] : ranges) {
+        if (offset > cursor)
+            break;
+        const auto end = offset + length;
+        if (end > cursor) {
+            cursor = end;
+        }
+    }
+    return cursor;
+}
+
+std::filesystem::path exportMetaPath(const std::filesystem::path& exportPath) {
+    auto meta = exportPath;
+    meta += kExportMetaSuffix;
+    return meta;
+}
+
+std::optional<nlohmann::json> loadExportMetadata(const std::filesystem::path& exportPath) {
+    auto metaPath = exportMetaPath(exportPath);
+    if (!std::filesystem::exists(metaPath))
+        return std::nullopt;
+    std::ifstream in(metaPath);
+    if (!in)
+        return std::nullopt;
+    try {
+        nlohmann::json j;
+        in >> j;
+        if (!j.is_object())
+            return std::nullopt;
+        return j;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void writeExportMetadata(const std::filesystem::path& exportPath, const std::string& hash,
+                         const std::optional<std::string>& etag,
+                         const std::optional<std::string>& lastModified) {
+    nlohmann::json meta = nlohmann::json::object();
+    meta["hash"] = hash;
+    if (etag && !etag->empty())
+        meta["etag"] = *etag;
+    if (lastModified && !lastModified->empty())
+        meta["last_modified"] = *lastModified;
+    meta["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+
+    auto metaPath = exportMetaPath(exportPath);
+    std::error_code ec;
+    std::filesystem::create_directories(metaPath.parent_path(), ec);
+    std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+    if (!out)
+        return;
+    out << meta.dump(2);
+}
+
+std::optional<std::string> computeFileSha256(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path))
+        return std::nullopt;
+    auto verifier = yams::downloader::makeIntegrityVerifierSha256Only();
+    verifier->reset(yams::downloader::HashAlgo::Sha256);
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return std::nullopt;
+    std::array<char, 1 << 16> buffer{};
+    while (in) {
+        in.read(buffer.data(), buffer.size());
+        auto read = in.gcount();
+        if (read > 0) {
+            verifier->update(std::span<const std::byte>(
+                reinterpret_cast<const std::byte*>(buffer.data()), static_cast<std::size_t>(read)));
+        }
+    }
+    auto result = verifier->finalize();
+    if (result.hex.empty())
+        return std::nullopt;
+    return result.hex;
+}
+
+} // namespace
 
 namespace yams::downloader {
 
@@ -156,7 +297,6 @@ private:
 // ---- Forward-declared factories from component .cpps (no public headers yet) ----
 std::unique_ptr<IHttpAdapter> makeCurlHttpAdapter();
 std::unique_ptr<IDiskWriter> makeDiskWriter();
-std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
 std::unique_ptr<IResumeStore> makeInMemoryResumeStore();
 std::unique_ptr<IRateLimiter> makeRateLimiter();
 
@@ -258,6 +398,11 @@ public:
                 if (lr.ok())
                     priorState = lr.value();
             }
+            std::vector<Range> completedRanges;
+            if (priorState && !priorState->completedRanges.empty()) {
+                completedRanges = priorState->completedRanges;
+                normalizeRanges(completedRanges);
+            }
 
             // Enforce max file size policy if configured
             if (config_.maxFileBytes > 0 && contentLength &&
@@ -271,18 +416,41 @@ public:
             const std::string sessionId = makeSessionId(request.url);
             std::filesystem::path stagingFile;
             std::uint64_t resumeOffset = 0;
+            IResumeStore::State resumeState;
+            if (priorState) {
+                resumeState = *priorState;
+            }
 
             const bool canResume = resumeSupported && priorState.has_value() &&
                                    priorState->etag.has_value() && currentEtag.has_value() &&
                                    (*priorState->etag == *currentEtag);
 
             if (canResume) {
+                std::uint64_t currentSize = 0;
                 auto stRes = disk_->createOrOpenStagingFile(storage_, sessionId, ".part",
-                                                            contentLength, resumeOffset);
+                                                            contentLength, currentSize);
                 if (!stRes.ok()) {
                     return stRes.error();
                 }
                 stagingFile = stRes.value();
+
+                const auto contiguous = contiguousPrefixLength(completedRanges);
+                resumeOffset = std::min(contiguous, currentSize);
+
+                if (currentSize > resumeOffset) {
+                    std::error_code resizeEc;
+                    std::filesystem::resize_file(stagingFile, resumeOffset, resizeEc);
+                    if (resizeEc) {
+                        spdlog::warn("Failed to shrink staging file to resume offset: {}",
+                                     resizeEc.message());
+                        resumeOffset = currentSize;
+                    }
+                }
+
+                if (completedRanges.empty() && resumeOffset > 0) {
+                    appendRange(completedRanges, 0, resumeOffset);
+                }
+
                 spdlog::info("Resuming download from offset {} (ETag matched).", resumeOffset);
             } else {
                 // Fresh start (or ETag mismatch)
@@ -292,6 +460,7 @@ public:
                 }
                 stagingFile = stagingRes.value();
                 resumeOffset = 0;
+                completedRanges.clear();
             }
 
             // Prepare integrity verifier (SHA-256 MVP)
@@ -300,6 +469,45 @@ public:
             // Running counters
             std::uint64_t written = resumeOffset;
             std::optional<std::uint64_t> totalBytes = contentLength;
+
+            resumeState.completedRanges = completedRanges;
+            if (totalBytes)
+                resumeState.totalBytes = *totalBytes;
+            else if (priorState)
+                resumeState.totalBytes = priorState->totalBytes;
+            else
+                resumeState.totalBytes = resumeOffset;
+            resumeState.etag = currentEtag;
+            resumeState.lastModified = currentLastModified;
+
+            const std::uint64_t persistThreshold = std::max<std::uint64_t>(
+                1024ull * 1024ull, request.chunkSizeBytes != 0 ? request.chunkSizeBytes
+                                                               : config_.defaultChunkSizeBytes);
+            std::uint64_t lastPersistedCursor = resumeOffset;
+            const bool allowResumePersistence = resume_ && request.resume && resumeSupported;
+
+            auto persistState = [&](bool force) {
+                if (!allowResumePersistence)
+                    return;
+                resumeState.completedRanges = completedRanges;
+                if (totalBytes)
+                    resumeState.totalBytes = *totalBytes;
+                else
+                    resumeState.totalBytes = std::max(resumeState.totalBytes, written);
+                resumeState.etag = currentEtag;
+                resumeState.lastModified = currentLastModified;
+
+                if (!force && written < lastPersistedCursor + persistThreshold)
+                    return;
+
+                auto saveRes = resume_->save(request.url, resumeState);
+                if (!saveRes.ok()) {
+                    spdlog::warn("Failed to persist resume state for {}: {}", request.url,
+                                 saveRes.error().message);
+                } else {
+                    lastPersistedCursor = written;
+                }
+            };
 
             // Optional: initial progress event
             if (onProgress) {
@@ -318,6 +526,7 @@ public:
                     limiter_->acquire(static_cast<std::uint64_t>(data.size()), shouldCancel);
                 }
 
+                const std::uint64_t chunkStart = written;
                 // Write at current offset
                 auto wr = disk_->writeAt(stagingFile, written, data);
                 if (!wr.ok()) {
@@ -329,6 +538,9 @@ public:
 
                 // Bump offset
                 written += static_cast<std::uint64_t>(data.size());
+
+                appendRange(completedRanges, chunkStart, static_cast<std::uint64_t>(data.size()));
+                persistState(false);
 
                 // Enforce max size cap during streaming if no Content-Length was known
                 if (config_.maxFileBytes > 0 && written > config_.maxFileBytes) {
@@ -356,6 +568,8 @@ public:
                 disk_->cleanup(stagingFile);
                 return fr.error();
             }
+
+            persistState(true);
 
             // Post-download: sync staging file and directory
             auto sr = disk_->sync(stagingFile, storage_);
@@ -393,35 +607,62 @@ public:
             }
 
             // Persist resume metadata (validators and total size) for future resumes
-            if (resume_) {
-                IResumeStore::State st;
-                st.etag = currentEtag;
-                st.lastModified = currentLastModified;
-                st.totalBytes = totalBytes.value_or(written);
-                st.completedRanges = {
-                    {0, written}}; // TODO(resume): persist partial map during download
-                (void)resume_->save(request.url, st);
+            if (resume_ && allowResumePersistence) {
+                resume_->remove(request.url);
             }
 
             // Optional export after CAS finalize
             if (request.exportPath) {
+                const auto& exportPath = *request.exportPath;
                 std::error_code fec;
-                bool exists = std::filesystem::exists(*request.exportPath, fec);
+                const bool exists = std::filesystem::exists(exportPath, fec);
                 if (exists && request.overwrite == OverwritePolicy::Never) {
                     disk_->cleanup(stagingFile);
                     return Error{ErrorCode::PolicyViolation,
                                  "Export path exists and overwrite=never"};
                 }
-                // TODO(export): implement IfDifferentEtag policy by comparing stored provenance
-                auto copyOpts = std::filesystem::copy_options::none;
-                if (request.overwrite == OverwritePolicy::Always) {
-                    copyOpts |= std::filesystem::copy_options::overwrite_existing;
+
+                bool skipCopy = false;
+                if (exists && request.overwrite == OverwritePolicy::IfDifferentEtag) {
+                    auto meta = loadExportMetadata(exportPath);
+                    if (meta) {
+                        if (currentEtag && meta->contains("etag") &&
+                            (*currentEtag == (*meta)["etag"].get<std::string>())) {
+                            skipCopy = true;
+                        } else if (meta->contains("hash")) {
+                            try {
+                                if ((*meta)["hash"].get<std::string>() == digest.hex) {
+                                    skipCopy = true;
+                                }
+                            } catch (...) {
+                                skipCopy = false;
+                            }
+                        }
+                    }
+                    if (!skipCopy) {
+                        auto existingHash = computeFileSha256(exportPath);
+                        if (existingHash && *existingHash == digest.hex) {
+                            skipCopy = true;
+                        }
+                    }
+                    if (skipCopy) {
+                        writeExportMetadata(exportPath, digest.hex, currentEtag,
+                                            currentLastModified);
+                    }
                 }
-                std::filesystem::create_directories(request.exportPath->parent_path(), fec);
-                std::filesystem::copy_file(finalRes.value(), *request.exportPath, copyOpts, fec);
-                if (fec) {
-                    disk_->cleanup(stagingFile);
-                    return Error{ErrorCode::IoError, "Failed to export file: " + fec.message()};
+
+                if (!skipCopy) {
+                    auto copyOpts = std::filesystem::copy_options::none;
+                    if (exists && request.overwrite != OverwritePolicy::Never) {
+                        copyOpts |= std::filesystem::copy_options::overwrite_existing;
+                    }
+                    std::filesystem::create_directories(exportPath.parent_path(), fec);
+                    std::filesystem::copy_file(finalRes.value(), exportPath, copyOpts, fec);
+                    if (fec) {
+                        disk_->cleanup(stagingFile);
+                        return Error{ErrorCode::IoError, "Failed to export file: " + fec.message()};
+                    }
+                    writeExportMetadata(exportPath, digest.hex, currentEtag, currentLastModified);
                 }
             }
 
@@ -501,9 +742,19 @@ private:
 };
 
 // ---- Optional factory to construct a default DownloadManager ----
+std::unique_ptr<IDownloadManager> makeDownloadManagerWithDependencies(
+    const StorageConfig& storage, const DownloaderConfig& cfg, std::unique_ptr<IHttpAdapter> http,
+    std::unique_ptr<IDiskWriter> disk, std::unique_ptr<IIntegrityVerifier> integ,
+    std::unique_ptr<IResumeStore> resume, std::unique_ptr<IRateLimiter> limiter) {
+    return std::make_unique<DownloadManager>(storage, cfg, std::move(http), std::move(disk),
+                                             std::move(integ), std::move(resume),
+                                             std::move(limiter));
+}
+
 std::unique_ptr<IDownloadManager> makeDownloadManager(const StorageConfig& storage,
                                                       const DownloaderConfig& cfg) {
-    return std::make_unique<DownloadManager>(storage, cfg);
+    return makeDownloadManagerWithDependencies(storage, cfg, nullptr, nullptr, nullptr, nullptr,
+                                               nullptr);
 }
 
 } // namespace yams::downloader

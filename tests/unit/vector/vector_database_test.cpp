@@ -464,21 +464,34 @@ protected:
         const ::testing::TestInfo* test_info =
             ::testing::UnitTest::GetInstance()->current_test_info();
         std::string test_name = std::string(test_info->test_suite_name()) + "_" + test_info->name();
-        config_.database_path = "test_persistence_vectors_" + test_name + ".db";
+        // Use per-test temp directory to avoid collisions and keep paths short
+        auto tmp = std::filesystem::path{"/tmp"} / ("vecdb_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(tmp);
+        db_dir_ = tmp;
+        config_.database_path = (db_dir_ / ("persistence_" + test_name + ".db")).string();
         config_.table_name = "test_embeddings";
         config_.embedding_dim = 384;
 
         // Ensure clean state by removing any existing database files (including WAL/SHM)
-        std::filesystem::remove(config_.database_path);
-        std::filesystem::remove(config_.database_path + "-wal");
-        std::filesystem::remove(config_.database_path + "-shm");
+        cleanupFiles();
     }
 
     void TearDown() override {
         // Clean up database files to avoid cross-test interference
-        std::filesystem::remove(config_.database_path);
-        std::filesystem::remove(config_.database_path + "-wal");
-        std::filesystem::remove(config_.database_path + "-shm");
+        cleanupFiles();
+        if (!db_dir_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(db_dir_, ec);
+        }
+    }
+
+    void cleanupFiles() {
+        if (config_.database_path.empty())
+            return;
+        std::error_code ec;
+        std::filesystem::remove(config_.database_path, ec);
+        std::filesystem::remove(config_.database_path + "-wal", ec);
+        std::filesystem::remove(config_.database_path + "-shm", ec);
     }
 
     std::vector<float> generateRandomEmbedding(size_t dim = 384) {
@@ -510,6 +523,7 @@ protected:
     }
 
     VectorDatabaseConfig config_;
+    std::filesystem::path db_dir_;
 };
 
 TEST_F(VectorDatabasePersistenceTest, DataPersistsAcrossDatabaseRestarts) {

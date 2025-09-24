@@ -39,6 +39,36 @@ namespace yams::downloader {
 
 namespace fs = std::filesystem;
 
+namespace {
+
+#if defined(__APPLE__)
+void best_effort_preallocate(const fs::path& file, std::uint64_t targetSize) {
+    if (targetSize == 0)
+        return;
+
+    int fd = ::open(file.c_str(), O_RDWR);
+    if (fd < 0)
+        return;
+
+    fstore_t store{};
+    store.fst_flags = F_ALLOCATECONTIG;
+    store.fst_posmode = F_PEOFPOSMODE;
+    store.fst_offset = 0;
+    store.fst_length = static_cast<off_t>(targetSize);
+
+    if (fcntl(fd, F_PREALLOCATE, &store) == -1) {
+        store.fst_flags = F_ALLOCATEALL;
+        (void)fcntl(fd, F_PREALLOCATE, &store);
+    }
+
+    ::close(fd);
+}
+#else
+void best_effort_preallocate(const fs::path&, std::uint64_t) {}
+#endif
+
+} // namespace
+
 // ---------- Helpers (platform-specific sync) ----------
 
 static Expected<void> fsync_file(const fs::path& p) {
@@ -251,7 +281,9 @@ public:
             ensure_file_private(stagingFile);
         }
 
-        // TODO(resume): best-effort preallocation up to expectedSize on supported filesystems
+        if (expectedSize && currentSize == 0) {
+            best_effort_preallocate(stagingFile, *expectedSize);
+        }
 
         return stagingFile;
     }

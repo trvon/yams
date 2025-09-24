@@ -1,4 +1,5 @@
 #include <yams/crypto/hasher.h>
+#include <yams/integrity/repair_manager.h>
 #include <yams/integrity/verifier.h>
 
 #include <spdlog/spdlog.h>
@@ -141,6 +142,7 @@ struct IntegrityVerifier::Impl {
 
     // Monitoring
     std::unique_ptr<VerificationMonitor> monitor;
+    std::shared_ptr<RepairManager> repairManager;
 
     // Statistics
     mutable IntegrityVerifier::Statistics stats;
@@ -186,6 +188,26 @@ struct IntegrityVerifier::Impl {
             }
 
             if (!existsResult.value()) {
+                if (config.enableAutoRepair && repairManager && repairManager->canRepair(hash)) {
+                    stats.repairsAttemptedTotal++;
+                    if (repairManager->attemptRepair(hash)) {
+                        auto repairedData = storage.retrieve(hash);
+                        if (repairedData.has_value()) {
+                            hasher->init();
+                            hasher->update(std::span{repairedData.value()});
+                            auto repairedHash = hasher->finalize();
+                            if (repairedHash == hash) {
+                                result.status = VerificationStatus::Repaired;
+                                result.blockSize = repairedData.value().size();
+                                stats.repairsSuccessfulTotal++;
+                                stats.blocksVerifiedTotal++;
+                                stats.bytesVerifiedTotal += repairedData.value().size();
+                                return result;
+                            }
+                        }
+                    }
+                }
+
                 result.status = VerificationStatus::Missing;
                 result.errorDetails = "Block not found in storage";
                 stats.verificationErrorsTotal++;
@@ -219,14 +241,41 @@ struct IntegrityVerifier::Impl {
                 result.errorDetails = "Hash mismatch: expected " + hash + ", got " + computedHash;
                 stats.verificationErrorsTotal++;
 
-                // Attempt repair if enabled
-                if (config.enableAutoRepair) {
-                    spdlog::warn("Block {} corrupted, attempting repair", hash);
-                    stats.repairsAttemptedTotal++;
+                if (config.enableAutoRepair && repairManager && repairManager->canRepair(hash)) {
+                    bool repaired = false;
+                    for (size_t attempt = 0; attempt < config.maxRepairAttempts && !repaired;
+                         ++attempt) {
+                        stats.repairsAttemptedTotal++;
+                        if (!repairManager->attemptRepair(hash)) {
+                            continue;
+                        }
 
-                    // For now, we don't have repair logic implemented
-                    // In a real system, this would try to restore from backup,
-                    // request from peers, or use parity data
+                        auto postRepair = storage.retrieve(hash);
+                        if (!postRepair.has_value()) {
+                            spdlog::warn("Repair succeeded but retrieve failed for {}",
+                                         hash.substr(0, 8));
+                            continue;
+                        }
+
+                        hasher->init();
+                        hasher->update(std::span{postRepair.value()});
+                        auto repairedHash = hasher->finalize();
+                        if (repairedHash == hash) {
+                            result.status = VerificationStatus::Repaired;
+                            result.errorDetails.clear();
+                            result.blockSize = postRepair.value().size();
+                            stats.repairsSuccessfulTotal++;
+                            stats.blocksVerifiedTotal++;
+                            stats.bytesVerifiedTotal += postRepair.value().size();
+                            repaired = true;
+                        } else {
+                            spdlog::warn("Repair mismatch for {}: {}", hash.substr(0, 8),
+                                         repairedHash.substr(0, 8));
+                        }
+                    }
+                    if (!repaired) {
+                        spdlog::warn("Automatic repair failed for {}", hash.substr(0, 8));
+                    }
                 }
             }
 
@@ -452,6 +501,10 @@ void IntegrityVerifier::updateConfig(const VerificationConfig& newConfig) {
     pImpl->rateLimiter->updateRate(newConfig.blocksPerSecond);
 
     spdlog::info("Updated verification configuration");
+}
+
+void IntegrityVerifier::setRepairManager(std::shared_ptr<RepairManager> manager) {
+    pImpl->repairManager = std::move(manager);
 }
 
 bool IntegrityVerifier::isRunning() const {

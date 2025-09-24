@@ -1,108 +1,108 @@
-#include <filesystem>
-#include <yams/integrity/repair_utils.h>
-#include <yams/integrity/verifier.h>
-#include <yams/vector/sqlite_vec_backend.h>
+#include <yams/crypto/hasher.h>
+#include <yams/integrity/repair_manager.h>
 
 #include <spdlog/spdlog.h>
 
+#include <span>
+
 namespace yams::integrity {
 
-/**
- * Basic repair manager implementation
- *
- * This is a simplified implementation that provides the interface
- * for repair operations. In a full system, this would integrate
- * with backup systems, P2P networks, and parity recovery.
- */
-class RepairManager {
-public:
-    enum class RepairStrategy {
-        FromBackup, // Restore from backup
-        FromP2P,    // Request from peers
-        FromParity, // Reed-Solomon recovery
-        Reconstruct // Rebuild from manifest
-    };
+RepairManager::RepairManager(storage::IStorageEngine& storage, RepairManagerConfig config)
+    : storage_(storage), config_(std::move(config)) {}
 
-    bool attemptRepair(const std::string& blockHash,
-                       RepairStrategy strategy = RepairStrategy::FromBackup) {
-        spdlog::info("Attempting repair for block {} using strategy {}", blockHash.substr(0, 8),
-                     static_cast<int>(strategy));
-
+bool RepairManager::attemptRepair(const std::string& blockHash,
+                                  const std::vector<RepairStrategy>& order) {
+    const auto& strategies = order.empty() ? config_.defaultOrder : order;
+    for (auto strategy : strategies) {
         switch (strategy) {
-            case RepairStrategy::FromBackup:
-                return repairFromBackup(blockHash);
-            case RepairStrategy::FromP2P:
-                return repairFromP2P(blockHash);
-            case RepairStrategy::FromParity:
-                return repairFromParity(blockHash);
-            case RepairStrategy::Reconstruct:
-                return reconstructFromManifest(blockHash);
+            case RepairStrategy::FromBackup: {
+                if (!config_.backupFetcher)
+                    continue;
+                auto data = config_.backupFetcher(blockHash);
+                if (storeIfValid(blockHash, data)) {
+                    spdlog::info("Repair succeeded for {} using backup", blockHash.substr(0, 8));
+                    return true;
+                }
+                break;
+            }
+            case RepairStrategy::FromP2P: {
+                if (!config_.p2pFetcher)
+                    continue;
+                auto data = config_.p2pFetcher(blockHash);
+                if (storeIfValid(blockHash, data)) {
+                    spdlog::info("Repair succeeded for {} via P2P", blockHash.substr(0, 8));
+                    return true;
+                }
+                break;
+            }
+            case RepairStrategy::FromParity: {
+                if (!config_.parityReconstructor)
+                    continue;
+                auto data = config_.parityReconstructor(blockHash);
+                if (storeIfValid(blockHash, data)) {
+                    spdlog::info("Repair succeeded for {} via parity reconstruction",
+                                 blockHash.substr(0, 8));
+                    return true;
+                }
+                break;
+            }
+            case RepairStrategy::FromManifest: {
+                if (!config_.manifestReconstructor)
+                    continue;
+                auto data = config_.manifestReconstructor(blockHash);
+                if (storeIfValid(blockHash, data)) {
+                    spdlog::info("Repair succeeded for {} via manifest reconstruction",
+                                 blockHash.substr(0, 8));
+                    return true;
+                }
+                break;
+            }
         }
+    }
 
+    spdlog::warn("Repair attempts failed for block {}", blockHash.substr(0, 8));
+    return false;
+}
+
+bool RepairManager::canRepair(const std::string& blockHash) const {
+    (void)blockHash;
+    return config_.backupFetcher || config_.p2pFetcher || config_.parityReconstructor ||
+           config_.manifestReconstructor;
+}
+
+bool RepairManager::storeIfValid(const std::string& blockHash,
+                                 const Result<std::vector<std::byte>>& fetchResult) const {
+    if (!fetchResult.has_value()) {
+        spdlog::warn("Repair fetch failed for {}: {}", blockHash.substr(0, 8),
+                     fetchResult.error().message);
         return false;
     }
 
-    bool canRepair(const std::string& blockHash) const {
-        // In a real implementation, this would check:
-        // - Backup availability
-        // - P2P peer availability
-        // - Parity data existence
-        // - Manifest availability for reconstruction
-
-        spdlog::debug("Checking repair availability for block {}", blockHash.substr(0, 8));
-
-        // For now, assume repair is always possible
-        return true;
+    auto hasher = yams::crypto::createSHA256Hasher();
+    hasher->init();
+    hasher->update(
+        std::span<const std::byte>(fetchResult.value().data(), fetchResult.value().size()));
+    auto computed = hasher->finalize();
+    if (computed != blockHash) {
+        spdlog::warn("Repaired data hash mismatch for {} (computed {})", blockHash.substr(0, 8),
+                     computed.substr(0, 8));
+        return false;
     }
 
-private:
-    bool repairFromBackup(const std::string& blockHash) {
-        spdlog::info("Attempting backup restoration for block {}", blockHash.substr(0, 8));
-
-        // TODO: Implement backup restoration
-        // This would:
-        // 1. Check backup storage for the block
-        // 2. Retrieve and verify the block
-        // 3. Restore to primary storage
-
-        return false; // Not implemented yet
+    auto storeRes =
+        storage_.store(blockHash, std::span<const std::byte>(fetchResult.value().data(),
+                                                             fetchResult.value().size()));
+    if (!storeRes.has_value()) {
+        spdlog::error("Failed to store repaired block {}: {}", blockHash.substr(0, 8),
+                      storeRes.error().message);
+        return false;
     }
+    return true;
+}
 
-    bool repairFromP2P(const std::string& blockHash) {
-        spdlog::info("Attempting P2P recovery for block {}", blockHash.substr(0, 8));
-
-        // TODO: Implement P2P recovery
-        // This would:
-        // 1. Query peers for block availability
-        // 2. Request block from available peers
-        // 3. Verify and store recovered block
-
-        return false; // Not implemented yet
-    }
-
-    bool repairFromParity(const std::string& blockHash) {
-        spdlog::info("Attempting parity recovery for block {}", blockHash.substr(0, 8));
-
-        // TODO: Implement Reed-Solomon recovery
-        // This would:
-        // 1. Locate parity blocks for the missing block
-        // 2. Perform Reed-Solomon reconstruction
-        // 3. Verify and store reconstructed block
-
-        return false; // Not implemented yet
-    }
-
-    bool reconstructFromManifest(const std::string& blockHash) {
-        spdlog::info("Attempting manifest reconstruction for block {}", blockHash.substr(0, 8));
-
-        // TODO: Implement manifest-based reconstruction
-        // This would:
-        // 1. Find manifests that reference this block
-        // 2. Attempt to rebuild from constituent parts
-        // 3. Verify reconstructed block
-
-        return false; // Not implemented yet
-    }
-};
+std::shared_ptr<RepairManager> makeRepairManager(storage::IStorageEngine& storage,
+                                                 RepairManagerConfig config) {
+    return std::make_shared<RepairManager>(storage, std::move(config));
+}
 
 } // namespace yams::integrity

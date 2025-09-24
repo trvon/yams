@@ -479,4 +479,9 @@ public:
 std::unique_ptr<IDownloadManager> makeDownloadManager(const StorageConfig& storage,
                                                       const DownloaderConfig& cfg);
 
+std::unique_ptr<IDownloadManager> makeDownloadManagerWithDependencies(
+    const StorageConfig& storage, const DownloaderConfig& cfg, std::unique_ptr<IHttpAdapter> http,
+    std::unique_ptr<IDiskWriter> disk, std::unique_ptr<IIntegrityVerifier> integ,
+    std::unique_ptr<IResumeStore> resume, std::unique_ptr<IRateLimiter> limiter);
+
 } // namespace yams::downloader

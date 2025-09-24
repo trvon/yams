@@ -237,6 +237,7 @@ jobs:
             liburing-dev \
             libarchive-dev \
             libtag1-dev \
+            pkg-config \
             ccache \
             rpm \
             fakeroot \

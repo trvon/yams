@@ -29,6 +29,12 @@ public:
             ->default_val(4);
 
         verify->add_flag("-r,--repair", attemptRepair_, "Attempt to repair corrupted blocks");
+        verify->add_option("--repair-backup-dir", repairBackupDir_,
+                           "Path to directory containing backup blocks by hash");
+        verify->add_option("--repair-p2p-dir", repairP2PDir_,
+                           "Path to directory simulating P2P blocks by hash");
+        verify->add_option("--repair-manifest-dir", repairManifestDir_,
+                           "Path to directory containing reconstructed blocks by hash");
 
         verify
             ->add_option("--report-interval", reportIntervalHours_,
@@ -58,6 +64,68 @@ public:
             config.enableAutoRepair = attemptRepair_;
 
             integrity::IntegrityVerifier verifier(*storage, *refCounter, config);
+
+            if (attemptRepair_) {
+                integrity::RepairManagerConfig rc;
+                if (!repairBackupDir_.empty()) {
+                    rc.backupFetcher =
+                        [this](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
+                        std::filesystem::path p = std::filesystem::path(repairBackupDir_) / hash;
+                        std::error_code ec;
+                        if (!std::filesystem::exists(p, ec)) {
+                            return yams::Error{yams::ErrorCode::NotFound, "backup not found"};
+                        }
+                        std::ifstream in(p, std::ios::binary);
+                        if (!in) {
+                            return yams::Error{yams::ErrorCode::IOError, "open failed"};
+                        }
+                        std::vector<char> buf((std::istreambuf_iterator<char>(in)), {});
+                        std::vector<std::byte> out(buf.size());
+                        std::memcpy(out.data(), buf.data(), buf.size());
+                        return out;
+                    };
+                }
+                if (!repairP2PDir_.empty()) {
+                    rc.p2pFetcher =
+                        [this](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
+                        std::filesystem::path p = std::filesystem::path(repairP2PDir_) / hash;
+                        std::error_code ec;
+                        if (!std::filesystem::exists(p, ec)) {
+                            return yams::Error{yams::ErrorCode::NotFound, "p2p not found"};
+                        }
+                        std::ifstream in(p, std::ios::binary);
+                        if (!in) {
+                            return yams::Error{yams::ErrorCode::IOError, "open failed"};
+                        }
+                        std::vector<char> buf((std::istreambuf_iterator<char>(in)), {});
+                        std::vector<std::byte> out(buf.size());
+                        std::memcpy(out.data(), buf.data(), buf.size());
+                        return out;
+                    };
+                }
+                if (!repairManifestDir_.empty()) {
+                    rc.manifestReconstructor =
+                        [this](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
+                        // For MVP, treat manifest dir like a prebuilt block store
+                        std::filesystem::path p = std::filesystem::path(repairManifestDir_) / hash;
+                        std::error_code ec;
+                        if (!std::filesystem::exists(p, ec)) {
+                            return yams::Error{yams::ErrorCode::NotFound,
+                                               "manifest block not found"};
+                        }
+                        std::ifstream in(p, std::ios::binary);
+                        if (!in) {
+                            return yams::Error{yams::ErrorCode::IOError, "open failed"};
+                        }
+                        std::vector<char> buf((std::istreambuf_iterator<char>(in)), {});
+                        std::vector<std::byte> out(buf.size());
+                        std::memcpy(out.data(), buf.data(), buf.size());
+                        return out;
+                    };
+                }
+                auto rm = integrity::makeRepairManager(*storage, std::move(rc));
+                verifier.setRepairManager(rm);
+            }
 
             // Handle specific hash verification
             if (!specificHash_.empty()) {

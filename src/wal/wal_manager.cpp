@@ -1,13 +1,39 @@
 #include <yams/wal/wal_manager.h>
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <sstream>
+#include <vector>
+
+#include <yams/compression/compressor_interface.h>
+
+namespace {
+
+bool isCompressedWalLog(const std::filesystem::path& path) {
+    return path.extension() == ".zst" && path.stem().extension() == ".log";
+}
+
+bool isWalLogFile(const std::filesystem::path& path) {
+    return path.extension() == ".log" || isCompressedWalLog(path);
+}
+
+std::optional<yams::compression::CompressionAlgorithm>
+compressionAlgorithmForPath(const std::filesystem::path& path) {
+    if (isCompressedWalLog(path)) {
+        return yams::compression::CompressionAlgorithm::Zstandard;
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 namespace yams::wal {
 
@@ -298,6 +324,94 @@ struct WALManager::Impl {
         return Result<uint64_t>(seqNum);
     }
 
+    Result<std::filesystem::path> compressLogFile(const std::filesystem::path& logPath) {
+        using namespace yams::compression;
+
+        auto compressor =
+            CompressionRegistry::instance().createCompressor(CompressionAlgorithm::Zstandard);
+        if (!compressor) {
+            return Result<std::filesystem::path>(
+                Error{ErrorCode::NotSupported, "Zstandard compression is not available"});
+        }
+
+        std::ifstream input(logPath, std::ios::binary | std::ios::ate);
+        if (!input) {
+            return Result<std::filesystem::path>(
+                Error{ErrorCode::FileNotFound,
+                      fmt::format("Unable to open WAL log for compression: {}", logPath.string())});
+        }
+
+        const auto fileSize = input.tellg();
+        if (fileSize < 0) {
+            return Result<std::filesystem::path>(
+                Error{ErrorCode::IOError,
+                      fmt::format("Failed to determine size of {}", logPath.string())});
+        }
+        input.seekg(0, std::ios::beg);
+
+        std::vector<std::byte> buffer(static_cast<size_t>(fileSize));
+        if (!buffer.empty()) {
+            input.read(reinterpret_cast<char*>(buffer.data()), fileSize);
+            if (!input) {
+                return Result<std::filesystem::path>(Error{
+                    ErrorCode::IOError,
+                    fmt::format("Failed to read WAL log {} for compression", logPath.string())});
+            }
+        }
+
+        auto compressionResult =
+            compressor->compress(std::span<const std::byte>(buffer.data(), buffer.size()), 0);
+        if (!compressionResult) {
+            return Result<std::filesystem::path>(compressionResult.error());
+        }
+
+        auto compressedPath = logPath;
+        compressedPath += ".zst";
+        auto tempPath = compressedPath;
+        tempPath += ".tmp";
+
+        std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            return Result<std::filesystem::path>(
+                Error{ErrorCode::WriteError,
+                      fmt::format("Unable to create temporary compressed WAL log {}",
+                                  tempPath.string())});
+        }
+
+        const auto& compressedData = compressionResult.value().data;
+        if (!compressedData.empty()) {
+            output.write(reinterpret_cast<const char*>(compressedData.data()),
+                         static_cast<std::streamsize>(compressedData.size()));
+            if (!output) {
+                return Result<std::filesystem::path>(
+                    Error{ErrorCode::WriteError,
+                          fmt::format("Failed to write compressed WAL log {}", tempPath.string())});
+            }
+        }
+
+        output.close();
+
+        std::error_code ec;
+        std::filesystem::rename(tempPath, compressedPath, ec);
+        if (ec) {
+            std::filesystem::remove(tempPath);
+            return Result<std::filesystem::path>(Error{
+                ErrorCode::IOError, fmt::format("Failed to finalize compressed WAL log {}: {}",
+                                                compressedPath.string(), ec.message())});
+        }
+
+        std::filesystem::remove(logPath, ec);
+        if (ec) {
+            spdlog::warn("Unable to remove uncompressed WAL log {} after compression: {}",
+                         logPath.string(), ec.message());
+        }
+
+        spdlog::info("Compressed WAL log {} -> {} ({} bytes -> {} bytes)", logPath.string(),
+                     compressedPath.string(), buffer.size(), compressedData.size());
+
+        return Result<std::filesystem::path>(compressedPath);
+    }
+
     Result<void> rotateLogs() {
         // Close current log
         if (currentLog) {
@@ -313,7 +427,11 @@ struct WALManager::Impl {
 
             // Optionally compress old log
             if (config.compressOldLogs) {
-                // TODO: Implement compression
+                auto compressResult = compressLogFile(currentLogPath);
+                if (!compressResult) {
+                    spdlog::warn("Failed to compress WAL log {}: {}", currentLogPath.string(),
+                                 compressResult.error().message);
+                }
             }
         }
 
@@ -343,18 +461,26 @@ Result<void> WALManager::initialize() {
     // Find the latest sequence number from existing logs
     uint64_t maxSeq = 0;
     for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
-        if (entry.path().extension() == ".log") {
-            // Parse sequence number from filename
-            auto stem = entry.path().stem().string();
-            auto lastUnderscore = stem.find_last_of('_');
-            if (lastUnderscore != std::string::npos) {
-                try {
-                    uint64_t seq = std::stoull(stem.substr(lastUnderscore + 1));
-                    maxSeq = std::max(maxSeq, seq);
-                } catch (...) {
-                    // Ignore parsing errors
-                }
-            }
+        if (!isWalLogFile(entry.path())) {
+            continue;
+        }
+
+        auto stemPath = entry.path().stem();
+        if (isCompressedWalLog(entry.path())) {
+            stemPath = stemPath.stem();
+        }
+
+        auto stem = stemPath.string();
+        auto lastUnderscore = stem.find_last_of('_');
+        if (lastUnderscore == std::string::npos) {
+            continue;
+        }
+
+        try {
+            uint64_t seq = std::stoull(stem.substr(lastUnderscore + 1));
+            maxSeq = std::max(maxSeq, seq);
+        } catch (...) {
+            // Ignore parsing errors for unexpected filenames
         }
     }
 
@@ -418,15 +544,17 @@ Result<WALManager::RecoveryStats> WALManager::recover(ApplyFunction applyEntry) 
     RecoveryStats stats;
     auto startTime = std::chrono::steady_clock::now();
 
-    // Find all log files
+    // Find all log files (compressed and uncompressed)
     std::vector<std::filesystem::path> logFiles;
-    for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
-        if (entry.path().extension() == ".log") {
-            logFiles.push_back(entry.path());
+    if (std::filesystem::exists(pImpl->config.walDirectory)) {
+        for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
+            if (isWalLogFile(entry.path())) {
+                logFiles.push_back(entry.path());
+            }
         }
     }
 
-    // Sort by modification time
+    // Sort by modification time to maintain chronological replay order
     std::ranges::sort(logFiles, [](const auto& a, const auto& b) {
         return std::filesystem::last_write_time(a) < std::filesystem::last_write_time(b);
     });
@@ -434,87 +562,166 @@ Result<WALManager::RecoveryStats> WALManager::recover(ApplyFunction applyEntry) 
     // Track active transactions
     std::map<uint64_t, std::vector<WALEntry>> activeTransactions;
 
+    auto applyOperation = [&](const WALEntry& opEntry) {
+        auto result = applyEntry(opEntry);
+        if (!result) {
+            spdlog::error("Failed to apply WAL entry (txn {}, op {}): {}",
+                          opEntry.header.transactionId, static_cast<int>(opEntry.header.operation),
+                          result.error().message);
+            stats.errorsEncountered++;
+        }
+    };
+
+    auto processEntry = [&](const WALEntry& entry) {
+        stats.entriesProcessed++;
+        stats.bytesProcessed += entry.totalSize();
+
+        pImpl->sequenceNumber = std::max(pImpl->sequenceNumber.load(), entry.header.sequenceNum);
+
+        switch (entry.header.operation) {
+            case WALEntry::OpType::BeginTransaction: {
+                activeTransactions[entry.header.transactionId] = {};
+                break;
+            }
+
+            case WALEntry::OpType::CommitTransaction: {
+                auto txnIt = activeTransactions.find(entry.header.transactionId);
+                if (txnIt != activeTransactions.end()) {
+                    for (const auto& txnEntry : txnIt->second) {
+                        applyOperation(txnEntry);
+                    }
+                    activeTransactions.erase(txnIt);
+                    stats.transactionsRecovered++;
+                }
+                break;
+            }
+
+            case WALEntry::OpType::Rollback: {
+                auto txnIt = activeTransactions.find(entry.header.transactionId);
+                if (txnIt != activeTransactions.end()) {
+                    activeTransactions.erase(txnIt);
+                    stats.transactionsRolledBack++;
+                }
+                break;
+            }
+
+            default: {
+                if (entry.header.transactionId > 0) {
+                    auto txnIt = activeTransactions.find(entry.header.transactionId);
+                    if (txnIt != activeTransactions.end()) {
+                        txnIt->second.push_back(entry);
+                    }
+                } else {
+                    applyOperation(entry);
+                }
+                break;
+            }
+        }
+    };
+
     // Process each log file
     for (const auto& logPath : logFiles) {
         spdlog::info("Recovering from log: {}", logPath.string());
 
-        WALFile logFile(logPath, WALFile::Mode::Read);
-        auto openResult = logFile.open();
-        if (!openResult) {
-            spdlog::error("Failed to open log file: {}", logPath.string());
-            stats.errorsEncountered++;
-            continue;
-        }
+        auto algorithm = compressionAlgorithmForPath(logPath);
 
-        // Process entries
-        spdlog::debug("Processing log file entries");
-        for (auto it = logFile.begin(); it != logFile.end(); ++it) {
-            spdlog::debug("Reading entry at iterator position");
-            auto entryOpt = *it;
-            if (!entryOpt) {
+        if (!algorithm) {
+            WALFile logFile(logPath, WALFile::Mode::Read);
+            auto openResult = logFile.open();
+            if (!openResult) {
+                spdlog::error("Failed to open log file: {}", logPath.string());
                 stats.errorsEncountered++;
                 continue;
             }
 
-            const auto& entry = entryOpt.value();
-            stats.entriesProcessed++;
-            stats.bytesProcessed += entry.totalSize();
+            for (auto it = logFile.begin(); it != logFile.end(); ++it) {
+                auto entryOpt = *it;
+                if (!entryOpt) {
+                    stats.errorsEncountered++;
+                    continue;
+                }
 
-            // Update sequence number
-            pImpl->sequenceNumber =
-                std::max(pImpl->sequenceNumber.load(), entry.header.sequenceNum);
+                processEntry(entryOpt.value());
+            }
+        } else {
+            using namespace yams::compression;
 
-            // Handle based on operation type
-            switch (entry.header.operation) {
-                case WALEntry::OpType::BeginTransaction: {
-                    activeTransactions[entry.header.transactionId] = {};
+            auto compressor = CompressionRegistry::instance().createCompressor(algorithm.value());
+            if (!compressor) {
+                spdlog::error("No compressor available to decompress WAL log {}", logPath.string());
+                stats.errorsEncountered++;
+                continue;
+            }
+
+            std::ifstream input(logPath, std::ios::binary | std::ios::ate);
+            if (!input) {
+                spdlog::error("Failed to open compressed WAL log {}", logPath.string());
+                stats.errorsEncountered++;
+                continue;
+            }
+
+            const auto compressedSize = input.tellg();
+            if (compressedSize < 0) {
+                spdlog::error("Failed to determine size of compressed WAL log {}",
+                              logPath.string());
+                stats.errorsEncountered++;
+                continue;
+            }
+            input.seekg(0, std::ios::beg);
+
+            std::vector<std::byte> compressed(static_cast<size_t>(compressedSize));
+            if (!compressed.empty()) {
+                input.read(reinterpret_cast<char*>(compressed.data()), compressedSize);
+                if (!input) {
+                    spdlog::error("Failed to read compressed WAL log {}", logPath.string());
+                    stats.errorsEncountered++;
+                    continue;
+                }
+            }
+
+            auto decompressedResult = compressor->decompress(
+                std::span<const std::byte>(compressed.data(), compressed.size()), 0);
+            if (!decompressedResult) {
+                spdlog::error("Failed to decompress WAL log {}: {}", logPath.string(),
+                              decompressedResult.error().message);
+                stats.errorsEncountered++;
+                continue;
+            }
+
+            const auto& decompressed = decompressedResult.value();
+            size_t offset = 0;
+            while (offset + sizeof(WALEntry::Header) <= decompressed.size()) {
+                WALEntry::Header header;
+                std::memcpy(&header, decompressed.data() + offset, sizeof(WALEntry::Header));
+
+                if (!header.isValid()) {
+                    spdlog::error("Invalid WAL entry header encountered in {}", logPath.string());
+                    stats.errorsEncountered++;
                     break;
                 }
 
-                case WALEntry::OpType::CommitTransaction: {
-                    auto txnIt = activeTransactions.find(entry.header.transactionId);
-                    if (txnIt != activeTransactions.end()) {
-                        // Apply all operations in transaction
-                        for (const auto& txnEntry : txnIt->second) {
-                            auto result = applyEntry(txnEntry);
-                            if (!result) {
-                                spdlog::error("Failed to apply entry: {}", result.error().message);
-                                stats.errorsEncountered++;
-                            }
-                        }
-                        activeTransactions.erase(txnIt);
-                        stats.transactionsRecovered++;
-                    }
+                const size_t entrySize = sizeof(WALEntry::Header) + header.dataSize;
+                if (offset + entrySize > decompressed.size()) {
+                    spdlog::error("Incomplete WAL entry detected in {}", logPath.string());
+                    stats.errorsEncountered++;
                     break;
                 }
 
-                case WALEntry::OpType::Rollback: {
-                    auto txnIt = activeTransactions.find(entry.header.transactionId);
-                    if (txnIt != activeTransactions.end()) {
-                        activeTransactions.erase(txnIt);
-                        stats.transactionsRolledBack++;
-                    }
+                auto entryOpt = WALEntry::deserialize(
+                    std::span<const std::byte>(decompressed.data() + offset, entrySize));
+                if (!entryOpt) {
+                    spdlog::error("Failed to deserialize WAL entry in {}", logPath.string());
+                    stats.errorsEncountered++;
                     break;
                 }
 
-                default: {
-                    // Regular operation
-                    if (entry.header.transactionId > 0) {
-                        // Part of transaction - queue it
-                        auto txnIt = activeTransactions.find(entry.header.transactionId);
-                        if (txnIt != activeTransactions.end()) {
-                            txnIt->second.push_back(entry);
-                        }
-                    } else {
-                        // Non-transactional - apply immediately
-                        auto result = applyEntry(entry);
-                        if (!result) {
-                            spdlog::error("Failed to apply entry: {}", result.error().message);
-                            stats.errorsEncountered++;
-                        }
-                    }
-                    break;
-                }
+                processEntry(entryOpt.value());
+                offset += entrySize;
+            }
+
+            if (offset != decompressed.size()) {
+                spdlog::warn("Compressed WAL log {} had {} trailing bytes after recovery",
+                             logPath.string(), decompressed.size() - offset);
             }
         }
     }
@@ -565,7 +772,7 @@ Result<void> WALManager::pruneLogs(std::chrono::hours retention) {
     size_t prunedCount = 0;
 
     for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
-        if (entry.path().extension() == ".log" && entry.path() != pImpl->currentLogPath) {
+        if (isWalLogFile(entry.path()) && entry.path() != pImpl->currentLogPath) {
             auto lastWrite = std::filesystem::last_write_time(entry);
             auto lastWriteTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                 lastWrite - std::filesystem::file_time_type::clock::now() +
@@ -626,7 +833,7 @@ WALManager::Stats WALManager::getStats() const {
     size_t logCount = 0;
     if (std::filesystem::exists(pImpl->config.walDirectory)) {
         for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
-            if (entry.path().extension() == ".log") {
+            if (isWalLogFile(entry.path())) {
                 logCount++;
             }
         }

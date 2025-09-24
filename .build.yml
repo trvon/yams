@@ -394,6 +394,9 @@ tasks:
         fi
       fi
 
+      echo "collect_artifacts completed successfully"
+      exit 0
+
 artifacts:
   # SourceHut interprets artifact names literally (no shell globs). Provide
   # stable filenames in collect_artifacts.

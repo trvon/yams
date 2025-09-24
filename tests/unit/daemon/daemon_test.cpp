@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <gtest/gtest.h>
 #include <yams/daemon/daemon.h>
@@ -20,24 +21,19 @@ using namespace std::chrono_literals;
 class DaemonTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Clean up any existing daemon files
         cleanupDaemonFiles();
 
-        // Create test config
-        auto tmp = fs::temp_directory_path();
+        fs::path tmp{"/tmp"};
+        auto unique_suffix =
+            std::to_string(::getpid()) + "_" +
+            std::to_string(static_cast<unsigned long>(reinterpret_cast<uintptr_t>(this) & 0xffff));
 
-        // Use real home directory for model resolution, not temp directory
-        const char* home = std::getenv("HOME");
-        if (home && strlen(home) > 0) {
-            config_.dataDir = fs::path(home) / ".yams";
-        } else {
-            config_.dataDir = tmp / "yams_test_data";
-        }
+        runtime_root_ = tmp / ("ydtest_" + unique_suffix);
 
-        // Other paths can still use temp directory
-        config_.socketPath = tmp / "test_yams_daemon.sock";
-        config_.pidFile = tmp / "test_yams_daemon.pid";
-        config_.logFile = tmp / "test_yams_daemon.log";
+        config_.dataDir = runtime_root_ / "data";
+        config_.socketPath = runtime_root_ / "sock";
+        config_.pidFile = runtime_root_ / "daemon.pid";
+        config_.logFile = runtime_root_ / "daemon.log";
         config_.workerThreads = 2;
         config_.maxMemoryGb = 1.0;
 
@@ -59,12 +55,17 @@ protected:
 
         std::error_code se;
         fs::create_directories(config_.dataDir, se);
+
+        ::setenv("YAMS_RUNTIME_DIR", runtime_root_.string().c_str(), 1);
+        ::setenv("YAMS_SOCKET_PATH", config_.socketPath.string().c_str(), 1);
+        ::setenv("YAMS_PID_FILE", config_.pidFile.string().c_str(), 1);
     }
 
     void TearDown() override {
         // Stop daemon if running
         if (daemon_) {
             daemon_->stop();
+            daemon_.reset();
         }
 
         // Clean up test files
@@ -73,15 +74,28 @@ protected:
 
     void cleanupDaemonFiles() {
         std::error_code ec;
-        auto tmp = fs::temp_directory_path();
-        fs::remove(tmp / "test_yams_daemon.sock", ec);
-        fs::remove(tmp / "test_yams_daemon.pid", ec);
-        fs::remove(tmp / "test_yams_daemon.log", ec);
-        fs::remove_all(tmp / "yams_test_data", ec);
+        if (!runtime_root_.empty()) {
+            fs::remove_all(runtime_root_, ec);
+        }
+    }
+
+    static bool isSocketPermissionDenied(const yams::Error& error) {
+        const std::string_view message{error.message};
+        return message.find("Operation not permitted") != std::string_view::npos ||
+               message.find("Permission denied") != std::string_view::npos;
+    }
+
+    void handleStartFailure(std::string_view context, const yams::Error& error) {
+        if (isSocketPermissionDenied(error)) {
+            GTEST_SKIP() << "Skipping " << context
+                         << " because UNIX domain sockets are not permitted: " << error.message;
+        }
+        FAIL() << "Failed to start daemon for " << context << ": " << error.message;
     }
 
     DaemonConfig config_;
     std::unique_ptr<YamsDaemon> daemon_;
+    fs::path runtime_root_;
 };
 
 // Test daemon creation and destruction
@@ -98,8 +112,11 @@ TEST_F(DaemonTest, StartStop) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
 
     // Start daemon
-    auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+    auto startResult = daemon_->start();
+    if (!startResult) {
+        handleStartFailure("StartStop initial start", startResult.error());
+        return;
+    }
 
     // Should be running
     EXPECT_TRUE(daemon_->isRunning());
@@ -111,7 +128,7 @@ TEST_F(DaemonTest, StartStop) {
     // Do not assert socket path existence here.
 
     // Stop daemon
-    result = daemon_->stop();
+    auto result = daemon_->stop();
     ASSERT_TRUE(result) << "Failed to stop daemon: " << result.error().message;
 
     // Should not be running
@@ -127,7 +144,10 @@ TEST_F(DaemonTest, SingleInstance) {
 
     // Start first daemon
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start first daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("SingleInstance first start", result.error());
+        return;
+    }
 
     // Try to start second daemon with same config
     auto daemon2 = std::make_unique<YamsDaemon>(config_);
@@ -145,7 +165,10 @@ TEST_F(DaemonTest, Restart) {
 
     // Start daemon
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("Restart first start", result.error());
+        return;
+    }
 
     // Stop daemon
     result = daemon_->stop();
@@ -153,7 +176,10 @@ TEST_F(DaemonTest, Restart) {
 
     // Start again
     result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to restart daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("Restart second start", result.error());
+        return;
+    }
 
     // Should be running
     EXPECT_TRUE(daemon_->isRunning());
@@ -179,7 +205,10 @@ TEST_F(DaemonTest, SignalHandling) {
 
     // Start daemon
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("SignalHandling start", result.error());
+        return;
+    }
 
     // Get PID from file
     std::ifstream pidFile(config_.pidFile);
@@ -208,7 +237,10 @@ TEST_F(DaemonTest, StalePidFileCleanup) {
 
     // Should be able to start despite stale PID file
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon with stale PID: " << result.error().message;
+    if (!result) {
+        handleStartFailure("StalePid start", result.error());
+        return;
+    }
 
     // Should be running
     EXPECT_TRUE(daemon_->isRunning());
@@ -230,38 +262,57 @@ TEST_F(DaemonTest, InvalidConfiguration) {
 
 // Test concurrent start attempts
 TEST_F(DaemonTest, ConcurrentStart) {
-    daemon_ = std::make_unique<YamsDaemon>(config_);
-
     std::atomic<int> successCount{0};
     std::atomic<int> failCount{0};
 
-    // Try to start daemon from multiple threads
+    {
+        YamsDaemon probe(config_);
+        auto result = probe.start();
+        if (!result) {
+            handleStartFailure("ConcurrentStart probe", result.error());
+            return;
+        }
+        probe.stop();
+    }
+
+    // Try to start multiple daemon instances concurrently with the same config.
+    std::once_flag startedFlag;
+    std::promise<void> startedPromise;
+    auto startedFuture = startedPromise.get_future().share();
+    std::promise<void> releasePromise;
+    auto releaseFuture = releasePromise.get_future().share();
+
     std::vector<std::thread> threads;
-    for (int i = 0; i < 5; ++i) {
-        threads.emplace_back([this, &successCount, &failCount]() {
-            auto result = daemon_->start();
+    constexpr int kAttempts = 5;
+    threads.reserve(kAttempts);
+    for (int i = 0; i < kAttempts; ++i) {
+        threads.emplace_back([this, &successCount, &failCount, &startedFlag, startedFuture,
+                              &startedPromise, releaseFuture]() {
+            YamsDaemon local(config_);
+            auto result = local.start();
             if (result) {
-                successCount++;
+                successCount.fetch_add(1, std::memory_order_relaxed);
+                std::call_once(startedFlag, [&]() { startedPromise.set_value(); });
+                releaseFuture.wait();
+                local.stop();
             } else {
-                failCount++;
+                startedFuture.wait();
+                failCount.fetch_add(1, std::memory_order_relaxed);
             }
         });
     }
 
-    // Wait for all threads
+    if (startedFuture.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
+        startedPromise.set_value();
+    }
+    releasePromise.set_value();
+
     for (auto& t : threads) {
         t.join();
     }
 
-    // Only one should succeed
-    EXPECT_EQ(successCount, 1);
-    EXPECT_EQ(failCount, 4);
-
-    // Should be running
-    EXPECT_TRUE(daemon_->isRunning());
-
-    // Stop daemon
-    daemon_->stop();
+    EXPECT_EQ(successCount.load(), 1);
+    EXPECT_EQ(failCount.load(), kAttempts - 1);
 }
 
 // Test daemon stats tracking
@@ -270,7 +321,10 @@ TEST_F(DaemonTest, StatsTracking) {
 
     // Start daemon
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("StatsTracking start", result.error());
+        return;
+    }
 
     // Get initial state
     [[maybe_unused]] const auto& state = daemon_->getState();
@@ -285,7 +339,10 @@ TEST_F(DaemonTest, StatsTracking) {
 TEST_F(DaemonTest, HybridSearchSmoke) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("HybridSearchSmoke start", result.error());
+        return;
+    }
 
 #ifdef YAMS_TESTING
     // Note: Test helper methods may not be available in current implementation
@@ -359,7 +416,10 @@ TEST_F(DaemonTest, HybridSearchSmoke) {
 TEST_F(DaemonTest, FallbackSearchWhenHybridUnavailable) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     auto result = daemon_->start();
-    ASSERT_TRUE(result) << "Failed to start daemon: " << result.error().message;
+    if (!result) {
+        handleStartFailure("FallbackSearch start", result.error());
+        return;
+    }
 
     // Prefer fuzzy path explicitly
     SearchRequest req;
@@ -431,8 +491,11 @@ TEST_F(DaemonTest, StartFailsWithInvalidDataDir) {
 
 TEST_F(DaemonTest, WarmLatencyBenchmark) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
-    auto startRes = daemon_->start();
-    ASSERT_TRUE(startRes) << "Failed to start daemon: " << startRes.error().message;
+    auto result = daemon_->start();
+    if (!result) {
+        handleStartFailure("WarmLatencyBenchmark start", result.error());
+        return;
+    }
 
     long long total_ms = 0;
 #ifdef GTEST_API_

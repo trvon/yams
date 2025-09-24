@@ -10,8 +10,11 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <execution>
 #include <future>
+#include <mutex>
+#include <thread>
 
 namespace yams::integrity {
 
@@ -172,21 +175,33 @@ std::vector<ChunkValidationResult> ChunkValidator::validateChunks(
     std::vector<ChunkValidationResult> results;
     results.reserve(chunks.size());
 
-    // Use parallel execution if configured and beneficial
-    // Note: std::execution::par_unseq not available in current implementation
-    // TODO: Implement parallel validation using thread pool when needed
-    if (false && config_.maxParallelValidations > 1 && chunks.size() > 10) {
-        std::mutex resultsMutex;
+    if (config_.maxParallelValidations > 1 && chunks.size() > 1) {
+        const std::size_t workerCount =
+            std::min<std::size_t>(config_.maxParallelValidations, chunks.size());
 
-        // Parallel execution would go here when std::execution is available
-        // std::for_each(std::execution::par_unseq,
-        //              chunks.begin(), chunks.end(),
-        //              [this, &results, &resultsMutex](const auto& chunk) {
-        //     auto result = validateChunk(chunk.first, chunk.second);
-        //
-        //     std::lock_guard lock(resultsMutex);
-        //     results.push_back(result);
-        // });
+        std::vector<ChunkValidationResult> parallelResults(chunks.size());
+        std::atomic<std::size_t> nextIndex{0};
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+
+        auto worker = [this, &chunks, &parallelResults, &nextIndex]() {
+            while (true) {
+                const std::size_t idx = nextIndex.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= chunks.size())
+                    break;
+                const auto& entry = chunks[idx];
+                parallelResults[idx] = validateChunk(entry.first, entry.second);
+            }
+        };
+
+        for (std::size_t i = 0; i < workerCount; ++i) {
+            workers.emplace_back(worker);
+        }
+        for (auto& thread : workers) {
+            thread.join();
+        }
+
+        return parallelResults;
     } else {
         // Sequential validation
         for (const auto& [data, hash] : chunks) {
@@ -206,7 +221,10 @@ std::future<ValidationReport> ChunkValidator::validateManifestAsync(
 }
 
 std::string ChunkValidator::calculateHash(std::span<const std::byte> data) {
-    return hasher_->hash(data);
+    auto hasher = crypto::createSHA256Hasher();
+    hasher->init();
+    hasher->update(data);
+    return hasher->finalize();
 }
 
 ChunkValidationResult ChunkValidator::validateChunkInternal(std::span<const std::byte> chunkData,
