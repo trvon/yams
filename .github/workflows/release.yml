@@ -533,33 +533,27 @@ jobs:
             esac
           fi
           conan install . $CONAN_ARGS
-          # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
-          if [ -f "build/release/build-release/conan/conanrun.sh" ]; then
-            source build/release/build-release/conan/conanrun.sh
+          # Find and source the Conan-generated environment script.
+          CONAN_RUN_SH=$(find build/release -name conanrun.sh -print -quit)
+          if [ -f "$CONAN_RUN_SH" ]; then
+            echo "Sourcing Conan environment from: $CONAN_RUN_SH"
+            source "$CONAN_RUN_SH"
           fi
-          # Resolve Conan Meson toolchain file robustly across Conan versions
-          TOOLCHAIN_DIR="build/release/build-release/conan"
-          NATIVE_FILE="$TOOLCHAIN_DIR/conan_meson_native.ini"
-          CROSS_FILE="$TOOLCHAIN_DIR/conan_meson_cross.ini"
-          if [ -f "$NATIVE_FILE" ]; then
-            MESON_TOOL_ARG=(--native-file "$NATIVE_FILE")
-          elif [ -f "$CROSS_FILE" ]; then
-            MESON_TOOL_ARG=(--cross-file "$CROSS_FILE")
-          else
-            echo "Meson toolchain file not found in $TOOLCHAIN_DIR; listing directory for diagnostics:" >&2
-            ls -al "$TOOLCHAIN_DIR" >&2 || true
-            # Last resort: search within build/release for either native or cross file
-            FOUND=$(find build/release -maxdepth 3 -type f \( -name 'conan_meson_native.ini' -o -name 'conan_meson_cross.ini' \) | head -n1)
-            if [ -n "$FOUND" ]; then
-              case "$FOUND" in
-                *native*) MESON_TOOL_ARG=(--native-file "$FOUND") ;;
-                *cross*) MESON_TOOL_ARG=(--cross-file "$FOUND") ;;
-              esac
-            else
-              echo "ERROR: Cannot find specified Meson toolchain file" >&2
-              exit 1
-            fi
+
+          # Find the Meson toolchain file using a search.
+          TOOLCHAIN_FILE=$(find build/release -maxdepth 4 -type f \( -name 'conan_meson_native.ini' -o -name 'conan_meson_cross.ini' \) | head -n1)
+
+          if [ -z "$TOOLCHAIN_FILE" ]; then
+            echo "ERROR: Could not find Meson toolchain file in build/release" >&2
+            ls -R build/release >&2
+            exit 1
           fi
+
+          echo "Found Meson toolchain file: $TOOLCHAIN_FILE"
+          case "$TOOLCHAIN_FILE" in
+            *native*) MESON_TOOL_ARG=(--native-file "$TOOLCHAIN_FILE") ;;
+            *cross*) MESON_TOOL_ARG=(--cross-file "$TOOLCHAIN_FILE") ;;
+          esac
           # Ensure pkg-config is discoverable for Meson
           if [ "$RUNNER_OS" = "macOS" ]; then
             export PKG_CONFIG=${PKG_CONFIG:-/opt/homebrew/bin/pkg-config}

@@ -105,9 +105,6 @@ private:
     std::atomic<bool> writerRunning_{false};
     void writerLoop();
 
-    // Capture output buffer at construction to respect caller redirections (e.g., tests)
-    std::streambuf* outbuf_{nullptr};
-
     // Helper for non-blocking stdin check
     bool isInputAvailable(int timeoutMs = 100) const;
 

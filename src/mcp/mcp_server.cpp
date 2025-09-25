@@ -213,8 +213,6 @@ StdioTransport::StdioTransport() {
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
-    // Capture the current stdout buffer so we honor caller redirections (tests set rdbuf)
-    outbuf_ = std::cout.rdbuf();
     // Configure receive timeout from environment, enforce a sane minimum
     if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
         try {
@@ -259,20 +257,13 @@ void StdioTransport::send(const json& message) {
         try {
             std::lock_guard<std::mutex> lock(out_mutex_);
             const std::string payload = message.dump();
-            // Temporarily bind std::cout to captured buffer to honor test redirections
-            std::streambuf* saved = std::cout.rdbuf();
-            if (outbuf_) {
-                (void)std::cout.rdbuf(outbuf_);
-            }
+            auto& out = std::cout;
             // Minimal MCP framing, always including Content-Type header for interop
-            std::cout << "Content-Length: " << payload.size() << "\r\n";
-            std::cout << "Content-Type: " << contentTypeHeader_ << "\r\n";
-            std::cout << "\r\n";
-            std::cout << payload;
-            std::cout.flush();
-            if (saved) {
-                (void)std::cout.rdbuf(saved);
-            }
+            out << "Content-Length: " << payload.size() << "\r\n";
+            out << "Content-Type: " << contentTypeHeader_ << "\r\n";
+            out << "\r\n";
+            out << payload;
+            out.flush();
         } catch (const std::exception& e) {
             spdlog::error("StdioTransport::send exception: {}", e.what());
         } catch (...) {
@@ -288,15 +279,9 @@ void StdioTransport::sendNdjson(const json& message) {
     try {
         std::lock_guard<std::mutex> lock(out_mutex_);
         const std::string payload = message.dump();
-        std::streambuf* saved = std::cout.rdbuf();
-        if (outbuf_) {
-            (void)std::cout.rdbuf(outbuf_);
-        }
-        std::cout << payload << "\n";
-        std::cout.flush();
-        if (saved) {
-            (void)std::cout.rdbuf(saved);
-        }
+        auto& out = std::cout;
+        out << payload << "\n";
+        out.flush();
     } catch (const std::exception& e) {
         spdlog::error("StdioTransport::sendNdjson exception: {}", e.what());
     } catch (...) {
@@ -311,18 +296,12 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
     }
     try {
         std::lock_guard<std::mutex> lock(out_mutex_);
-        std::streambuf* saved = std::cout.rdbuf();
-        if (outbuf_) {
-            (void)std::cout.rdbuf(outbuf_);
-        }
-        std::cout << "Content-Length: " << payload.size() << "\r\n";
-        std::cout << "Content-Type: " << contentTypeHeader_ << "\r\n";
-        std::cout << "\r\n";
-        std::cout << payload;
-        std::cout.flush();
-        if (saved) {
-            (void)std::cout.rdbuf(saved);
-        }
+        auto& out = std::cout;
+        out << "Content-Length: " << payload.size() << "\r\n";
+        out << "Content-Type: " << contentTypeHeader_ << "\r\n";
+        out << "\r\n";
+        out << payload;
+        out.flush();
     } catch (const std::exception& e) {
         spdlog::error("StdioTransport::sendFramedSerialized exception: {}", e.what());
     } catch (...) {
