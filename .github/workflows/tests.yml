@@ -24,7 +24,7 @@ jobs:
       matrix:
         include:
           - suffix: linux-x86_64
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-24.04
             conan_host_profile: ./conan/profiles/host-linux-clang
             conan_arch: x86_64
             needs_rosetta: false
@@ -257,17 +257,19 @@ jobs:
           meson compile -C ${{ env.BUILD_DIR }}
 
       - name: Run Tests with Meson (native)
+        id: meson_tests_native
         if: ${{ !matrix.needs_rosetta }}
         shell: bash
-        continue-on-error: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+        continue-on-error: true
         run: |
           cd ${{ env.BUILD_DIR }}
           meson test --print-errorlogs
 
       - name: Run Tests with Meson (Rosetta x86_64)
+        id: meson_tests_rosetta
         if: ${{ matrix.needs_rosetta }}
         shell: bash
-        continue-on-error: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+        continue-on-error: true
         run: |
           # Ensure Rosetta is present (idempotent)
           softwareupdate --install-rosetta --agree-to-license || true
@@ -275,7 +277,7 @@ jobs:
           arch -x86_64 meson test --print-errorlogs
 
       - name: Upload test logs (artifacts)
-        if: failure()
+        if: ${{ steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.suffix }}-${{ github.run_number }}
@@ -293,6 +295,13 @@ jobs:
         run: |
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce failure on protected branches
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && (steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
+        shell: bash
+        run: |
+          echo "Meson tests reported failures; enforcing job failure for protected branch." >&2
+          exit 1
 
       - name: Generate Coverage Report
         if: matrix.coverage == true

@@ -107,10 +107,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && rm -rf /var/lib/apt/lists/*
 RUN groupadd -r yams && useradd -r -g yams -s /bin/false yams
 COPY --from=builder /opt/yams /opt/yams
-ENV PATH="/opt/yams/bin:${PATH}"
+ENV YAMS_PREFIX=/opt/yams/usr/local
+ENV PATH="${YAMS_PREFIX}/bin:${PATH}"
 # Backward compatibility: retain standalone yams symlink
-RUN ln -sf /opt/yams/bin/yams /usr/local/bin/yams && \
-  if [ -f /opt/yams/bin/yams-daemon ]; then ln -sf /opt/yams/bin/yams-daemon /usr/local/bin/yams-daemon; fi && \
+RUN ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
+  if [ -f ${YAMS_PREFIX}/bin/yams-daemon ]; then ln -sf ${YAMS_PREFIX}/bin/yams-daemon /usr/local/bin/yams-daemon; fi && \
   mkdir -p /usr/local/share/yams/data && \
   [ -f /src/data/magic_numbers.json ] || true
 COPY --from=builder /src/data/magic_numbers.json /usr/local/share/yams/data
