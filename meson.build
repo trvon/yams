@@ -11,6 +11,10 @@ project('yams', ['cpp', 'c'],
 fs = import('fs')
 pkg = import('pkgconfig')
 
+if host_machine.system() == 'darwin'
+  add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
+endif
+
 # --- Version header generation ---
 _override_version = get_option('yams-version')
 _effective_version = _override_version != '' ? _override_version : meson.project_version()
