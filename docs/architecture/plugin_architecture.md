@@ -14,6 +14,12 @@ This document describes the plugin system and content extraction architecture, c
 - Manifests conform to `docs/spec/plugin_metadata.schema.json`.
 - Interfaces are versioned; see `docs/spec/plugin_spec.md` and `docs/spec/wit/*`.
 
+### Provider categories (examples)
+- Storage: `object_storage_v1`
+- DR: `dr_provider_v1`
+- Models: `model_provider_v1`
+- Graphs: `graph_adapter_v1` (property-graph read interface with optional import/export/deltas)
+
 ## Runtimes
 
 - ABI loader: loads native libraries, fetches manifest via exported symbol, and enforces name policy from manifest when configured.
@@ -33,4 +39,3 @@ This document describes the plugin system and content extraction architecture, c
 See also
 - API examples: `docs/api/examples/storage_plugin/*.manifest.json`
 - Design: Content Handler Architecture (`docs/design/content-handler-architecture.md`)
-

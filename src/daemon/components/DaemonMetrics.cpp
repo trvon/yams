@@ -441,6 +441,29 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
             }
+            // Heal/mirror readiness from the actual handle if present: if a live vector DB
+            // instance exists and is initialized, consider it ready even if the flag wasn't
+            // updated earlier (e.g., lock-skips, reordered init). This avoids false negatives in
+            // doctor/status while embeddings and vector storage are operational.
+            try {
+                auto vdb = services_->getVectorDatabase();
+                if (vdb && vdb->isInitialized()) {
+                    out.vectorDbReady = true;
+                    // Best-effort: propagate back to state so subsequent snapshots are consistent
+                    try {
+                        auto& readiness =
+                            const_cast<yams::daemon::DaemonReadiness&>(state_->readiness);
+                        readiness.vectorDbReady.store(true, std::memory_order_relaxed);
+                        auto dim = vdb->getConfig().embedding_dim;
+                        if (dim > 0)
+                            readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
+                                                        std::memory_order_relaxed);
+                        out.vectorDbDim = static_cast<uint32_t>(dim);
+                    } catch (...) {
+                    }
+                }
+            } catch (...) {
+            }
             // Size via filepath
             try {
                 auto dd = services_->getResolvedDataDir();
@@ -475,7 +498,14 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                             cfg.database_path = vdbp.string();
                             auto tmp = std::make_unique<yams::vector::VectorDatabase>(cfg);
                             if (tmp->initialize()) {
+                                // DB is openable; consider it ready for the purposes of status
+                                // to avoid misleading "not ready" reports when storage exists.
+                                out.vectorDbReady = true;
                                 out.vectorRowsExact = tmp->getVectorCount();
+                                if (out.vectorDbDim == 0 && tmp->getConfig().embedding_dim > 0) {
+                                    out.vectorDbDim =
+                                        static_cast<uint32_t>(tmp->getConfig().embedding_dim);
+                                }
                             }
                         }
                     }

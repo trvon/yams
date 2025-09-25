@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -86,13 +87,74 @@ static bool wildcardMatch(const std::string& text, const std::string& pattern) {
 }
 
 // Presence-based tag match using metadata repository
+static bool isTransientMetadataError(const Error& err) {
+    switch (err.code) {
+        case ErrorCode::NotInitialized:
+        case ErrorCode::DatabaseError:
+        case ErrorCode::ResourceBusy:
+        case ErrorCode::OperationInProgress:
+        case ErrorCode::Timeout:
+            return true;
+        case ErrorCode::InternalError: {
+            const auto& msg = err.message;
+            return msg.find("database is locked") != std::string::npos ||
+                   msg.find("readonly") != std::string::npos ||
+                   msg.find("busy") != std::string::npos;
+        }
+        default:
+            return false;
+    }
+}
+
+struct MetadataTelemetry {
+    std::atomic<std::uint64_t> operations{0};
+    std::atomic<std::uint64_t> retries{0};
+    std::atomic<std::uint64_t> transientFailures{0};
+};
+
+template <typename Fn>
+auto retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
+                     std::chrono::milliseconds initialDelay = std::chrono::milliseconds(25),
+                     MetadataTelemetry* telemetry = nullptr) -> decltype(fn()) {
+    using ResultT = decltype(fn());
+    if (telemetry)
+        telemetry->operations.fetch_add(1, std::memory_order_relaxed);
+    auto attempt = fn();
+    if (attempt)
+        return attempt;
+
+    auto delay = initialDelay;
+    bool transient = isTransientMetadataError(attempt.error());
+    if (telemetry && transient)
+        telemetry->transientFailures.fetch_add(1, std::memory_order_relaxed);
+
+    for (std::size_t i = 1; i < maxAttempts && transient; ++i) {
+        if (telemetry)
+            telemetry->retries.fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(delay);
+        delay = std::min(delay * 2, std::chrono::milliseconds(250));
+        attempt = fn();
+        if (attempt)
+            return attempt;
+        transient = isTransientMetadataError(attempt.error());
+        if (telemetry && transient)
+            telemetry->transientFailures.fetch_add(1, std::memory_order_relaxed);
+    }
+    return attempt;
+}
+
 static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
-                            const std::vector<std::string>& tags, bool matchAll) {
+                            const std::vector<std::string>& tags, bool matchAll,
+                            MetadataTelemetry* telemetry = nullptr) {
     if (!repo || tags.empty())
         return true;
-    auto md = repo->getAllMetadata(docId);
-    if (!md)
+    auto md = retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
+                              std::chrono::milliseconds(25), telemetry);
+    if (!md) {
+        spdlog::debug("SearchService: metadata lookup failed for doc {}: {}", docId,
+                      md.error().message);
         return false;
+    }
     auto& all = md.value();
 
     auto hasTag = [&](const std::string& t) {
@@ -224,6 +286,7 @@ public:
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
+        MetadataTelemetry metadataTelemetry;
 
         // Validate dependencies
         if (!ctx_.metadataRepo) {
@@ -261,13 +324,13 @@ public:
                 co_return Error{ErrorCode::InvalidArgument,
                                 "Invalid hash format (expected hex, 8-64 chars)"};
             }
-            auto result = searchByHashPrefix(normalizedReq);
+            auto result = searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             co_return result;
         }
 
         if (looksLikeHash(normalizedReq.query)) {
-            auto result = searchByHashPrefix(normalizedReq);
+            auto result = searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             co_return result;
         }
@@ -286,7 +349,7 @@ public:
             if (degraded_) {
                 spdlog::warn("SearchService: degraded mode active{}",
                              repairDetails_.empty() ? "" : (std::string(": ") + repairDetails_));
-                result = metadataSearch(normalizedReq);
+                result = metadataSearch(normalizedReq, &metadataTelemetry);
                 if (result) {
                     auto resp = std::move(result).value();
                     resp.queryInfo =
@@ -301,10 +364,10 @@ public:
                     result = Result<SearchResponse>(std::move(resp));
                 }
             } else if (ctx_.hybridEngine) {
-                result = hybridSearch(normalizedReq, parsed.scope);
+                result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry);
             } else {
                 spdlog::warn("Hybrid engine unavailable, using metadata fallback");
-                result = metadataSearch(normalizedReq);
+                result = metadataSearch(normalizedReq, &metadataTelemetry);
                 if (result) {
                     auto resp = std::move(result).value();
                     resp.searchStats["mode"] = "degraded";
@@ -313,7 +376,7 @@ public:
                 }
             }
         } else {
-            result = metadataSearch(normalizedReq);
+            result = metadataSearch(normalizedReq, &metadataTelemetry);
         }
 
         setExecTime(result, t0);
@@ -324,7 +387,7 @@ public:
             if (enhancedCfg_.enable) {
                 enhanced_.apply(ctx_, enhancedCfg_, normalizedReq.query, resp.results);
             }
-            co_await hydrateSnippetsAsync_worker(normalizedReq, resp);
+            co_await hydrateSnippetsAsync_worker(normalizedReq, resp, &metadataTelemetry);
             result = Result<SearchResponse>(std::move(resp));
         }
 
@@ -351,6 +414,20 @@ public:
         }
 #endif
 
+        if (result) {
+            auto resp = std::move(result).value();
+            auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
+            resp.executionTimeMs = static_cast<int64_t>(totalElapsed);
+            resp.searchStats["latency_ms"] = std::to_string(totalElapsed);
+            resp.searchStats["metadata_operations"] =
+                std::to_string(metadataTelemetry.operations.load(std::memory_order_relaxed));
+            resp.searchStats["metadata_retries"] =
+                std::to_string(metadataTelemetry.retries.load(std::memory_order_relaxed));
+            resp.searchStats["metadata_transient_failures"] =
+                std::to_string(metadataTelemetry.transientFailures.load(std::memory_order_relaxed));
+            result = Result<SearchResponse>(std::move(resp));
+        }
+
         co_return result;
     }
 
@@ -360,7 +437,7 @@ public:
             if (!ctx_.metadataRepo) {
                 return Error{ErrorCode::NotInitialized, "metadata repository not available"};
             }
-            auto di = ctx_.metadataRepo->getDocumentByHash(hash);
+            auto di = retryMetadataOp([&]() { return ctx_.metadataRepo->getDocumentByHash(hash); });
             if (!di) {
                 return di.error();
             }
@@ -443,17 +520,19 @@ public:
             }
 
             // Index into FTS5 and fuzzy index
-            (void)ctx_.metadataRepo->indexDocumentContent(info.id, info.fileName, text,
-                                                          mime.empty() ? "text/plain" : mime);
-            (void)ctx_.metadataRepo->updateFuzzyIndex(info.id);
+            (void)retryMetadataOp([&]() {
+                return ctx_.metadataRepo->indexDocumentContent(info.id, info.fileName, text,
+                                                               mime.empty() ? "text/plain" : mime);
+            });
+            (void)retryMetadataOp([&]() { return ctx_.metadataRepo->updateFuzzyIndex(info.id); });
 
             // Mark extraction success for this light path
-            auto d = ctx_.metadataRepo->getDocument(info.id);
+            auto d = retryMetadataOp([&]() { return ctx_.metadataRepo->getDocument(info.id); });
             if (d && d.value().has_value()) {
                 auto updated = *d.value();
                 updated.contentExtracted = true;
                 updated.extractionStatus = metadata::ExtractionStatus::Success;
-                (void)ctx_.metadataRepo->updateDocument(updated);
+                (void)retryMetadataOp([&]() { return ctx_.metadataRepo->updateDocument(updated); });
             }
 
             return Result<void>();
@@ -471,7 +550,8 @@ private:
     std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
 
     boost::asio::awaitable<void> hydrateSnippetsAsync(const SearchRequest& req,
-                                                      SearchResponse& resp) {
+                                                      SearchResponse& resp,
+                                                      MetadataTelemetry* telemetry = nullptr) {
         if (!ctx_.metadataRepo || !ctx_.workerExecutor) {
             co_return;
         }
@@ -497,17 +577,23 @@ private:
                     std::string hash = out.hash;
                     int64_t docId = -1;
                     if (!hash.empty()) {
-                        auto d = ctx_.metadataRepo->getDocumentByHash(hash);
+                        auto d = retryMetadataOp(
+                            [&]() { return ctx_.metadataRepo->getDocumentByHash(hash); }, 4,
+                            std::chrono::milliseconds(25), telemetry);
                         if (d && d.value().has_value())
                             docId = d.value()->id;
                     } else if (!out.path.empty()) {
-                        auto v = ctx_.metadataRepo->findDocumentsByPath(out.path);
+                        auto v = retryMetadataOp(
+                            [&]() { return ctx_.metadataRepo->findDocumentsByPath(out.path); }, 4,
+                            std::chrono::milliseconds(25), telemetry);
                         if (v && !v.value().empty())
                             docId = v.value().front().id;
                     }
 
                     if (docId >= 0) {
-                        auto contentResult = ctx_.metadataRepo->getContent(docId);
+                        auto contentResult =
+                            retryMetadataOp([&]() { return ctx_.metadataRepo->getContent(docId); },
+                                            4, std::chrono::milliseconds(25), telemetry);
                         if (contentResult && contentResult.value().has_value()) {
                             const auto& content = contentResult.value().value();
                             if (!content.contentText.empty()) {
@@ -521,8 +607,9 @@ private:
         }
     }
 
-    boost::asio::awaitable<void> hydrateSnippetsAsync_worker(const SearchRequest& req,
-                                                             SearchResponse& resp) {
+    boost::asio::awaitable<void>
+    hydrateSnippetsAsync_worker(const SearchRequest& req, SearchResponse& resp,
+                                MetadataTelemetry* telemetry = nullptr) {
         if (!ctx_.metadataRepo || !ctx_.workerExecutor)
             co_return;
 
@@ -543,15 +630,22 @@ private:
                     auto& out = resp.results[idx];
                     int64_t docId = -1;
                     if (!out.hash.empty()) {
-                        if (auto d = ctx_.metadataRepo->getDocumentByHash(out.hash); d && d.value())
+                        if (auto d = retryMetadataOp(
+                                [&]() { return ctx_.metadataRepo->getDocumentByHash(out.hash); }, 4,
+                                std::chrono::milliseconds(25), telemetry);
+                            d && d.value())
                             docId = d.value()->id;
                     } else if (!out.path.empty()) {
-                        if (auto v = ctx_.metadataRepo->findDocumentsByPath(out.path);
+                        if (auto v = retryMetadataOp(
+                                [&]() { return ctx_.metadataRepo->findDocumentsByPath(out.path); },
+                                4, std::chrono::milliseconds(25), telemetry);
                             v && !v.value().empty())
                             docId = v.value().front().id;
                     }
                     if (docId >= 0) {
-                        if (auto contentResult = ctx_.metadataRepo->getContent(docId);
+                        if (auto contentResult = retryMetadataOp(
+                                [&]() { return ctx_.metadataRepo->getContent(docId); }, 4,
+                                std::chrono::milliseconds(25), telemetry);
                             contentResult && contentResult.value()) {
                             if (!contentResult.value()->contentText.empty()) {
                                 out.snippet = utils::createSnippet(
@@ -566,10 +660,13 @@ private:
     }
 
     boost::asio::awaitable<void> ensurePathsFallbackAsync(const SearchRequest& req,
-                                                          SearchResponse& resp) {
+                                                          SearchResponse& resp,
+                                                          MetadataTelemetry* telemetry = nullptr) {
         if (!ctx_.metadataRepo || !ctx_.workerExecutor)
             co_return;
-        auto allDocsResult = ctx_.metadataRepo->findDocumentsByPath("%");
+        auto allDocsResult =
+            retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                            std::chrono::milliseconds(25), telemetry);
         if (!allDocsResult)
             co_return;
         const auto& docs = allDocsResult.value();
@@ -620,8 +717,11 @@ private:
         }
     }
 
-    Result<SearchResponse> searchByHashPrefix(const SearchRequest& req) {
-        auto docsResult = ctx_.metadataRepo->findDocumentsByPath("%");
+    Result<SearchResponse> searchByHashPrefix(const SearchRequest& req,
+                                              MetadataTelemetry* telemetry = nullptr) {
+        auto docsResult =
+            retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                            std::chrono::milliseconds(25), telemetry);
         if (!docsResult) {
             return Error{ErrorCode::InternalError,
                          "Failed to enumerate documents for hash search: " +
@@ -664,7 +764,8 @@ private:
                 metaFiltersOk = false;
             }
             if (!pathOk || !metaFiltersOk ||
-                !metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags)) {
+                !metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags,
+                                 telemetry)) {
                 continue;
             }
 
@@ -690,7 +791,8 @@ private:
     }
 
     Result<SearchResponse> hybridSearch(const SearchRequest& req,
-                                        const yams::search::ExtractScope& scope) {
+                                        const yams::search::ExtractScope& scope,
+                                        MetadataTelemetry* telemetry = nullptr) {
         // Expect ctx_.hybridEngine->search(query, limit) returning Result<vector<...>>
         // Shape inferred from existing MCP code: each result has:
         //  - id
@@ -779,7 +881,8 @@ private:
         return resp;
     }
 
-    Result<SearchResponse> metadataSearch(const SearchRequest& req) {
+    Result<SearchResponse> metadataSearch(const SearchRequest& req,
+                                          MetadataTelemetry* telemetry = nullptr) {
         // Prepare query - escape regex if literalText is requested
         std::string processedQuery = req.query;
         if (req.literalText) {
@@ -789,8 +892,12 @@ private:
 
         // Fuzzy or full-text via metadata repository
         if (req.fuzzy) {
-            auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
-                                                    static_cast<int>(req.limit));
+            auto r = retryMetadataOp(
+                [&]() {
+                    return ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
+                                                          static_cast<int>(req.limit));
+                },
+                4, std::chrono::milliseconds(25), telemetry);
             if (!r) {
                 return Error{ErrorCode::InternalError, "Fuzzy search failed: " + r.error().message};
             }
@@ -828,14 +935,16 @@ private:
                         metaFiltersOk = false;
                     }
                     if (pathOk && metaFiltersOk &&
-                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                        req.matchAllTags)) {
+                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags,
+                                        telemetry)) {
                         resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                     }
                 }
                 // Fallback: if no paths matched but query is non-empty, try filename/path contains
                 if (resp.paths.empty() && !processedQuery.empty()) {
-                    auto allDocs = ctx_.metadataRepo->findDocumentsByPath("%");
+                    auto allDocs = retryMetadataOp(
+                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                        std::chrono::milliseconds(25), telemetry);
                     if (allDocs) {
                         for (const auto& d : allDocs.value()) {
                             if (d.filePath.find(processedQuery) != std::string::npos ||
@@ -849,7 +958,9 @@ private:
                 }
                 // Final fallback: if still empty, return up to 'limit' recent documents' paths
                 if (resp.paths.empty()) {
-                    auto allDocs = ctx_.metadataRepo->findDocumentsByPath("%");
+                    auto allDocs = retryMetadataOp(
+                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                        std::chrono::milliseconds(25), telemetry);
                     if (allDocs) {
                         for (const auto& d : allDocs.value()) {
                             resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
@@ -892,7 +1003,7 @@ private:
                             metaFiltersOk = false;
                         if (!pathOk || !metaFiltersOk ||
                             !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                             req.matchAllTags))
+                                             req.matchAllTags, telemetry))
                             continue;
 
                         SearchItem it;
@@ -919,7 +1030,12 @@ private:
             normalizeScores(resp.results, resp.type);
             return resp;
         } else {
-            auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0);
+            auto r = retryMetadataOp(
+                [&]() {
+                    return ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit),
+                                                     0);
+                },
+                4, std::chrono::milliseconds(25), telemetry);
             if (!r) {
                 return Error{ErrorCode::InternalError,
                              "Full-text search failed: " + r.error().message};
@@ -929,7 +1045,7 @@ private:
             if (!req.fuzzy && res.totalCount == 0) {
                 SearchRequest req2 = req;
                 req2.fuzzy = true;
-                return metadataSearch(req2);
+                return metadataSearch(req2, telemetry);
             }
             SearchResponse resp;
             resp.total = res.totalCount;
@@ -956,13 +1072,15 @@ private:
                     if (!req.mimeType.empty() && d.mimeType != req.mimeType)
                         metaFiltersOk = false;
                     if (pathOk && metaFiltersOk &&
-                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                        req.matchAllTags)) {
+                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags,
+                                        telemetry)) {
                         resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                     }
                 }
                 if (resp.paths.empty() && !processedQuery.empty()) {
-                    auto allDocs = ctx_.metadataRepo->findDocumentsByPath("%");
+                    auto allDocs = retryMetadataOp(
+                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                        std::chrono::milliseconds(25), telemetry);
                     if (allDocs) {
                         for (const auto& d : allDocs.value()) {
                             if (d.filePath.find(processedQuery) != std::string::npos ||
@@ -975,7 +1093,9 @@ private:
                     }
                 }
                 if (resp.paths.empty()) {
-                    auto allDocs = ctx_.metadataRepo->findDocumentsByPath("%");
+                    auto allDocs = retryMetadataOp(
+                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                        std::chrono::milliseconds(25), telemetry);
                     if (allDocs) {
                         for (const auto& d : allDocs.value()) {
                             resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
@@ -1019,7 +1139,7 @@ private:
                             metaFiltersOk = false;
                         if (!pathOk || !metaFiltersOk ||
                             !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                             req.matchAllTags))
+                                             req.matchAllTags, telemetry))
                             continue;
 
                         SearchItem it;

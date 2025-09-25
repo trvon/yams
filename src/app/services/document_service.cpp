@@ -8,6 +8,7 @@
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/format_handlers/format_handler.hpp>
 #include <yams/extraction/format_handlers/text_basic_handler.hpp>
+#include <yams/extraction/text_extractor.h>
 
 #include <yams/metadata/metadata_repository.h>
 
@@ -272,6 +273,25 @@ public:
                             ctx_.contentExtractors);
                         if (extractedOpt && !extractedOpt->empty()) {
                             const std::string& extracted = *extractedOpt;
+
+                            if (docId > 0) {
+                                metadata::DocumentContent contentRow;
+                                contentRow.documentId = docId;
+                                contentRow.contentText = extracted;
+                                contentRow.contentLength =
+                                    static_cast<int64_t>(contentRow.contentText.size());
+                                contentRow.extractionMethod = "inline";
+                                double langConfidence = 0.0;
+                                contentRow.language =
+                                    yams::extraction::LanguageDetector::detectLanguage(
+                                        contentRow.contentText, &langConfidence);
+                                auto contentUpsert = ctx_.metadataRepo->insertContent(contentRow);
+                                if (!contentUpsert) {
+                                    spdlog::warn("Failed to upsert extracted content for {}: {}",
+                                                 out.hash, contentUpsert.error().message);
+                                }
+                            }
+
                             (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
                                                                           extracted, info.mimeType);
                             (void)ctx_.metadataRepo->updateFuzzyIndex(docId);

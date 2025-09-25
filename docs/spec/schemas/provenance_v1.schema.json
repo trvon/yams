@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/provenance_v1",
+  "title": "Provenance v1 — Evidence & sourcing metadata for graph entities",
+  "type": "object",
+  "properties": {
+    "source": { "type": "string", "description": "e.g., ingestion, agent, user" },
+    "method": { "type": "string", "description": "brief method or tool name" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "agent": { "type": "string", "description": "agent name/id" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "media_type": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+          "size": { "type": "integer", "minimum": 0 },
+          "url": { "type": "string", "format": "uri" },
+          "description": { "type": "string" }
+        },
+        "required": ["sha256"],
+        "additionalProperties": true
+      },
+      "default": []
+    }
+  },
+  "required": ["timestamp"],
+  "additionalProperties": true
+}
+

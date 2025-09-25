@@ -29,6 +29,34 @@ using ::testing::IsEmpty;
 using ::testing::Not;
 
 namespace {
+
+class FlakyMetadataRepository : public MetadataRepository {
+public:
+    explicit FlakyMetadataRepository(ConnectionPool& pool) : MetadataRepository(pool) {}
+
+    void setGetDocumentByHashFailures(std::size_t count) { getDocumentByHashFailures_ = count; }
+
+    Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override {
+        if (consume(getDocumentByHashFailures_)) {
+            return Error{ErrorCode::NotInitialized, "metadata warming up"};
+        }
+        return MetadataRepository::getDocumentByHash(hash);
+    }
+
+private:
+    static bool consume(std::size_t& counter) {
+        if (counter == 0)
+            return false;
+        --counter;
+        return true;
+    }
+
+    std::size_t getDocumentByHashFailures_{0};
+};
+
+} // namespace
+
+namespace {
 constexpr std::size_t kZeroTotal = 0;
 }
 template <typename T> yams::Result<T> runAwait(boost::asio::awaitable<yams::Result<T>> aw) {
@@ -230,11 +258,15 @@ TEST_F(SearchServiceTest, BasicTextSearch) {
     ASSERT_TRUE(result) << "Search failed: " << result.error().message;
 
     // Should find relevant documents
-    EXPECT_GE(result.value().results.size(), std::size_t{0});
-    EXPECT_GE(result.value().total, kZeroTotal);
+    const auto& resp = result.value();
+    EXPECT_GE(resp.results.size(), std::size_t{0});
+    EXPECT_GE(resp.total, kZeroTotal);
+    EXPECT_GE(resp.executionTimeMs, 0);
+    ASSERT_TRUE(resp.searchStats.contains("metadata_operations"));
+    EXPECT_NE(resp.searchStats.at("metadata_operations"), "0");
 
     // Check result structure
-    for (const auto& doc : result.value().results) {
+    for (const auto& doc : resp.results) {
         EXPECT_FALSE(doc.hash.empty());
         EXPECT_GE(doc.score, 0.0);
     }
@@ -638,4 +670,18 @@ TEST_F(SearchServiceTest, SearchWithPathsOnly) {
     for (const auto& doc : result.value().results) {
         EXPECT_FALSE(doc.hash.empty());
     }
+}
+
+TEST_F(SearchServiceTest, LightIndexRetriesTransientMetadataErrors) {
+    ASSERT_FALSE(testHashes_.empty());
+
+    auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*pool_);
+    flakyRepo->setGetDocumentByHashFailures(1);
+
+    metadataRepo_ = flakyRepo;
+    appContext_.metadataRepo = flakyRepo;
+    searchService_ = makeSearchService(appContext_);
+
+    auto result = searchService_->lightIndexForHash(testHashes_.front(), 512 * 1024);
+    ASSERT_TRUE(result) << result.error().message;
 }

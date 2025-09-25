@@ -47,20 +47,20 @@ Other distros: use analogous `*-devel` / package names.
 conan install . -of build/debug -s build_type=Debug -b missing
 meson setup build/debug \
   --prefix /usr/local \
-  --native-file build/debug/build/Debug/generators/conan_meson_native.ini \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini \
   --buildtype=debug
 meson compile -C build/debug
 
 # Reconfigure later (Debug)
 meson setup build/debug --reconfigure \
   --prefix /usr/local \
-  --native-file build/debug/build/Debug/generators/conan_meson_native.ini
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
 
 # Release
 conan install . -of build/release -s build_type=Release -b missing
 meson setup build/release \
   --prefix /usr/local \
-  --native-file build/release/build/Release/generators/conan_meson_native.ini \
+  --native-file build/release/build-release/conan/conan_meson_native.ini \
   --buildtype=release
 meson compile -C build/release
 ```
@@ -131,7 +131,7 @@ sudo make install
 conan install . -of build/debug -s build_type=Debug -b missing
 meson setup build/debug \
   --prefix /usr/local \
-  --native-file build/debug/build/Debug/generators/conan_meson_native.ini \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini \
   --buildtype=debug -Dbuild-tests=true
 meson compile -C build/debug
 meson test -C build/debug --print-errorlogs
@@ -159,7 +159,7 @@ For code coverage analysis (example):
 conan install . -of build/debug -s build_type=Debug -b missing
 meson setup build/debug \
   --prefix /usr/local \
-  --native-file build/debug/build/Debug/generators/conan_meson_native.ini \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini \
   --buildtype=debug -Dbuild-tests=true
 meson compile -C build/debug
 meson test -C build/debug

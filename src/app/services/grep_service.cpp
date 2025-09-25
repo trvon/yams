@@ -6,9 +6,12 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -46,13 +49,74 @@ static bool hasWildcard(const std::string& s) {
 }
 
 // Helper to check if document has required tags
+static bool isTransientMetadataError(const Error& err) {
+    switch (err.code) {
+        case ErrorCode::NotInitialized:
+        case ErrorCode::DatabaseError:
+        case ErrorCode::ResourceBusy:
+        case ErrorCode::OperationInProgress:
+        case ErrorCode::Timeout:
+            return true;
+        case ErrorCode::InternalError: {
+            const auto& msg = err.message;
+            return msg.find("database is locked") != std::string::npos ||
+                   msg.find("readonly") != std::string::npos ||
+                   msg.find("busy") != std::string::npos;
+        }
+        default:
+            return false;
+    }
+}
+
+struct MetadataTelemetry {
+    std::atomic<std::uint64_t> operations{0};
+    std::atomic<std::uint64_t> retries{0};
+    std::atomic<std::uint64_t> transientFailures{0};
+};
+
+template <typename Fn>
+auto retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
+                     std::chrono::milliseconds initialDelay = std::chrono::milliseconds(25),
+                     MetadataTelemetry* telemetry = nullptr) -> decltype(fn()) {
+    using ResultT = decltype(fn());
+    if (telemetry)
+        telemetry->operations.fetch_add(1, std::memory_order_relaxed);
+    auto attempt = fn();
+    if (attempt)
+        return attempt;
+
+    auto delay = initialDelay;
+    bool transient = isTransientMetadataError(attempt.error());
+    if (telemetry && transient)
+        telemetry->transientFailures.fetch_add(1, std::memory_order_relaxed);
+
+    for (std::size_t i = 1; i < maxAttempts && transient; ++i) {
+        if (telemetry)
+            telemetry->retries.fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(delay);
+        delay = std::min(delay * 2, std::chrono::milliseconds(250));
+        attempt = fn();
+        if (attempt)
+            return attempt;
+        transient = isTransientMetadataError(attempt.error());
+        if (telemetry && transient)
+            telemetry->transientFailures.fetch_add(1, std::memory_order_relaxed);
+    }
+    return attempt;
+}
+
 static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
-                            const std::vector<std::string>& tags, bool matchAll) {
+                            const std::vector<std::string>& tags, bool matchAll,
+                            MetadataTelemetry* telemetry = nullptr) {
     if (!repo || tags.empty())
         return true;
-    auto md = repo->getAllMetadata(docId);
-    if (!md)
+    auto md = retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
+                              std::chrono::milliseconds(25), telemetry);
+    if (!md) {
+        spdlog::debug("GrepService: metadata lookup failed for doc {}: {}", docId,
+                      md.error().message);
         return false;
+    }
     auto& all = md.value();
 
     auto hasTag = [&](const std::string& t) {
@@ -173,12 +237,17 @@ public:
         const int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 2000);
         const int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 200);
         const int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 15000);
+        MetadataTelemetry metadataTelemetry;
         auto start_time = std::chrono::steady_clock::now();
 
         // Build candidate document set: KG(tags) -> metadata -> fallback
         std::vector<metadata::DocumentInfo> docs;
         if (!req.tags.empty()) {
-            auto tRes = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+            auto tRes = retryMetadataOp(
+                [&]() {
+                    return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+                },
+                4, std::chrono::milliseconds(25), &metadataTelemetry);
             if (!tRes) {
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents by tags: " + tRes.error().message};
@@ -188,13 +257,19 @@ public:
         if (docs.empty()) {
             bool canUseFTS = req.literalText || req.word;
             if (canUseFTS) {
-                auto sRes = ctx_.metadataRepo->search(req.pattern, /*limit*/ 2000, /*offset*/ 0);
+                auto sRes = retryMetadataOp(
+                    [&]() {
+                        return ctx_.metadataRepo->search(req.pattern, /*limit*/ 2000, /*offset*/ 0);
+                    },
+                    4, std::chrono::milliseconds(25), &metadataTelemetry);
                 if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
                     std::unordered_set<int64_t> allow;
                     allow.reserve(sRes.value().results.size());
                     for (const auto& r : sRes.value().results)
                         allow.insert(r.document.id);
-                    auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                    auto allRes = retryMetadataOp(
+                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                        std::chrono::milliseconds(25), &metadataTelemetry);
                     if (!allRes) {
                         return Error{ErrorCode::InternalError,
                                      "Failed to enumerate documents: " + allRes.error().message};
@@ -240,7 +315,9 @@ public:
                                         allowPaths.insert(it->second);
                                     }
                                 }
-                                auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                                auto allRes = retryMetadataOp(
+                                    [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); },
+                                    4, std::chrono::milliseconds(25), &metadataTelemetry);
                                 if (!allRes) {
                                     return Error{ErrorCode::InternalError,
                                                  "Failed to enumerate documents: " +
@@ -258,7 +335,9 @@ public:
             }
         }
         if (docs.empty()) {
-            auto allRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            auto allRes =
+                retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                                std::chrono::milliseconds(25), &metadataTelemetry);
             if (!allRes) {
                 return Error{ErrorCode::InternalError,
                              "Failed to enumerate documents: " + allRes.error().message};
@@ -402,13 +481,16 @@ public:
                     if (!ok)
                         continue;
                 }
-                if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags))
+                if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags,
+                                     &metadataTelemetry))
                     continue;
 
                 // Respect per-document force_cold (metadata key or tag)
                 bool forceCold = false;
                 if (ctx_.metadataRepo) {
-                    auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                    auto md =
+                        retryMetadataOp([&]() { return ctx_.metadataRepo->getAllMetadata(doc.id); },
+                                        4, std::chrono::milliseconds(25), &metadataTelemetry);
                     if (md) {
                         auto& all = md.value();
                         auto it = all.find("force_cold");
@@ -475,7 +557,9 @@ public:
                 // Hot path: process extracted text line-by-line without touching CAS
                 if (mode == Mode::HotOnly && !forceCold) {
                     if (ctx_.metadataRepo) {
-                        auto c = ctx_.metadataRepo->getContent(doc.id);
+                        auto c =
+                            retryMetadataOp([&]() { return ctx_.metadataRepo->getContent(doc.id); },
+                                            4, std::chrono::milliseconds(25), &metadataTelemetry);
                         if (c && c.value().has_value()) {
                             std::istringstream iss(c.value()->contentText);
                             std::string line;
@@ -700,6 +784,23 @@ public:
                 }
             } catch (...) {
             }
+        }
+
+        auto totalElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start_time)
+                                .count();
+        response.executionTimeMs = static_cast<std::int64_t>(totalElapsed);
+        response.searchStats["latency_ms"] = std::to_string(totalElapsed);
+        response.searchStats["metadata_operations"] =
+            std::to_string(metadataTelemetry.operations.load(std::memory_order_relaxed));
+        response.searchStats["metadata_retries"] =
+            std::to_string(metadataTelemetry.retries.load(std::memory_order_relaxed));
+        response.searchStats["metadata_transient_failures"] =
+            std::to_string(metadataTelemetry.transientFailures.load(std::memory_order_relaxed));
+        if (budget_ms > 0) {
+            response.searchStats["budget_ms"] = std::to_string(budget_ms);
+            response.searchStats["timeout_triggered"] =
+                stop.load(std::memory_order_relaxed) ? "1" : "0";
         }
 
         return Result<GrepResponse>(std::move(response));

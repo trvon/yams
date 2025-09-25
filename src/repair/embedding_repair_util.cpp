@@ -1,4 +1,5 @@
 #include <yams/extraction/extraction_util.h>
+#include <yams/extraction/text_extractor.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/vector_database.h>
 
@@ -171,6 +172,29 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             }
 
             std::string text = std::move(*extractedOpt);
+            if (doc.id > 0) {
+                metadata::DocumentContent contentRow;
+                contentRow.documentId = doc.id;
+                contentRow.contentText = text;
+                contentRow.contentLength = static_cast<int64_t>(contentRow.contentText.size());
+                contentRow.extractionMethod = "repair";
+                double langConfidence = 0.0;
+                contentRow.language = yams::extraction::LanguageDetector::detectLanguage(
+                    contentRow.contentText, &langConfidence);
+                auto contentUpsert = metadataRepo->insertContent(contentRow);
+                if (!contentUpsert) {
+                    spdlog::warn("[repair] Failed to upsert content for {}: {}", doc.sha256Hash,
+                                 contentUpsert.error().message);
+                } else {
+                    auto docRow = metadataRepo->getDocument(doc.id);
+                    if (docRow && docRow.value().has_value()) {
+                        auto updated = docRow.value().value();
+                        updated.contentExtracted = true;
+                        updated.extractionStatus = metadata::ExtractionStatus::Success;
+                        (void)metadataRepo->updateDocument(updated);
+                    }
+                }
+            }
             // Guard overly large text
             if (text.size() > 1000000) { // 1MB limit
                 text.resize(1000000);

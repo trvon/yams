@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/card_anchor_v1",
+  "title": "Card Anchor v1 — Stable code/content anchors",
+  "type": "object",
+  "properties": {
+    "repo_path": { "type": "string" },
+    "blob_sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+    "language": { "type": "string" },
+    "start_line": { "type": "integer", "minimum": 1 },
+    "end_line": { "type": "integer", "minimum": 1 },
+    "start_byte": { "type": "integer", "minimum": 0 },
+    "end_byte": { "type": "integer", "minimum": 0 },
+    "pre_context": { "type": "string", "description": "hash of N lines before" },
+    "post_context": { "type": "string", "description": "hash of N lines after" }
+  },
+  "required": ["repo_path", "blob_sha256"],
+  "additionalProperties": true,
+  "anyOf": [
+    { "required": ["start_line", "end_line"] },
+    { "required": ["start_byte", "end_byte"] }
+  ]
+}
+

@@ -190,6 +190,11 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
                 document_id, content_text, content_length,
                 extraction_method, language
             ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(document_id) DO UPDATE SET
+                content_text = excluded.content_text,
+                content_length = excluded.content_length,
+                extraction_method = excluded.extraction_method,
+                language = excluded.language
         )");
 
         if (!stmtResult)

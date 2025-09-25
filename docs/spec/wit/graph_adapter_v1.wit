@@ -1,0 +1,108 @@
+package yams:plugins/graph-adapter-v1@1.0.0
+
+/// GraphAdapter v1 — Property-Graph access for YAMS plugins/SDKs
+///
+/// Notes
+/// - Read-focused interface with optional import/export and delta apply.
+/// - Iteration uses cursor handles to support large graphs without materializing all data.
+/// - Properties are represented as a simple key/value variant.
+
+interface types {
+  /// Opaque identifiers
+  type id = string;
+
+  /// Property value variant
+  variant value {
+    null,
+    bool(bool),
+    i64(s64),
+    f64(float64),
+    string(string),
+    bytes(list<u8>),
+  }
+
+  record kv {
+    key: string,
+    val: value,
+  }
+
+  record node {
+    id: id,
+    labels: list<string>,
+    props: list<kv>,
+  }
+
+  record edge {
+    id: id,
+    src: id,
+    dst: id,
+    label: option<string>,
+    weight: option<float64>,
+    props: list<kv>,
+  }
+
+  record graph-stats {
+    num-nodes: u64,
+    num-edges: u64,
+  }
+
+  record graph-info {
+    id: id,
+    name: string,
+    directed: option<bool>,
+    stats: option<graph-stats>,
+  }
+
+  record capabilities {
+    read-only: bool,
+    multigraph: bool,
+    weighted: bool,
+    delta: bool,
+    provenance: bool,
+    views: bool,
+    export-formats: list<string>,
+    import-formats: list<string>,
+  }
+
+  /// Paged results for iteration
+  record node-page { items: list<node>, done: bool }
+  record edge-page { items: list<edge>, done: bool }
+}
+
+interface graph-adapter {
+  use types.{id, graph-info, capabilities, node-page, edge-page};
+
+  /// Report adapter capabilities and supported formats.
+  get-capabilities: func() -> capabilities;
+
+  /// Enumerate available graphs.
+  list-graphs: func() -> list<graph-info>;
+
+  /// Fetch latest metadata for a graph (counts, flags, etc.).
+  get-graph-info: func(graph: id) -> graph-info;
+
+  /// Begin node iteration for a graph. Optional filter expressed as JSON (adapter-defined).
+  nodes-begin: func(graph: id, filter-json: option<string>) -> u64;
+  nodes-next: func(cursor: u64, limit: u32) -> node-page;
+  nodes-end: func(cursor: u64);
+
+  /// Begin edge iteration for a graph. Optional filter expressed as JSON (adapter-defined).
+  edges-begin: func(graph: id, filter-json: option<string>) -> u64;
+  edges-next: func(cursor: u64, limit: u32) -> edge-page;
+  edges-end: func(cursor: u64);
+
+  /// Export a graph to a portable format (e.g., "graphjson", "graphml", "edge-list", "cytoscape").
+  /// Returns a binary blob containing the exported data.
+  export-graph: func(graph: id, format: string, options-json: option<string>) -> list<u8>;
+
+  /// Import a graph from a portable format. Returns the created/updated graph id.
+  import-graph: func(format: string, data: list<u8>, options-json: option<string>) -> id;
+
+  /// Apply Graph Delta (JSON/JSONL string) to an existing graph. Returns number of operations applied.
+  apply-delta-json: func(graph: id, delta-jsonl: string) -> u32;
+}
+
+world graph-adapter-v1 {
+  export graph-adapter;
+}
+

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/graphjson_v1",
+  "title": "GraphJSON v1 — YAMS canonical property-graph format",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "directed": { "type": "boolean" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "labels": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "boolean" },
+                { "type": "null" }
+              ]
+            },
+            "default": {}
+          }
+        },
+        "required": ["id"]
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "src": { "type": "string" },
+          "dst": { "type": "string" },
+          "label": { "type": "string" },
+          "weight": { "type": "number" },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "boolean" },
+                { "type": "null" }
+              ]
+            },
+            "default": {}
+          }
+        },
+        "required": ["src", "dst"]
+      }
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "stats": {
+          "type": "object",
+          "properties": {
+            "num_nodes": { "type": "integer", "minimum": 0 },
+            "num_edges": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "focus": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true,
+      "default": {}
+    }
+  },
+  "required": ["nodes", "edges"],
+  "additionalProperties": true
+}
+

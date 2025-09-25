@@ -115,6 +115,10 @@ jobs:
             python3 -m pipx ensurepath || true
             pipx install --python python3 conan || pipx install conan || pip3 install --user --upgrade conan
           fi
+          PY_USER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
+          [ -d "$PY_USER_BIN" ] && echo "$PY_USER_BIN" >> "$GITHUB_PATH" || true
+          [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
+          export PATH="$HOME/.local/bin:$PY_USER_BIN:$PATH"
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
@@ -182,12 +186,19 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
-      - name: Install pkg-config (macOS)
+      - name: Install build tools (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          brew update
-          brew install pkg-config cmake ninja || true
+          set -euo pipefail
+          brew update || true
+          brew install pkg-config cmake ninja meson || true
+          command -v meson >/dev/null 2>&1 || {
+            python3 -m pip install --user --upgrade meson || pip3 install --user --upgrade meson || true
+            [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
+          }
+          echo "meson version: $(meson --version || echo 'missing')"
+          echo "ninja version: $(ninja --version || echo 'missing')"
 
       - name: Tune Conan client (parallel downloads)
         shell: bash
@@ -297,7 +308,7 @@ jobs:
           echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce failure on protected branches
-        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && (steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
+        if: ${{ github.ref_protected && (steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
         shell: bash
         run: |
           echo "Meson tests reported failures; enforcing job failure for protected branch." >&2

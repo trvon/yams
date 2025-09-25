@@ -3,9 +3,12 @@
 This directory contains interface specifications and schemas for YAMS plugins and public surfaces.
 
 - `wit/` – WIT definitions for WASM components (e.g., `object_storage_v1.wit`, `dr_provider_v1.wit`).
+- New: `graph_adapter_v1.wit` defines a read-focused property-graph interface with cursor-based
+  iteration and optional import/export and delta-apply.
 - `schemas/` – JSON Schemas describing manifests and interface payloads.
 - `interface_versions.json` – authoritative version registry for public interfaces:
   - Keys: `plugin_abi`, `object_storage_v1`, `dr_provider_v1`, `model_provider_v1`, etc.
+  - New: `graph_adapter_v1`, `graphjson_v1`, `graph_delta_v1`, `provenance_v1`, `card_anchor_v1`.
   - Bump the corresponding version when changing WIT/schemas/headers for that interface.
 
 Policy
@@ -40,3 +43,5 @@ Security and Trust
 Notes
 - Keep WIT and schema filenames aligned with the version keys (e.g., `object_storage_v1.wit`, `object_storage_v1.schema.json`) so automated mapping is accurate.
 - For new interfaces, add an entry to `interface_versions.json` when introducing the first version.
+ - GraphAdapter v1 provides read-first APIs. Write operations are intentionally scoped to import and
+   delta-apply to keep implementations simple and deterministic.

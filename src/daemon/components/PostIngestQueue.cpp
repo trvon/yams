@@ -5,6 +5,7 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/extraction/extraction_util.h>
+#include <yams/extraction/text_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 
 using yams::extraction::util::extractDocumentText;
@@ -189,6 +190,21 @@ void PostIngestQueue::workerLoop() {
                     }
                 }
             } else if (docId >= 0) {
+                {
+                    metadata::DocumentContent contentRow;
+                    contentRow.documentId = docId;
+                    contentRow.contentText = *txt;
+                    contentRow.contentLength = static_cast<int64_t>(contentRow.contentText.size());
+                    contentRow.extractionMethod = "post_ingest";
+                    double langConfidence = 0.0;
+                    contentRow.language = yams::extraction::LanguageDetector::detectLanguage(
+                        contentRow.contentText, &langConfidence);
+                    auto contentUpsert = meta_->insertContent(contentRow);
+                    if (!contentUpsert) {
+                        spdlog::warn("PostIngest: failed to upsert content for {}: {}", task.hash,
+                                     contentUpsert.error().message);
+                    }
+                }
                 (void)meta_->indexDocumentContent(docId, fileName, *txt, mime);
                 (void)meta_->updateFuzzyIndex(docId);
                 auto d = meta_->getDocument(docId);

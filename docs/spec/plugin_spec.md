@@ -61,6 +61,21 @@ void my_plugin_function() {
   - Progress: callback may be invoked from background threads; phases: PROBE, DOWNLOAD, LOAD, WARMUP, READY; bytes current/total optional.
   - Status codes: int ABI — YAMS_OK, YAMS_ERR_INVALID_ARG, YAMS_ERR_NOT_FOUND, YAMS_ERR_IO, YAMS_ERR_INTERNAL, YAMS_ERR_UNSUPPORTED.
 
+## GraphAdapter v1 (Property Graph)
+
+- Purpose: read-first property-graph interface for large graphs with cursor-based iteration; optional import/export and delta apply.
+- WIT: docs/spec/wit/graph_adapter_v1.wit
+- C-ABI (optional for native providers): include/yams/plugins/graph_adapter_v1.h
+  - Required symbols:
+    - `extern "C" const char* getGraphAdapterName();`
+    - `extern "C" yams::daemon::IGraphAdapter* createGraphAdapterV1();`
+  - Optional: `createGraphAdapter()` (legacy), `getGraphAdapterVersion()`
+- Portable formats & schemas:
+  - GraphJSON v1: docs/spec/schemas/graphjson_v1.schema.json
+  - Graph Delta v1: docs/spec/schemas/graph_delta_v1.schema.json
+  - Provenance v1: docs/spec/schemas/provenance_v1.schema.json
+  - Card Anchor v1: docs/spec/schemas/card_anchor_v1.schema.json
+
 ## Transport Bindings
 
 - C‑ABI (Native)

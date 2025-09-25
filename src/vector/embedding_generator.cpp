@@ -32,6 +32,7 @@
 // Include daemon client for DaemonBackend
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/ml/provider.h>
 
 namespace yams::vector {
 
@@ -1287,17 +1288,34 @@ public:
         }
 
         try {
-            // If running inside the daemon process, never use the daemon IPC backend to avoid
-            // self-calls and potential deadlocks/crashes. The daemon should use the local backend.
+            // If running inside the daemon process, prefer an in-process embedding provider to
+            // avoid recursive IPC calls back into the daemon.
             if (const char* inproc = std::getenv("YAMS_IN_DAEMON")) {
                 std::string v(inproc);
                 for (auto& c : v)
                     c = static_cast<char>(std::tolower(c));
                 if (!v.empty() && v != "0" && v != "false" && v != "off" && v != "no") {
-                    spdlog::debug("DaemonBackend disabled in-process (YAMS_IN_DAEMON=1); using "
-                                  "local backend only");
-                    initialized_ = true;
-                    return true;
+                    fallback_provider_ = yams::ml::createEmbeddingProvider();
+                    if (fallback_provider_ && fallback_provider_->isAvailable()) {
+                        auto initRes = fallback_provider_->initialize();
+                        if (!initRes) {
+                            spdlog::warn("DaemonBackend fallback provider init failed: {}",
+                                         initRes.error().message);
+                            fallback_provider_.reset();
+                        } else {
+                            fallback_initialized_ = true;
+                            cached_dim_ = fallback_provider_->getEmbeddingDimension();
+                            cached_seq_len_ = fallback_provider_->getMaxSequenceLength();
+                            initialized_ = true;
+                            spdlog::info("DaemonBackend using in-process embedding provider '{}'",
+                                         fallback_provider_->getProviderName());
+                            return true;
+                        }
+                    } else {
+                        fallback_provider_.reset();
+                        spdlog::warn("DaemonBackend could not obtain in-process embedding "
+                                     "provider; falling back to IPC backend");
+                    }
                 }
             }
 
@@ -1379,16 +1397,42 @@ public:
             daemon_client_->disconnect();
             daemon_client_.reset();
         }
+        if (fallback_provider_) {
+            try {
+                fallback_provider_->shutdown();
+            } catch (...) {
+            }
+            fallback_provider_.reset();
+        }
+        fallback_initialized_ = false;
         initialized_ = false;
         stats_ = GenerationStats{};
     }
 
     bool isInitialized() const override {
-        return initialized_ && daemon_client_ && daemon_client_->isConnected();
+        if (!initialized_)
+            return false;
+        if (fallback_initialized_ && fallback_provider_)
+            return true;
+        return daemon_client_ && daemon_client_->isConnected();
     }
 
     Result<std::vector<float>> generateEmbedding(const std::string& text) override {
         YAMS_ZONE_SCOPED_N("DaemonBackend::generateEmbedding");
+
+        if (fallback_initialized_ && fallback_provider_) {
+            auto start = std::chrono::high_resolution_clock::now();
+            auto res = fallback_provider_->generateEmbedding(text);
+            if (!res) {
+                return Error{ErrorCode::InternalError, res.error().message};
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            cached_dim_ = fallback_provider_->getEmbeddingDimension();
+            cached_seq_len_ = fallback_provider_->getMaxSequenceLength();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            updateStats(1, text.length() / 4, duration);
+            return res.value();
+        }
 
         if (!isInitialized()) {
             return Error{ErrorCode::NotInitialized, "Daemon backend not connected"};
@@ -1430,6 +1474,27 @@ public:
     Result<std::vector<std::vector<float>>>
     generateEmbeddings(std::span<const std::string> texts) override {
         YAMS_EMBEDDING_ZONE_BATCH(texts.size());
+
+        if (fallback_initialized_ && fallback_provider_) {
+            auto start = std::chrono::high_resolution_clock::now();
+            std::vector<std::string> batch(texts.begin(), texts.end());
+            auto res = fallback_provider_->generateBatchEmbeddings(batch);
+            if (!res) {
+                return Error{ErrorCode::InternalError, res.error().message};
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            cached_dim_ = fallback_provider_->getEmbeddingDimension();
+            cached_seq_len_ = fallback_provider_->getMaxSequenceLength();
+            size_t total_chars = 0;
+            for (const auto& text : texts) {
+                total_chars += text.length();
+            }
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            updateStats(texts.size(), total_chars / 4, duration);
+            stats_.total_batches++;
+            stats_.batch_count++;
+            return res.value();
+        }
 
         if (!isInitialized()) {
             return Error{ErrorCode::NotInitialized, "Daemon backend not connected"};
@@ -1528,16 +1593,30 @@ public:
     }
 
     size_t getEmbeddingDimension() const override {
-        return cached_dim_ > 0 ? cached_dim_ : config_.embedding_dim;
+        if (cached_dim_ > 0)
+            return cached_dim_;
+        if (fallback_initialized_ && fallback_provider_) {
+            return fallback_provider_->getEmbeddingDimension();
+        }
+        return config_.embedding_dim;
     }
 
     size_t getMaxSequenceLength() const override {
-        return cached_seq_len_ > 0 ? cached_seq_len_ : config_.max_sequence_length;
+        if (cached_seq_len_ > 0)
+            return cached_seq_len_;
+        if (fallback_initialized_ && fallback_provider_) {
+            return fallback_provider_->getMaxSequenceLength();
+        }
+        return config_.max_sequence_length;
     }
 
     std::string getBackendName() const override { return "Daemon"; }
 
-    bool isAvailable() const override { return daemon_client_ && daemon_client_->isConnected(); }
+    bool isAvailable() const override {
+        if (fallback_initialized_ && fallback_provider_)
+            return true;
+        return daemon_client_ && daemon_client_->isConnected();
+    }
 
     GenerationStats getStats() const override { return stats_; }
     void resetStats() override {
@@ -1567,6 +1646,8 @@ private:
 
     EmbeddingConfig config_;
     std::shared_ptr<daemon::DaemonClient> daemon_client_;
+    std::unique_ptr<yams::ml::IEmbeddingProvider> fallback_provider_;
+    bool fallback_initialized_{false};
     bool initialized_;
     GenerationStats stats_;
     mutable size_t cached_dim_ = 0;

@@ -344,6 +344,30 @@ if all_unit.length() > 0
     timeout: unit_timeout,
   )
 
+  # Pin a targeted shard-style runner for the new DaemonMetrics vectordb readiness test.
+  # Note: regular unit shards already include this test automatically. This explicit entry
+  # guarantees coverage even when sharding is disabled and provides an easy way to
+  # re-run just this test in CI logs.
+  test('unit_shard_vectordb_metrics', unit_exe,
+    suite: ['unit'],
+    args: ['--gtest_filter=DaemonMetrics.VectorDbReadyHealsFromHandle'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: 120,
+  )
+
+  test('unit_reliability_grep_search_startup', unit_exe,
+    suite: ['unit', 'reliability'],
+    args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: 120,
+  )
+
   # Define a fast "smoke" subset using gtest filter for developer iteration
   smoke_filter = 'ContentStoreTest.*:ProgressReporterTest.*:ContentMetadataTest.*:ContentStoreBuilderTest.*:SearchSmoke.*'
   test('unit_smoke', unit_exe,

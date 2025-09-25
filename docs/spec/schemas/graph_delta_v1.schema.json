@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://yams/graph_delta_v1",
+  "title": "Graph Delta v1 — Append-only changesets for property-graphs",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "add_node", "remove_node",
+          "add_edge", "remove_edge",
+          "set_node_props", "set_edge_props",
+          "merge_node_props", "merge_edge_props"
+        ]
+      },
+      "graph_id": { "type": "string" },
+      "id": { "type": "string" },
+      "src": { "type": "string" },
+      "dst": { "type": "string" },
+      "label": { "type": "string" },
+      "weight": { "type": "number" },
+      "properties": {
+        "type": "object",
+        "additionalProperties": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "boolean" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "ts": { "type": "string", "format": "date-time" },
+      "author": { "type": "string" },
+      "txn": { "type": "string", "description": "Optional transaction id to group changes" }
+    },
+    "required": ["op"],
+    "additionalProperties": true,
+    "allOf": [
+      {
+        "if": { "properties": { "op": { "const": "add_node" } } },
+        "then": { "required": ["id"] }
+      },
+      {
+        "if": { "properties": { "op": { "const": "remove_node" } } },
+        "then": { "required": ["id"] }
+      },
+      {
+        "if": { "properties": { "op": { "const": "add_edge" } } },
+        "then": { "required": ["id", "src", "dst"] }
+      },
+      {
+        "if": { "properties": { "op": { "const": "remove_edge" } } },
+        "then": { "required": ["id"] }
+      },
+      {
+        "if": { "properties": { "op": { "const": "set_node_props" } } },
+        "then": { "required": ["id", "properties"] }
+      },
+      {
+        "if": { "properties": { "op": { "const": "set_edge_props" } } },
+        "then": { "required": ["id", "properties"] }
+      }
+    ]
+  }
+}
+

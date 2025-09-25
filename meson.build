@@ -76,6 +76,7 @@ subdir('src/api')
 subdir('src/repair')
 subdir('src/daemon/client')
 subdir('src/app/services')
+subdir('src/mobile')
 subdir('src/daemon')
 subdir('src/benchmarks')
 

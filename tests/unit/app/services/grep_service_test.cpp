@@ -14,6 +14,44 @@ using namespace yams::app::services;
 using namespace yams::metadata;
 using namespace yams::api;
 
+namespace {
+
+class FlakyMetadataRepository : public MetadataRepository {
+public:
+    explicit FlakyMetadataRepository(ConnectionPool& pool) : MetadataRepository(pool) {}
+
+    void setGetAllMetadataFailures(std::size_t count) { getAllMetadataFailures_ = count; }
+    void setFindDocumentsByPathFailures(std::size_t count) { findByPathFailures_ = count; }
+
+    Result<std::unordered_map<std::string, MetadataValue>>
+    getAllMetadata(int64_t documentId) override {
+        if (consume(getAllMetadataFailures_)) {
+            return Error{ErrorCode::NotInitialized, "metadata warming up"};
+        }
+        return MetadataRepository::getAllMetadata(documentId);
+    }
+
+    Result<std::vector<DocumentInfo>> findDocumentsByPath(const std::string& pathPattern) override {
+        if (consume(findByPathFailures_)) {
+            return Error{ErrorCode::DatabaseError, "database is locked"};
+        }
+        return MetadataRepository::findDocumentsByPath(pathPattern);
+    }
+
+private:
+    static bool consume(std::size_t& counter) {
+        if (counter == 0)
+            return false;
+        --counter;
+        return true;
+    }
+
+    std::size_t getAllMetadataFailures_{0};
+    std::size_t findByPathFailures_{0};
+};
+
+} // namespace
+
 class GrepServiceTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -117,6 +155,10 @@ TEST_F(GrepServiceTest, RegexOnlyFindsRegexMatches) {
     const auto& r = res.value();
     EXPECT_GT(r.totalMatches, 0u);
     EXPECT_EQ(r.semanticMatches, 0u);
+    EXPECT_GE(r.executionTimeMs, 0);
+    ASSERT_TRUE(r.searchStats.contains("metadata_operations"));
+    EXPECT_NE(r.searchStats.at("metadata_operations"), "0");
+    ASSERT_TRUE(r.searchStats.contains("latency_ms"));
 }
 
 TEST_F(GrepServiceTest, HybridModeIncludesSemanticWhenRegexOff) {
@@ -188,4 +230,27 @@ TEST_F(GrepServiceTest, PathsOnlyModeAllowsSemanticSuggestions) {
                            [](const auto& m) { return m.matchType == "semantic"; });
     });
     SUCCEED();
+}
+
+TEST_F(GrepServiceTest, RetriesTransientMetadataErrors) {
+    auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*pool_);
+    auto docsRes = flakyRepo->findDocumentsByPath("%");
+    ASSERT_TRUE(docsRes);
+    ASSERT_FALSE(docsRes.value().empty());
+    const auto docId = docsRes.value().front().id;
+
+    ASSERT_TRUE(flakyRepo->setMetadata(docId, "force_cold", MetadataValue("true")));
+
+    flakyRepo->setGetAllMetadataFailures(1);
+    repo_ = flakyRepo;
+    ctx_.metadataRepo = flakyRepo;
+    grepService_ = makeGrepService(ctx_);
+
+    GrepRequest rq;
+    rq.pattern = "alpha";
+    rq.literalText = true;
+
+    auto res = grepService_->grep(rq);
+    ASSERT_TRUE(res) << res.error().message;
+    EXPECT_GT(res.value().totalMatches, 0u);
 }
