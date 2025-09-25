@@ -1,0 +1,140 @@
+name: Matrix Warm
+
+on:
+  workflow_call:
+    inputs:
+      conan_profile_linux:
+        description: Path to Linux Conan host profile
+        required: false
+        type: string
+        default: ./conan/profiles/host-linux-clang
+      conan_profile_macos:
+        description: Path to macOS Conan host profile
+        required: false
+        type: string
+        default: ./conan/profiles/host-macos-apple-clang
+      build_type:
+        description: Conan build type for warming (Release/Debug)
+        required: false
+        type: string
+        default: Release
+      enable_onnx:
+        description: Enable ONNX deps during warm
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  warm:
+    name: Warm Conan & ccache (${{ matrix.suffix }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: linux-x86_64
+            runs_on: ubuntu-latest
+            conan_host_profile: ${{ inputs.conan_profile_linux }}
+            conan_arch: x86_64
+            needs_rosetta: false
+          - suffix: linux-arm64
+            runs_on: ubuntu-24.04-arm
+            conan_host_profile: ${{ inputs.conan_profile_linux }}
+            conan_arch: armv8
+            needs_rosetta: false
+          - suffix: macos-arm64
+            runs_on: macos-15
+            conan_host_profile: ${{ inputs.conan_profile_macos }}
+            conan_arch: armv8
+            needs_rosetta: false
+          - suffix: macos-x86_64
+            runs_on: macos-15
+            conan_host_profile: ${{ inputs.conan_profile_macos }}
+            conan_arch: x86_64
+            needs_rosetta: true
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Cache Conan packages (warm)
+        if: github.actor != 'nektos/act'
+        id: cache_conan_warm
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          restore-keys: |
+            conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-
+
+      - name: Cache ccache (warm)
+        if: github.actor != 'nektos/act'
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.ccache
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-
+
+      - name: Install Conan
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew update
+            brew install pipx || true
+            python3 -m pipx ensurepath || true
+            pipx install --python python3 conan || pipx install conan
+          else
+            python3 -m pip install --user --upgrade pipx || true
+            python3 -m pipx ensurepath || true
+            pipx install --python python3 conan || pipx install conan || pip3 install --user --upgrade conan
+          fi
+          conan --version
+          mkdir -p ~/.conan2
+          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+
+      - name: Prime Conan profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          conan profile detect --force
+          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          conan profile show
+
+      - name: Warm dependencies (${{ inputs.build_type }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
+          ONNX=$([ "${{ inputs.enable_onnx }}" = 'true' ] && echo True || echo False)
+          conan install . \
+            -of build/warm-${{ inputs.build_type }} \
+            -pr:b=default \
+            -pr:h=${{ matrix.conan_host_profile }} \
+            -s build_type=${{ inputs.build_type }} \
+            -s:h arch=${{ matrix.conan_arch }} \
+            -o "yams/*:enable_onnx=${ONNX}" \
+            --build=missing
+
+      - name: Warm summary
+        shell: bash
+        run: |
+          echo "Conan warm cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}" || true
+          du -sh ~/.conan2/p 2>/dev/null || true
+          du -sh ~/.cache/ccache 2>/dev/null || true
+

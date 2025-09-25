@@ -148,6 +148,10 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
     }
 
     // For all other requests, check daemon readiness.
+    const bool isAddDocumentRequest = std::holds_alternative<AddDocumentRequest>(req);
+    const bool isGetStatsRequest = std::holds_alternative<GetStatsRequest>(req);
+    const bool isShutdownRequest = std::holds_alternative<ShutdownRequest>(req);
+
     auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
     // Allow GetStatsRequest to bypass the readiness gating so it can return
     // a minimal GetStatsResponse (the handler itself has an early not_ready
@@ -155,21 +159,19 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
     // returned for GetStatsRequest during initialization, breaking the
     // contract that GetStats always yields GetStatsResponse.
     if (lifecycleSnapshot.state != LifecycleState::Ready &&
-        lifecycleSnapshot.state != LifecycleState::Degraded &&
-        !std::holds_alternative<GetStatsRequest>(req)) {
+        lifecycleSnapshot.state != LifecycleState::Degraded && !isGetStatsRequest) {
         // Core services must be ready to proceed. However, for AddDocumentRequest we can
         // accept the request early as long as the content store is ready; the operation is
         // asynchronous and metadata indexing will catch up when the repository is ready.
         bool csReady = state_ && state_->readiness.contentStoreReady.load();
         bool dbReady = state_ && state_->readiness.metadataRepoReady.load();
         bool coreReady = csReady && dbReady;
-        const bool isAddDoc = std::holds_alternative<AddDocumentRequest>(req);
-        if (!coreReady && !(isAddDoc && csReady)) {
+        if (!coreReady && !(isAddDocumentRequest && csReady)) {
             // If not ready (and not an early-accepted add), return a status response.
             StatusRequest statusReq;
             statusReq.detailed = true;
             co_return co_await handleStatusRequest(statusReq);
-        } else if (!coreReady && isAddDoc && csReady) {
+        } else if (!coreReady && isAddDocumentRequest && csReady) {
             spdlog::debug(
                 "Proceeding with AddDocument during initialization (content store ready)");
         } else {
@@ -178,15 +180,20 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
     }
 
     // For requests that need services, check readiness.
-    bool needs_services = !std::holds_alternative<ShutdownRequest>(req) &&
-                          !std::holds_alternative<GetStatsRequest>(req);
+    bool needs_services = !isShutdownRequest && !isGetStatsRequest;
+    const bool contentStoreReady = state_ && state_->readiness.contentStoreReady.load();
+    const bool metadataRepoReady = state_ && state_->readiness.metadataRepoReady.load();
 
     if (needs_services) {
-        if (!state_->readiness.metadataRepoReady.load()) {
-            co_return ErrorResponse{ErrorCode::InvalidState,
-                                    "Metadata repository not ready. Please try again shortly."};
+        if (!metadataRepoReady) {
+            if (isAddDocumentRequest && contentStoreReady) {
+                spdlog::debug("Proceeding with AddDocument while metadata repository initializes");
+            } else {
+                co_return ErrorResponse{ErrorCode::InvalidState,
+                                        "Metadata repository not ready. Please try again shortly."};
+            }
         }
-        if (!state_->readiness.contentStoreReady.load()) {
+        if (!contentStoreReady) {
             std::string error_detail = "Content store not available. Please try again shortly.";
             if (serviceManager_) {
                 std::string cs_error = serviceManager_->getContentStoreError();

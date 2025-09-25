@@ -2,7 +2,9 @@
 #include <filesystem>
 #include <thread>
 #include <gtest/gtest.h>
+#include <yams/common/utf8_utils.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/bk_tree.h>
@@ -284,4 +286,88 @@ TEST_F(MetadataRepositoryTest, SearchFunctionality) {
 
     auto results = searchResult.value();
     EXPECT_GT(results.results.size(), 0);
+}
+
+TEST_F(MetadataRepositoryTest, SearchSanitizesSnippetUtf8) {
+    DocumentInfo docInfo;
+    docInfo.sha256Hash = "search_bad_utf8";
+    docInfo.fileName = "bad_utf8.txt";
+    docInfo.fileSize = 32;
+    docInfo.mimeType = "text/plain";
+    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.modifiedTime = docInfo.createdTime;
+
+    auto createResult = repository_->insertDocument(docInfo);
+    ASSERT_TRUE(createResult.has_value());
+    auto docId = createResult.value();
+
+    std::string badContent = "alpha";
+    badContent.push_back(static_cast<char>(0xFF));
+    badContent += "beta";
+
+    auto indexResult =
+        repository_->indexDocumentContent(docId, "Bad UTF-8", badContent, "text/plain");
+    ASSERT_TRUE(indexResult.has_value());
+
+    auto searchResult = repository_->search("alpha", 10, 0);
+    ASSERT_TRUE(searchResult.has_value());
+    const auto& results = searchResult.value();
+    ASSERT_FALSE(results.results.empty());
+
+    bool matchedDocument = false;
+    for (const auto& item : results.results) {
+        if (item.document.sha256Hash == "search_bad_utf8") {
+            matchedDocument = true;
+            auto sanitized = common::sanitizeUtf8(item.snippet);
+            EXPECT_EQ(item.snippet, sanitized);
+            EXPECT_EQ(item.snippet.find(static_cast<char>(0xFF)), std::string::npos);
+        }
+    }
+
+    EXPECT_TRUE(matchedDocument);
+}
+
+TEST_F(MetadataRepositoryTest, IndexDocumentContentSanitizesUtf8) {
+    DocumentInfo docInfo;
+    docInfo.sha256Hash = "fts_bad_utf8";
+    docInfo.fileName = "fts_bad_utf8.txt";
+    docInfo.fileSize = 64;
+    docInfo.mimeType = "text/plain";
+    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.modifiedTime = docInfo.createdTime;
+
+    auto createResult = repository_->insertDocument(docInfo);
+    ASSERT_TRUE(createResult.has_value());
+    auto docId = createResult.value();
+
+    std::string badContent = "gamma";
+    badContent.push_back(static_cast<char>(0xFF));
+    badContent += "delta";
+
+    auto indexResult =
+        repository_->indexDocumentContent(docId, "Bad FTS UTF-8", badContent, "text/plain");
+    ASSERT_TRUE(indexResult.has_value());
+
+    auto fetchResult = pool_->withConnection([&](metadata::Database& db) -> Result<std::string> {
+        auto stmtResult = db.prepare("SELECT content FROM documents_fts WHERE rowid = ?");
+        if (!stmtResult)
+            return stmtResult.error();
+        metadata::Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, docId);
+        if (!bindResult)
+            return bindResult.error();
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value()) {
+            return Error{ErrorCode::NotFound, "FTS entry not found"};
+        }
+        return stmt.getString(0);
+    });
+
+    ASSERT_TRUE(fetchResult.has_value());
+    const auto storedContent = fetchResult.value();
+    const auto sanitized = common::sanitizeUtf8(badContent);
+    EXPECT_EQ(storedContent, sanitized);
+    EXPECT_EQ(storedContent.find(static_cast<char>(0xFF)), std::string::npos);
 }

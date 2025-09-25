@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <sstream>
+#include <yams/common/utf8_utils.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
@@ -687,6 +688,9 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
             return deleteResult.error();
 
         // Insert new FTS entry
+        const std::string sanitizedContent = common::sanitizeUtf8(content);
+        const std::string sanitizedTitle = common::sanitizeUtf8(title);
+
         auto stmtResult = db.prepare(R"(
             INSERT INTO documents_fts (rowid, content, title, content_type)
             VALUES (?, ?, ?, ?)
@@ -696,7 +700,7 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(documentId, content, title, contentType);
+        auto bindResult = stmt.bindAll(documentId, sanitizedContent, sanitizedTitle, contentType);
         if (!bindResult)
             return bindResult.error();
 
@@ -860,7 +864,7 @@ Result<SearchResults> MetadataRepository::search(const std::string& query, int l
                     result.document.extractionError = stmt.getString(15);
 
                     // Search-specific fields
-                    result.snippet = stmt.getString(2);
+                    result.snippet = common::sanitizeUtf8(stmt.getString(2));
                     result.score = stmt.getDouble(3);
 
                     results.results.push_back(result);
@@ -1534,8 +1538,9 @@ Result<SearchResults> MetadataRepository::fuzzySearch(const std::string& query, 
 
             SearchResult result;
             result.document = docResult.value().value();
-            result.snippet = "Match type: " + fuzzyResult.matchType +
-                             " (similarity: " + std::to_string(fuzzyResult.score) + ")";
+            result.snippet =
+                common::sanitizeUtf8("Match type: " + fuzzyResult.matchType +
+                                     " (similarity: " + std::to_string(fuzzyResult.score) + ")");
             result.score = static_cast<double>(fuzzyResult.score);
 
             results.results.push_back(result);

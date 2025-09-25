@@ -115,6 +115,7 @@ endif
 incs = [
   include_directories('..'),             # project root
   include_directories('.'),              # tests/
+  include_directories('common'),         # shared helpers
   include_directories('../include'),     # headers
   include_directories('../tools/yams-tools/include'),
 ]
@@ -134,7 +135,7 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
 # Collect sources recursively using run_command per directory (no user functions)
 unit_srcs = []
 # Exclude temporarily-outdated tests until ported
-_ru = run_command('sh', '-c', 'find unit -type f -name "*.cpp" ! -path "unit/api/metadata_api_test.cpp" ! -path "unit/compression/error_handler_test_simple.cpp" ! -path "unit/compression/error_handler_test.cpp" ! -path "unit/compression/integrity_validator_test_simple.cpp" ! -path "unit/compression/integrity_validator_test.cpp" ! -path "unit/content/*" ! -path "unit/crypto/*" ! -path "unit/daemon/multiplex_client_test.cpp" ! -path "unit/daemon/request_dispatcher_plugin_test.cpp" ! -path "unit/daemon/onnx_*" ! -path "unit/manifest/manifest_test.cpp" ! -path "unit/integrity/integrity_verifier_test.cpp" ! -path "unit/storage/storage_engine_test.cpp" ! -path "unit/storage/compressed_storage_engine_test.cpp" ! -path "unit/wal/wal_manager_test.cpp" ! -path "unit/cli/*" ! -path "unit/detection/*" 2>/dev/null | sort', check: false)
+_ru = run_command('sh', '-c', 'find unit -type f -name "*.cpp" ! -path "unit/api/metadata_api_test.cpp" ! -path "unit/compression/error_handler_test_simple.cpp" ! -path "unit/compression/error_handler_test.cpp" ! -path "unit/compression/integrity_validator_test_simple.cpp" ! -path "unit/compression/integrity_validator_test.cpp" ! -path "unit/content/*" ! -path "unit/crypto/*" ! -path "unit/daemon/multiplex_client_test.cpp" ! -path "unit/daemon/request_dispatcher_plugin_test.cpp" ! -path "unit/daemon/onnx_*" ! -path "unit/manifest/manifest_test.cpp" ! -path "unit/integrity/integrity_verifier_test.cpp" ! -path "unit/storage/storage_engine_test.cpp" ! -path "unit/storage/compressed_storage_engine_test.cpp" ! -path "unit/cli/*" ! -path "unit/detection/*" 2>/dev/null | sort', check: false)
 if _ru.returncode() == 0
   _out = _ru.stdout()
   if _out != ''

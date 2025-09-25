@@ -399,6 +399,36 @@ TEST_F(SearchServiceTest, SemanticSearch) {
     }
 }
 
+TEST_F(SearchServiceTest, PathsOnlyFallbackHandlesLargeCorpora) {
+    auto docService = makeDocumentService(appContext_);
+    const int extraDocs = 120;
+    for (int i = 0; i < extraDocs; ++i) {
+        auto filePath = testDir_ / ("bulk_doc_" + std::to_string(i) + ".txt");
+        std::ofstream file(filePath);
+        file << "Synthetic corpus document " << i << " content to exercise metadata fallback path.";
+        file.close();
+
+        StoreDocumentRequest storeReq;
+        storeReq.path = filePath.string();
+        auto stored = docService->store(storeReq);
+        ASSERT_TRUE(stored) << "Failed to store test document " << i << ": "
+                            << stored.error().message;
+    }
+
+    SearchRequest request;
+    request.query = "termthatshouldnotmatch"; // force fallback path
+    request.limit = 7;
+    request.pathsOnly = true;
+    request.fuzzy = false;
+
+    auto result = runAwait(searchService_->search(request));
+
+    ASSERT_TRUE(result) << "Search failed: " << result.error().message;
+    EXPECT_LE(result.value().paths.size(), request.limit);
+    EXPECT_FALSE(result.value().paths.empty())
+        << "Fallback should provide recent document paths when no match is found";
+}
+
 TEST_F(SearchServiceTest, HybridSearch) {
     auto request = createBasicSearchRequest("python programming");
     request.type = "hybrid";

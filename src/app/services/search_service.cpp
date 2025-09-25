@@ -1,5 +1,4 @@
 #include <spdlog/spdlog.h>
-#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
@@ -224,8 +223,6 @@ public:
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
         using namespace std::chrono;
-        using namespace boost::asio::experimental::awaitable_operators;
-
         const auto t0 = steady_clock::now();
 
         // Validate dependencies
@@ -492,11 +489,8 @@ private:
             co_return;
         }
 
-        std::vector<boost::asio::awaitable<void>> tasks;
-        tasks.reserve(todo.size());
-
         for (size_t i = 0; i < todo.size(); ++i) {
-            tasks.emplace_back(boost::asio::co_spawn(
+            co_await boost::asio::co_spawn(
                 ctx_.workerExecutor,
                 [&, idx = todo[i]]() -> boost::asio::awaitable<void> {
                     auto& out = resp.results[idx];
@@ -523,16 +517,7 @@ private:
                     }
                     co_return;
                 },
-                boost::asio::use_awaitable));
-        }
-
-        if (!tasks.empty()) {
-            using namespace boost::asio::experimental::awaitable_operators;
-            auto combined_task = std::move(tasks[0]);
-            for (size_t i = 1; i < tasks.size(); ++i) {
-                combined_task = std::move(combined_task) && std::move(tasks[i]);
-            }
-            co_await std::move(combined_task);
+                boost::asio::use_awaitable);
         }
     }
 
@@ -551,12 +536,8 @@ private:
         if (todo.empty())
             co_return;
 
-        using namespace boost::asio::experimental::awaitable_operators;
-        std::vector<boost::asio::awaitable<void>> tasks;
-        tasks.reserve(todo.size());
-
         for (size_t i = 0; i < todo.size(); ++i) {
-            tasks.emplace_back(boost::asio::co_spawn(
+            co_await boost::asio::co_spawn(
                 ctx_.workerExecutor,
                 [&, idx = todo[i]]() -> boost::asio::awaitable<void> {
                     auto& out = resp.results[idx];
@@ -580,15 +561,7 @@ private:
                     }
                     co_return;
                 },
-                boost::asio::use_awaitable));
-        }
-
-        if (!tasks.empty()) {
-            auto combined_task = std::move(tasks[0]);
-            for (size_t i = 1; i < tasks.size(); ++i) {
-                combined_task = std::move(combined_task) && std::move(tasks[i]);
-            }
-            co_await std::move(combined_task);
+                boost::asio::use_awaitable);
         }
     }
 
@@ -604,12 +577,8 @@ private:
         std::vector<std::string> foundPaths;
         std::mutex outMutex;
 
-        using namespace boost::asio::experimental::awaitable_operators;
-        std::vector<boost::asio::awaitable<void>> tasks;
-        tasks.reserve(docs.size());
-
         for (const auto& doc : docs) {
-            tasks.emplace_back(boost::asio::co_spawn(
+            co_await boost::asio::co_spawn(
                 ctx_.workerExecutor,
                 [&, doc]() -> boost::asio::awaitable<void> {
                     if (!req.query.empty() && doc.filePath.find(req.query) == std::string::npos &&
@@ -623,15 +592,10 @@ private:
                     }
                     co_return;
                 },
-                boost::asio::use_awaitable));
-        }
-
-        if (!tasks.empty()) {
-            auto combined_task = std::move(tasks[0]);
-            for (size_t i = 1; i < tasks.size(); ++i) {
-                combined_task = std::move(combined_task) && std::move(tasks[i]);
+                boost::asio::use_awaitable);
+            if (req.limit != 0 && foundPaths.size() >= req.limit) {
+                break;
             }
-            co_await std::move(combined_task);
         }
 
         resp.paths = std::move(foundPaths);

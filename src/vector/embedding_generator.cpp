@@ -4,6 +4,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/system_executor.hpp>
+#include <yams/common/utf8_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
 
@@ -1437,62 +1438,10 @@ public:
         try {
             auto start = std::chrono::high_resolution_clock::now();
 
-            // Sanitize to UTF-8 to satisfy protobuf 'string' constraints
-            auto sanitize_utf8 = [](const std::string& s) -> std::string {
-                std::string out;
-                out.reserve(s.size());
-                const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
-                size_t i = 0, n = s.size();
-                while (i < n) {
-                    unsigned char c = p[i];
-                    if (c < 0x80) { // ASCII
-                        out.push_back(static_cast<char>(c));
-                        ++i;
-                    } else if (c >= 0xC2 && c <= 0xDF && i + 1 < n) { // 2-byte
-                        unsigned char c1 = p[i + 1];
-                        if ((c1 & 0xC0) == 0x80) {
-                            out.push_back(static_cast<char>(c));
-                            out.push_back(static_cast<char>(c1));
-                            i += 2;
-                        } else {
-                            out.push_back('?');
-                            ++i;
-                        }
-                    } else if (c >= 0xE0 && c <= 0xEF && i + 2 < n) { // 3-byte
-                        unsigned char c1 = p[i + 1], c2 = p[i + 2];
-                        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
-                            out.push_back(static_cast<char>(c));
-                            out.push_back(static_cast<char>(c1));
-                            out.push_back(static_cast<char>(c2));
-                            i += 3;
-                        } else {
-                            out.push_back('?');
-                            ++i;
-                        }
-                    } else if (c >= 0xF0 && c <= 0xF4 && i + 3 < n) { // 4-byte
-                        unsigned char c1 = p[i + 1], c2 = p[i + 2], c3 = p[i + 3];
-                        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
-                            out.push_back(static_cast<char>(c));
-                            out.push_back(static_cast<char>(c1));
-                            out.push_back(static_cast<char>(c2));
-                            out.push_back(static_cast<char>(c3));
-                            i += 4;
-                        } else {
-                            out.push_back('?');
-                            ++i;
-                        }
-                    } else {
-                        out.push_back('?');
-                        ++i;
-                    }
-                }
-                return out;
-            };
-
             daemon::BatchEmbeddingRequest req;
             req.texts.reserve(texts.size());
             for (const auto& t : texts) {
-                req.texts.emplace_back(sanitize_utf8(t));
+                req.texts.emplace_back(common::sanitizeUtf8(t));
             }
             req.modelName = config_.model_name;
             req.normalize = config_.normalize_embeddings;
