@@ -141,11 +141,25 @@ bool EmbeddingService::startRepairAsync() {
         }
 #else
 #if defined(SCHED_IDLE)
-        // Lower thread priority on Linux using SCHED_IDLE
-        struct sched_param sp{};
-        sp.sched_priority = 0;
-        if (pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp) != 0) {
-            spdlog::warn("Failed to set repair thread to idle priority (SCHED_IDLE)");
+        bool priorityAdjusted = false;
+        if (::geteuid() == 0) {
+            // Lower thread priority on Linux using SCHED_IDLE when permitted
+            struct sched_param sp{};
+            sp.sched_priority = 0;
+            if (int rc = pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp); rc != 0) {
+                spdlog::warn("Failed to set repair thread to idle priority (SCHED_IDLE), rc={} "
+                             "(falling back to setpriority)",
+                             rc);
+            } else {
+                priorityAdjusted = true;
+            }
+        }
+        if (!priorityAdjusted) {
+            // Fallback: lower niceness when SCHED_IDLE is unavailable/forbidden
+            if (setpriority(PRIO_PROCESS, 0, 19) != 0) {
+                spdlog::warn("Failed to lower repair thread priority via setpriority (errno={})",
+                             errno);
+            }
         }
 #else
         // Fallback: lower niceness when SCHED_IDLE is unavailable

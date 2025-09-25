@@ -635,7 +635,7 @@ jobs:
                 cp "$HOST_PROFILE" "$HOST_PROFILE.x86_64"
                 sed -i '' -E 's/^arch=.*/arch=x86_64/' "$HOST_PROFILE.x86_64"
                 HOST_PROFILE="$HOST_PROFILE.x86_64"
-                ;;;
+                ;;
             esac
           else
             HOST_PROFILE="./conan/profiles/host-linux-clang"
