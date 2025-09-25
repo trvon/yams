@@ -1,6 +1,6 @@
 #include <filesystem>
-#include <fstream>
-#include <random>
+#include "common/fixture_manager.h"
+#include "common/search_corpus_presets.h"
 #include "test_async_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -49,32 +49,34 @@ protected:
         if (daemon_) {
             daemon_->stop();
         }
-
+        fixtureManager_.reset();
         std::error_code ec;
         fs::remove_all(testDir_, ec);
     }
 
     void createTestDocuments() {
-        // Create various test documents
-        testDocs_ = {
-            {"doc1.txt", "The quick brown fox jumps over the lazy dog"},
-            {"doc2.txt", "Lorem ipsum dolor sit amet, consectetur adipiscing elit"},
-            {"doc3.md", "# Markdown Document\n\nThis is a test markdown file with **bold** text"},
-            {"doc4.txt", "Python programming language is widely used for data science"},
-            {"doc5.txt",
-             "Machine learning and artificial intelligence are transforming technology"},
-            {"readme.md", "# README\n\nThis project demonstrates search functionality"},
-            {"notes.txt", "Important notes about the quick deployment process"},
-            {"config.json", "{\"server\": \"localhost\", \"port\": 8080}"},
-            {"test.py", "def hello_world():\n    print(\"Hello, World!\")"},
-            {"data.csv", "name,age,city\nJohn,30,New York\nJane,25,London"}};
+        fixtureManager_ = std::make_unique<yams::test::FixtureManager>(dataDir_);
 
-        for (const auto& [filename, content] : testDocs_) {
-            fs::path filePath = dataDir_ / filename;
-            std::ofstream file(filePath);
-            file << content;
-            file.close();
-        }
+        auto spec = yams::test::defaultSearchCorpusSpec();
+        spec.commonTags.push_back("daemon");
+        spec.commonTags.push_back("search");
+        searchCorpus_ = fixtureManager_->createSearchCorpus(spec);
+
+        fixtureManager_->createTextFixture(
+            "corpus/readme.md", "# README\n\nThis project demonstrates search functionality",
+            {"docs", "markdown"});
+        fixtureManager_->createTextFixture(
+            "corpus/markdown_doc.md",
+            "# Markdown Document\n\nThis is a test markdown file with **bold** text",
+            {"docs", "markdown"});
+        fixtureManager_->createTextFixture("corpus/config.json",
+                                           "{\"server\": \"localhost\", \"port\": 8080}",
+                                           {"config", "json"});
+        fixtureManager_->createTextFixture("corpus/test.py",
+                                           "def hello_world():\n    print(\"Hello, World!\")",
+                                           {"code", "python"});
+        fixtureManager_->createTextFixture(
+            "corpus/data.csv", "name,age,city\nJohn,30,New York\nJane,25,London", {"data", "csv"});
     }
 
     fs::path testDir_;
@@ -82,7 +84,8 @@ protected:
     DaemonConfig daemonConfig_;
     ClientConfig clientConfig_;
     std::unique_ptr<YamsDaemon> daemon_;
-    std::vector<std::pair<std::string, std::string>> testDocs_;
+    std::unique_ptr<yams::test::FixtureManager> fixtureManager_;
+    yams::test::SearchCorpus searchCorpus_;
 };
 
 // Test basic search through daemon

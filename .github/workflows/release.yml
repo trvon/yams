@@ -571,6 +571,19 @@ jobs:
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV
 
+      - name: Upload build logs (artifacts)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.suffix }}-${{ github.run_number }}
+          path: |
+            build/release/meson-logs/
+            build/release/meson-info/
+            build/release/meson-logs/meson-log.txt
+            build/release/build-release/conan/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: ccache stats (post-build)
         shell: bash
         run: |
@@ -611,6 +624,8 @@ jobs:
       - name: Generate release summary
         shell: bash
         run: |
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
           SUMMARY_FILE="$BUILD_DIR/release_summary.md"
           echo "## Release Build Information (${{ steps.meta.outputs.version }})" > "$SUMMARY_FILE"
           echo "" >> "$SUMMARY_FILE"

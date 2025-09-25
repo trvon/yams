@@ -253,9 +253,35 @@ auto binaryFixture = manager.createBinaryFixture("data.bin", generator.generateR
 auto fixtures = manager.createCorpus(50, 1024);  // 50 docs, 1KB each
 ```
 
-> **Tip:** Integration smoke tests (daemon ingestion) and metadata-heavy unit suites (search
-> service) are wired to `FixtureManager`; prefer extending those helpers over ad-hoc
-> `std::ofstream` usage when adding new file-backed scenarios.
+#### Search Corpus Presets
+
+Search-heavy suites (daemon search, CLI regressions, benchmarking) reuse a deterministic preset corpus so they can share documents, tags, and query workloads.
+
+```cpp
+#include "tests/common/fixture_manager.h"
+#include "tests/common/search_corpus_presets.h"
+
+yams::test::FixtureManager fixtures(tmpDir);
+auto spec = yams::test::defaultSearchCorpusSpec();
+spec.commonTags.push_back("regression");
+auto corpus = fixtures.createSearchCorpus(spec);
+
+yams::app::services::DocumentIngestionService ingiter;
+yams::app::services::AddOptions opts;
+opts.socketPath = sock;
+opts.explicitDataDir = storageDir;
+opts.path = (fixtures.root() / spec.rootDirectory).string();
+opts.recursive = true;
+opts.noEmbeddings = false; // ensure vectors are generated
+auto addRes = ingiter.addViaDaemon(opts);
+ASSERT_TRUE(addRes);
+```
+
+`createSearchCorpus` returns both a flat list (`corpus.fixtures`) and a topic map (`corpus.fixturesByTopic`) so callers can pick targeted subsets (for example `topic:python`). All artifacts live under `FixtureManager::root()` and are removed when the manager is destroyed.
+
+> See `docs/delivery/028/artifacts/search-fixture-benchmark.md` for a command-line flow that uses the same presets to benchmark `yams search` end to end.
+
+> **Tip:** Integration smoke tests (daemon ingestion) and metadata-heavy unit suites (search service) are wired to `FixtureManager`; prefer extending those helpers over ad-hoc `std::ofstream` usage when adding new file-backed scenarios.
 
 ## Code Coverage
 

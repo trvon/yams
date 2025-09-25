@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -17,6 +18,26 @@ struct Fixture {
     std::filesystem::path path;
     std::string description;
     std::vector<std::string> tags;
+};
+
+struct SearchTopicSpec {
+    std::string name;
+    std::size_t documentsPerTopic{4};
+    std::string extension{".txt"};
+    std::vector<std::string> keywords;
+    std::vector<std::string> tags;
+};
+
+struct SearchCorpusSpec {
+    std::string rootDirectory{"search"};
+    std::size_t bytesPerDocument{512};
+    std::vector<std::string> commonTags;
+    std::vector<SearchTopicSpec> topics;
+};
+
+struct SearchCorpus {
+    std::vector<Fixture> fixtures;
+    std::map<std::string, std::vector<Fixture>> fixturesByTopic;
 };
 
 class FixtureManager {
@@ -71,6 +92,39 @@ public:
             fixtures.push_back(createTextFixture(name, corpus[i], {"corpus"}));
         }
         return fixtures;
+    }
+
+    SearchCorpus createSearchCorpus(const SearchCorpusSpec& spec) {
+        SearchCorpus corpus;
+        TestDataGenerator generator;
+
+        auto make_tags = [&](const SearchTopicSpec& topic) {
+            std::vector<std::string> tags = spec.commonTags;
+            tags.reserve(tags.size() + topic.tags.size() + 1);
+            tags.insert(tags.end(), topic.tags.begin(), topic.tags.end());
+            tags.push_back("topic:" + topic.name);
+            return tags;
+        };
+
+        for (const auto& topic : spec.topics) {
+            auto tags = make_tags(topic);
+            for (std::size_t i = 0; i < std::max<std::size_t>(1, topic.documentsPerTopic); ++i) {
+                auto filename = topic.name + "_" + std::to_string(i) + topic.extension;
+                auto relative = std::filesystem::path(spec.rootDirectory) / filename;
+
+                auto content = generator.generateTextDocument(spec.bytesPerDocument, topic.name);
+                for (const auto& keyword : topic.keywords) {
+                    content.append(" ");
+                    content.append(keyword);
+                }
+
+                auto fixture = createTextFixture(relative.string(), content, tags);
+                corpus.fixtures.push_back(fixture);
+                corpus.fixturesByTopic[topic.name].push_back(fixture);
+            }
+        }
+
+        return corpus;
     }
 
     void cleanupFixtures() {

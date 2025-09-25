@@ -1,7 +1,8 @@
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <thread>
+#include <vector>
+#include "common/fixture_manager.h"
 #include <gtest/gtest.h>
 
 #include <yams/app/services/document_ingestion_service.h>
@@ -19,6 +20,7 @@ protected:
     fs::path storageDir_;
     fs::path xdgRuntimeDir_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::unique_ptr<yams::test::FixtureManager> fixtures_;
 
     void SetUp() override {
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -27,6 +29,7 @@ protected:
         xdgRuntimeDir_ = testRoot_ / "xdg";
         fs::create_directories(storageDir_);
         fs::create_directories(xdgRuntimeDir_);
+        fixtures_ = std::make_unique<yams::test::FixtureManager>(testRoot_ / "fixtures");
 
         // Ensure test daemon never kills any existing user/system daemon
 #if defined(_WIN32)
@@ -50,6 +53,7 @@ protected:
     void TearDown() override {
         if (daemon_)
             daemon_->stop();
+        fixtures_.reset();
         // Best-effort removal of test socket and pid file
         std::error_code ec2;
         std::filesystem::remove(xdgRuntimeDir_ / "yams-daemon.sock", ec2);
@@ -65,12 +69,9 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     using yams::app::services::RetrievalService;
 
     // 1) Create a small file to add
-    fs::path filePath = testRoot_ / "hello.txt";
-    {
-        std::ofstream f(filePath);
-        f << "hello yams services";
-        f.close();
-    }
+    auto doc = fixtures_->createTextFixture("hello/hello.txt", "hello yams services",
+                                            {"services", "smoke"});
+    fs::path filePath = doc.path;
 
     // 2) Add via DocumentIngestionService (daemon-first)
     DocumentIngestionService ing;
@@ -155,7 +156,19 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     DocumentIngestionService ing;
     yams::app::services::AddOptions opts;
     opts.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
-    opts.path = (testRoot_ / "ingest").string();
+    auto keepCpp = fixtures_->createTextFixture(
+        "ingest/dirA/dirB/keep.cpp", "int main() { return 0; }\n", {"code", "cpp", "ingest"});
+    auto keepMd = fixtures_->createTextFixture(
+        "ingest/dirA/dirB/keep.md", "# Title\nhello pattern tags\n", {"docs", "md", "ingest"});
+    std::vector<std::byte> skipData = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}};
+    auto skipBin =
+        fixtures_->createBinaryFixture("ingest/dirA/dirB/skip.bin", skipData, {"bin", "ingest"});
+
+    (void)keepCpp;
+    (void)keepMd;
+    (void)skipBin;
+
+    opts.path = (fixtures_->root() / "ingest").string();
     opts.recursive = true;
     opts.includePatterns = {"*.cpp", "*.md"};
     opts.excludePatterns = {"*.bin"};
@@ -178,7 +191,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     yams::daemon::ListRequest lreq;
     lreq.limit = 50;
     // Filter to our directory by pattern
-    lreq.namePattern = (testRoot_ / "ingest" / "**").string();
+    lreq.namePattern = (fixtures_->root() / "ingest" / "**").string();
     lreq.showTags = true;
     lreq.showMetadata = true;
     auto lres = rsvc.list(lreq, ropts);

@@ -274,16 +274,25 @@ jobs:
           cd ${{ env.BUILD_DIR }}
           arch -x86_64 meson test --print-errorlogs
 
-      - name: Upload Meson logs
-        if: always()
+      - name: Upload test logs (artifacts)
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: meson-logs-${{ matrix.suffix }}
+          name: logs-${{ matrix.suffix }}-${{ github.run_number }}
           path: |
             ${{ env.BUILD_DIR }}/meson-logs/
             ${{ env.BUILD_DIR }}/meson-info/
+            ${{ env.BUILD_DIR }}/meson-logs/testlog.txt
+            ${{ env.BUILD_DIR }}/build-debug/conan/**/*.log
           if-no-files-found: ignore
-          retention-days: 5
+          retention-days: 14
+
+      - name: Job Summary (artifacts link)
+        if: always()
+        shell: bash
+        run: |
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate Coverage Report
         if: matrix.coverage == true

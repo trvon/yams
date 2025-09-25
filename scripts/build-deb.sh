@@ -61,8 +61,23 @@ persist_env_defaults() {
 }
 
 ensure_base_packages() {
-  apt-get update -y
-  apt-get install -y --no-install-recommends \
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "apt-get not available; skipping base package install" >&2
+    return
+  fi
+
+  local -a apt_runner
+  if [ "$(id -u)" -eq 0 ]; then
+    apt_runner=(apt-get)
+  elif command -v sudo >/dev/null 2>&1; then
+    apt_runner=(sudo apt-get)
+  else
+    echo "Skipping apt-get install (requires root privileges); assuming base image already provides build dependencies" >&2
+    return
+  fi
+
+  "${apt_runner[@]}" update -y
+  "${apt_runner[@]}" install -y --no-install-recommends \
     build-essential \
     cmake \
     meson \
