@@ -7,6 +7,7 @@
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 
@@ -85,8 +86,8 @@ TEST_F(IntegrityVerifierSimpleTest, ConstructorBasics) {
     EXPECT_FALSE(verifier->isPaused());
 
     const auto& stats = verifier->getStatistics();
-    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 0);
-    EXPECT_EQ(stats.verificationErrorsTotal.load(), 0);
+    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 0u);
+    EXPECT_EQ(stats.verificationErrorsTotal.load(), 0u);
 }
 
 TEST_F(IntegrityVerifierSimpleTest, VerifyExistingBlock) {
@@ -100,8 +101,8 @@ TEST_F(IntegrityVerifierSimpleTest, VerifyExistingBlock) {
     EXPECT_TRUE(result.isSuccess());
 
     const auto& stats = verifier->getStatistics();
-    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 1);
-    EXPECT_EQ(stats.verificationErrorsTotal.load(), 0);
+    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 1u);
+    EXPECT_EQ(stats.verificationErrorsTotal.load(), 0u);
 }
 
 TEST_F(IntegrityVerifierSimpleTest, VerifyMissingBlock) {
@@ -114,8 +115,8 @@ TEST_F(IntegrityVerifierSimpleTest, VerifyMissingBlock) {
     EXPECT_FALSE(result.isSuccess());
 
     const auto& stats = verifier->getStatistics();
-    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 0);
-    EXPECT_EQ(stats.verificationErrorsTotal.load(), 1);
+    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 0u);
+    EXPECT_EQ(stats.verificationErrorsTotal.load(), 1u);
 }
 
 TEST_F(IntegrityVerifierSimpleTest, BackgroundVerificationControl) {
@@ -134,29 +135,31 @@ TEST_F(IntegrityVerifierSimpleTest, GenerateReport) {
     storeTestData();
 
     // Verify a block to have some data
-    verifier->verifyBlock(testHash);
+    auto result = verifier->verifyBlock(testHash);
+    ASSERT_TRUE(result.isSuccess());
 
     auto report = verifier->generateReport(std::chrono::hours{1});
 
-    EXPECT_EQ(report.blocksVerified, 1);
-    EXPECT_EQ(report.blocksPassed, 1);
-    EXPECT_EQ(report.blocksFailed, 0);
-    EXPECT_GT(report.totalBytes, 0);
+    EXPECT_EQ(report.blocksVerified, 1u);
+    EXPECT_EQ(report.blocksPassed, 1u);
+    EXPECT_EQ(report.blocksFailed, 0u);
+    EXPECT_GT(report.totalBytes, std::size_t{0});
     EXPECT_NEAR(report.getSuccessRate(), 1.0, 0.01);
 }
 
 TEST_F(IntegrityVerifierSimpleTest, StatisticsReset) {
     storeTestData();
-    verifier->verifyBlock(testHash);
+    auto result = verifier->verifyBlock(testHash);
+    ASSERT_TRUE(result.isSuccess());
 
     const auto& statsBefore = verifier->getStatistics();
-    EXPECT_GT(statsBefore.blocksVerifiedTotal.load(), 0);
+    EXPECT_GT(statsBefore.blocksVerifiedTotal.load(), 0u);
 
     verifier->resetStatistics();
 
     const auto& statsAfter = verifier->getStatistics();
-    EXPECT_EQ(statsAfter.blocksVerifiedTotal.load(), 0);
-    EXPECT_EQ(statsAfter.verificationErrorsTotal.load(), 0);
+    EXPECT_EQ(statsAfter.blocksVerifiedTotal.load(), 0u);
+    EXPECT_EQ(statsAfter.verificationErrorsTotal.load(), 0u);
 }
 
 TEST_F(IntegrityVerifierSimpleTest, ConfigurationUpdate) {
@@ -185,7 +188,8 @@ TEST_F(IntegrityVerifierSimpleTest, CallbackFunctionality) {
         EXPECT_EQ(result.blockHash, testHash);
     });
 
-    verifier->verifyBlock(testHash);
+    auto result = verifier->verifyBlock(testHash);
+    ASSERT_TRUE(result.isSuccess());
 
     EXPECT_TRUE(progressCalled);
 }

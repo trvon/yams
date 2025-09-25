@@ -186,7 +186,8 @@ public:
                     fields.emplace_back(key, metadata::MetadataValue("value_" + key));
                     break;
                 case 1:
-                    fields.emplace_back(key, metadata::MetadataValue(int_dist(rng_)));
+                    fields.emplace_back(
+                        key, metadata::MetadataValue(static_cast<int64_t>(int_dist(rng_))));
                     break;
                 case 2:
                     fields.emplace_back(key, metadata::MetadataValue(real_dist(rng_)));

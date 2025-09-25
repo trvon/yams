@@ -1,6 +1,5 @@
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <future>
 #include <thread>
 #include "common/daemon_preflight.h"
@@ -8,6 +7,9 @@
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/daemon.h>
+
+#include "common/fixture_manager.h"
+#include "common/test_data_generator.h"
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -19,6 +21,7 @@ protected:
     fs::path root_;
     fs::path storageDir_;
     fs::path runtimeRoot_;
+    std::unique_ptr<yams::test::FixtureManager> fixtures_;
 
     void SetUp() override {
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -27,6 +30,8 @@ protected:
         runtimeRoot_ = root_ / "runtime";
         fs::create_directories(storageDir_);
         fs::create_directories(runtimeRoot_);
+
+        fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
 
         // Standardize daemon test environment (no external daemon kills; unique paths)
         yams::tests::harnesses::DaemonPreflight::ensure_environment({
@@ -37,6 +42,7 @@ protected:
     }
 
     void TearDown() override {
+        fixtures_.reset();
         // Best-effort cleanup of runtime paths
         yams::tests::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
         std::error_code ec;
@@ -45,12 +51,12 @@ protected:
 };
 
 TEST_F(DaemonIngestionReliabilitySmoke, IngestRetriesUntilDaemonReady) {
-    // Prepare a file to ingest
-    const fs::path src = root_ / "hello.txt";
-    {
-        std::ofstream f(src);
-        f << "hello yams daemon reliability";
-    }
+    ASSERT_TRUE(fixtures_) << "Fixture manager not initialized";
+
+    yams::test::TestDataGenerator generator(4242);
+    auto documentFixture = fixtures_->createTextFixture(
+        "hello.txt", generator.generateTextDocument(256, "daemon"), {"daemon", "ingest", "smoke"});
+    const fs::path& src = documentFixture.path;
 
     // Compose add options pointing at a socket that does not exist yet
     yams::app::services::DocumentIngestionService ing;

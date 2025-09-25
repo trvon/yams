@@ -1,7 +1,7 @@
 #include <chrono>
 #include <filesystem>
-#include "../../common/fixture_manager.h"
-#include "../../common/test_data_generator.h"
+#include "common/fixture_manager.h"
+#include "common/test_data_generator.h"
 #include <gtest/gtest.h>
 #include <yams/api/content_store.h>
 #include <yams/extraction/pdf_extractor.h>

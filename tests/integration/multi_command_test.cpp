@@ -1,7 +1,7 @@
 #include <filesystem>
 #include <sstream>
 #include <vector>
-#include "../../common/test_data_generator.h"
+#include "common/test_data_generator.h"
 #include <gtest/gtest.h>
 #include <yams/api/content_store.h>
 #include <yams/metadata/database.h>

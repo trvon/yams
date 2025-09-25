@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <string>
 #include <string_view>
@@ -91,7 +92,7 @@ public:
         if (!std::filesystem::exists(cat.largeText.path) ||
             std::filesystem::file_size(cat.largeText.path) != size) {
             TestDataGenerator generator;
-            cat.largeText = cat.manager.createTextFixture(
+            cat.largeText = cat.manager->createTextFixture(
                 "large_text.txt", generator.generateTextDocument(size, "fixture"),
                 {"text", "large"});
         }
@@ -100,19 +101,19 @@ public:
 
 private:
     struct FixtureCatalog {
-        FixtureManager manager;
+        std::unique_ptr<FixtureManager> manager;
         Fixture simple;
         Fixture complex;
         Fixture corrupted;
         Fixture largeText;
 
-        FixtureCatalog() : manager(make_root_path()) {
+        FixtureCatalog() : manager(std::make_unique<FixtureManager>(make_root_path())) {
             TestDataGenerator generator;
-            simple = manager.createPdfFixture("simple.pdf", 2, {"pdf", "simple"});
-            complex = manager.createPdfFixture("complex.pdf", 8, {"pdf", "complex"});
-            corrupted = manager.createBinaryFixture(
+            simple = manager->createPdfFixture("simple.pdf", 2, {"pdf", "simple"});
+            complex = manager->createPdfFixture("complex.pdf", 8, {"pdf", "complex"});
+            corrupted = manager->createBinaryFixture(
                 "corrupted.pdf", generator.generateCorruptedPDF(), {"pdf", "corrupted"});
-            largeText = manager.createTextFixture(
+            largeText = manager->createTextFixture(
                 "large_text.txt", generator.generateTextDocument(512 * 1024, "large fixture"),
                 {"text", "large"});
         }

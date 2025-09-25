@@ -1,6 +1,6 @@
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
-#include <fstream>
 #include <optional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -17,6 +17,9 @@
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_executor.h>
 
+#include "common/fixture_manager.h"
+#include "common/test_data_generator.h"
+
 using namespace yams;
 using namespace yams::app::services;
 using namespace yams::metadata;
@@ -24,6 +27,10 @@ using namespace yams::api;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 using ::testing::Not;
+
+namespace {
+constexpr std::size_t kZeroTotal = 0;
+}
 template <typename T> yams::Result<T> runAwait(boost::asio::awaitable<yams::Result<T>> aw) {
     boost::asio::io_context ioc;
 
@@ -72,6 +79,8 @@ private:
         std::error_code ec;
         std::filesystem::create_directories(testDir_, ec);
         ASSERT_FALSE(ec) << "Failed to create test directory: " << ec.message();
+
+        fixtureManager_ = std::make_unique<yams::test::FixtureManager>(testDir_ / "fixtures");
     }
 
     void setupDatabase() {
@@ -126,24 +135,25 @@ private:
     }
 
     void setupTestData() {
-        // Create test files to store
-        testDocuments_ = {{"Document about artificial intelligence and machine learning", "ai.txt"},
-                          {"Python programming tutorial with examples", "python.txt"},
-                          {"Database design patterns and best practices", "database.md"},
-                          {"Web development using React and JavaScript", "web.html"},
-                          {"Scientific paper about climate change research", "climate.pdf"}};
+        ASSERT_TRUE(fixtureManager_) << "Fixture manager not initialized";
+
+        yams::test::TestDataGenerator generator(1337);
+        testDocuments_ = {
+            {generator.generateMarkdown(2, "Artificial Intelligence Primer"), "ai.txt"},
+            {generator.generateMarkdown(2, "Python Programming Tutorial"), "python.txt"},
+            {generator.generateMarkdown(2, "Database Design Handbook"), "database.md"},
+            {generator.generateMarkdown(2, "Web Development Guide"), "web.md"},
+            {generator.generateMarkdown(3, "Climate Research Summary"), "climate.txt"}};
 
         // Create document service to store test data
         auto docService = makeDocumentService(appContext_);
 
         for (const auto& [content, filename] : testDocuments_) {
-            auto filePath = testDir_ / filename;
-            std::ofstream file(filePath);
-            file << content;
-            file.close();
+            auto fixture = fixtureManager_->createTextFixture(filename, content,
+                                                              {"search", "unit", "fixture"});
 
             StoreDocumentRequest storeReq;
-            storeReq.path = filePath.string();
+            storeReq.path = fixture.path.string();
             auto storeResult = docService->store(storeReq);
             if (storeResult) {
                 testHashes_.push_back(storeResult.value().hash);
@@ -171,6 +181,7 @@ private:
     }
 
     void cleanupTestEnvironment() {
+        fixtureManager_.reset();
         if (!testDir_.empty() && std::filesystem::exists(testDir_)) {
             std::error_code ec;
             std::filesystem::remove_all(testDir_, ec);
@@ -203,6 +214,7 @@ protected:
     std::shared_ptr<ISearchService> searchService_;
 
     // Test documents
+    std::unique_ptr<yams::test::FixtureManager> fixtureManager_;
     std::vector<std::pair<std::string, std::string>> testDocuments_;
     std::vector<std::string> testHashes_;
 };
@@ -218,8 +230,8 @@ TEST_F(SearchServiceTest, BasicTextSearch) {
     ASSERT_TRUE(result) << "Search failed: " << result.error().message;
 
     // Should find relevant documents
-    EXPECT_GE(result.value().results.size(), 0);
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().results.size(), std::size_t{0});
+    EXPECT_GE(result.value().total, kZeroTotal);
 
     // Check result structure
     for (const auto& doc : result.value().results) {
@@ -273,7 +285,7 @@ TEST_F(SearchServiceTest, SearchWithLimit) {
     auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
-    EXPECT_LE(result.value().results.size(), 3);
+    EXPECT_LE(result.value().results.size(), std::size_t{3});
 }
 
 TEST_F(SearchServiceTest, SearchWithOffset) {
@@ -294,7 +306,7 @@ TEST_F(SearchServiceTest, SearchWithOffset) {
         // Should get different results potentially
         if (!result2.value().results.empty() && !result1.value().results.empty()) {
             // Results might differ
-            EXPECT_GE(result2.value().results.size(), 0);
+            EXPECT_GE(result2.value().results.size(), std::size_t{0});
         }
     }
 }
@@ -310,7 +322,7 @@ TEST_F(SearchServiceTest, FuzzySearch) {
 
     // Fuzzy search might find documents even with typos
     // The exact behavior depends on implementation
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 }
 
 // Search Filters
@@ -324,7 +336,7 @@ TEST_F(SearchServiceTest, SearchWithTagFilter) {
 
     ASSERT_TRUE(result);
     // Should only return documents with at least one of the specified tags
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 }
 
 TEST_F(SearchServiceTest, SearchWithFileTypeFilter) {
@@ -370,7 +382,7 @@ TEST_F(SearchServiceTest, KeywordSearch) {
     auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 
     // Should find documents containing the keywords
     for (const auto& doc : result.value().results) {
@@ -386,7 +398,7 @@ TEST_F(SearchServiceTest, SemanticSearch) {
 
     // Semantic search might not be available in all configurations
     if (result) {
-        EXPECT_GE(result.value().total, 0);
+        EXPECT_GE(result.value().total, kZeroTotal);
 
         // Semantic search should find conceptually similar documents
         for (const auto& doc : result.value().results) {
@@ -436,7 +448,7 @@ TEST_F(SearchServiceTest, HybridSearch) {
     auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 
     // Hybrid search should combine keyword and semantic results
     for (const auto& doc : result.value().results) {
@@ -475,7 +487,7 @@ TEST_F(SearchServiceTest, HandleInvalidSearchType) {
     if (!result) {
         EXPECT_EQ(result.error().code, ErrorCode::InvalidArgument);
     } else {
-        EXPECT_GE(result.value().total, 0);
+        EXPECT_GE(result.value().total, kZeroTotal);
     }
 }
 
@@ -521,7 +533,7 @@ TEST_F(SearchServiceTest, SearchWithSpecialCharacters) {
 
     ASSERT_TRUE(result);
     // Should handle special characters in queries without crashing
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 }
 
 TEST_F(SearchServiceTest, SearchWithQuotedPhrase) {
@@ -531,7 +543,7 @@ TEST_F(SearchServiceTest, SearchWithQuotedPhrase) {
 
     ASSERT_TRUE(result);
     // Should search for exact phrase
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 }
 
 TEST_F(SearchServiceTest, SearchWithWildcards) {
@@ -541,7 +553,7 @@ TEST_F(SearchServiceTest, SearchWithWildcards) {
 
     ASSERT_TRUE(result);
     // Should match programming, programs, etc.
-    EXPECT_GE(result.value().total, 0);
+    EXPECT_GE(result.value().total, kZeroTotal);
 }
 
 // Result Quality Tests
@@ -575,7 +587,7 @@ TEST_F(SearchServiceTest, NoResults) {
     auto result = runAwait(searchService_->search(request));
 
     ASSERT_TRUE(result);
-    EXPECT_EQ(result.value().total, 0);
+    EXPECT_EQ(result.value().total, kZeroTotal);
     EXPECT_TRUE(result.value().results.empty());
 }
 
@@ -605,7 +617,7 @@ TEST_F(SearchServiceTest, VeryLongQuery) {
 
     // Should either handle gracefully or return appropriate error
     if (result) {
-        EXPECT_GE(result.value().total, 0);
+        EXPECT_GE(result.value().total, kZeroTotal);
     } else {
         EXPECT_TRUE(result.error().code == ErrorCode::InvalidArgument);
     }

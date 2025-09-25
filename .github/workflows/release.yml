@@ -55,6 +55,13 @@ jobs:
             build_packages: true
             meson_args: ""
             hosted: true
+          - os: linux-hosted-arm64
+            runs_on: ubuntu-24.04-arm
+            suffix: linux-arm64
+            packaging: tar
+            build_packages: true
+            meson_args: ""
+            hosted: true
           - os: macos-hosted-arm64
             runs_on: macos-15
             suffix: macos-arm64
@@ -518,6 +525,12 @@ jobs:
               macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
               macos-x86_64) CONAN_ARGS="$CONAN_ARGS -s:h arch=x86_64" ;;
             esac
+          else
+            # Linux: set explicit host arch based on matrix suffix
+            case "${{ matrix.suffix }}" in
+              linux-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
+              linux-x86_64) CONAN_ARGS="$CONAN_ARGS -s:h arch=x86_64" ;;
+            esac
           fi
           conan install . $CONAN_ARGS
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
@@ -547,8 +560,12 @@ jobs:
               exit 1
             fi
           fi
-          # Ensure pkg-config is discoverable in cross build; use Homebrew path explicitly
-          export PKG_CONFIG=${PKG_CONFIG:-/opt/homebrew/bin/pkg-config}
+          # Ensure pkg-config is discoverable for Meson
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export PKG_CONFIG=${PKG_CONFIG:-/opt/homebrew/bin/pkg-config}
+          else
+            export PKG_CONFIG=${PKG_CONFIG:-/usr/bin/pkg-config}
+          fi
           meson setup build/release "${MESON_TOOL_ARG[@]}" \
             -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto
           meson compile -C build/release

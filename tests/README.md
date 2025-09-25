@@ -233,19 +233,29 @@ auto metadata = generator.generateMetadata(10, {"string", "number", "boolean"});
 
 ```cpp
 #include "tests/common/fixture_manager.h"
+#include "tests/common/test_data_generator.h"
+
+using yams::test::FixtureManager;
+using yams::test::TestDataGenerator;
 
 // Get predefined fixtures
 auto simplePDF = FixtureManager::getSimplePDF();
 auto complexPDF = FixtureManager::getComplexPDF();
 auto largeText = FixtureManager::getLargeTextFile();
 
-// Create custom fixture
+// Create custom fixtures rooted in a temporary directory
 FixtureManager manager;
-auto fixture = manager.createFixture("custom.txt", "content");
+TestDataGenerator generator;
+auto textFixture = manager.createTextFixture("custom.txt", "content");
+auto binaryFixture = manager.createBinaryFixture("data.bin", generator.generateRandomBytes(512));
 
-// Create test corpus
+// Create a synthetic corpus for search/metadata tests
 auto fixtures = manager.createCorpus(50, 1024);  // 50 docs, 1KB each
 ```
+
+> **Tip:** Integration smoke tests (daemon ingestion) and metadata-heavy unit suites (search
+> service) are wired to `FixtureManager`; prefer extending those helpers over ad-hoc
+> `std::ofstream` usage when adding new file-backed scenarios.
 
 ## Code Coverage
 

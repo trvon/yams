@@ -126,18 +126,13 @@ jobs:
 
   # Build ARM64 image on native Linux ARM64 runner (no QEMU)
   build-arm64:
-    name: Build Docker Image (linux/arm64 via QEMU)
-    runs-on: ubuntu-latest
+    name: Build Docker Image (linux/arm64 native)
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: Set up QEMU (arm64)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Verify Docker daemon is running
         run: |
