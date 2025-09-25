@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <thread>
 #include <gtest/gtest.h>
@@ -221,7 +222,7 @@ TEST_F(MetadataRepositoryTest, GetAllMetadata) {
     ASSERT_TRUE(getAllResult.has_value());
 
     auto metadata = getAllResult.value();
-    EXPECT_EQ(metadata.size(), 3);
+    EXPECT_EQ(metadata.size(), 3u);
 
     EXPECT_EQ(metadata["author"].asString(), "John Doe");
     EXPECT_EQ(metadata["year"].asInteger(), 2024);
@@ -285,7 +286,7 @@ TEST_F(MetadataRepositoryTest, SearchFunctionality) {
     ASSERT_TRUE(searchResult.has_value());
 
     auto results = searchResult.value();
-    EXPECT_GT(results.results.size(), 0);
+    EXPECT_GT(results.results.size(), std::size_t{0});
 }
 
 TEST_F(MetadataRepositoryTest, SearchSanitizesSnippetUtf8) {

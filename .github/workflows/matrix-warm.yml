@@ -1,5 +1,8 @@
 name: Matrix Warm
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
@@ -137,4 +140,3 @@ jobs:
           echo "Conan warm cache hit: ${{ steps.cache_conan_warm.outputs.cache-hit }}" || true
           du -sh ~/.conan2/p 2>/dev/null || true
           du -sh ~/.cache/ccache 2>/dev/null || true
-

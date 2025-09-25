@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main] # Or your default branch
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   warm:
@@ -17,7 +17,7 @@ jobs:
 
   tests:
     needs: warm
-    if: ${{ always() }}
+    if: ${{ success() }}
     name: Tests (${{ matrix.suffix }})
     strategy:
       fail-fast: false
