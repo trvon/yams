@@ -1,6 +1,6 @@
 # Mobile Bindings Overview
 
-_Status: draft_
+_Status: in_review
 
 ## Goals
 - Provide a minimal C ABI that exposes search and grep capabilities without leaking internal C++ types.
@@ -33,18 +33,24 @@ _Status: draft_
 
 ## Threading & Concurrency
 - Embedders may call APIs from any thread; library serializes access via internal dispatch contexts.
-- Async operations expose both blocking (`*_execute`) and callback-based variants (`*_execute_async`).
-- Swift/Kotlin wrappers translate callbacks into platform futures (Combine publishers / Kotlin flows).
+- Current surface provides blocking (`*_execute`) calls; Swift/Kotlin wrappers translate results into platform async primitives (Combine publishers / Kotlin flows) while we plan future `*_execute_async` additions.
 
-## Feature Skeleton
-| Area                  | Functions (draft)                              | Notes |
-|-----------------------|-----------------------------------------------|-------|
-| Context lifecycle     | `yams_mobile_context_create`, `*_destroy`, `*_reload_config` | Takes config struct (paths, cache size, feature toggles). |
-| Grep/Search           | `yams_mobile_grep_execute`, `yams_mobile_search_execute`, `*_dispose_result` | Mirrors CLI flags (pattern, literal, word, context windows, filters, hybrid toggles). |
-| Document ingest/update| `yams_mobile_store_document`, `yams_mobile_update_document`, `yams_mobile_delete_document` | Wraps DocumentService flows; supports fixture-backed paths. |
-| Metadata & fixtures   | `yams_mobile_list_documents`, `yams_mobile_get_metadata`, `yams_mobile_list_fixtures` | Enables mobile clients to inspect corpus state and pull sample data. |
-| Vector/embedding      | `yams_mobile_vector_status`, `yams_mobile_warm_embeddings`, `yams_mobile_list_models` | Provides ONNX/model readiness checks and warmup controls. |
-| Warmup/telemetry      | `yams_mobile_get_stats`, `yams_mobile_set_logger` | Warmup primes metadata/embeddings; stats include retry counters; optional logging hook supplied by embedder. |
+## Current Surface (v0.1)
+| Area              | Functions                                      | Notes |
+|-------------------|-----------------------------------------------|-------|
+| Context lifecycle | `yams_mobile_context_create`, `yams_mobile_context_destroy` | Accepts working/cache dirs, worker threads, and `telemetry_sink` (`console`, `stderr`, `noop`, `file:/...`). |
+| Search/Grep       | `yams_mobile_search_execute`, `yams_mobile_grep_execute`, `*_destroy`, `*_stats_json` | Mirrors CLI hybrid search/grep; emits telemetry JSON via configured sink. |
+| Listing/Metadata | `yams_mobile_list_documents`, `yams_mobile_get_metadata`, `yams_mobile_list_result_json` | Enumerates documents with CLI-compatible filters; returns structured JSON payloads. |
+| Document ingest   | `yams_mobile_store_document`, `yams_mobile_remove_document` | Store/remove by path; supports tag lists and deferred extraction. |
+| Vector/Stats      | `yams_mobile_get_vector_status`, `yams_mobile_vector_status_result_json` | Produces structured JSON payloads for UI/tooling. |
+
+## Planned Extensions
+| Area                  | Target Functions                                  | Status |
+|-----------------------|---------------------------------------------------|--------|
+| Context lifecycle     | `yams_mobile_reload_config`                        | TODO (follow-up once config schema stabilizes). |
+| Fixtures & warmup     | `yams_mobile_list_fixtures`, `yams_mobile_warm_embeddings` | Backlog — align with CLI roadmap. |
+| Document retrieval    | `yams_mobile_get_document`, result JSON/content helpers | DONE in v0.1 parity; extend with update/delete flows next. |
+| Advanced telemetry    | `yams_mobile_get_stats`, custom logger callbacks   | Backlog — revisit after initial sink rollout. |
 
 ## Compatibility Strategy
 - ABI version encoded in `yams_mobile_version_info` (major/minor/patch).

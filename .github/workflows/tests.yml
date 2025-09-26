@@ -251,8 +251,13 @@ jobs:
             -o "yams/*:enable_onnx=False" \
             --build=missing
           # Load Conan-generated environment (PKG_CONFIG_PATH, CFLAGS/LDFLAGS, etc.)
-          if [ -f "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh" ]; then
-            source "${{ env.BUILD_DIR }}/build-debug/conan/conanrun.sh"
+          CONAN_RUN_SCRIPT=$(find "${{ env.BUILD_DIR }}" -maxdepth 5 -type f -name "conanrun.sh" | head -n1)
+          if [ -n "$CONAN_RUN_SCRIPT" ]; then
+            echo "Sourcing Conan environment from $CONAN_RUN_SCRIPT"
+            # shellcheck disable=SC1090
+            source "$CONAN_RUN_SCRIPT"
+          else
+            echo "::warning:: Conan run environment script not found under ${{ env.BUILD_DIR }}; relying on system toolchain" >&2
           fi
           # Relax noisy third-party warnings observed in CI (e.g., sign-compare from gtest)
           export CXXFLAGS="$CXXFLAGS -Wno-sign-compare -Wno-unused-result"
@@ -260,23 +265,26 @@ jobs:
           TOOLCHAIN_DIR="${{ env.BUILD_DIR }}/build-debug/conan"
           NATIVE_FILE="$TOOLCHAIN_DIR/conan_meson_native.ini"
           CROSS_FILE="$TOOLCHAIN_DIR/conan_meson_cross.ini"
+          MESON_TOOL_ARG=()
           if [ -f "$NATIVE_FILE" ]; then
             MESON_TOOL_ARG=(--native-file "$NATIVE_FILE")
           elif [ -f "$CROSS_FILE" ]; then
             MESON_TOOL_ARG=(--cross-file "$CROSS_FILE")
           else
             echo "Meson toolchain file not found in $TOOLCHAIN_DIR; searching..." >&2
-            FOUND=$(find "${{ env.BUILD_DIR }}" -maxdepth 3 -type f \( -name 'conan_meson_native.ini' -o -name 'conan_meson_cross.ini' \) | head -n1)
-            if [ -n "$FOUND" ]; then
-              case "$FOUND" in
-                *native*) MESON_TOOL_ARG=(--native-file "$FOUND") ;;
-                *cross*) MESON_TOOL_ARG=(--cross-file "$FOUND") ;;
-              esac
+            FOUND_NATIVE=$(find "${{ env.BUILD_DIR }}" -maxdepth 5 -type f -name 'conan_meson_native.ini' | head -n1)
+            FOUND_CROSS=$(find "${{ env.BUILD_DIR }}" -maxdepth 5 -type f -name 'conan_meson_cross.ini' | head -n1)
+            if [ -n "$FOUND_NATIVE" ]; then
+              MESON_TOOL_ARG=(--native-file "$FOUND_NATIVE")
+            elif [ -n "$FOUND_CROSS" ]; then
+              MESON_TOOL_ARG=(--cross-file "$FOUND_CROSS")
             else
-              echo "ERROR: Conan Meson toolchain file not found" >&2
+              echo "ERROR: Conan Meson toolchain file not found under ${{ env.BUILD_DIR }}" >&2
+              find "${{ env.BUILD_DIR }}" -maxdepth 5 -type f -name 'conan_meson_*.ini' >&2 || true
               exit 1
             fi
           fi
+          echo "Using Meson toolchain arg: ${MESON_TOOL_ARG[*]}"
           meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
           meson compile -C ${{ env.BUILD_DIR }}
 

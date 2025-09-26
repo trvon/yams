@@ -41,8 +41,15 @@ namespace {
 using yams::ErrorCode;
 using yams::Result;
 using yams::app::services::AppContext;
+using yams::app::services::DocumentEntry;
 using yams::app::services::GrepRequest;
 using yams::app::services::GrepResponse;
+using yams::app::services::ListDocumentsRequest;
+using yams::app::services::ListDocumentsResponse;
+using yams::app::services::RelatedDocument;
+using yams::app::services::RetrieveDocumentRequest;
+using yams::app::services::RetrieveDocumentResponse;
+using yams::app::services::RetrievedDocument;
 using yams::app::services::StoreDocumentRequest;
 using yams::app::services::StoreDocumentResponse;
 using yams::metadata::ConnectionMode;
@@ -102,6 +109,166 @@ nlohmann::json stats_map_to_json(const std::unordered_map<std::string, std::stri
 }
 
 void emit_telemetry(MobileState& state, const nlohmann::json& payload);
+
+nlohmann::json document_entry_to_json(const DocumentEntry& entry) {
+    nlohmann::json j;
+    j["name"] = entry.name;
+    j["fileName"] = entry.fileName;
+    j["hash"] = entry.hash;
+    j["path"] = entry.path;
+    j["extension"] = entry.extension;
+    j["size"] = entry.size;
+    j["mimeType"] = entry.mimeType;
+    j["fileType"] = entry.fileType;
+    j["created"] = entry.created;
+    j["modified"] = entry.modified;
+    j["indexed"] = entry.indexed;
+    if (!entry.tags.empty())
+        j["tags"] = entry.tags;
+    if (!entry.metadata.empty())
+        j["metadata"] = entry.metadata;
+    if (entry.snippet)
+        j["snippet"] = *entry.snippet;
+    if (entry.changeType)
+        j["changeType"] = *entry.changeType;
+    if (entry.changeTime)
+        j["changeTime"] = *entry.changeTime;
+    if (entry.matchReason)
+        j["matchReason"] = *entry.matchReason;
+    if (entry.relevanceScore != 0.0)
+        j["relevanceScore"] = entry.relevanceScore;
+    return j;
+}
+
+nlohmann::json related_document_to_json(const RelatedDocument& rel) {
+    nlohmann::json j;
+    j["hash"] = rel.hash;
+    j["path"] = rel.path;
+    j["name"] = rel.name;
+    if (rel.relationship)
+        j["relationship"] = *rel.relationship;
+    j["distance"] = rel.distance;
+    j["relevanceScore"] = rel.relevanceScore;
+    return j;
+}
+
+nlohmann::json retrieved_document_to_json(const RetrievedDocument& doc, bool includeExtractedText) {
+    nlohmann::json j;
+    j["hash"] = doc.hash;
+    j["path"] = doc.path;
+    j["name"] = doc.name;
+    j["fileName"] = doc.fileName;
+    j["mimeType"] = doc.mimeType;
+    j["fileType"] = doc.fileType;
+    j["size"] = doc.size;
+    j["created"] = doc.created;
+    j["modified"] = doc.modified;
+    j["indexed"] = doc.indexed;
+    if (!doc.metadata.empty())
+        j["metadata"] = doc.metadata;
+    if (!doc.tags.empty())
+        j["tags"] = doc.tags;
+    if (includeExtractedText && doc.extractedText)
+        j["extractedText"] = *doc.extractedText;
+    if (doc.content)
+        j["contentLength"] = doc.content->size();
+    j["isStreaming"] = doc.isStreaming;
+    j["bytesTransferred"] = doc.bytesTransferred;
+    return j;
+}
+
+nlohmann::json list_response_to_json(const ListDocumentsResponse& resp) {
+    nlohmann::json root;
+    root["count"] = static_cast<std::uint64_t>(resp.count);
+    root["totalFound"] = static_cast<std::uint64_t>(resp.totalFound);
+    root["hasMore"] = resp.hasMore;
+    root["executionTimeMs"] = resp.executionTimeMs;
+    if (!resp.queryInfo.empty())
+        root["queryInfo"] = resp.queryInfo;
+    if (!resp.appliedFormat.empty())
+        root["format"] = resp.appliedFormat;
+    if (resp.pattern)
+        root["pattern"] = *resp.pattern;
+    if (!resp.filteredByTags.empty())
+        root["filteredByTags"] = resp.filteredByTags;
+
+    nlohmann::json docs = nlohmann::json::array();
+    for (const auto& entry : resp.documents)
+        docs.push_back(document_entry_to_json(entry));
+    root["documents"] = std::move(docs);
+
+    if (!resp.paths.empty())
+        root["paths"] = resp.paths;
+    if (!resp.addedDocuments.empty()) {
+        nlohmann::json added = nlohmann::json::array();
+        for (const auto& entry : resp.addedDocuments)
+            added.push_back(document_entry_to_json(entry));
+        root["addedDocuments"] = std::move(added);
+    }
+    if (!resp.modifiedDocuments.empty()) {
+        nlohmann::json modified = nlohmann::json::array();
+        for (const auto& entry : resp.modifiedDocuments)
+            modified.push_back(document_entry_to_json(entry));
+        root["modifiedDocuments"] = std::move(modified);
+    }
+    if (!resp.deletedDocuments.empty()) {
+        nlohmann::json deleted = nlohmann::json::array();
+        for (const auto& entry : resp.deletedDocuments)
+            deleted.push_back(document_entry_to_json(entry));
+        root["deletedDocuments"] = std::move(deleted);
+    }
+
+    if (!resp.groupedResults.empty()) {
+        nlohmann::json grouped = nlohmann::json::object();
+        for (const auto& [key, docsVec] : resp.groupedResults) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& entry : docsVec)
+                arr.push_back(document_entry_to_json(entry));
+            grouped[key] = std::move(arr);
+        }
+        root["groupedResults"] = std::move(grouped);
+    }
+
+    if (!resp.queryInfo.empty())
+        root["queryInfo"] = resp.queryInfo;
+
+    if (!resp.sortBy.empty())
+        root["sortBy"] = resp.sortBy;
+    if (!resp.sortOrder.empty())
+        root["sortOrder"] = resp.sortOrder;
+
+    return root;
+}
+
+nlohmann::json retrieve_response_to_json(const RetrieveDocumentResponse& resp,
+                                         bool includeExtractedText) {
+    nlohmann::json root;
+    root["totalFound"] = static_cast<std::uint64_t>(resp.totalFound);
+    root["hasMore"] = resp.hasMore;
+    root["graphEnabled"] = resp.graphEnabled;
+    root["totalBytes"] = resp.totalBytes;
+    if (resp.outputPath)
+        root["outputPath"] = *resp.outputPath;
+
+    if (resp.document)
+        root["document"] = retrieved_document_to_json(*resp.document, includeExtractedText);
+
+    if (!resp.documents.empty()) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& doc : resp.documents)
+            arr.push_back(retrieved_document_to_json(doc, includeExtractedText));
+        root["documents"] = std::move(arr);
+    }
+
+    if (!resp.related.empty()) {
+        nlohmann::json relArr = nlohmann::json::array();
+        for (const auto& rel : resp.related)
+            relArr.push_back(related_document_to_json(rel));
+        root["related"] = std::move(relArr);
+    }
+
+    return root;
+}
 
 std::filesystem::path make_temp_directory() {
     auto base = std::filesystem::temp_directory_path();
@@ -211,6 +378,15 @@ struct yams_mobile_metadata_result_t {
 
 struct yams_mobile_vector_status_result_t {
     std::string json;
+};
+
+struct yams_mobile_list_result_t {
+    std::string json;
+};
+
+struct yams_mobile_document_get_result_t {
+    std::string json;
+    std::string content;
 };
 
 yams_mobile_version_info yams_mobile_get_version(void) {
@@ -696,6 +872,145 @@ void yams_mobile_vector_status_result_destroy(yams_mobile_vector_status_result_t
     delete result;
 }
 
+yams_mobile_status yams_mobile_list_documents(yams_mobile_context_t* ctx,
+                                              const yams_mobile_list_request* request,
+                                              yams_mobile_list_result_t** out_result) {
+    if (out_result)
+        *out_result = nullptr;
+    if (!ctx) {
+        set_last_error("context is null");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    auto service = ctx->state.document_service;
+    if (!service) {
+        set_last_error("document service not initialized");
+        return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
+    }
+
+    ListDocumentsRequest req;
+    req.limit = 100;
+    req.offset = 0;
+    req.pathsOnly = false;
+    req.matchAllTags = false;
+
+    if (request) {
+        if (request->pattern && *request->pattern)
+            req.pattern = request->pattern;
+        if (request->limit > 0)
+            req.limit = static_cast<int>(request->limit);
+        if (request->offset > 0)
+            req.offset = static_cast<int>(request->offset);
+        req.pathsOnly = request->paths_only != 0;
+        req.matchAllTags = request->match_all_tags != 0;
+        if (request->tags && request->tag_count > 0) {
+            req.tags.reserve(request->tag_count);
+            for (size_t i = 0; i < request->tag_count; ++i) {
+                if (request->tags[i])
+                    req.tags.emplace_back(request->tags[i]);
+            }
+        }
+    }
+
+    auto result = service->list(req);
+    if (!result) {
+        set_last_error(result.error().message);
+        return map_error_code(result.error().code);
+    }
+
+    auto wrapper = std::make_unique<yams_mobile_list_result_t>();
+    wrapper->json = list_response_to_json(result.value()).dump();
+
+    if (out_result)
+        *out_result = wrapper.release();
+
+    nlohmann::json telemetry;
+    telemetry["event"] = "list";
+    telemetry["timestamp"] = iso_timestamp_now();
+    telemetry["count"] = static_cast<std::uint64_t>(result.value().count);
+    telemetry["totalFound"] = static_cast<std::uint64_t>(result.value().totalFound);
+    emit_telemetry(ctx->state, telemetry);
+
+    set_last_error("");
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+void yams_mobile_list_result_destroy(yams_mobile_list_result_t* result) {
+    delete result;
+}
+
+yams_mobile_status yams_mobile_get_document(yams_mobile_context_t* ctx,
+                                            const yams_mobile_document_get_request* request,
+                                            yams_mobile_document_get_result_t** out_result) {
+    if (out_result)
+        *out_result = nullptr;
+    if (!ctx) {
+        set_last_error("context is null");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    auto service = ctx->state.document_service;
+    if (!service) {
+        set_last_error("document service not initialized");
+        return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
+    }
+
+    RetrieveDocumentRequest req;
+    req.includeContent = false;
+    req.raw = false;
+    req.extract = true;
+    req.metadataOnly = false;
+
+    if (request) {
+        if (request->document_hash && *request->document_hash)
+            req.hash = request->document_hash;
+        else if (request->name && *request->name)
+            req.name = request->name;
+
+        req.metadataOnly = request->metadata_only != 0;
+        req.includeContent = request->include_content != 0 && !req.metadataOnly;
+        req.raw = request->raw != 0;
+        req.extract = request->include_extracted_text != 0 && !req.raw;
+        req.latest = request->latest != 0;
+        req.oldest = request->oldest != 0;
+        if (request->max_bytes > 0)
+            req.maxBytes = request->max_bytes;
+        if (req.metadataOnly)
+            req.includeContent = false;
+    }
+
+    auto result = service->retrieve(req);
+    if (!result) {
+        set_last_error(result.error().message);
+        return map_error_code(result.error().code);
+    }
+
+    auto response = std::move(result.value());
+    auto wrapper = std::make_unique<yams_mobile_document_get_result_t>();
+
+    const bool includeExtractedText = request ? (request->include_extracted_text != 0) : true;
+    wrapper->json = retrieve_response_to_json(response, includeExtractedText).dump();
+
+    if (response.document && req.includeContent && response.document->content) {
+        wrapper->content = *response.document->content;
+    }
+
+    if (out_result)
+        *out_result = wrapper.release();
+
+    nlohmann::json telemetry;
+    telemetry["event"] = "get";
+    telemetry["timestamp"] = iso_timestamp_now();
+    telemetry["hasDocument"] = response.document.has_value();
+    telemetry["documents"] = static_cast<std::uint64_t>(response.documents.size());
+    emit_telemetry(ctx->state, telemetry);
+
+    set_last_error("");
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+void yams_mobile_document_get_result_destroy(yams_mobile_document_get_result_t* result) {
+    delete result;
+}
+
 yams_mobile_string_view
 yams_mobile_metadata_result_json(const yams_mobile_metadata_result_t* result) {
     if (!result)
@@ -735,6 +1050,185 @@ yams_mobile_search_result_stats_json(const yams_mobile_search_result_t* result) 
     j["stats"] = result->response.searchStats;
     g_temp_string = j.dump();
     return {g_temp_string.c_str(), g_temp_string.size()};
+}
+
+yams_mobile_string_view
+yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+
+    nlohmann::json root;
+    root["total"] = result->response.total;
+    root["type"] = result->response.type;
+    root["executionTimeMs"] = result->response.executionTimeMs;
+    root["usedHybrid"] = result->response.usedHybrid;
+    if (!result->response.detectedHashQuery.empty())
+        root["detectedHashQuery"] = result->response.detectedHashQuery;
+    if (!result->response.appliedFormat.empty())
+        root["appliedFormat"] = result->response.appliedFormat;
+    if (!result->response.queryInfo.empty())
+        root["queryInfo"] = result->response.queryInfo;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& item : result->response.results) {
+        nlohmann::json entry;
+        entry["id"] = item.id;
+        entry["hash"] = item.hash;
+        entry["title"] = item.title;
+        entry["path"] = item.path;
+        entry["fileName"] = item.fileName;
+        entry["score"] = item.score;
+        if (!item.snippet.empty())
+            entry["snippet"] = item.snippet;
+        entry["mimeType"] = item.mimeType;
+        entry["fileType"] = item.fileType;
+        entry["size"] = item.size;
+        entry["created"] = item.created;
+        entry["modified"] = item.modified;
+        entry["indexed"] = item.indexed;
+        if (!item.tags.empty())
+            entry["tags"] = item.tags;
+        if (!item.metadata.empty())
+            entry["metadata"] = item.metadata;
+        if (item.vectorScore)
+            entry["vectorScore"] = *item.vectorScore;
+        if (item.keywordScore)
+            entry["keywordScore"] = *item.keywordScore;
+        if (item.kgEntityScore)
+            entry["kgEntityScore"] = *item.kgEntityScore;
+        if (item.structuralScore)
+            entry["structuralScore"] = *item.structuralScore;
+        if (item.matchReason)
+            entry["matchReason"] = *item.matchReason;
+        if (item.searchMethod)
+            entry["searchMethod"] = *item.searchMethod;
+
+        if (!item.matches.empty()) {
+            nlohmann::json matches = nlohmann::json::array();
+            for (const auto& m : item.matches) {
+                nlohmann::json mJson;
+                mJson["lineNumber"] = static_cast<std::uint64_t>(m.lineNumber);
+                mJson["line"] = m.line;
+                mJson["columnStart"] = static_cast<std::uint64_t>(m.columnStart);
+                mJson["columnEnd"] = static_cast<std::uint64_t>(m.columnEnd);
+                if (!m.beforeLines.empty())
+                    mJson["beforeLines"] = m.beforeLines;
+                if (!m.afterLines.empty())
+                    mJson["afterLines"] = m.afterLines;
+                matches.push_back(std::move(mJson));
+            }
+            entry["matches"] = std::move(matches);
+        }
+
+        arr.push_back(std::move(entry));
+    }
+    root["results"] = std::move(arr);
+
+    if (!result->response.paths.empty())
+        root["paths"] = result->response.paths;
+    if (!result->response.jsonOutput.empty())
+        root["jsonOutput"] = result->response.jsonOutput;
+    if (!result->response.searchStats.empty())
+        root["stats"] = result->response.searchStats;
+
+    g_temp_string = root.dump();
+    return {g_temp_string.c_str(), g_temp_string.size()};
+}
+
+
+yams_mobile_string_view
+yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+
+    nlohmann::json root;
+    root["totalMatches"] = static_cast<std::uint64_t>(result->response.totalMatches);
+    root["filesSearched"] = static_cast<std::uint64_t>(result->response.filesSearched);
+    root["regexMatches"] = static_cast<std::uint64_t>(result->response.regexMatches);
+    root["semanticMatches"] = static_cast<std::uint64_t>(result->response.semanticMatches);
+    root["executionTimeMs"] = result->response.executionTimeMs;
+    if (!result->response.queryInfo.empty())
+        root["queryInfo"] = result->response.queryInfo;
+    if (!result->response.searchStats.empty())
+        root["stats"] = result->response.searchStats;
+
+    nlohmann::json files = nlohmann::json::array();
+    for (const auto& fr : result->response.results) {
+        nlohmann::json entry;
+        entry["file"] = fr.file;
+        entry["fileName"] = fr.fileName;
+        entry["matchCount"] = static_cast<std::uint64_t>(fr.matchCount);
+        entry["mimeType"] = fr.mimeType;
+        entry["fileType"] = fr.fileType;
+        entry["size"] = fr.size;
+        if (!fr.tags.empty())
+            entry["tags"] = fr.tags;
+        if (!fr.metadata.empty())
+            entry["metadata"] = fr.metadata;
+        if (!fr.searchMethod.empty())
+            entry["searchMethod"] = fr.searchMethod;
+        entry["wasSemanticSearch"] = fr.wasSemanticSearch;
+
+        if (!fr.matches.empty()) {
+            nlohmann::json matches = nlohmann::json::array();
+            for (const auto& match : fr.matches) {
+                nlohmann::json mJson;
+                mJson["lineNumber"] = static_cast<std::uint64_t>(match.lineNumber);
+                mJson["line"] = match.line;
+                mJson["columnStart"] = static_cast<std::uint64_t>(match.columnStart);
+                mJson["columnEnd"] = static_cast<std::uint64_t>(match.columnEnd);
+                if (!match.before.empty())
+                    mJson["before"] = match.before;
+                if (!match.after.empty())
+                    mJson["after"] = match.after;
+                if (!match.matchText.empty())
+                    mJson["match"] = match.matchText;
+                if (!match.matchType.empty())
+                    mJson["matchType"] = match.matchType;
+                mJson["confidence"] = match.confidence;
+                matches.push_back(std::move(mJson));
+            }
+            entry["matches"] = std::move(matches);
+        }
+
+        files.push_back(std::move(entry));
+    }
+    root["files"] = std::move(files);
+
+    if (!result->response.filesWith.empty())
+        root["filesWith"] = result->response.filesWith;
+    if (!result->response.filesWithout.empty())
+        root["filesWithout"] = result->response.filesWithout;
+    if (!result->response.pathsOnly.empty())
+        root["pathsOnly"] = result->response.pathsOnly;
+    if (!result->response.jsonOutput.empty())
+        root["jsonOutput"] = result->response.jsonOutput;
+    root["format"] = result->response.format;
+
+    g_temp_string = root.dump();
+    return {g_temp_string.c_str(), g_temp_string.size()};
+}
+
+
+yams_mobile_string_view
+yams_mobile_list_result_json(const yams_mobile_list_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+    return {result->json.c_str(), result->json.size()};
+}
+
+yams_mobile_string_view
+yams_mobile_document_get_result_json(const yams_mobile_document_get_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+    return {result->json.c_str(), result->json.size()};
+}
+
+yams_mobile_string_view
+yams_mobile_document_get_result_content(const yams_mobile_document_get_result_t* result) {
+    if (!result || result->content.empty())
+        return {nullptr, 0};
+    return {result->content.c_str(), result->content.size()};
 }
 
 const char* yams_mobile_last_error_message(void) {
