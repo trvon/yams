@@ -74,6 +74,19 @@ jobs:
           # is not detected by CMake (module mode will pick this up).
           sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config
           echo "Installed system Boost headers/libs for module-mode fallback"
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          # Align with release workflow to ensure Meson builds have required toolchain bits.
+          brew install pkg-config cmake ninja meson ccache || true
+          # Guard against Homebrew reporting success without linking binaries (nondefault prefixes).
+          command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
+          command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
+          echo "meson version: $(meson --version || echo 'missing')"
+          echo "ninja version: $(ninja --version || echo 'missing')"
       - name: Cache Conan packages
         id: cache_conan
         uses: actions/cache@v4

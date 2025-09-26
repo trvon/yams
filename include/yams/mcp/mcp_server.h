@@ -197,6 +197,7 @@ private:
     std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
     yams::daemon::DaemonClient* daemon_client_{nullptr};
     yams::daemon::ClientConfig daemon_client_config_{};
+    std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
     struct ClientInfo {
         std::string name;
         std::string version;
@@ -318,6 +319,11 @@ public:
     boost::asio::awaitable<Result<MCPStatsResponse>>
     testHandleGetStats(const MCPStatsRequest& req) {
         return handleGetStats(req);
+    }
+
+    void testSetEnsureDaemonClientHook(
+        std::function<Result<void>(const yams::daemon::ClientConfig&)> hook) {
+        testEnsureDaemonClientHook_ = std::move(hook);
     }
 #endif
 

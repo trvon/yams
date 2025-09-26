@@ -1295,20 +1295,38 @@ public:
             r.name = name;
             r.hash = hash;
             if (!req.dryRun) {
-                auto del = ctx_.store->remove(hash);
-                if (!del) {
+                bool storeDeleted = false;
+                if (auto del = ctx_.store->remove(hash)) {
+                    storeDeleted = del.value();
+                    if (!storeDeleted) {
+                        r.error = "Document not found";
+                        resp.errors.push_back(r);
+                        continue;
+                    }
+                } else {
                     r.deleted = false;
                     r.error = del.error().message;
                     resp.errors.push_back(r);
                     continue;
                 }
-                r.deleted = del.value();
-                if (!r.deleted) {
-                    r.error = "Document not found";
-                    resp.errors.push_back(r);
-                    continue;
+
+                bool metadataOk = true;
+                if (ctx_.metadataRepo) {
+                    auto docInfo = ctx_.metadataRepo->getDocumentByHash(hash);
+                    if (docInfo && docInfo.value().has_value()) {
+                        auto deleteResult = ctx_.metadataRepo->deleteDocument(docInfo.value()->id);
+                        if (!deleteResult) {
+                            metadataOk = false;
+                            r.error = "Failed to delete metadata: " + deleteResult.error().message;
+                            resp.errors.push_back(r);
+                        }
+                    }
                 }
-                resp.deleted.push_back(r);
+
+                if (metadataOk) {
+                    r.deleted = storeDeleted;
+                    resp.deleted.push_back(r);
+                }
             } else {
                 r.deleted = false;
                 resp.deleted.push_back(r);

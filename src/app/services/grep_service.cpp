@@ -48,6 +48,35 @@ static bool hasWildcard(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
 
+static std::string normalizePathForCompare(const std::string& path) {
+    if (path.empty())
+        return {};
+    std::filesystem::path fs(path);
+    std::error_code ec;
+    auto normalized = fs.lexically_normal();
+    std::string out = normalized.generic_string();
+    if (out.empty()) {
+        out = fs.generic_string();
+    }
+#if defined(_WIN32) || defined(__APPLE__)
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return out;
+}
+
+static std::string normalizeForGlobMatch(const std::string& value) {
+    std::string out = value;
+#if defined(_WIN32)
+    std::replace(out.begin(), out.end(), '\\', '/');
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return out;
+}
+
 // Helper to check if document has required tags
 static bool isTransientMetadataError(const Error& err) {
     switch (err.code) {
@@ -78,7 +107,6 @@ template <typename Fn>
 auto retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
                      std::chrono::milliseconds initialDelay = std::chrono::milliseconds(25),
                      MetadataTelemetry* telemetry = nullptr) -> decltype(fn()) {
-    using ResultT = decltype(fn());
     if (telemetry)
         telemetry->operations.fetch_add(1, std::memory_order_relaxed);
     auto attempt = fn();
@@ -105,9 +133,9 @@ auto retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     return attempt;
 }
 
-static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
-                            const std::vector<std::string>& tags, bool matchAll,
-                            MetadataTelemetry* telemetry = nullptr) {
+static Result<bool> metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
+                                    const std::vector<std::string>& tags, bool matchAll,
+                                    MetadataTelemetry* telemetry = nullptr) {
     if (!repo || tags.empty())
         return true;
     auto md = retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
@@ -115,7 +143,10 @@ static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
     if (!md) {
         spdlog::debug("GrepService: metadata lookup failed for doc {}: {}", docId,
                       md.error().message);
-        return false;
+        spdlog::warn("GrepService: propagating metadata error code {} for doc {}",
+                     static_cast<int>(md.error().code), docId);
+        return Error{md.error().code, "Metadata lookup failed for doc " + std::to_string(docId) +
+                                          ": " + md.error().message};
     }
     auto& all = md.value();
 
@@ -138,40 +169,37 @@ static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
                 return false;
         }
         return true;
-    } else {
-        for (const auto& t : tags) {
-            if (hasTag(t))
-                return true;
-        }
-        return false;
     }
+    for (const auto& t : tags) {
+        if (hasTag(t))
+            return true;
+    }
+    return false;
 }
 
 static bool pathFilterMatch(const std::string& filePath, const std::vector<std::string>& filters) {
     if (filters.empty())
         return true;
+    const std::string normalizedDoc = normalizePathForCompare(filePath);
+    const std::string globDoc = normalizeForGlobMatch(filePath);
     for (const auto& f : filters) {
         if (f.empty())
             continue;
         if (hasWildcard(f)) {
-            if (yams::app::services::utils::matchGlob(filePath, f))
+            if (yams::app::services::utils::matchGlob(globDoc, normalizeForGlobMatch(f)))
                 return true;
         } else {
-            // Treat filter as prefix (dir) or exact path
-            if (filePath == f)
+            auto normalizedFilter = normalizePathForCompare(f);
+            if (normalizedFilter.empty())
+                continue;
+            if (normalizedDoc == normalizedFilter)
                 return true;
-#ifdef _WIN32
-            // Normalize slash for crude prefix match
-            std::string fp = filePath;
-            std::replace(fp.begin(), fp.end(), '\\', '/');
-            std::string ff = f;
-            std::replace(ff.begin(), ff.end(), '\\', '/');
-            if (fp.rfind(ff, 0) == 0)
+            std::string prefix = normalizedFilter;
+            if (!prefix.empty() && prefix.back() != '/')
+                prefix.push_back('/');
+            if (!prefix.empty() && normalizedDoc.size() > prefix.size() &&
+                normalizedDoc.compare(0, prefix.size(), prefix) == 0)
                 return true;
-#else
-            if (filePath.rfind(f, 0) == 0)
-                return true;
-#endif
         }
     }
     return false;
@@ -443,6 +471,9 @@ public:
         std::atomic<size_t> totalMatches{0};
         std::atomic<size_t> regexMatches{0};
         std::atomic<bool> stop{false};
+        std::mutex errorMutex;
+        std::vector<Error> workerErrors;
+        workerErrors.reserve(workers);
 
         auto worker = [&]() {
             while (true) {
@@ -465,14 +496,18 @@ public:
                     continue;
                 if (!req.includePatterns.empty()) {
                     bool ok = false;
+                    const std::string docGlobPath = normalizeForGlobMatch(doc.filePath);
                     for (const auto& pattern : req.includePatterns) {
                         if (hasWildcard(pattern)) {
-                            if (yams::app::services::utils::matchGlob(doc.filePath, pattern)) {
+                            if (yams::app::services::utils::matchGlob(
+                                    docGlobPath, normalizeForGlobMatch(pattern))) {
                                 ok = true;
                                 break;
                             }
                         } else {
-                            if (doc.filePath.find(pattern) != std::string::npos) {
+                            const auto normalizedPattern = normalizeForGlobMatch(pattern);
+                            if (!normalizedPattern.empty() &&
+                                docGlobPath.find(normalizedPattern) != std::string::npos) {
                                 ok = true;
                                 break;
                             }
@@ -481,8 +516,17 @@ public:
                     if (!ok)
                         continue;
                 }
-                if (!metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags,
-                                     &metadataTelemetry))
+                auto tagCheck = metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags,
+                                                req.matchAllTags, &metadataTelemetry);
+                if (!tagCheck) {
+                    {
+                        std::lock_guard<std::mutex> errLock(errorMutex);
+                        workerErrors.push_back(tagCheck.error());
+                    }
+                    stop.store(true, std::memory_order_relaxed);
+                    continue;
+                }
+                if (!tagCheck.value())
                     continue;
 
                 // Respect per-document force_cold (metadata key or tag)
@@ -611,8 +655,6 @@ public:
                             while (p < end) {
                                 const void* nl = memchr(p, '\n', static_cast<size_t>(end - p));
                                 if (!nl) {
-                                    // no newline in remainder
-                                    // append non-CR characters
                                     if (memchr(p, '\r', static_cast<size_t>(end - p)) != nullptr) {
                                         // handle CR occurrences by copying segments
                                         const char* q = p;
@@ -696,6 +738,12 @@ public:
         for (auto& th : ths)
             th.join();
 
+        {
+            std::lock_guard<std::mutex> lk(errorMutex);
+            if (!workerErrors.empty())
+                return workerErrors.front();
+        }
+
         response.results = std::move(outResults);
         response.filesWith = std::move(filesWith);
         response.filesWithout = std::move(filesWithout);
@@ -738,14 +786,18 @@ public:
                                 continue;
                             if (!req.includePatterns.empty()) {
                                 bool ok = false;
+                                const std::string pathGlob = normalizeForGlobMatch(path);
                                 for (const auto& p : req.includePatterns) {
                                     if (hasWildcard(p)) {
-                                        if (yams::app::services::utils::matchGlob(path, p)) {
+                                        if (yams::app::services::utils::matchGlob(
+                                                pathGlob, normalizeForGlobMatch(p))) {
                                             ok = true;
                                             break;
                                         }
                                     } else {
-                                        if (path.find(p) != std::string::npos) {
+                                        const auto normalized = normalizeForGlobMatch(p);
+                                        if (!normalized.empty() &&
+                                            pathGlob.find(normalized) != std::string::npos) {
                                             ok = true;
                                             break;
                                         }

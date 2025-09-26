@@ -250,6 +250,11 @@ public:
         return stats;
     }
 
+    static std::mutex& getGlobalStatsMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
 private:
     // Configuration
     mutable std::mutex configMutex_;
@@ -387,6 +392,7 @@ private:
     CompressionStats getCurrentStatsInternal() const {
         // In production, this would get stats from the actual system
         // For now, return a copy of global stats
+        std::lock_guard lock(getGlobalStatsMutex());
         return globalStats_;
     }
 };
@@ -405,6 +411,10 @@ CompressionMonitor& CompressionMonitor::operator=(CompressionMonitor&&) noexcept
 
 CompressionStats& CompressionMonitor::getGlobalStats() {
     return Impl::getGlobalStats();
+}
+
+std::mutex& CompressionMonitor::getGlobalStatsMutex() {
+    return Impl::getGlobalStatsMutex();
 }
 
 Result<void> CompressionMonitor::start() {
@@ -484,13 +494,11 @@ void CompressionTracker::complete(const CompressionResult& result) {
     completed_ = true;
 
     auto& stats = CompressionMonitor::getGlobalStats();
-    auto it = stats.algorithmStats.find(algorithm_);
-    if (it == stats.algorithmStats.end()) {
-        stats.algorithmStats[algorithm_] = AlgorithmStats{};
-        it = stats.algorithmStats.find(algorithm_);
-    }
+    auto& mutex = CompressionMonitor::getGlobalStatsMutex();
+    std::lock_guard lock(mutex);
 
-    it->second.recordCompression(result);
+    auto& algoStats = stats.algorithmStats[algorithm_];
+    algoStats.recordCompression(result);
 
     stats.totalCompressedFiles++;
     stats.totalCompressedBytes += result.compressedSize;
@@ -503,6 +511,9 @@ void CompressionTracker::failed() {
     completed_ = true;
 
     auto& stats = CompressionMonitor::getGlobalStats();
+    auto& mutex = CompressionMonitor::getGlobalStatsMutex();
+    std::lock_guard lock(mutex);
+
     auto it = stats.algorithmStats.find(algorithm_);
     if (it != stats.algorithmStats.end()) {
         it->second.compressionErrors++;
@@ -532,13 +543,11 @@ void DecompressionTracker::complete(size_t decompressedSize) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - startTime_);
 
     auto& stats = CompressionMonitor::getGlobalStats();
-    auto it = stats.algorithmStats.find(algorithm_);
-    if (it == stats.algorithmStats.end()) {
-        stats.algorithmStats[algorithm_] = AlgorithmStats{};
-        it = stats.algorithmStats.find(algorithm_);
-    }
+    auto& mutex = CompressionMonitor::getGlobalStatsMutex();
+    std::lock_guard lock(mutex);
 
-    it->second.recordDecompression(compressedSize_, decompressedSize, duration);
+    auto& algoStats = stats.algorithmStats[algorithm_];
+    algoStats.recordDecompression(compressedSize_, decompressedSize, duration);
 }
 
 void DecompressionTracker::failed() {
@@ -547,6 +556,9 @@ void DecompressionTracker::failed() {
     completed_ = true;
 
     auto& stats = CompressionMonitor::getGlobalStats();
+    auto& mutex = CompressionMonitor::getGlobalStatsMutex();
+    std::lock_guard lock(mutex);
+
     auto it = stats.algorithmStats.find(algorithm_);
     if (it != stats.algorithmStats.end()) {
         it->second.decompressionErrors++;

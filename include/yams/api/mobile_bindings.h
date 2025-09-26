@@ -52,7 +52,8 @@ typedef struct yams_mobile_context_t yams_mobile_context_t;
 typedef struct yams_mobile_context_config {
     const char* working_directory; /**< Root path for metadata/storage; UTF-8, nullable */
     const char* cache_directory;   /**< Optional cache directory override */
-    const char* telemetry_sink;    /**< Optional sink identifier (e.g., "console", "noop") */
+    const char* telemetry_sink;    /**< Optional sink identifier ("console", "stderr", "noop", or
+                                      "file:/path") */
     uint32_t max_worker_threads;   /**< 0 => auto */
     uint32_t flags;                /**< Reserved for future feature toggles */
 } yams_mobile_context_config;

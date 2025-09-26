@@ -1954,56 +1954,54 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
 
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            // Build the SQL query based on matchAll flag
-            std::string sql;
-            if (matchAll) {
-                // For matchAll, we need documents that have ALL the specified tags
-                sql = R"(
-                    SELECT DISTINCT d.*
-                    FROM documents d
-                    WHERE d.id IN (
-                        SELECT document_id
-                        FROM metadata
-                        WHERE key LIKE 'tag:%'
-                        AND key IN (";
-                
-                for (size_t i = 0; i < tags.size(); ++i) {
-                    if (i > 0) sql += ", ";
-                    sql += "'tag:" + tags[i] + "'";
-                }
-                sql += R"()
-                        GROUP BY document_id
-                        HAVING COUNT(DISTINCT key) = ?)
-                    ORDER BY d.indexed_time DESC
-                )";
-            } else {
-                // For matchAny, we need documents that have ANY of the specified tags
-                sql = R"(
-                    SELECT DISTINCT d.*
-                    FROM documents d
-                    JOIN metadata m ON d.id = m.document_id
-                    WHERE m.key IN (";
-                
-                for (size_t i = 0; i < tags.size(); ++i) {
-                    if (i > 0) sql += ", ";
-                    sql += "'tag:" + tags[i] + "'";
-                }
-                sql += R"()
-                    ORDER BY d.indexed_time DESC
-                )";
+            // Build the SQL query based on matchAll flag using bound parameters
+            std::string placeholders;
+            placeholders.reserve(tags.size() * 3);
+            for (size_t i = 0; i < tags.size(); ++i) {
+                if (i > 0)
+                    placeholders += ", ";
+                placeholders += '?';
             }
 
-            auto stmtResult = db.prepare(sql);
+            std::ostringstream sql;
+            if (matchAll) {
+                // For matchAll, we need documents that have ALL the specified tags
+                sql << "SELECT DISTINCT d.* "
+                    << "FROM documents d "
+                    << "WHERE d.id IN ("
+                    << "SELECT document_id "
+                    << "FROM metadata "
+                    << "WHERE key LIKE 'tag:%' "
+                    << "AND key IN (" << placeholders << ") "
+                    << "GROUP BY document_id "
+                    << "HAVING COUNT(DISTINCT key) = ?) "
+                    << "ORDER BY d.indexed_time DESC";
+            } else {
+                // For matchAny, we need documents that have ANY of the specified tags
+                sql << "SELECT DISTINCT d.* "
+                    << "FROM documents d "
+                    << "JOIN metadata m ON d.id = m.document_id "
+                    << "WHERE m.key IN (" << placeholders << ") "
+                    << "ORDER BY d.indexed_time DESC";
+            }
+
+            auto stmtResult = db.prepare(sql.str());
             if (!stmtResult)
                 return stmtResult.error();
 
             Statement stmt = std::move(stmtResult).value();
 
-            // Bind the count for matchAll query
-            if (matchAll) {
-                auto bindResult = stmt.bind(1, static_cast<int64_t>(tags.size()));
+            int paramIndex = 1;
+            for (const auto& tag : tags) {
+                auto bindResult = stmt.bind(paramIndex++, "tag:" + tag);
                 if (!bindResult)
-                    return Error{bindResult.error()};
+                    return bindResult.error();
+            }
+
+            if (matchAll) {
+                auto bindResult = stmt.bind(paramIndex, static_cast<int64_t>(tags.size()));
+                if (!bindResult)
+                    return bindResult.error();
             }
 
             std::vector<DocumentInfo> results;

@@ -93,6 +93,7 @@ public:
     // Resize PostIngestQueue worker threads; returns false if unchanged/missing.
     bool resizePostIngestThreads(std::size_t target);
     void enqueuePostIngest(const std::string& hash, const std::string& mime) {
+        bool routedViaBus = false;
         if (yams::daemon::TuneAdvisor::useInternalBusForPostIngest()) {
             yams::daemon::InternalEventBus::PostIngestTask t{hash, mime};
             static std::shared_ptr<
@@ -100,14 +101,17 @@ public:
                 q = yams::daemon::InternalEventBus::instance()
                         .get_or_create_channel<yams::daemon::InternalEventBus::PostIngestTask>(
                             "post_ingest", 4096);
-            if (!q->try_push(std::move(t))) {
-                // Best-effort; if bus is full, drop with a warning
-                yams::daemon::InternalEventBus::instance().incPostDropped();
-            } else {
+            if (q && q->try_push(std::move(t))) {
                 yams::daemon::InternalEventBus::instance().incPostQueued();
+                routedViaBus = true;
+                if (postIngest_)
+                    postIngest_->notifyWorkers();
+            } else {
+                yams::daemon::InternalEventBus::instance().incPostDropped();
             }
-            return;
         }
+        if (routedViaBus)
+            return;
         // TODO(021-38-remove-ipc): This direct enqueue is kept for rollback safety.
         // After the InternalEventBus consumer path is stable, remove and always use the bus.
         if (postIngest_) {
@@ -117,13 +121,16 @@ public:
             constexpr int kMaxAttempts = 5;
             int attempts = 0;
             while (attempts++ < kMaxAttempts) {
-                if (postIngest_->tryEnqueue(t))
+                if (postIngest_->tryEnqueue(t)) {
+                    postIngest_->notifyWorkers();
                     return;
+                }
                 // Backoff: 10,20,30,40ms
                 std::this_thread::sleep_for(std::chrono::milliseconds(10 * attempts));
             }
             // Fallback to legacy blocking enqueue to preserve correctness
             postIngest_->enqueue(std::move(t));
+            postIngest_->notifyWorkers();
         }
     }
     // Last search engine build metadata (for diagnostics/status)

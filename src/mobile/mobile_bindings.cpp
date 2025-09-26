@@ -14,14 +14,22 @@
 #include <boost/asio/use_future.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstddef>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <future>
+#include <iomanip>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifndef _WIN32
@@ -48,6 +56,10 @@ using SearchResponseResult = Result<yams::app::services::SearchResponse>;
 
 constexpr yams_mobile_version_info kVersion{0u, 1u, 0u};
 
+enum class TelemetrySinkType { None, Console, Stderr, File };
+
+struct MobileState;
+
 template <typename T> std::shared_ptr<T> to_shared(std::unique_ptr<T>&& ptr) {
     return std::shared_ptr<T>(ptr.release());
 }
@@ -58,6 +70,38 @@ thread_local std::string g_temp_string;
 void set_last_error(const std::string& message) {
     g_last_error = message;
 }
+
+std::string to_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string iso_timestamp_now() {
+    using clock = std::chrono::system_clock;
+    auto now = clock::now();
+    std::time_t t = clock::to_time_t(now);
+#ifdef _WIN32
+    std::tm tm{};
+    gmtime_s(&tm, &t);
+#else
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%FT%TZ");
+    return oss.str();
+}
+
+nlohmann::json stats_map_to_json(const std::unordered_map<std::string, std::string>& stats) {
+    nlohmann::json obj = nlohmann::json::object();
+    for (const auto& [key, value] : stats) {
+        obj[key] = value;
+    }
+    return obj;
+}
+
+void emit_telemetry(MobileState& state, const nlohmann::json& payload);
 
 std::filesystem::path make_temp_directory() {
     auto base = std::filesystem::temp_directory_path();
@@ -103,6 +147,8 @@ struct MobileContextConfig {
     std::filesystem::path storage_directory;
     uint32_t max_worker_threads = 0;
     uint32_t flags = 0;
+    TelemetrySinkType telemetry_sink = TelemetrySinkType::None;
+    std::string telemetry_file_path;
 };
 
 struct MobileState {
@@ -116,7 +162,34 @@ struct MobileState {
     std::shared_ptr<yams::app::services::IDocumentService> document_service;
     std::shared_ptr<yams::app::services::ISearchService> search_service;
     std::shared_ptr<yams::app::services::IGrepService> grep_service;
+    TelemetrySinkType telemetry_sink = TelemetrySinkType::None;
+    std::ofstream telemetry_stream;
+    std::mutex telemetry_mutex;
 };
+
+void emit_telemetry(MobileState& state, const nlohmann::json& payload) {
+    if (state.telemetry_sink == TelemetrySinkType::None)
+        return;
+    std::string line = payload.dump();
+    std::lock_guard<std::mutex> lock(state.telemetry_mutex);
+    switch (state.telemetry_sink) {
+        case TelemetrySinkType::Console:
+            std::cout << line << std::endl;
+            break;
+        case TelemetrySinkType::Stderr:
+            std::cerr << line << std::endl;
+            break;
+        case TelemetrySinkType::File:
+            if (state.telemetry_stream.is_open()) {
+                state.telemetry_stream << line << std::endl;
+                state.telemetry_stream.flush();
+            }
+            break;
+        case TelemetrySinkType::None:
+        default:
+            break;
+    }
+}
 
 } // namespace
 
@@ -170,6 +243,29 @@ yams_mobile_status yams_mobile_context_create(const yams_mobile_context_config* 
         ctx->state.config.storage_directory = ctx->state.config.working_directory / "storage";
         ctx->state.config.max_worker_threads = config->max_worker_threads;
         ctx->state.config.flags = config->flags;
+
+        if (config->telemetry_sink && *config->telemetry_sink) {
+            std::string sink = config->telemetry_sink;
+            auto lower = to_lower_copy(sink);
+            if (lower == "console") {
+                ctx->state.config.telemetry_sink = TelemetrySinkType::Console;
+            } else if (lower == "stderr") {
+                ctx->state.config.telemetry_sink = TelemetrySinkType::Stderr;
+            } else if (lower == "noop" || lower == "none") {
+                ctx->state.config.telemetry_sink = TelemetrySinkType::None;
+            } else if (lower.rfind("file:", 0) == 0) {
+                std::string path = sink.substr(5);
+                if (path.empty()) {
+                    set_last_error("telemetry sink file path is empty");
+                    return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+                }
+                ctx->state.config.telemetry_sink = TelemetrySinkType::File;
+                ctx->state.config.telemetry_file_path = path;
+            } else {
+                set_last_error("unsupported telemetry sink");
+                return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+            }
+        }
 
         std::error_code ec;
         std::filesystem::create_directories(ctx->state.config.working_directory, ec);
@@ -230,6 +326,16 @@ yams_mobile_status yams_mobile_context_create(const yams_mobile_context_config* 
         ctx->state.search_service = yams::app::services::makeSearchService(ctx->state.app_context);
         ctx->state.grep_service = yams::app::services::makeGrepService(ctx->state.app_context);
 
+        ctx->state.telemetry_sink = ctx->state.config.telemetry_sink;
+        if (ctx->state.telemetry_sink == TelemetrySinkType::File) {
+            ctx->state.telemetry_stream.open(ctx->state.config.telemetry_file_path,
+                                             std::ios::app | std::ios::out);
+            if (!ctx->state.telemetry_stream.is_open()) {
+                set_last_error("failed to open telemetry sink file");
+                return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+            }
+        }
+
         *out_context = ctx.release();
         set_last_error("");
         return YAMS_MOBILE_STATUS_OK;
@@ -282,11 +388,23 @@ yams_mobile_status yams_mobile_grep_execute(yams_mobile_context_t* ctx,
         return map_error_code(result.error().code);
     }
 
+    auto response = std::move(result.value());
+
+    nlohmann::json telemetry;
+    telemetry["event"] = "grep";
+    telemetry["timestamp"] = iso_timestamp_now();
+    telemetry["executionTimeMs"] = response.executionTimeMs;
+    telemetry["totalMatches"] = static_cast<std::int64_t>(response.totalMatches);
+    telemetry["filesSearched"] = static_cast<std::int64_t>(response.filesSearched);
+    telemetry["stats"] = stats_map_to_json(response.searchStats);
+
     if (out_result) {
         auto wrapper = std::make_unique<yams_mobile_grep_result_t>();
-        wrapper->response = std::move(result.value());
+        wrapper->response = std::move(response);
         *out_result = wrapper.release();
     }
+
+    emit_telemetry(ctx->state, telemetry);
     set_last_error("");
     return YAMS_MOBILE_STATUS_OK;
 }
@@ -347,11 +465,23 @@ yams_mobile_status yams_mobile_search_execute(yams_mobile_context_t* ctx,
             return map_error_code(result.error().code);
         }
 
+        auto response = std::move(result.value());
+
+        nlohmann::json telemetry;
+        telemetry["event"] = "search";
+        telemetry["timestamp"] = iso_timestamp_now();
+        telemetry["executionTimeMs"] = response.executionTimeMs;
+        telemetry["total"] = static_cast<std::int64_t>(response.total);
+        telemetry["type"] = response.type;
+        telemetry["stats"] = stats_map_to_json(response.searchStats);
+
         if (out_result) {
             auto wrapper = std::make_unique<yams_mobile_search_result_t>();
-            wrapper->response = std::move(result.value());
+            wrapper->response = std::move(response);
             *out_result = wrapper.release();
         }
+
+        emit_telemetry(ctx->state, telemetry);
         set_last_error("");
         return YAMS_MOBILE_STATUS_OK;
     } catch (const std::exception& ex) {

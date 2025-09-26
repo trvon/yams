@@ -358,9 +358,19 @@ if all_unit.length() > 0
     timeout: 120,
   )
 
+  test('unit_shard_post_ingest_queue', unit_exe,
+    suite: ['unit'],
+    args: ['--gtest_filter=PostIngestQueueStandardTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: 120,
+  )
+
   test('unit_reliability_grep_search_startup', unit_exe,
     suite: ['unit', 'reliability'],
-    args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
+    args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:GrepServiceTest.PropagatesMetadataErrorsWhenTagsUnavailable:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
@@ -387,8 +397,9 @@ if all_integration.length() > 0
     install: false,
   )
   test('integration_smoke', integ_exe,
-    suite: ['integration','smoke'],
+    suite: ['integration', 'isolated'],
     env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
+    is_parallel: false,
     timeout: 60)
 endif
 

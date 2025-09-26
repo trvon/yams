@@ -1,4 +1,5 @@
 #include <chrono>
+#include <mutex>
 #include <thread>
 #include <gtest/gtest.h>
 #include <yams/compression/compression_monitor.h>
@@ -11,8 +12,13 @@ class CompressionMonitorTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Reset global stats before each test to avoid cross-test interference
-        monitor_ = std::make_unique<CompressionMonitor>();
+        MonitorConfig testConfig;
+        testConfig.metricsInterval = std::chrono::seconds(1);
+        testConfig.historyRetention = std::chrono::seconds(10);
+        monitor_ = std::make_unique<CompressionMonitor>(testConfig);
         auto& stats = CompressionMonitor::getGlobalStats();
+        auto& mutex = CompressionMonitor::getGlobalStatsMutex();
+        std::lock_guard lock(mutex);
         stats = CompressionStats{};
     }
 
@@ -107,10 +113,19 @@ TEST_F(CompressionMonitorTest, TrackingOperations) {
     EXPECT_EQ(stats2.totalCompressedFiles.load(), initialCompressed + 1);
     EXPECT_EQ(stats2.totalSpaceSaved.load(), 500u);
 
-    // Track failed compression (ensure LZMA stats entry exists to record an error)
+    // Prime the LZMA entry without touching global internals directly.
     {
-        auto& gs = CompressionMonitor::getGlobalStats();
-        gs.algorithmStats[CompressionAlgorithm::LZMA] = AlgorithmStats{};
+        CompressionTracker tracker(CompressionAlgorithm::LZMA, 2000);
+        CompressionResult result;
+        result.originalSize = 2000;
+        result.compressedSize = 1500;
+        result.algorithm = CompressionAlgorithm::LZMA;
+        result.duration = 5ms;
+        tracker.complete(result);
+    }
+
+    // Track failed compression and ensure the error is recorded.
+    {
         CompressionTracker tracker(CompressionAlgorithm::LZMA, 2000);
         tracker.failed();
     }
@@ -155,21 +170,20 @@ TEST_F(CompressionMonitorTest, ExportFormats) {
 }
 
 TEST_F(CompressionMonitorTest, MetricsHistory) {
+    MonitorConfig config = monitor_->getConfig();
+    config.metricsInterval = std::chrono::seconds(1);
+    config.historyRetention = std::chrono::seconds(10);
+    monitor_->updateConfig(config);
+
     auto result = monitor_->start();
     ASSERT_TRUE(result.has_value());
 
-    // Configure short interval for testing
-    MonitorConfig config;
-    config.metricsInterval = std::chrono::seconds(1);
-    monitor_->updateConfig(config);
+    // Manually record a few snapshots without waiting on the background thread
+    monitor_->checkMetrics();
+    monitor_->checkMetrics();
 
-    // Wait for a few intervals
-    std::this_thread::sleep_for(350ms);
-
-    // Get history
-    auto history = monitor_->getHistory(1s);
-    // Relaxed expectation: allow >=1 snapshot to reduce platform variance
-    EXPECT_GE(history.size(), 1u);
+    auto history = monitor_->getHistory(std::chrono::seconds(2));
+    EXPECT_GE(history.size(), 2u);
 }
 
 TEST_F(CompressionMonitorTest, ConcurrentOperations) {

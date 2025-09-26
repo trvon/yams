@@ -194,6 +194,18 @@ TEST_F(GrepServiceTest, CountModeAllowsSemanticSuggestions) {
     SUCCEED();
 }
 
+TEST_F(GrepServiceTest, PathFiltersNormalizeRelativeSegments) {
+    GrepRequest rq;
+    rq.pattern = "hello";
+    rq.paths.push_back((tmpDir_ / std::filesystem::path("./a.txt")).string());
+    auto res = grepService_->grep(rq);
+    ASSERT_TRUE(res);
+    const auto& out = res.value();
+    ASSERT_FALSE(out.results.empty());
+    EXPECT_EQ(out.results.front().fileName, "a.txt");
+    EXPECT_GT(out.totalMatches, 0u);
+}
+
 TEST_F(GrepServiceTest, FilesOnlyModeAllowsSemanticSuggestions) {
     GrepRequest rq;
     rq.pattern = "programming";
@@ -253,4 +265,32 @@ TEST_F(GrepServiceTest, RetriesTransientMetadataErrors) {
     auto res = grepService_->grep(rq);
     ASSERT_TRUE(res) << res.error().message;
     EXPECT_GT(res.value().totalMatches, 0u);
+}
+
+TEST_F(GrepServiceTest, PropagatesMetadataErrorsWhenTagsUnavailable) {
+    auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*pool_);
+    auto docsRes = flakyRepo->findDocumentsByPath("%");
+    ASSERT_TRUE(docsRes);
+    ASSERT_FALSE(docsRes.value().empty());
+    const auto docId = docsRes.value().front().id;
+
+    ASSERT_TRUE(
+        flakyRepo->setMetadata(docId, "tag:ready_flag", MetadataValue(std::string("true"))));
+
+    flakyRepo->setGetAllMetadataFailures(8);
+    repo_ = flakyRepo;
+    ctx_.metadataRepo = flakyRepo;
+    grepService_ = makeGrepService(ctx_);
+
+    GrepRequest rq;
+    rq.pattern = "alpha";
+    rq.literalText = true;
+    rq.tags = {"ready_flag"};
+
+    auto res = grepService_->grep(rq);
+    ASSERT_FALSE(res);
+    EXPECT_EQ(res.error().code, ErrorCode::NotInitialized)
+        << "Actual code=" << static_cast<int>(res.error().code)
+        << " message=" << res.error().message;
+    EXPECT_FALSE(res.error().message.empty());
 }

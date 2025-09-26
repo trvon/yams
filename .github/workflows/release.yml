@@ -173,6 +173,7 @@ jobs:
             liburing-dev \
             libarchive-dev \
             libtag1-dev \
+            libboost-all-dev \
             pkg-config \
             ccache \
             rpm \
@@ -184,7 +185,7 @@ jobs:
             clang \
             clang-tools \
             lld
-          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev ccache rpm fakeroot dpkg-dev meson cmake ninja-build clang clang-tools lld"
+          echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev libboost-all-dev ccache rpm fakeroot dpkg-dev meson cmake ninja-build clang clang-tools lld"
           # Ensure compilers are preferred
           echo "CC=clang" >> $GITHUB_ENV
           echo "CXX=clang++" >> $GITHUB_ENV
@@ -448,12 +449,18 @@ jobs:
             echo "Conan cache locks/temp cleaned"
           fi
 
-      - name: Install pkg-config (macOS)
+      - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          set -euo pipefail
           brew update
-          brew install pkg-config cmake ninja || true
+          brew install pkg-config cmake ninja meson ccache boost || true
+          # Ensure Meson/Ninja are present even if Homebrew failed to link binaries.
+          command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
+          command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
+          echo "meson version: $(meson --version || echo 'missing')"
+          echo "ninja version: $(ninja --version || echo 'missing')"
 
       - name: Tune Conan client (parallel downloads)
         shell: bash

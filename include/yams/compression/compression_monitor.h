@@ -4,6 +4,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 #include <yams/compression/compression_stats.h>
@@ -182,6 +183,11 @@ public:
      * @return Reference to global stats
      */
     static CompressionStats& getGlobalStats();
+
+    /**
+     * @brief Mutex guarding access to global stats map
+     */
+    static std::mutex& getGlobalStatsMutex();
 
 private:
     class Impl;

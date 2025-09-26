@@ -53,6 +53,7 @@ public:
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_; }
+    void notifyWorkers();
 
     // Dynamically resize the worker thread pool (grow or shrink)
     // Returns true if a change was applied.

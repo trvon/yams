@@ -80,15 +80,26 @@ TEST(MCPAsyncExecTest, ToolsReturnStructuredErrorsWithoutDaemon) {
     std::error_code ec;
     std::filesystem::remove(cfg.socketPath, ec);
     server->testConfigureDaemonClient(cfg);
+    server->testSetEnsureDaemonClientHook(
+        [](const yams::daemon::ClientConfig&) -> yams::Result<void> {
+            return yams::Error{yams::ErrorCode::NetworkError,
+                               "Daemon socket not found for test harness"};
+        });
 
     auto expectAsyncCompletion = [&](auto makeAwaitable, const std::string& toolName) {
+        auto start = std::chrono::steady_clock::now();
         auto result = run_awaitable_with_timeout(makeAwaitable(), std::chrono::seconds(3));
+        auto elapsed = std::chrono::steady_clock::now() - start;
         ASSERT_TRUE(result.has_value()) << toolName << " handler timed out";
+        EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed), 500ms)
+            << toolName << " harness took too long";
         if (result->has_value()) {
             SUCCEED() << toolName << " handler completed successfully";
         } else {
             const auto& error = result->error();
             EXPECT_FALSE(error.message.empty()) << toolName << " error message missing";
+            EXPECT_THAT(error.message, ::testing::HasSubstr("test harness"))
+                << toolName << " unexpected error message";
         }
     };
 
@@ -130,12 +141,29 @@ TEST(MCPAsyncExecTest, ToolsReturnStructuredErrorsWithoutDaemon) {
         },
         "stats");
 
-    auto syncResult = server->callToolPublic("search", nlohmann::json{{"query", "foo"}});
-    ASSERT_TRUE(syncResult.is_object());
-    ASSERT_TRUE(syncResult.contains("error"));
-    const auto& error = syncResult["error"];
-    ASSERT_TRUE(error.contains("message"));
-    EXPECT_FALSE(error["message"].get<std::string>().empty());
+    auto syncResult = run_awaitable_with_timeout(
+        server->testCallToolAsync("search", nlohmann::json{{"query", "foo"}}),
+        std::chrono::seconds(3));
+    ASSERT_TRUE(syncResult.has_value()) << "callTool async timed out";
+    ASSERT_TRUE(syncResult->is_object());
+    if (syncResult->contains("error")) {
+        const auto& error = (*syncResult)["error"];
+        ASSERT_TRUE(error.contains("message"));
+        EXPECT_THAT(error["message"].get<std::string>(), ::testing::HasSubstr("test harness"));
+    } else {
+        ASSERT_TRUE(syncResult->contains("isError")) << "callTool result: " << syncResult->dump();
+        ASSERT_TRUE((*syncResult)["isError"].is_boolean())
+            << "callTool result: " << syncResult->dump();
+        EXPECT_TRUE((*syncResult)["isError"].get<bool>())
+            << "callTool result: " << syncResult->dump();
+        ASSERT_TRUE(syncResult->contains("content")) << "callTool result: " << syncResult->dump();
+        const auto& content = (*syncResult)["content"];
+        ASSERT_TRUE(content.is_array()) << "callTool result: " << syncResult->dump();
+        ASSERT_FALSE(content.empty()) << "callTool result: " << syncResult->dump();
+        const auto& first = content.front();
+        ASSERT_TRUE(first.contains("text")) << "callTool result: " << syncResult->dump();
+        EXPECT_THAT(first["text"].get<std::string>(), ::testing::HasSubstr("test harness"));
+    }
 
     server->testShutdown();
 }

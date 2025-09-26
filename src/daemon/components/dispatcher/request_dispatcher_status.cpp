@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <thread>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -11,6 +12,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
 namespace yams::daemon {
@@ -204,6 +206,66 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
             res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
             res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+            try {
+                if (state_) {
+                    res.vectorDbInitAttempted =
+                        state_->readiness.vectorDbInitAttempted.load(std::memory_order_relaxed);
+                    res.vectorDbReady =
+                        state_->readiness.vectorDbReady.load(std::memory_order_relaxed);
+                    res.vectorDbDim = state_->readiness.vectorDbDim.load(std::memory_order_relaxed);
+                }
+            } catch (...) {
+            }
+            if (!res.vectorDbReady) {
+                try {
+                    if (serviceManager_) {
+                        if (auto vdb = serviceManager_->getVectorDatabase();
+                            vdb && vdb->isInitialized()) {
+                            res.vectorDbReady = true;
+                            auto dim = vdb->getConfig().embedding_dim;
+                            if (dim > 0) {
+                                res.vectorDbDim = static_cast<uint32_t>(dim);
+                            }
+                            if (state_) {
+                                state_->readiness.vectorDbReady.store(true,
+                                                                      std::memory_order_relaxed);
+                                if (dim > 0) {
+                                    state_->readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
+                                                                        std::memory_order_relaxed);
+                                }
+                            }
+                        } else {
+                            auto dd = serviceManager_->getResolvedDataDir();
+                            if (!dd.empty()) {
+                                auto vdbPath = dd / "vectors.db";
+                                if (std::filesystem::exists(vdbPath)) {
+                                    yams::vector::VectorDatabaseConfig cfg;
+                                    cfg.database_path = vdbPath.string();
+                                    cfg.create_if_missing = false;
+                                    auto tmp = std::make_unique<yams::vector::VectorDatabase>(cfg);
+                                    if (tmp->initialize()) {
+                                        res.vectorDbReady = true;
+                                        auto dim = tmp->getConfig().embedding_dim;
+                                        if (dim > 0) {
+                                            res.vectorDbDim = static_cast<uint32_t>(dim);
+                                        }
+                                        if (state_) {
+                                            state_->readiness.vectorDbReady.store(
+                                                true, std::memory_order_relaxed);
+                                            if (dim > 0) {
+                                                state_->readiness.vectorDbDim.store(
+                                                    static_cast<uint32_t>(dim),
+                                                    std::memory_order_relaxed);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (...) {
+                }
+            }
         }
         try {
             bool searchDegraded = true;

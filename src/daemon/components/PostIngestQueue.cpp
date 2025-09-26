@@ -106,6 +106,10 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     return true;
 }
 
+void PostIngestQueue::notifyWorkers() {
+    cv_.notify_one();
+}
+
 std::size_t PostIngestQueue::size() const {
     std::lock_guard<std::mutex> lk(mtx_);
     return qMeta_.size() + qKg_.size() + qEmb_.size();
@@ -114,8 +118,9 @@ std::size_t PostIngestQueue::size() const {
 void PostIngestQueue::workerLoop() {
     Task task;
     bool haveTask = false;
+    const bool busEnabled = TuneAdvisor::useInternalBusForPostIngest();
     // Try InternalEventBus first when enabled
-    if (TuneAdvisor::useInternalBusForPostIngest()) {
+    if (busEnabled) {
         static std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> bus =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
                 "post_ingest", 4096);
@@ -140,15 +145,24 @@ void PostIngestQueue::workerLoop() {
     }
     if (!haveTask) {
         std::unique_lock<std::mutex> lk(mtx_);
-        cv_.wait(lk, [&] {
+        auto predicate = [&] {
             return stop_.load() || (!qMeta_.empty() || !qKg_.empty() || !qEmb_.empty());
-        });
+        };
+        if (busEnabled) {
+            cv_.wait_for(lk, std::chrono::milliseconds(50), predicate);
+        } else {
+            cv_.wait(lk, predicate);
+        }
         if (stop_.load())
             return;
         if (!popNextTaskLocked(task)) {
             // Nothing eligible (token-starved), wait briefly to allow refill
             lk.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (busEnabled) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
             return;
         }
         cv_.notify_one();

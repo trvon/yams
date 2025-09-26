@@ -205,7 +205,31 @@ Result<void> SocketServer::stop() {
             spdlog::warn("Unknown exception while closing acceptor");
         }
 
-        stop_io_reconciler();
+        // Stop and join the IO reconciler thread BEFORE touching workers_ to avoid
+        // concurrent modifications while we iterate/join worker threads.
+        try {
+            stop_io_reconciler();
+        } catch (...) {
+        }
+        try {
+            if (ioReconThread_.joinable()) {
+                // Request cooperative stop (no-op on fallback) then join.
+                try {
+                    ioReconThread_.request_stop();
+                } catch (...) {
+                }
+                try {
+                    ioReconThread_.join();
+                } catch (const std::exception& e) {
+                    spdlog::warn("ioReconThread join exception: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("ioReconThread join unknown exception");
+                }
+            }
+        } catch (...) {
+        }
+
+        // Signal all workers to exit under lock, then stop the io_context.
         try {
             std::lock_guard<std::mutex> lk(workersMutex_);
             for (auto& w : workers_) {
@@ -219,27 +243,49 @@ Result<void> SocketServer::stop() {
         } catch (...) {
         }
 
+        // Move workers to a local list under lock to avoid iterator invalidation
+        // if any other component attempts to resize during shutdown (defensive).
+        std::vector<IoWorker> localWorkers;
+        try {
+            std::lock_guard<std::mutex> lk(workersMutex_);
+            localWorkers = std::move(workers_);
+            workers_.clear();
+        } catch (...) {
+            // If the move failed, fall back to joining what's present without lock.
+        }
+
         // Join/detach worker threads safely.
         const auto self_id = std::this_thread::get_id();
-        for (auto& w : workers_) {
-            if (w.th.joinable()) {
-                if (w.th.get_id() == self_id) {
-                    try {
-                        w.th.detach();
-                    } catch (...) {
-                    }
-                } else {
-                    try {
-                        w.th.join();
-                    } catch (const std::exception& e) {
-                        spdlog::warn("Worker join exception: {}", e.what());
-                    } catch (...) {
-                        spdlog::warn("Worker join unknown exception");
-                    }
+        auto join_worker = [&](IoWorker& w) {
+            if (!w.th.joinable())
+                return;
+            if (w.th.get_id() == self_id) {
+                try {
+                    w.th.detach();
+                } catch (...) {
+                }
+            } else {
+                try {
+                    w.th.join();
+                } catch (const std::exception& e) {
+                    spdlog::warn("Worker join exception: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("Worker join unknown exception");
                 }
             }
+        };
+
+        if (!localWorkers.empty()) {
+            for (auto& w : localWorkers) {
+                join_worker(w);
+            }
+        } else {
+            // Fallback path if move failed: join workers_ directly (may be empty already)
+            for (auto& w : workers_) {
+                join_worker(w);
+            }
+            workers_.clear();
         }
-        workers_.clear();
         work_guard_.reset();
 
         if (state_) {

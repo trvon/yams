@@ -15,7 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.0-pre] - 2025-09-21
+## [v0.7.1] - 2025-09-25
+
+### Fixed
+- Guarded compression monitor global statistics with a dedicated mutex to stop concurrent tracker
+  updates from crashing `unit_shard5` (validated via `meson test -C build/debug unit_shard5
+  --print-errorlogs`).
+- Repaired the `document_service` metadata pipeline regression so fixture-driven search tests no
+  longer observe missing extracted content.
+
+## [v0.7.0] - 2025-09-25
 
 ### Highlights
 - These changes reduce CPU spikes observed in profiles for large greps and remove
@@ -81,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and flat JSON remain unchanged unless `--json-grouped` is specified.
 
 ### Fixed
+- Regression in metadata extraction and storage used in search and grep tools
+  The async post-ingest pipeline never persisted extracted text into the metadata store. As a result, document_content stayed empty, so search, repairs, and semantic pipelines saw “Document content not found” despite vector insert logs.
 - Many tuning optimizations for daemon usage
 - Grep pipeline: staged KG → metadata → content with caps and budget.
   - Prefers "hot" text (metadata-extracted) and caps cold CAS reads; early path/include filters.

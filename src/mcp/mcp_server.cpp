@@ -723,6 +723,12 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 }
 
 Result<void> MCPServer::ensureDaemonClient() {
+    if (testEnsureDaemonClientHook_) {
+        auto hookResult = testEnsureDaemonClientHook_(daemon_client_config_);
+        if (!hookResult) {
+            return hookResult;
+        }
+    }
     if (daemon_client_)
         return Result<void>();
     auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
