@@ -129,6 +129,34 @@ typedef struct yams_mobile_vector_status_request {
 
 typedef struct yams_mobile_vector_status_result_t yams_mobile_vector_status_result_t;
 
+typedef struct yams_mobile_list_request {
+    yams_mobile_request_header header;
+    const char* pattern;
+    const char** tags;
+    size_t tag_count;
+    uint32_t limit;
+    uint32_t offset;
+    uint8_t match_all_tags;
+    uint8_t paths_only;
+} yams_mobile_list_request;
+
+typedef struct yams_mobile_list_result_t yams_mobile_list_result_t;
+
+typedef struct yams_mobile_document_get_request {
+    yams_mobile_request_header header;
+    const char* document_hash;
+    const char* name;
+    uint8_t metadata_only;
+    uint8_t include_content;
+    uint8_t include_extracted_text;
+    uint8_t raw;
+    uint8_t latest;
+    uint8_t oldest;
+    uint64_t max_bytes;
+} yams_mobile_document_get_request;
+
+typedef struct yams_mobile_document_get_result_t yams_mobile_document_get_result_t;
+
 /**
  * Retrieve the compiled ABI version.
  */
@@ -188,6 +216,34 @@ yams_mobile_grep_result_stats_json(const yams_mobile_grep_result_t* result);
 
 YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_search_result_stats_json(const yams_mobile_search_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_search_result_json(const yams_mobile_search_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_list_documents(yams_mobile_context_t* ctx, const yams_mobile_list_request* request,
+                           yams_mobile_list_result_t** out_result);
+
+YAMS_MOBILE_API void yams_mobile_list_result_destroy(yams_mobile_list_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_list_result_json(const yams_mobile_list_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_status yams_mobile_get_document(
+    yams_mobile_context_t* ctx, const yams_mobile_document_get_request* request,
+    yams_mobile_document_get_result_t** out_result);
+
+YAMS_MOBILE_API void
+yams_mobile_document_get_result_destroy(yams_mobile_document_get_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_document_get_result_json(const yams_mobile_document_get_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_document_get_result_content(const yams_mobile_document_get_result_t* result);
 
 /**
  * Fetch extended error information for the last API call on the invoking thread.
