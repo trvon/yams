@@ -58,9 +58,38 @@ static std::string normalizePathForCompare(const std::string& path) {
     if (out.empty()) {
         out = fs.generic_string();
     }
+#if defined(__APPLE__)
+    // Canonicalize common macOS path aliases so comparisons/globs are consistent
+    auto canonApple = [](const std::string& s) -> std::string {
+        if (s.rfind("/private/var/", 0) == 0 || s == "/private/var")
+            return s; // already canonical
+        if (s.rfind("/private/tmp/", 0) == 0 || s == "/private/tmp")
+            return s; // already canonical
+        if (s.rfind("/var/", 0) == 0)
+            return std::string("/private") + s; // "/var/..." -> "/private/var/..."
+        if (s == "/var")
+            return std::string("/private/var");
+        if (s.rfind("/tmp/", 0) == 0)
+            return std::string("/private") + s; // "/tmp/..." -> "/private/tmp/..."
+        if (s == "/tmp")
+            return std::string("/private/tmp");
+        return s;
+    };
+    out = canonApple(out);
+#endif
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return out;
+}
+
+// Normalize path minimally for SQL LIKE against stored file_path.
+// Do not alter macOS /var vs /private/var or case; only unify separators on Windows.
+static std::string normalizePathForSqlLike(const std::string& path) {
+    std::string out = path;
+#if defined(_WIN32)
+    std::replace(out.begin(), out.end(), '\\', '/');
 #endif
     return out;
 }
@@ -69,6 +98,25 @@ static std::string normalizeForGlobMatch(const std::string& value) {
     std::string out = value;
 #if defined(_WIN32)
     std::replace(out.begin(), out.end(), '\\', '/');
+#endif
+#if defined(__APPLE__)
+    // Canonicalize macOS path aliases for consistent glob matching
+    auto canonApple = [](const std::string& s) -> std::string {
+        if (s.rfind("/private/var/", 0) == 0 || s == "/private/var")
+            return s;
+        if (s.rfind("/private/tmp/", 0) == 0 || s == "/private/tmp")
+            return s;
+        if (s.rfind("/var/", 0) == 0)
+            return std::string("/private") + s;
+        if (s == "/var")
+            return std::string("/private/var");
+        if (s.rfind("/tmp/", 0) == 0)
+            return std::string("/private") + s;
+        if (s == "/tmp")
+            return std::string("/private/tmp");
+        return s;
+    };
+    out = canonApple(out);
 #endif
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
@@ -186,19 +234,30 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
         if (f.empty())
             continue;
         if (hasWildcard(f)) {
+            // First try a straight glob match (supports '*' and '?')
             if (yams::app::services::utils::matchGlob(globDoc, normalizeForGlobMatch(f)))
                 return true;
+            // Extra robustness: support directory-style patterns like "/path/**" by
+            // treating the portion before "**" as a normalized directory prefix.
+            // This covers cases where a double-star may not be interpreted as intended by
+            // the minimal glob matcher.
+            auto dd = f.find("**");
+            if (dd != std::string::npos) {
+                std::string prefix = f.substr(0, dd);
+                auto normPrefix = normalizePathForCompare(prefix);
+                if (!normPrefix.empty()) {
+                    if (!normPrefix.empty() && normPrefix.back() != '/')
+                        normPrefix.push_back('/');
+                    if (normalizedDoc.size() >= normPrefix.size() &&
+                        normalizedDoc.compare(0, normPrefix.size(), normPrefix) == 0)
+                        return true;
+                }
+            }
         } else {
             auto normalizedFilter = normalizePathForCompare(f);
             if (normalizedFilter.empty())
                 continue;
-            if (normalizedDoc == normalizedFilter)
-                return true;
-            std::string prefix = normalizedFilter;
-            if (!prefix.empty() && prefix.back() != '/')
-                prefix.push_back('/');
-            if (!prefix.empty() && normalizedDoc.size() > prefix.size() &&
-                normalizedDoc.compare(0, prefix.size(), prefix) == 0)
+            if (normalizedDoc.find(normalizedFilter) != std::string::npos)
                 return true;
         }
     }
@@ -363,18 +422,154 @@ public:
             }
         }
         if (docs.empty()) {
-            auto allRes =
-                retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                                std::chrono::milliseconds(25), &metadataTelemetry);
-            if (!allRes) {
+            auto fetchAll = [&]() -> Result<std::vector<metadata::DocumentInfo>> {
+                return retryMetadataOp(
+                    [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                    std::chrono::milliseconds(25), &metadataTelemetry);
+            };
+            if (auto allRes = fetchAll(); allRes) {
+                docs = std::move(allRes.value());
+            } else {
                 return Error{ErrorCode::InternalError,
                              "Failed to enumerate documents: " + allRes.error().message};
             }
-            docs = std::move(allRes.value());
+            // If caller provided paths/include globs and we still have no docs, allow a brief
+            // bounded wait for metadata to become visible (post-ingest extraction completes).
+            if (docs.empty() && (!req.paths.empty() || !req.includePatterns.empty())) {
+                for (int i = 0; i < 10 && docs.empty(); ++i) { // up to ~500ms
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    if (auto allRes2 = fetchAll(); allRes2)
+                        docs = std::move(allRes2.value());
+                }
+                // If still empty, try targeted metadata scans using includePatterns directory
+                // prefixes like "/dir/**" -> prefix "/dir/".
+                if (docs.empty() && !req.includePatterns.empty()) {
+                    std::unordered_set<int64_t> seenIds;
+                    for (const auto& p : req.includePatterns) {
+                        auto dd = p.find("**");
+                        if (dd == std::string::npos)
+                            continue;
+                        std::string prefix = p.substr(0, dd);
+                        if (prefix.empty())
+                            continue;
+                        // Normalize macOS /var -> /private/var and lowercase for repo matching
+                        auto normPrefix = normalizePathForCompare(prefix);
+                        if (!normPrefix.empty() && normPrefix.back() != '/')
+                            normPrefix.push_back('/');
+                        // Convert to SQL LIKE friendly form (end with %)
+                        std::string like = normPrefix + "%";
+                        auto dirRes = retryMetadataOp(
+                            [&]() { return ctx_.metadataRepo->findDocumentsByPath(like); }, 4,
+                            std::chrono::milliseconds(25), &metadataTelemetry);
+                        if (dirRes && !dirRes.value().empty()) {
+                            for (auto& d : dirRes.value()) {
+                                if (seenIds.insert(d.id).second) {
+                                    docs.push_back(std::move(d));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also preselect candidates using explicit req.paths entries. For directory
+                // paths, perform a LIKE prefix scan ("/dir/" -> "/dir/%"); for file paths,
+                // perform an exact LIKE (no wildcard). If a path contains wildcards or ends
+                // with "**", derive a directory prefix up to the last '/' and perform a
+                // LIKE prefix scan.
+                if (docs.empty() && !req.paths.empty()) {
+                    std::unordered_set<int64_t> seenIds;
+                    for (const auto& p : req.paths) {
+                        if (p.empty())
+                            continue;
+                        auto queryLike = [&](const std::string& like) {
+                            auto r = retryMetadataOp(
+                                [&]() { return ctx_.metadataRepo->findDocumentsByPath(like); }, 4,
+                                std::chrono::milliseconds(25), &metadataTelemetry);
+                            if (r && !r.value().empty()) {
+                                for (auto& d : r.value()) {
+                                    if (seenIds.insert(d.id).second)
+                                        docs.push_back(std::move(d));
+                                }
+                            }
+                        };
+                        // Handle wildcards by reducing to a directory prefix
+                        bool wild = (p.find('*') != std::string::npos) ||
+                                    (p.find('?') != std::string::npos);
+                        auto dd = p.find("**");
+                        if (wild || dd != std::string::npos) {
+                            std::string prefix = (dd != std::string::npos) ? p.substr(0, dd) : p;
+                            auto lastSlash = prefix.find_last_of('/');
+                            if (lastSlash != std::string::npos)
+                                prefix = prefix.substr(0, lastSlash + 1);
+                            auto normPrefix = normalizePathForSqlLike(prefix);
+                            if (!normPrefix.empty() && normPrefix.back() != '/')
+                                normPrefix.push_back('/');
+                            queryLike(normPrefix + "%");
+                        } else {
+                            // Try exact file, then treat as directory prefix
+                            auto norm = normalizePathForSqlLike(p);
+                            if (!norm.empty()) {
+                                queryLike(norm);
+                                if (norm.back() != '/')
+                                    queryLike(norm + "/%");
+                                else
+                                    queryLike(norm + "%");
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        // Ensure candidate set includes any explicit req.paths selections by performing
+        // directory-prefix LIKE scans or exact path matches before filtering. This helps
+        // surface freshly ingested documents that may not yet appear in broad enumerations.
+        if (!req.paths.empty()) {
+            std::unordered_set<int64_t> have;
+            have.reserve(docs.size());
+            for (const auto& d : docs)
+                have.insert(d.id);
+            for (const auto& p : req.paths) {
+                if (p.empty())
+                    continue;
+                std::string like;
+                bool wild =
+                    (p.find('*') != std::string::npos) || (p.find('?') != std::string::npos);
+                auto dd = p.find("**");
+                if (wild || dd != std::string::npos) {
+                    std::string prefix = (dd != std::string::npos) ? p.substr(0, dd) : p;
+                    auto lastSlash = prefix.find_last_of('/');
+                    if (lastSlash != std::string::npos)
+                        prefix = prefix.substr(0, lastSlash + 1);
+                    auto normPrefix = normalizePathForSqlLike(prefix);
+                    if (!normPrefix.empty() && normPrefix.back() != '/')
+                        normPrefix.push_back('/');
+                    like = normPrefix + "%";
+                } else {
+                    auto norm = normalizePathForSqlLike(p);
+                    if (!norm.empty() && norm.back() == '/')
+                        like = norm + "%";
+                    else
+                        like = norm;
+                }
+                if (like.empty())
+                    continue;
+                auto addRes =
+                    retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath(like); },
+                                    4, std::chrono::milliseconds(25), &metadataTelemetry);
+                if (addRes && !addRes.value().empty()) {
+                    for (auto& d : addRes.value()) {
+                        if (have.insert(d.id).second)
+                            docs.push_back(std::move(d));
+                    }
+                }
+            }
+        }
+
+        spdlog::debug("[GrepService] candidates pre-filter count={}", docs.size());
 
         // Apply early path/include filtering
         if (!req.paths.empty() || !req.includePatterns.empty()) {
+            const size_t preCount = docs.size();
             std::vector<metadata::DocumentInfo> filtered;
             filtered.reserve(docs.size());
             for (auto& d : docs) {
@@ -386,6 +581,26 @@ public:
                 filtered.push_back(std::move(d));
             }
             docs = std::move(filtered);
+            try {
+                if (!req.includePatterns.empty()) {
+                    std::ostringstream oss;
+                    oss << "[GrepService] includePatterns= ";
+                    for (size_t i = 0; i < req.includePatterns.size(); ++i) {
+                        if (i)
+                            oss << ", ";
+                        oss << req.includePatterns[i];
+                    }
+                    oss << "; candidates after filter=" << docs.size() << "/" << preCount;
+                    spdlog::info("{}", oss.str());
+                }
+                if (!req.paths.empty()) {
+                    std::ostringstream oss2;
+                    oss2 << "[GrepService] paths preselect size=" << preCount
+                         << ", after filter=" << docs.size();
+                    spdlog::debug("{}", oss2.str());
+                }
+            } catch (...) {
+            }
         }
 
         // Prefer hot docs (extracted/text) then cold; cap both sets
@@ -503,6 +718,22 @@ public:
                                     docGlobPath, normalizeForGlobMatch(pattern))) {
                                 ok = true;
                                 break;
+                            }
+                            // Extra: treat "/dir/**" as a directory prefix include
+                            auto dd = pattern.find("**");
+                            if (!ok && dd != std::string::npos) {
+                                std::string prefix = pattern.substr(0, dd);
+                                auto normPrefix = normalizePathForCompare(prefix);
+                                if (!normPrefix.empty()) {
+                                    if (normPrefix.back() != '/')
+                                        normPrefix.push_back('/');
+                                    auto normDoc = normalizePathForCompare(doc.filePath);
+                                    if (normDoc.size() >= normPrefix.size() &&
+                                        normDoc.compare(0, normPrefix.size(), normPrefix) == 0) {
+                                        ok = true;
+                                        break;
+                                    }
+                                }
                             }
                         } else {
                             const auto normalizedPattern = normalizeForGlobMatch(pattern);
@@ -711,6 +942,15 @@ public:
                     auto rs = ctx_.store->retrieveStream(doc.sha256Hash, os, nullptr);
                     if (!rs)
                         continue;
+                    // Flush any remaining buffered content as a final line
+                    if (!sb.buffer.empty()) {
+                        std::string tail = std::move(sb.buffer);
+                        sb.buffer.clear();
+                        // Normalize potential Windows CRLF by stripping trailing \r
+                        if (!tail.empty() && tail.back() == '\r')
+                            tail.pop_back();
+                        onLine(tail);
+                    }
                 }
 
                 // Early exit shaping for files-only/paths-only
@@ -720,6 +960,8 @@ public:
 
                 std::lock_guard<std::mutex> lk(outMutex);
                 if (fileResult.matchCount > 0) {
+                    spdlog::debug("[GrepService] matched '{}' count={}", fileResult.file,
+                                  fileResult.matchCount);
                     totalMatches += static_cast<size_t>(fileResult.matchCount);
                     regexMatches += static_cast<size_t>(fileResult.matchCount);
                     filesWith.push_back(fileResult.file);
@@ -747,6 +989,13 @@ public:
         response.results = std::move(outResults);
         response.filesWith = std::move(filesWith);
         response.filesWithout = std::move(filesWithout);
+        if (req.pathsOnly) {
+            response.pathsOnly = response.filesWith;
+        }
+        spdlog::debug(
+            "[GrepService] filesWith={} filesWithout={} results={} pathsOnly={} totalMatches={}",
+            response.filesWith.size(), response.filesWithout.size(), response.results.size(),
+            response.pathsOnly.size(), response.totalMatches);
         response.totalMatches = totalMatches.load();
         response.regexMatches = regexMatches.load();
         response.queryInfo = "grep: parallel regex scan";
@@ -793,6 +1042,23 @@ public:
                                                 pathGlob, normalizeForGlobMatch(p))) {
                                             ok = true;
                                             break;
+                                        }
+                                        // Extra: support directory prefix semantics for "**"
+                                        auto dd = p.find("**");
+                                        if (!ok && dd != std::string::npos) {
+                                            std::string prefix = p.substr(0, dd);
+                                            auto normPrefix = normalizePathForCompare(prefix);
+                                            if (!normPrefix.empty()) {
+                                                if (normPrefix.back() != '/')
+                                                    normPrefix.push_back('/');
+                                                auto normDoc = normalizePathForCompare(path);
+                                                if (normDoc.size() >= normPrefix.size() &&
+                                                    normDoc.compare(0, normPrefix.size(),
+                                                                    normPrefix) == 0) {
+                                                    ok = true;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     } else {
                                         const auto normalized = normalizeForGlobMatch(p);

@@ -43,6 +43,7 @@ void RepairCoordinator::start() {
     }
     // Initialize maintenance tokens based on config
     tokens_.store(cfg_.maintenanceTokens);
+    finished_.store(false, std::memory_order_relaxed);
     auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
     boost::asio::co_spawn(
         io,
@@ -59,7 +60,15 @@ void RepairCoordinator::stop() {
     if (!running_.exchange(false)) {
         return;
     }
+    // Clear services pointer to avoid use-after-free races during shutdown.
+    services_ = nullptr;
     queueCv_.notify_all();
+    // Best-effort wait for coroutine to signal completion
+    {
+        std::unique_lock<std::mutex> lk(doneMutex_);
+        (void)doneCv_.wait_for(lk, std::chrono::milliseconds(1500),
+                               [&] { return finished_.load(std::memory_order_relaxed); });
+    }
 }
 
 bool RepairCoordinator::maintenance_allowed() const {
@@ -400,6 +409,8 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
     }
 
     spdlog::info("RepairCoordinator stopped");
+    finished_.store(true, std::memory_order_relaxed);
+    doneCv_.notify_all();
     co_return;
 }
 #if 0

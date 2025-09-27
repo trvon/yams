@@ -63,6 +63,7 @@ private:
     boost::asio::awaitable<Response> handleGetInitRequest(const GetInitRequest& req);
     boost::asio::awaitable<Response> handleGetChunkRequest(const GetChunkRequest& req);
     boost::asio::awaitable<Response> handleGetEndRequest(const GetEndRequest& req);
+    boost::asio::awaitable<Response> handleCatRequest(const CatRequest& req);
     boost::asio::awaitable<Response> handleAddDocumentRequest(const AddDocumentRequest& req);
     boost::asio::awaitable<Response> handleListRequest(const ListRequest& req);
     boost::asio::awaitable<Response> handleDeleteRequest(const DeleteRequest& req);
@@ -72,6 +73,14 @@ private:
     boost::asio::awaitable<Response> handleGrepRequest(const GrepRequest& req);
     boost::asio::awaitable<Response> handleDownloadRequest(const DownloadRequest& req);
     boost::asio::awaitable<Response> handlePrepareSessionRequest(const PrepareSessionRequest& req);
+
+    // Session management handlers
+    boost::asio::awaitable<Response> handleListSessionsRequest(const ListSessionsRequest& req);
+    boost::asio::awaitable<Response> handleUseSessionRequest(const UseSessionRequest& req);
+    boost::asio::awaitable<Response>
+    handleAddPathSelectorRequest(const AddPathSelectorRequest& req);
+    boost::asio::awaitable<Response>
+    handleRemovePathSelectorRequest(const RemovePathSelectorRequest& req);
 
     // Plugin management handlers
     boost::asio::awaitable<Response> handlePluginScanRequest(const PluginScanRequest& req);

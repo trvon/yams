@@ -345,7 +345,6 @@ void SocketServer::start_io_reconciler() {
                                 try {
                                     while (!stopping_.load(std::memory_order_relaxed) &&
                                            !flag->load(std::memory_order_relaxed)) {
-                                        boost::asio::steady_timer timer(io_context_);
                                         uint32_t poll_ms = 100;
                                         try {
                                             if (auto snap =
@@ -355,10 +354,7 @@ void SocketServer::start_io_reconciler() {
                                                 poll_ms = TuneAdvisor::workerPollMs();
                                         } catch (...) {
                                         }
-                                        timer.expires_after(std::chrono::milliseconds(poll_ms));
-                                        timer.async_wait([](const boost::system::error_code&) {});
-                                        io_context_.run_one();
-                                        timer.cancel();
+                                        io_context_.run_for(std::chrono::milliseconds(poll_ms));
                                     }
                                 } catch (const std::exception& e) {
                                     spdlog::error("Worker thread exception: {}", e.what());

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <random>
 #include <thread>
+#include "test_async_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
@@ -21,7 +22,8 @@ public:
         fs::create_directories(root_);
         data_ = root_ / "data";
         fs::create_directories(data_);
-        sock_ = root_ / ("daemon_" + id + ".sock");
+        // Use short AF_UNIX path under /tmp to avoid sandbox and length issues
+        sock_ = std::filesystem::path("/tmp") / ("daemon_" + id + ".sock");
         pid_ = root_ / ("daemon_" + id + ".pid");
         log_ = root_ / ("daemon_" + id + ".log");
 

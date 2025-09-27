@@ -19,6 +19,9 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+// Local-socket bind probe for sandboxed environments
+#include <boost/asio/local/stream_protocol.hpp>
+#include <boost/system/error_code.hpp>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -75,6 +78,29 @@ bool wait_for_daemon_ready(yams::daemon::DaemonClient& client, std::chrono::mill
         std::this_thread::sleep_for(100ms);
     }
     return false;
+}
+
+static bool canBindUnixSocketHere() {
+    try {
+        boost::asio::io_context io;
+        boost::asio::local::stream_protocol::acceptor acc(io);
+        auto path = fs::path("/tmp") /
+                    (std::string("yams-smoke-probe-") + std::to_string(::getpid()) + ".sock");
+        std::error_code ec;
+        fs::remove(path, ec);
+        boost::system::error_code bec;
+        acc.open(boost::asio::local::stream_protocol::endpoint(path.string()).protocol(), bec);
+        if (bec)
+            return false;
+        acc.bind(boost::asio::local::stream_protocol::endpoint(path.string()), bec);
+        if (bec)
+            return false;
+        acc.close();
+        fs::remove(path, ec);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool wait_for_vector_index_growth(yams::daemon::DaemonClient& client, size_t base_bytes,
@@ -218,6 +244,9 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
     if (std::getenv("GTEST_DISCOVERY_MODE")) {
         GTEST_SKIP() << "Skipping during test discovery";
     }
+    if (!canBindUnixSocketHere()) {
+        GTEST_SKIP() << "Skipping smoke: environment forbids AF_UNIX bind (sandbox).";
+    }
 
 #if defined(_WIN32)
     _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
@@ -241,7 +270,12 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
 
     yams::daemon::DaemonConfig cfg;
     cfg.dataDir = dataDir;
-    cfg.socketPath = root / "daemon.sock";
+    // Prefer /tmp-based path to avoid path-length and sandbox issues
+    fs::path sockdir = fs::path("/tmp") / (std::string("yamsr-") + std::to_string(::getpid()));
+    std::error_code mkec;
+    fs::create_directories(sockdir, mkec);
+    cfg.socketPath =
+        sockdir / (std::string("yams-daemon-smoke-") + std::to_string(::getpid()) + ".sock");
     cfg.pidFile = root / "daemon.pid";
     cfg.logFile = root / "daemon.log";
     cfg.enableModelProvider = true;

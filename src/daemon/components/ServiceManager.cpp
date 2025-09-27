@@ -266,6 +266,22 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     }
 }
 
+bool ServiceManager::invokeInitCompleteOnce(bool success, const std::string& error) {
+    bool expected = false;
+    if (!initCompleteInvoked_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return false; // already invoked
+    }
+    try {
+        if (initCompleteCallback_) {
+            initCompleteCallback_(success, error);
+        }
+        // Do not null out the callback pointer here; tests may introspect it.
+    } catch (...) {
+        // Swallow to avoid terminating threads
+    }
+    return true;
+}
+
 ServiceManager::~ServiceManager() {
     shutdown();
 }
@@ -334,14 +350,10 @@ yams::Result<void> ServiceManager::initialize() {
         auto result = fut.get();
         if (!result) {
             spdlog::error("Async resource initialization failed: {}", result.error().message);
-            if (initCompleteCallback_) {
-                initCompleteCallback_(false, result.error().message);
-            }
+            (void)invokeInitCompleteOnce(false, result.error().message);
         } else {
             spdlog::info("All daemon services initialized successfully");
-            if (initCompleteCallback_) {
-                initCompleteCallback_(true, "");
-            }
+            (void)invokeInitCompleteOnce(true, "");
         }
     });
 
@@ -405,6 +417,11 @@ yams::Result<void> ServiceManager::initialize() {
 }
 
 void ServiceManager::shutdown() {
+    // Ensure shutdown is executed at most once to avoid double-free/use-after-free
+    if (shutdownInvoked_.exchange(true, std::memory_order_acq_rel)) {
+        spdlog::debug("ServiceManager: shutdown already invoked; skipping.");
+        return;
+    }
     // Stop pool reconciler thread first
     try {
         if (poolReconThread_.joinable()) {
@@ -1314,14 +1331,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1200));
             if (st.stop_requested())
                 return;
-            if (initCompleteCallback_ && state_.readiness.databaseReady.load() &&
+            if (state_.readiness.databaseReady.load() &&
                 state_.readiness.metadataRepoReady.load()) {
                 spdlog::info("Lifecycle Ready watchdog: promoting state based on core readiness");
-                try {
-                    initCompleteCallback_(true, "");
-                } catch (...) {
-                }
-                initCompleteCallback_ = nullptr;
+                (void)invokeInitCompleteOnce(true, "");
             }
         });
     } catch (...) {

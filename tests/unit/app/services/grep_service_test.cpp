@@ -185,7 +185,7 @@ TEST_F(GrepServiceTest, CountModeAllowsSemanticSuggestions) {
     // Semantic suggestions should not be suppressed in count mode (may be zero if no sem hits)
     EXPECT_GE(r.semanticMatches, 0u);
     // If semantic suggestions exist, they should appear in results
-    bool hasSemantic = std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
+    (void)std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
         return fr.wasSemanticSearch ||
                std::any_of(fr.matches.begin(), fr.matches.end(),
                            [](const auto& m) { return m.matchType == "semantic"; });
@@ -217,7 +217,7 @@ TEST_F(GrepServiceTest, FilesOnlyModeAllowsSemanticSuggestions) {
     const auto& r = res.value();
     // Semantic suggestions should not be suppressed in files-only mode (may be zero if no sem hits)
     EXPECT_GE(r.semanticMatches, 0u);
-    bool hasSemantic = std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
+    (void)std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
         return fr.wasSemanticSearch ||
                std::any_of(fr.matches.begin(), fr.matches.end(),
                            [](const auto& m) { return m.matchType == "semantic"; });
@@ -236,7 +236,7 @@ TEST_F(GrepServiceTest, PathsOnlyModeAllowsSemanticSuggestions) {
     const auto& r = res.value();
     // Semantic suggestions should not be suppressed in paths-only mode (may be zero if no sem hits)
     EXPECT_GE(r.semanticMatches, 0u);
-    bool hasSemantic = std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
+    (void)std::any_of(r.results.begin(), r.results.end(), [](const auto& fr) {
         return fr.wasSemanticSearch ||
                std::any_of(fr.matches.begin(), fr.matches.end(),
                            [](const auto& m) { return m.matchType == "semantic"; });
@@ -293,4 +293,22 @@ TEST_F(GrepServiceTest, PropagatesMetadataErrorsWhenTagsUnavailable) {
         << "Actual code=" << static_cast<int>(res.error().code)
         << " message=" << res.error().message;
     EXPECT_FALSE(res.error().message.empty());
+}
+
+TEST_F(GrepServiceTest, SubpathFilterMatches) {
+    // Create a file in a subdirectory
+    std::filesystem::path subDir = tmpDir_ / "sub";
+    std::filesystem::create_directory(subDir);
+    addOne("sub/c.txt", "subpath content");
+
+    GrepRequest rq;
+    rq.pattern = "subpath";
+    rq.paths.push_back("sub/c.txt"); // use a subpath
+
+    auto res = grepService_->grep(rq);
+    ASSERT_TRUE(res);
+    const auto& out = res.value();
+    ASSERT_FALSE(out.results.empty());
+    EXPECT_EQ(out.results.front().fileName, "c.txt");
+    EXPECT_GT(out.totalMatches, 0u);
 }

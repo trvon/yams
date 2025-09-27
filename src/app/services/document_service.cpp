@@ -49,16 +49,25 @@ inline std::string toFileType(const std::string& mime) {
     return isTextMime(mime) ? "text" : "binary";
 }
 
-// Convert glob to SQL LIKE pattern: * -> %, ? -> _
-// If not starting with %, prepend "%/" to match filename at end of path
+// Convert glob to SQL LIKE pattern. This is updated to better handle subpath matching
+// by prepending a wildcard if the pattern appears to be a relative path.
 inline std::string globToSqlLike(const std::string& glob) {
     if (glob.empty())
         return "%";
     std::string sql = glob;
     std::replace(sql.begin(), sql.end(), '*', '%');
     std::replace(sql.begin(), sql.end(), '?', '_');
-    if (!sql.empty() && sql.front() != '%') {
-        // heuristic to match filename at end of path
+
+    // Check if the path is absolute before modifying it.
+    const bool is_absolute = !glob.empty() && std::filesystem::path(glob).is_absolute();
+
+    const bool hasSlash =
+        (sql.find('/') != std::string::npos) || (sql.find('\\') != std::string::npos);
+    if (hasSlash && sql.front() != '%' && !is_absolute) {
+        // Path segment, treat as suffix match
+        sql = "%" + sql;
+    } else if (!sql.empty() && sql.front() != '%' && !hasSlash) {
+        // Heuristic to match filename at end of path when no directory component was provided
         sql = "%/" + sql;
     }
     return sql;
@@ -73,8 +82,10 @@ inline void addTagPairsToMap(const std::vector<std::string>& tags,
     for (const auto& t : tags) {
         if (t.empty())
             continue;
-        // Store tag as key with empty value (consistent with existing usage)
-        out[t] = "";
+        // Store tags under a normalized key with value equal to the tag itself.
+        // Using key "tag:<name>" enables efficient tag queries and consistent extraction,
+        // while setting the value to the tag ensures UI/reporting shows plain names.
+        out[std::string("tag:") + t] = t;
     }
 }
 

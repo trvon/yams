@@ -103,6 +103,46 @@ NormalizedLookupPath normalizeLookupPath(const std::string& path) {
 
     if (hasPathWildcards(path)) {
         out.hasWildcards = true;
+
+        // Attempt to canonicalize the directory portion before the first wildcard to ensure
+        // paths under symlinked locations (e.g., /var -> /private/var) still align with stored
+        // canonical paths. Best-effort: if we cannot resolve the prefix, fall back to the
+        // original pattern.
+        const std::string wildcardChars = "*?";
+        const auto firstWildcard = path.find_first_of(wildcardChars);
+        if (firstWildcard == std::string::npos)
+            return out;
+
+        const auto lastSep = path.find_last_of("/\\", firstWildcard);
+        if (lastSep == std::string::npos)
+            return out; // no directory component to normalize
+
+        std::string dirPart = path.substr(0, lastSep + 1);
+        std::string remainder = path.substr(lastSep + 1);
+
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path dirPath{dirPart};
+
+        if (!dirPath.is_absolute()) {
+            auto abs = fs::absolute(dirPath, ec);
+            if (!ec)
+                dirPath = abs;
+        }
+
+        auto canon = fs::weakly_canonical(dirPath, ec);
+        if (ec || canon.empty())
+            return out; // cannot canonicalize; keep original pattern
+
+        auto preferred = canon.make_preferred().string();
+        if (preferred.empty())
+            return out;
+
+        if (preferred.back() != fs::path::preferred_separator)
+            preferred.push_back(fs::path::preferred_separator);
+
+        out.normalized = preferred + remainder;
+        out.changed = (out.normalized != out.original);
         return out;
     }
 

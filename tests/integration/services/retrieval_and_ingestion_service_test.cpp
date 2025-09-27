@@ -10,6 +10,14 @@
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+// Direct client for status polling
+#include <yams/daemon/client/daemon_client.h>
+// Minimal boost.asio includes for a tiny status helper
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/system_executor.hpp>
+#include <boost/system/error_code.hpp>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -19,10 +27,36 @@ protected:
     fs::path testRoot_;
     fs::path storageDir_;
     fs::path xdgRuntimeDir_;
+    fs::path socketPath_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
     std::unique_ptr<yams::test::FixtureManager> fixtures_;
+    static bool canBindUnixSocketHere() {
+        try {
+            boost::asio::io_context io;
+            boost::asio::local::stream_protocol::acceptor acc(io);
+            auto path = std::filesystem::path("/tmp") /
+                        (std::string("yams-svc-probe-") + std::to_string(::getpid()) + ".sock");
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            boost::system::error_code bec;
+            acc.open(boost::asio::local::stream_protocol::endpoint(path.string()).protocol(), bec);
+            if (bec)
+                return false;
+            acc.bind(boost::asio::local::stream_protocol::endpoint(path.string()), bec);
+            if (bec)
+                return false;
+            acc.close();
+            std::filesystem::remove(path, ec);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
 
     void SetUp() override {
+        if (!canBindUnixSocketHere()) {
+            GTEST_SKIP() << "Skipping services IT: environment forbids AF_UNIX bind (sandbox).";
+        }
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         testRoot_ = fs::temp_directory_path() / ("yams_services_it_" + unique);
         storageDir_ = testRoot_ / "storage";
@@ -38,9 +72,12 @@ protected:
         setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
 #endif
 
+        // Use short /tmp path for AF_UNIX sun_path compatibility and sandbox friendliness
+        socketPath_ = fs::path("/tmp") / ("yams-svc-" + unique + ".sock");
+
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = storageDir_;
-        cfg.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
+        cfg.socketPath = socketPath_;
         cfg.pidFile = testRoot_ / "daemon.pid";
         cfg.logFile = testRoot_ / "daemon.log";
 
@@ -56,12 +93,57 @@ protected:
         fixtures_.reset();
         // Best-effort removal of test socket and pid file
         std::error_code ec2;
-        std::filesystem::remove(xdgRuntimeDir_ / "yams-daemon.sock", ec2);
+        std::filesystem::remove(socketPath_, ec2);
         std::filesystem::remove(testRoot_ / "daemon.pid", ec2);
         std::error_code ec;
         fs::remove_all(testRoot_, ec);
     }
 };
+
+// Helper: wait until post-ingest queue drains (queued==0 && inflight==0) or timeout
+static void
+waitForPostIngestQuiescent(const std::filesystem::path& socket,
+                           const std::filesystem::path& dataDir, std::chrono::milliseconds timeout,
+                           std::chrono::milliseconds poll = std::chrono::milliseconds(50)) {
+    yams::daemon::ClientConfig cfg;
+    cfg.socketPath = socket;
+    cfg.dataDir = dataDir;
+    cfg.requestTimeout = std::chrono::milliseconds(1500);
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        // Run a single status call "synchronously" using a promise. To avoid
+        // use-after-free if the coroutine outlives this scope on timeout,
+        // heap-allocate the client and capture it by value.
+        auto client = std::make_shared<yams::daemon::DaemonClient>(cfg);
+        std::promise<yams::Result<yams::daemon::StatusResponse>> prom;
+        auto fut = prom.get_future();
+        boost::asio::co_spawn(
+            boost::asio::system_executor{},
+            [client, p = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
+                auto r = co_await client->status();
+                p.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        if (fut.wait_for(std::chrono::milliseconds(1500)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res) {
+                const auto& s = res.value();
+                auto getU64 = [&](const char* key) -> std::uint64_t {
+                    auto it = s.requestCounts.find(key);
+                    return (it == s.requestCounts.end()) ? 0ull
+                                                         : static_cast<std::uint64_t>(it->second);
+                };
+                auto queued = getU64("post_ingest_queued");
+                auto inflight = getU64("post_ingest_inflight");
+                if (queued == 0 && inflight == 0)
+                    return; // drained
+            }
+        }
+        std::this_thread::sleep_for(poll);
+    }
+}
 
 TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     using yams::app::services::DocumentIngestionService;
@@ -77,7 +159,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     DocumentIngestionService ing;
     yams::app::services::AddOptions opts;
     // Ensure we target this test's daemon socket
-    opts.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
+    opts.socketPath = socketPath_;
     opts.path = filePath.string();
     opts.recursive = false;
     opts.noEmbeddings = true; // avoid model work in IT
@@ -87,22 +169,30 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
     ASSERT_FALSE(addRes.value().hash.empty());
 
-    // 3) List via RetrievalService
+    // Ensure deferred extraction/indexing completes before assertions
+    waitForPostIngestQuiescent(socketPath_, storageDir_, std::chrono::milliseconds(5000));
+
+    // 3) List via RetrievalService (with a short bounded wait for visibility)
     RetrievalService rsvc;
     RetrievalOptions ropts;
     // Pin to test daemon socket and storage
-    ropts.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
+    ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
     yams::daemon::ListRequest lreq;
     lreq.limit = 100;
-    auto lres = rsvc.list(lreq, ropts);
-    ASSERT_TRUE(lres) << (lres ? "" : lres.error().message);
     bool found = false;
-    for (const auto& e : lres.value().items) {
-        if (e.name == "hello.txt") {
-            found = true;
-            break;
+    for (int attempt = 0; attempt < 60 && !found; ++attempt) { // up to ~3s
+        auto lres = rsvc.list(lreq, ropts);
+        ASSERT_TRUE(lres) << (lres ? "" : lres.error().message);
+        found = false;
+        for (const auto& e : lres.value().items) {
+            if (e.name == "hello.txt") {
+                found = true;
+                break;
+            }
         }
+        if (!found)
+            std::this_thread::sleep_for(50ms);
     }
     EXPECT_TRUE(found);
 
@@ -118,8 +208,17 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     yams::daemon::GrepRequest gpreq;
     gpreq.pattern = "hello";
     gpreq.pathsOnly = true;
-    auto gpres = rsvc.grep(gpreq, ropts);
-    ASSERT_TRUE(gpres) << (gpres ? "" : gpres.error().message);
+    // Grep may require deferred extraction/indexing to complete; allow a brief wait
+    {
+        bool grepReady = false;
+        for (int attempt = 0; attempt < 60 && !grepReady; ++attempt) { // up to ~3s
+            auto gpres = rsvc.grep(gpreq, ropts);
+            ASSERT_TRUE(gpres) << (gpres ? "" : gpres.error().message);
+            grepReady = !gpres.value().matches.empty();
+            if (!grepReady)
+                std::this_thread::sleep_for(50ms);
+        }
+    }
 
     // 6) Name-smart get
     auto gname = rsvc.getByNameSmart("hello.txt", /*oldest*/ false, /*includeContent*/ true,
@@ -155,7 +254,8 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     // Add recursively with include/exclude patterns and tags/metadata/collection
     DocumentIngestionService ing;
     yams::app::services::AddOptions opts;
-    opts.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
+    // Use the same socket path as the daemon started in SetUp()
+    opts.socketPath = socketPath_;
     auto keepCpp = fixtures_->createTextFixture(
         "ingest/dirA/dirB/keep.cpp", "int main() { return 0; }\n", {"code", "cpp", "ingest"});
     auto keepMd = fixtures_->createTextFixture(
@@ -182,10 +282,13 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     // When recursive, documentsAdded should be >= 2 (keep.cpp, keep.md)
     EXPECT_GE(addRes.value().documentsAdded, static_cast<size_t>(2));
 
+    // Wait for background post-ingest to finish so grep sees content
+    waitForPostIngestQuiescent(socketPath_, storageDir_, std::chrono::milliseconds(7000));
+
     // List entries under our path; ensure tags are present and excluded file absent
     RetrievalService rsvc;
     RetrievalOptions ropts;
-    ropts.socketPath = xdgRuntimeDir_ / "yams-daemon.sock";
+    ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
     yams::daemon::ListRequest lreq;
@@ -194,30 +297,36 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     lreq.namePattern = (fixtures_->root() / "ingest" / "**").string();
     lreq.showTags = true;
     lreq.showMetadata = true;
-    auto lres = rsvc.list(lreq, ropts);
-    ASSERT_TRUE(lres) << (lres ? "" : lres.error().message);
-
     bool sawCpp = false, sawMd = false, sawBin = false;
-    for (const auto& e : lres.value().items) {
-        if (e.name == "keep.cpp") {
-            sawCpp = true;
-            // Verify tags carried through
-            EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("code")), e.tags.end());
-            EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("working")),
-                      e.tags.end());
-        } else if (e.name == "keep.md") {
-            sawMd = true;
-            EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("kg")), e.tags.end());
-            EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("kg:node:test")),
-                      e.tags.end());
-        } else if (e.name == "skip.bin") {
-            sawBin = true;
+    for (int attempt = 0; attempt < 100; ++attempt) { // up to ~5s
+        sawCpp = sawMd = sawBin = false;
+        auto lres = rsvc.list(lreq, ropts);
+        ASSERT_TRUE(lres) << (lres ? "" : lres.error().message);
+        for (const auto& e : lres.value().items) {
+            if (e.name == "keep.cpp") {
+                sawCpp = true;
+                // Verify tags carried through
+                EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("code")),
+                          e.tags.end());
+                EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("working")),
+                          e.tags.end());
+            } else if (e.name == "keep.md") {
+                sawMd = true;
+                EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("kg")), e.tags.end());
+                EXPECT_NE(std::find(e.tags.begin(), e.tags.end(), std::string("kg:node:test")),
+                          e.tags.end());
+            } else if (e.name == "skip.bin") {
+                sawBin = true;
+            }
+            // Common metadata expectations
+            auto it = e.metadata.find("pbi");
+            if (it != e.metadata.end()) {
+                EXPECT_EQ(it->second, "002");
+            }
         }
-        // Common metadata expectations
-        auto it = e.metadata.find("pbi");
-        if (it != e.metadata.end()) {
-            EXPECT_EQ(it->second, "002");
-        }
+        if (sawCpp && sawMd && !sawBin)
+            break;
+        std::this_thread::sleep_for(50ms);
     }
     EXPECT_TRUE(sawCpp);
     EXPECT_TRUE(sawMd);
@@ -227,16 +336,23 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     yams::daemon::GrepRequest gpreq;
     gpreq.pattern = "hello";
     gpreq.pathsOnly = true;
-    gpreq.includePatterns = {(testRoot_ / "ingest" / "**").string()};
-    auto gpres = rsvc.grep(gpreq, ropts);
-    ASSERT_TRUE(gpres) << (gpres ? "" : gpres.error().message);
-    // At least the markdown file should match
-    bool grepFoundMd = false;
-    for (const auto& m : gpres.value().matches) {
-        if (m.file.find("keep.md") != std::string::npos) {
-            grepFoundMd = true;
-            break;
+    // Use fixtures root, matching the path passed to ingestion so grep scopes correctly
+    gpreq.includePatterns = {(fixtures_->root() / "ingest" / "**").string()};
+    // Grep can lag slightly behind post-ingest extraction; wait briefly for match
+    {
+        bool grepFoundMd = false;
+        for (int attempt = 0; attempt < 100 && !grepFoundMd; ++attempt) { // up to ~5s
+            auto gpres = rsvc.grep(gpreq, ropts);
+            ASSERT_TRUE(gpres) << (gpres ? "" : gpres.error().message);
+            for (const auto& m : gpres.value().matches) {
+                if (m.file.find("keep.md") != std::string::npos) {
+                    grepFoundMd = true;
+                    break;
+                }
+            }
+            if (!grepFoundMd)
+                std::this_thread::sleep_for(50ms);
         }
+        EXPECT_TRUE(grepFoundMd);
     }
-    EXPECT_TRUE(grepFoundMd);
 }

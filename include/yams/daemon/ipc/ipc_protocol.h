@@ -1691,6 +1691,7 @@ struct GrepRequest {
     std::string colorMode = "auto";           // Color output mode
     int beforeContext = 0;                    // Lines before match
     int afterContext = 0;                     // Lines after match
+    bool showDiff = false;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -1701,7 +1702,7 @@ struct GrepRequest {
             << noFilename << countOnly << filesOnly << filesWithoutMatch << pathsOnly << literalText
             << regexOnly << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags
             << colorMode << static_cast<int32_t>(beforeContext)
-            << static_cast<int32_t>(afterContext);
+            << static_cast<int32_t>(afterContext) << showDiff;
     }
 
     template <typename Deserializer>
@@ -1815,6 +1816,11 @@ struct GrepRequest {
         if (!ac)
             return ac.error();
         req.afterContext = ac.value();
+
+        auto showDiffResult = deser.template read<bool>();
+        if (showDiffResult) {
+            req.showDiff = showDiffResult.value();
+        }
 
         return req;
     }
@@ -2166,6 +2172,13 @@ struct PluginTrustRemoveRequest {
     }
 };
 
+// Forward declarations for late-defined request types used in the Request variant
+struct CatRequest;
+struct ListSessionsRequest;
+struct UseSessionRequest;
+struct AddPathSelectorRequest;
+struct RemovePathSelectorRequest;
+
 // Variant type for all requests
 using Request =
     std::variant<SearchRequest, AddRequest, GetRequest, GetInitRequest, GetChunkRequest,
@@ -2173,9 +2186,10 @@ using Request =
                  PingRequest, GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
                  UnloadModelRequest, ModelStatusRequest, AddDocumentRequest, GrepRequest,
                  UpdateDocumentRequest, DownloadRequest, GetStatsRequest, PrepareSessionRequest,
-                 CancelRequest, EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest,
-                 PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest,
-                 PluginTrustRemoveRequest>;
+                 EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest, PluginUnloadRequest,
+                 PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
+                 CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest,
+                 AddPathSelectorRequest, RemovePathSelectorRequest>;
 
 // ============================================================================
 // Response Types
@@ -3719,6 +3733,7 @@ struct GrepMatch {
     std::vector<std::string> contextAfter;
     std::string matchType = "regex"; // "regex" | "semantic" | "hybrid"
     double confidence = 1.0;         // Match confidence (1.0 for regex, variable for semantic)
+    std::string diff;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -3775,8 +3790,9 @@ struct GrepResponse {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << static_cast<uint32_t>(matches.size());
-        for (const auto& m : matches)
+        for (const auto& m : matches) {
             m.serialize(ser);
+        }
         ser << static_cast<uint64_t>(totalMatches) << static_cast<uint64_t>(filesSearched);
     }
 
@@ -4109,14 +4125,198 @@ struct PrepareSessionResponse {
     }
 };
 
+struct CatRequest {
+    std::string hash;
+    std::string name;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << hash << name;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<CatRequest> deserialize(Deserializer& deser) {
+        CatRequest req;
+        auto h = deser.readString();
+        if (!h)
+            return h.error();
+        req.hash = std::move(h.value());
+        auto n = deser.readString();
+        if (!n)
+            return n.error();
+        req.name = std::move(n.value());
+        return req;
+    }
+};
+
+struct CatResponse {
+    std::string hash;
+    std::string name;
+    std::string content;
+    uint64_t size = 0;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << hash << name << content << size;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<CatResponse> deserialize(Deserializer& deser) {
+        CatResponse res;
+        auto h = deser.readString();
+        if (!h)
+            return h.error();
+        res.hash = std::move(h.value());
+        auto n = deser.readString();
+        if (!n)
+            return n.error();
+        res.name = std::move(n.value());
+        auto c = deser.readString();
+        if (!c)
+            return c.error();
+        res.content = std::move(c.value());
+        auto s = deser.template read<uint64_t>();
+        if (!s)
+            return s.error();
+        res.size = s.value();
+        return res;
+    }
+};
+
+struct ListSessionsRequest {
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer&) const {}
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListSessionsRequest> deserialize(Deserializer&) {
+        return ListSessionsRequest{};
+    }
+};
+
+struct ListSessionsResponse {
+    std::vector<std::string> session_names;
+    std::string current_session;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << session_names << current_session;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListSessionsResponse> deserialize(Deserializer& deser) {
+        ListSessionsResponse res;
+        auto sn = deser.readStringVector();
+        if (!sn)
+            return sn.error();
+        res.session_names = std::move(sn.value());
+        auto cs = deser.readString();
+        if (!cs)
+            return cs.error();
+        res.current_session = std::move(cs.value());
+        return res;
+    }
+};
+
+struct UseSessionRequest {
+    std::string session_name;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << session_name;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<UseSessionRequest> deserialize(Deserializer& deser) {
+        UseSessionRequest req;
+        auto sn = deser.readString();
+        if (!sn)
+            return sn.error();
+        req.session_name = std::move(sn.value());
+        return req;
+    }
+};
+
+struct AddPathSelectorRequest {
+    std::string session_name;
+    std::string path;
+    std::vector<std::string> tags;
+    std::map<std::string, std::string> metadata;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << session_name << path << tags << metadata;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<AddPathSelectorRequest> deserialize(Deserializer& deser) {
+        AddPathSelectorRequest req;
+        auto sn = deser.readString();
+        if (!sn)
+            return sn.error();
+        req.session_name = std::move(sn.value());
+        auto p = deser.readString();
+        if (!p)
+            return p.error();
+        req.path = std::move(p.value());
+        auto t = deser.readStringVector();
+        if (!t)
+            return t.error();
+        req.tags = std::move(t.value());
+        auto m = deser.readStringMap();
+        if (!m)
+            return m.error();
+        req.metadata = std::move(m.value());
+        return req;
+    }
+};
+
+struct RemovePathSelectorRequest {
+    std::string session_name;
+    std::string path;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << session_name << path;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RemovePathSelectorRequest> deserialize(Deserializer& deser) {
+        RemovePathSelectorRequest req;
+        auto sn = deser.readString();
+        if (!sn)
+            return sn.error();
+        req.session_name = std::move(sn.value());
+        auto p = deser.readString();
+        if (!p)
+            return p.error();
+        req.path = std::move(p.value());
+        return req;
+    }
+};
+
 // Variant type for all responses
 using Response =
     std::variant<SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse,
                  StatusResponse, SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse,
                  BatchEmbeddingResponse, ModelLoadResponse, ModelStatusResponse, ListResponse,
-                 AddDocumentResponse, GrepResponse, UpdateDocumentResponse, DownloadResponse,
-                 GetStatsResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
-                 PluginScanResponse, PluginLoadResponse, PluginTrustListResponse,
+                 AddDocumentResponse, GrepResponse, UpdateDocumentResponse, GetStatsResponse,
+                 DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
+                 PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
+                 ListSessionsResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -4176,6 +4376,12 @@ enum class MessageType : uint8_t {
     CancelRequest = 22,
     PrepareSessionRequest = 23,
     EmbedDocumentsRequest = 24,
+    // Session and utility requests
+    CatRequest = 25,
+    ListSessionsRequest = 26,
+    UseSessionRequest = 27,
+    AddPathSelectorRequest = 28,
+    RemovePathSelectorRequest = 29,
 
     // Responses
     SearchResponse = 128,
@@ -4199,6 +4405,8 @@ enum class MessageType : uint8_t {
     GetStatsResponse = 146,
     DeleteResponse = 147,
     PrepareSessionResponse = 148,
+    CatResponse = 152,
+    ListSessionsResponse = 153,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

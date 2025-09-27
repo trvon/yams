@@ -1,6 +1,6 @@
 # Mobile Bindings Overview
 
-_Status: draft_
+_Status: in progress_
 
 ## Goals
 - Provide a minimal C ABI that exposes search and grep capabilities without leaking internal C++ types.
@@ -14,9 +14,9 @@ _Status: draft_
 
 ## Architectural Shape
 1. **Core ABI Layer** — versioned header `include/yams/api/mobile_bindings.h` compiled into `libyams_mobile`.
-2. **Platform Glue** — Swift/Kotlin wrappers translate native types, manage threading, and expose async APIs.
-3. **Service Facade** — long-lived `yams_mobile_context_t` mapping to `AppContext` with configurable storage paths and worker executors.
-4. **Lifecycle Hooks** — initialization, warmup, shutdown, diagnostics.
+2. **Platform Glue** — Swift/Kotlin wrappers (future milestone) translate native types and may layer async semantics over the blocking C entrypoints.
+3. **Service Facade** — long-lived `yams_mobile_context_t` mapping to `AppContext` with configurable storage paths, caches, and worker executors.
+4. **Lifecycle Hooks** — initialization, shutdown, and JSON-based diagnostics helpers.
 
 ```
 [Swift/Combine]      [Kotlin/Coroutines]
@@ -32,19 +32,18 @@ _Status: draft_
 - Errors propagate through `yams_mobile_status` enums plus optional extended payloads.
 
 ## Threading & Concurrency
-- Embedders may call APIs from any thread; library serializes access via internal dispatch contexts.
-- Async operations expose both blocking (`*_execute`) and callback-based variants (`*_execute_async`).
-- Swift/Kotlin wrappers translate callbacks into platform futures (Combine publishers / Kotlin flows).
+- Embedders may call APIs from any thread; the library owns a background `boost::asio::thread_pool` per context.
+- The current C ABI exposes synchronous entrypoints only (`yams_mobile_*_execute`). Async helpers will ship with platform wrappers.
+- Swift/Kotlin adapters should wrap the blocking calls using dispatch queues/coroutines to surface async behaviour.
 
 ## Feature Skeleton
-| Area                  | Functions (draft)                              | Notes |
-|-----------------------|-----------------------------------------------|-------|
-| Context lifecycle     | `yams_mobile_context_create`, `*_destroy`, `*_reload_config` | Takes config struct (paths, cache size, feature toggles). |
-| Grep/Search           | `yams_mobile_grep_execute`, `yams_mobile_search_execute`, `*_dispose_result` | Mirrors CLI flags (pattern, literal, word, context windows, filters, hybrid toggles). |
-| Document ingest/update| `yams_mobile_store_document`, `yams_mobile_update_document`, `yams_mobile_delete_document` | Wraps DocumentService flows; supports fixture-backed paths. |
-| Metadata & fixtures   | `yams_mobile_list_documents`, `yams_mobile_get_metadata`, `yams_mobile_list_fixtures` | Enables mobile clients to inspect corpus state and pull sample data. |
-| Vector/embedding      | `yams_mobile_vector_status`, `yams_mobile_warm_embeddings`, `yams_mobile_list_models` | Provides ONNX/model readiness checks and warmup controls. |
-| Warmup/telemetry      | `yams_mobile_get_stats`, `yams_mobile_set_logger` | Warmup primes metadata/embeddings; stats include retry counters; optional logging hook supplied by embedder. |
+| Area                  | Available entrypoints                          | Notes |
+|-----------------------|------------------------------------------------|-------|
+| Context lifecycle     | `yams_mobile_context_create`, `yams_mobile_context_destroy` | Config accepts working/cache dirs and a `telemetry_sink` string (`console`, `stderr`, `noop`, or `file:/path`). |
+| Grep/Search           | `yams_mobile_grep_execute`, `yams_mobile_search_execute`, destroy helpers, `yams_mobile_{grep,search}_result_stats_json` | Blocking calls returning opaque handles plus JSON stats (latency, retry counters). |
+| Document ingest       | `yams_mobile_store_document`, `yams_mobile_remove_document` | Update/list flows are deferred; wrappers should enforce doc hygiene. |
+| Metadata inspection   | `yams_mobile_get_metadata`, `yams_mobile_metadata_result_json` | JSON payload mirrors DocumentService metadata map. |
+| Vector status         | `yams_mobile_get_vector_status`, `yams_mobile_vector_status_result_json` | Returns document counts/storage stats; warmup/model control APIs remain TODO. |
 
 ## Compatibility Strategy
 - ABI version encoded in `yams_mobile_version_info` (major/minor/patch).
@@ -52,7 +51,6 @@ _Status: draft_
 - Headers guarded via `YAMS_MOBILE_API_VERSION` macros.
 
 ## Next Steps
-1. Finalize header layout (`yams_mobile_context_config`, request/response structs, status codes).
-2. Identify deterministic fixture sets for mobile smoke tests (reuse `FixtureManager`).
-3. Implement thin Swift demo harness calling grep/search flows.
-4. Extend CI to build & run new reliability suite + mobile demos under `unit_reliability_grep_search_startup`.
+1. Add vector warmup/model management entrypoints before the public SDK release.
+2. Implement Swift Package / Android AAR wrappers that offer async APIs and lifecycle helpers.
+3. Document fixture selection and mobile smoke workflow once dedicated corpora land in FixtureManager.

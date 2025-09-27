@@ -744,10 +744,16 @@ private:
             // Optional path and tag filters for CLI parity
             bool pathOk = true;
             if (!req.pathPattern.empty()) {
-                if (hasWildcard(req.pathPattern))
-                    pathOk = wildcardMatch(doc.filePath, req.pathPattern);
-                else
+                if (hasWildcard(req.pathPattern)) {
+                    std::string pattern = req.pathPattern;
+                    if (pattern.front() != '*' && pattern.front() != '/' &&
+                        pattern.find(":/") == std::string::npos) {
+                        pattern = "*" + pattern;
+                    }
+                    pathOk = wildcardMatch(doc.filePath, pattern);
+                } else {
                     pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
+                }
             }
             // Enforce ext/mime filters when available
             bool metaFiltersOk = true;
@@ -914,16 +920,18 @@ private:
                 for (const auto& item : res.results) {
                     const auto& d = item.document;
                     bool pathOk = true;
-                    if (!req.pathPattern.empty()) {
-                        if (hasWildcard(req.pathPattern))
-                            pathOk = wildcardMatch(d.filePath, req.pathPattern);
-                        else
-                            pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
-                    }
-                    // Enforce ext/mime filters when available
                     bool metaFiltersOk = true;
-                    if (!req.fileType.empty()) {
-                        // keep current behavior (type handled elsewhere)
+                    if (!req.pathPattern.empty()) {
+                        if (hasWildcard(req.pathPattern)) {
+                            std::string pattern = req.pathPattern;
+                            if (pattern.front() != '*' && pattern.front() != '/' &&
+                                pattern.find(":/") == std::string::npos) {
+                                pattern = "*" + pattern;
+                            }
+                            pathOk = wildcardMatch(d.filePath, pattern);
+                        } else {
+                            pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
+                        }
                     }
                     if (!req.extension.empty()) {
                         if (d.fileExtension != req.extension &&

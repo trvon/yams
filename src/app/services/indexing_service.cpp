@@ -23,6 +23,11 @@ public:
                              "Directory does not exist: " + req.directoryPath};
             }
 
+            spdlog::info("[IndexingService] addDirectory: root='{}' recursive={} include={} "
+                         "exclude={} tags={} collection='{}'",
+                         req.directoryPath, req.recursive, req.includePatterns.size(),
+                         req.excludePatterns.size(), req.tags.size(), req.collection);
+
             // Collect file entries first
             std::vector<std::filesystem::directory_entry> entries;
 
@@ -62,6 +67,9 @@ public:
                 }
             }
 
+            spdlog::info("[IndexingService] addDirectory: collected {} candidate files under '{}'",
+                         entries.size(), req.directoryPath);
+
             // Parallel processing with bounded workers
             std::atomic<size_t> idx{0};
             // Note: Underlying store and extraction paths may not be fully thread-safe across
@@ -74,7 +82,13 @@ public:
                     if (i >= entries.size())
                         break;
                     AddDirectoryResponse localResp; // partial counts
-                    processDirectoryEntry(entries[i], req, localResp);
+                    const auto& ent = entries[i];
+                    // Pre-log include/exclude decision for visibility
+                    bool willInclude = shouldIncludeFile(req.directoryPath, ent.path().string(),
+                                                         req.includePatterns, req.excludePatterns);
+                    spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
+                                 willInclude ? "include" : "skip");
+                    processDirectoryEntry(ent, req, localResp);
                     // Merge local results into shared response
                     std::lock_guard<std::mutex> lk(respMutex);
                     response.filesProcessed += localResp.filesProcessed;
@@ -91,6 +105,11 @@ public:
                 threads.emplace_back(workerFn);
             for (auto& th : threads)
                 th.join();
+
+            spdlog::info("[IndexingService] addDirectory: done. processed={} indexed={} skipped={} "
+                         "failed={}",
+                         response.filesProcessed, response.filesIndexed, response.filesSkipped,
+                         response.filesFailed);
 
             return response;
         } catch (const std::exception& e) {

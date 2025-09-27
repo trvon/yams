@@ -1,5 +1,4 @@
 #! Meson configure-time test discovery without fs.glob/subdir_glob
-fsmod = import('fs')
 
 gtest_dep = dependency('gtest', required: true)
 gmock_dep = dependency('gmock', required: false)
@@ -132,90 +131,37 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
   '-Wno-error=missing-field-initializers',
 ])
 
-# Collect sources recursively using run_command per directory (no user functions)
-unit_srcs = []
-# Exclude temporarily-outdated tests until ported
-_ru = run_command('sh', '-c', 'find unit -type f -name "*.cpp" ! -path "unit/api/metadata_api_test.cpp" ! -path "unit/compression/error_handler_test_simple.cpp" ! -path "unit/compression/error_handler_test.cpp" ! -path "unit/compression/integrity_validator_test_simple.cpp" ! -path "unit/compression/integrity_validator_test.cpp" ! -path "unit/content/*" ! -path "unit/crypto/*" ! -path "unit/daemon/multiplex_client_test.cpp" ! -path "unit/daemon/request_dispatcher_plugin_test.cpp" ! -path "unit/daemon/onnx_*" ! -path "unit/manifest/manifest_test.cpp" ! -path "unit/integrity/integrity_verifier_test.cpp" ! -path "unit/storage/storage_engine_test.cpp" ! -path "unit/storage/compressed_storage_engine_test.cpp" ! -path "unit/cli/*" ! -path "unit/detection/*" 2>/dev/null | sort', check: false)
-if _ru.returncode() == 0
-  _out = _ru.stdout()
-  if _out != ''
-    foreach p : _out.split('\n')
-      if p != ''
-        unit_srcs += files(p)
-      endif
-    endforeach
-  endif
-endif
+## Meson-native test discovery via structured subdirs (no shell globs)
+# Build unit test object library in subdir and link here for the aggregate runner
+subdir('unit')
 
-# Conditionally add LZMA unit test when liblzma is available and option allows it
-lzma_opt = get_option('enable-lzma')
-lzma_dep = dependency('lzma', required: false)
-if lzma_dep.found() and lzma_opt.allowed()
-  unit_srcs += files('unit/compression/lzma_compressor_test.cpp')
-endif
 
-integration_srcs = []
-# Re-enable a tiny integration smoke subset
-_ri = run_command('sh', '-c', 'find integration/smoke -type f -name "*.cpp" ! -name "daemon_client_smoke_test.cpp" 2>/dev/null | sort', check: false)
-if _ri.returncode() == 0
-  _outi = _ri.stdout()
-  if _outi != ''
-    foreach p : _outi.split('\n')
-      if p != ''
-        integration_srcs += files(p)
-      endif
-    endforeach
-  endif
-endif
+
+subdir('integration/smoke')
 
 stress_srcs = []
 # NOTE (PBI 028): Temporarily disabling stress tests compilation for now.
 
-common_srcs = []
-_rc = run_command('sh', '-c', 'find common -type f -name "*.cpp" 2>/dev/null | sort', check: false)
-if _rc.returncode() == 0
-  _outc = _rc.stdout()
-  if _outc != ''
-    foreach p : _outc.split('\n')
-      if p != ''
-        common_srcs += files(p)
-      endif
-    endforeach
-  endif
-endif
-
-sdk_srcs = []
-_rk = run_command('sh', '-c', 'find sdk -type f -name "*.cpp" 2>/dev/null | sort', check: false)
-if _rk.returncode() == 0
-  _outk = _rk.stdout()
-  if _outk != ''
-    foreach p : _outk.split('\n')
-      if p != ''
-        sdk_srcs += files(p)
-      endif
-    endforeach
-  endif
-endif
+common_srcs = []  # currently no .cpp files under tests/common
+sdk_srcs = []     # currently no .cpp files under tests/sdk
 
 # NOTE (PBI 028): Temporarily disable plugin tests to avoid duplicate plugin
 # symbol definitions in a single aggregated integration binary.
 plugin_test_srcs = []
 
-all_unit = common_srcs + unit_srcs
-# Temporarily disable integration and stress aggregates
-all_integration = integration_srcs
+all_unit = []  # unit sources now provided by 'yams_unit_objs' from tests/unit/meson.build
 all_stress = []
 
 # Always rely on tests/unit_main.cpp; do not include tests/test_main.cpp here
 test_main = []
 
-if all_unit.length() > 0
-  unit_exe = executable('yams_unit_tests', all_unit + test_main,
-    include_directories: incs,
-    dependencies: [gtest_dep, test_deps],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    install: false,
-  )
+unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
+  include_directories: incs,
+  dependencies: [gtest_dep, test_deps],
+  cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+  link_with: yams_unit_objs,
+  install: false,
+)
   # Give the aggregated unit binary more time; default 30s was tight on CI/macOS
   # Exclude a few flaky/heavy tests in the aggregate run; they still run in their suites when targeted.
   # - ResourcePoolTest.MaxSizeEnforcement occasionally trips a platform-specific CV/queue edge case.
@@ -386,22 +332,14 @@ if all_unit.length() > 0
     env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
     timeout: 120,
   )
-endif
 
-if all_integration.length() > 0
-  # Integration smoke uses dedicated test main to provide entry point
-  integ_exe = executable('yams_integration_smoke_tests', all_integration + files('test_main.cpp'),
-    include_directories: incs,
-    dependencies: [gtest_dep, test_deps],
-    cpp_args: ['-DYAMS_TESTING=1'],
-    install: false,
-  )
-  test('integration_smoke', integ_exe,
-    suite: ['integration', 'isolated'],
-    env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
-    is_parallel: false,
-    timeout: 60)
-endif
+
+## integration_smoke now defined in subdir('integration/smoke')
+
+# Next integration group: Services (daemon ingestion/retrieval)
+# Compile this group separately to avoid duplicate plugin symbols and to allow isolated serial runs.
+# Prefer Meson-native subdirs over shell discovery for services integration tests
+subdir('integration/services')
 
 # Stress tests can be heavy; register but mark as long-running via suite name
 if all_stress.length() > 0

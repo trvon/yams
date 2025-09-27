@@ -311,7 +311,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
             serviceReq.matchAllTags = req.matchAllTags;
 
             // Name pattern filtering
-            serviceReq.pattern = req.namePattern;
+            if (!req.namePattern.empty()) {
+                auto normalized = yams::app::services::utils::normalizeLookupPath(req.namePattern);
+                serviceReq.pattern = normalized.normalized;
+            } else {
+                serviceReq.pattern = req.namePattern;
+            }
 
             auto result = docService->list(serviceReq);
             if (!result) {
@@ -373,6 +378,49 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
 
             response.totalCount = serviceResp.totalFound;
             co_return response;
+        });
+}
+
+boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "cat", [this, req]() -> boost::asio::awaitable<Response> {
+            auto appContext = serviceManager_->getAppContext();
+            auto documentService = app::services::makeDocumentService(appContext);
+
+            app::services::RetrieveDocumentRequest sreq;
+            sreq.hash = req.hash;
+            sreq.name = req.name;
+            sreq.includeContent = true;
+            sreq.metadataOnly = false;
+            sreq.outputPath = "";
+            sreq.maxBytes = 0;
+            sreq.chunkSize = 512 * 1024;
+            sreq.raw = true;      // Return raw content for cat
+            sreq.extract = false; // Do not force text extraction
+            sreq.graph = false;
+            sreq.depth = 1;
+
+            auto result = documentService->retrieve(sreq);
+            if (!result) {
+                co_return ErrorResponse{result.error().code, result.error().message};
+            }
+
+            const auto& r = result.value();
+            if (!r.document.has_value()) {
+                co_return ErrorResponse{ErrorCode::NotFound, "Document not found"};
+            }
+
+            const auto& doc = r.document.value();
+            if (!doc.content.has_value()) {
+                co_return ErrorResponse{ErrorCode::InternalError, "Content unavailable"};
+            }
+
+            CatResponse out;
+            out.hash = doc.hash;
+            out.name = doc.name;
+            out.content = doc.content.value();
+            out.size = doc.size;
+            co_return out;
         });
 }
 
@@ -676,6 +724,27 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
             const auto& serviceResp = result.value();
+            // Special handling: when pathsOnly is requested, the app-level GrepService
+            // intentionally omits per-file match details and instead populates filesWith.
+            // Map those paths into lightweight GrepMatch entries so daemon clients (and tests)
+            // can observe results via the standard matches field.
+            if (serviceReq.pathsOnly) {
+                GrepResponse response;
+                response.filesSearched = serviceResp.filesSearched;
+                for (const auto& path : serviceResp.filesWith) {
+                    GrepMatch dm;
+                    dm.file = path;
+                    dm.lineNumber = 0;
+                    dm.line = std::string();
+                    dm.contextBefore = {};
+                    dm.contextAfter = {};
+                    dm.matchType = "path"; // indicate path-only emission
+                    dm.confidence = 1.0;
+                    response.matches.push_back(std::move(dm));
+                }
+                response.totalMatches = response.matches.size();
+                co_return response;
+            }
             const std::size_t defaultCap = 20;
             const bool applyDefaultCap =
                 !(req.countOnly || req.filesOnly || req.filesWithoutMatch || req.pathsOnly) &&

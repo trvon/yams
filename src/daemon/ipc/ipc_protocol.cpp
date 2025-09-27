@@ -53,6 +53,16 @@ MessageType getMessageType(const Request& req) {
                 return MessageType::CancelRequest;
             } else if constexpr (std::is_same_v<T, EmbedDocumentsRequest>) {
                 return MessageType::EmbedDocumentsRequest;
+            } else if constexpr (std::is_same_v<T, CatRequest>) {
+                return MessageType::CatRequest;
+            } else if constexpr (std::is_same_v<T, ListSessionsRequest>) {
+                return MessageType::ListSessionsRequest;
+            } else if constexpr (std::is_same_v<T, UseSessionRequest>) {
+                return MessageType::UseSessionRequest;
+            } else if constexpr (std::is_same_v<T, AddPathSelectorRequest>) {
+                return MessageType::AddPathSelectorRequest;
+            } else if constexpr (std::is_same_v<T, RemovePathSelectorRequest>) {
+                return MessageType::RemovePathSelectorRequest;
             }
             return MessageType::StatusRequest; // Default
         },
@@ -110,6 +120,10 @@ MessageType getMessageType(const Response& res) {
                 return MessageType::EmbeddingEvent;
             } else if constexpr (std::is_same_v<T, ModelLoadEvent>) {
                 return MessageType::ModelLoadEvent;
+            } else if constexpr (std::is_same_v<T, CatResponse>) {
+                return MessageType::CatResponse;
+            } else if constexpr (std::is_same_v<T, ListSessionsResponse>) {
+                return MessageType::ListSessionsResponse;
             }
             return MessageType::ErrorResponse; // Default
         },
@@ -155,6 +169,16 @@ std::string getRequestName(const Request& req) {
                 return "EmbedDocuments";
             } else if constexpr (std::is_same_v<T, ModelStatusRequest>) {
                 return "ModelStatus";
+            } else if constexpr (std::is_same_v<T, CatRequest>) {
+                return "Cat";
+            } else if constexpr (std::is_same_v<T, ListSessionsRequest>) {
+                return "ListSessions";
+            } else if constexpr (std::is_same_v<T, UseSessionRequest>) {
+                return "UseSession";
+            } else if constexpr (std::is_same_v<T, AddPathSelectorRequest>) {
+                return "AddPathSelector";
+            } else if constexpr (std::is_same_v<T, RemovePathSelectorRequest>) {
+                return "RemovePathSelector";
             }
             return "Unknown";
         },

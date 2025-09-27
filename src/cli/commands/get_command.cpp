@@ -46,6 +46,9 @@ public:
         auto* group = cmd->add_option_group("retrieval_method");
         group->add_option("hash", hash_, "Hash of the document to retrieve");
         group->add_option("--name", name_, "Name of the document to retrieve");
+        auto* positional =
+            group->add_option("target", target_, "Document hash or path (positional argument)");
+        positional->type_name("HASH|PATH");
 
         // File type filters
         group->add_option("--type", fileType_,
@@ -102,6 +105,14 @@ public:
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
+            if (hash_.empty() && name_.empty() && !target_.empty()) {
+                if (isValidHashPrefix(target_)) {
+                    hash_ = target_;
+                } else {
+                    name_ = target_;
+                }
+            }
+
             // Create enhanced daemon request with ALL CLI options mapped
             yams::daemon::GetRequest dreq;
 
@@ -1163,6 +1174,7 @@ private:
     YamsCLI* cli_ = nullptr;
     std::string hash_;
     std::string name_;
+    std::string target_;
     std::filesystem::path outputPath_;
     bool verbose_ = false;
     bool getLatest_ = false;

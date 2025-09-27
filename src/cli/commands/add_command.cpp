@@ -165,7 +165,6 @@ public:
                         return leaseRes.error();
                     }
                     auto leaseHandle = std::move(leaseRes.value());
-                    auto& client = **leaseHandle;
 
                     auto start = std::chrono::steady_clock::now();
                     for (;;) {
@@ -174,7 +173,8 @@ public:
                         auto prom =
                             std::make_shared<std::promise<Result<yams::daemon::StatusResponse>>>();
                         auto fut = prom->get_future();
-                        auto work = [prom, &client, sreq]() -> boost::asio::awaitable<void> {
+                        auto work = [prom, leaseHandle, sreq]() -> boost::asio::awaitable<void> {
+                            auto& client = **leaseHandle;
                             auto r = co_await client.call(sreq);
                             prom->set_value(std::move(r));
                             co_return;
