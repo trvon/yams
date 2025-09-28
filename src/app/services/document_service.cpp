@@ -213,7 +213,21 @@ public:
             std::filesystem::remove(*tmpToRemove, ec);
         }
         if (!storeRes) {
-            return Error{ErrorCode::InternalError, storeRes.error().message};
+            // Preserve upstream error code when meaningful; enrich FileNotFound with guidance.
+            auto err = storeRes.error();
+            if (err.code == ErrorCode::FileNotFound || err.code == ErrorCode::NotFound) {
+                std::string hint;
+                try {
+                    if (usePath.find(',') != std::string::npos) {
+                        hint = " (hint: pass multiple files individually or use addDirectory; "
+                               "commas are not path separators)";
+                    }
+                } catch (...) {
+                }
+                return Error{ErrorCode::FileNotFound,
+                             std::string("File not found: ") + usePath + hint};
+            }
+            return err;
         }
 
         StoreDocumentResponse out;
@@ -695,6 +709,7 @@ public:
                          "Failed to retrieve content: " + rs.error().message};
         }
 
+        CatDocumentResponse out;
         CatDocumentResponse out;
         out.hash = hash;
         out.name = name;

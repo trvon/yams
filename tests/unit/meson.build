@@ -20,6 +20,7 @@ unit_api = files(
 
 unit_app_services = files(
   'app/services/document_service_test.cpp',
+  'app/services/document_service_errors_test.cpp',
   'app/services/grep_service_test.cpp',
   'app/services/indexing_service_test.cpp',
   'app/services/search_service_test.cpp',
