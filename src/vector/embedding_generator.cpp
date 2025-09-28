@@ -1955,7 +1955,7 @@ public:
 
     size_t estimateTokenCount(const std::string& text) const {
         // Simple estimation: ~4 characters per token on average
-        return std::max(1ul, text.length() / 4);
+        return std::max(static_cast<std::size_t>(1), text.length() / 4);
     }
 
     // Getters and configuration

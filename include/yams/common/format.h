@@ -32,7 +32,7 @@ inline std::string fmt_format(std::format_string<Args...> fmt, Args&&... args) {
 } // namespace yams
 #else
 // Using {fmt}. If spdlog bundles fmt (SPDLOG_FMT_EXTERNAL=0), include from spdlog path
-#if defined(SPDLOG_FMT_EXTERNAL) && SPDLOG_FMT_EXTERNAL
+#if defined(SPDLOG_FMT_EXTERNAL)
 #include <fmt/chrono.h>
 #include <fmt/format.h>
 #include <fmt/ostream.h>

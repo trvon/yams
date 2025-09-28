@@ -11,7 +11,7 @@ proto_out_dir = join_paths(meson.current_build_dir(), 'libyams_daemon.a.p')
 proto_generator = generator(protoc_prog,
   output: ['@BASENAME@.pb.cc', '@BASENAME@.pb.h'],
   arguments: [
-    '--cpp_out=' + proto_out_dir,
+    '--cpp_out=lite:' + proto_out_dir,
     '--proto_path=' + proto_source_root,
     '@INPUT@'
   ]

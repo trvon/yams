@@ -32,7 +32,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__ANDROID__)
 #include <execinfo.h>
 #endif
 
@@ -53,7 +53,7 @@ void signal_handler(int signo) {
                          : (signo == SIGABRT) ? "SIGABRT"
                                               : "UNKNOWN";
     log_fatal(sigstr);
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__ANDROID__)
     // Capture and log a backtrace
     void* bt[64];
     int n = backtrace(bt, 64);
