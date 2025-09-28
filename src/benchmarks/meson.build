@@ -16,3 +16,10 @@ yams_benchmarks_dep = declare_dependency(
 )
 
 meson.override_dependency('yams_benchmarks', yams_benchmarks_dep)
+
+# Internal event bus micro-benchmark
+executable('yams_bus_bench',
+  'internal_event_bus_benchmark.cpp',
+  dependencies: [dependency('spdlog'), dependency('yams_core')],
+  install: true,
+)

@@ -15,6 +15,11 @@ if host_machine.system() == 'darwin'
   add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
 endif
 
+# Conan provides Boost via PkgConfigDeps; force Meson to consume it through pkg-config so
+# macOS workflows don't fall back to searching Homebrew/system headers.
+boost_dep = dependency('boost', method: 'pkg-config', required: true)
+meson.override_dependency('boost', boost_dep)
+
 # --- Version header generation ---
 _override_version = get_option('yams-version')
 _effective_version = _override_version != '' ? _override_version : meson.project_version()

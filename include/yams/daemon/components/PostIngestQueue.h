@@ -122,6 +122,8 @@ private:
     std::unordered_map<std::string, Bucket> buckets_;
     uint32_t tokenRatePerSec_{50}; // defaults tuned for small-burst adds
     uint32_t tokenBurst_{100};
+    // Optional single-consumer bus dispatcher when the internal bus is SPSC
+    std::thread busDispatcher_;
 
     // Internal helpers
     bool admitSessionLocked(const std::string& session);

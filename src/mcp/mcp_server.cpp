@@ -732,8 +732,17 @@ Result<void> MCPServer::ensureDaemonClient() {
     if (daemon_client_)
         return Result<void>();
     auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
-    if (!leaseRes)
-        return leaseRes.error();
+    if (!leaseRes) {
+        // Augment error with actionable connection details for MCP clients
+        std::string hint = "Failed to establish connection to YAMS daemon";
+        try {
+            hint += std::string(" at '") + daemon_client_config_.socketPath.string() + "'";
+        } catch (...) {
+        }
+        hint +=
+            "; set YAMS_DAEMON_SOCKET to explicit path or ensure XDG_RUNTIME_DIR is set on Linux.";
+        return yams::Error{leaseRes.error().code, hint};
+    }
     daemon_client_lease_ = leaseRes.value();
     daemon_client_ = &(**daemon_client_lease_);
     return Result<void>();
@@ -3857,6 +3866,11 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     details["lastError"] = s.lastError;
     details["readiness"] = s.readinessStates;
     details["counters"] = s.requestCounts;
+    // Echo resolved socket path to help clients verify MCP/daemon alignment
+    try {
+        details["socketPath"] = daemon_client_config_.socketPath.string();
+    } catch (...) {
+    }
 
     if (!s.running) {
         issues.push_back("daemon_not_running");

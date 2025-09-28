@@ -285,6 +285,11 @@ jobs:
             fi
           fi
           echo "Using Meson toolchain arg: ${MESON_TOOL_ARG[*]}"
+          # Keep AF_UNIX socket path short on Linux to avoid sun_path length limits
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+            mkdir -p "$XDG_RUNTIME_DIR" || true
+          fi
           meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
           meson compile -C ${{ env.BUILD_DIR }}
 

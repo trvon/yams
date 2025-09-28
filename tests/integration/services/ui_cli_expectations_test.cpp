@@ -389,6 +389,79 @@ TEST_F(UiCliExpectationsIT, NegativeNoMatchPathsOnly) {
     EXPECT_TRUE(resp.paths.empty());
 }
 
+// 11) Search — jsonOutput structure with pathsOnly
+TEST_F(UiCliExpectationsIT, JsonOutputStructurePathsOnly) {
+    fs::create_directories(root_ / "ingest" / "json");
+    std::ofstream(root_ / "json.txt") << "json test content";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = (root_ / "json.txt").string();
+    opts.recursive = false;
+    opts.noEmbeddings = true;
+    ASSERT_TRUE(ing.addViaDaemon(opts));
+
+    auto* sm = daemon_->getServiceManager();
+    auto ctx = sm->getAppContext();
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+
+    yams::app::services::SearchRequest sreq;
+    sreq.query = "json";
+    sreq.fuzzy = true;
+    sreq.similarity = 0.6f;
+    sreq.pathsOnly = true;
+    sreq.jsonOutput = true;
+    sreq.limit = 5;
+    sreq.pathPattern = (root_ / "**").string();
+
+    auto result = yams::test_async::res(searchSvc->search(sreq), 2s);
+    ASSERT_TRUE(result) << result.error().message;
+    // For now just assert non-empty JSON string when requested
+    EXPECT_FALSE(result.value().jsonOutput.empty());
+}
+
+// 12) Search — explicit hash search normalization
+TEST_F(UiCliExpectationsIT, HashSearchNormalization) {
+    // Ingest one file and query by its hash (full and partial)
+    fs::create_directories(root_ / "ingest" / "hash");
+    auto path = (root_ / "ingest" / "hash" / "h.txt");
+    std::ofstream(path) << "hash query";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = path.string();
+    opts.recursive = false;
+    opts.noEmbeddings = true;
+    auto add = ing.addViaDaemon(opts);
+    ASSERT_TRUE(add);
+    auto hash = add.value().hash;
+    ASSERT_GT(hash.size(), 12u);
+
+    auto* sm = daemon_->getServiceManager();
+    auto ctx = sm->getAppContext();
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+
+    // Full hash
+    yams::app::services::SearchRequest full;
+    full.type = "hash";
+    full.hash = hash;
+    full.pathsOnly = true;
+    auto rFull = yams::test_async::res(searchSvc->search(full), 2s);
+    ASSERT_TRUE(rFull) << rFull.error().message;
+    ASSERT_FALSE(rFull.value().paths.empty());
+
+    // Partial hash (prefix >= 8)
+    yams::app::services::SearchRequest pref = full;
+    pref.hash = hash.substr(0, 12);
+    auto rPref = yams::test_async::res(searchSvc->search(pref), 2s);
+    ASSERT_TRUE(rPref) << rPref.error().message;
+    ASSERT_FALSE(rPref.value().paths.empty());
+}
+
 // 8) Search — fuzzy bounds (similarity extremes) structure and monotonicity
 TEST_F(UiCliExpectationsIT, FuzzyBoundsSimilarityZeroAndOne) {
     fs::create_directories(root_ / "ingest" / "fuzzy");

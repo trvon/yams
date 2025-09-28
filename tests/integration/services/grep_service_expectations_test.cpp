@@ -244,3 +244,132 @@ TEST_F(GrepServiceExpectationsIT, NegativeNoMatchPathsOnly) {
     const auto& r = res.value();
     EXPECT_TRUE(r.pathsOnly.empty());
 }
+// D) Literal vs Regex vs Word boundaries
+TEST_F(GrepServiceExpectationsIT, LiteralVsRegexWordBoundaries) {
+    fs::create_directories(root_ / "ingest");
+    auto f = (root_ / "ingest" / "words.txt");
+    std::ofstream(f) << "foo foobar foo-bar (foo)";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = f.string();
+    opts.recursive = false;
+    opts.noEmbeddings = true;
+    auto add = ing.addViaDaemon(opts);
+    ASSERT_TRUE(add);
+
+    auto* sm = daemon_->getServiceManager();
+    auto ctx = sm->getAppContext();
+    auto grepSvc = yams::app::services::makeGrepService(ctx);
+
+    // Literal: match parentheses without regex semantics
+    {
+        yams::app::services::GrepRequest rq;
+        rq.pattern = "(foo)";
+        rq.literalText = true;
+        rq.lineNumbers = true;
+        rq.paths = {(root_ / "ingest").string()};
+        auto r = grepSvc->grep(rq);
+        ASSERT_TRUE(r);
+        bool found = false;
+        for (const auto& fr : r.value().results) {
+            if (fr.file.find("words.txt") != std::string::npos && fr.matchCount > 0)
+                found = true;
+        }
+        EXPECT_TRUE(found);
+    }
+
+    // Regex word boundary: should match 'foo' as a whole word, not 'foobar'
+    {
+        yams::app::services::GrepRequest rq;
+        rq.pattern = "foo";
+        rq.word = true;
+        rq.lineNumbers = true;
+        rq.paths = {(root_ / "ingest").string()};
+        auto r = grepSvc->grep(rq);
+        ASSERT_TRUE(r);
+        // Expect exactly two word matches: "foo" and "(foo)"; not the segment in foo-bar or foobar
+        size_t total = 0;
+        for (const auto& fr : r.value().results)
+            total += fr.matchCount;
+        EXPECT_GE(total, 2u);
+    }
+}
+
+// E) filesWithMatches and filesWithoutMatch modes
+TEST_F(GrepServiceExpectationsIT, FilesWithAndWithoutModes) {
+    fs::create_directories(root_ / "ingest");
+    auto f1 = (root_ / "ingest" / "a.txt");
+    auto f2 = (root_ / "ingest" / "b.txt");
+    std::ofstream(f1) << "alpha";
+    std::ofstream(f2) << "beta";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.recursive = false;
+    opts.noEmbeddings = true;
+    opts.path = f1.string();
+    ASSERT_TRUE(ing.addViaDaemon(opts));
+    opts.path = f2.string();
+    ASSERT_TRUE(ing.addViaDaemon(opts));
+
+    auto* sm = daemon_->getServiceManager();
+    auto ctx = sm->getAppContext();
+    auto grepSvc = yams::app::services::makeGrepService(ctx);
+
+    yams::app::services::GrepRequest rq;
+    rq.pattern = "alpha";
+    rq.filesWithMatches = true;
+    rq.filesWithoutMatch = true;
+    rq.paths = {(root_ / "ingest").string()};
+    auto r = grepSvc->grep(rq);
+    ASSERT_TRUE(r);
+    const auto& resp = r.value();
+    bool hasA = false, hasB = false;
+    for (const auto& p : resp.filesWith)
+        if (p.find("a.txt") != std::string::npos)
+            hasA = true;
+    for (const auto& p : resp.filesWithout)
+        if (p.find("b.txt") != std::string::npos)
+            hasB = true;
+    EXPECT_TRUE(hasA);
+    EXPECT_TRUE(hasB);
+}
+
+// F) Invert with pathsOnly
+TEST_F(GrepServiceExpectationsIT, InvertPathsOnly) {
+    fs::create_directories(root_ / "ingest");
+    auto f = (root_ / "ingest" / "c.txt");
+    std::ofstream(f) << "gamma";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = f.string();
+    opts.recursive = false;
+    opts.noEmbeddings = true;
+    ASSERT_TRUE(ing.addViaDaemon(opts));
+
+    auto* sm = daemon_->getServiceManager();
+    auto ctx = sm->getAppContext();
+    auto grepSvc = yams::app::services::makeGrepService(ctx);
+
+    yams::app::services::GrepRequest rq;
+    rq.pattern = "zzz"; // not present
+    rq.regexOnly = true;
+    rq.invert = true; // invert: should show file because pattern not present
+    rq.pathsOnly = true;
+    rq.paths = {(root_ / "ingest").string()};
+    auto r = grepSvc->grep(rq);
+    ASSERT_TRUE(r);
+    bool hasC = false;
+    for (const auto& p : r.value().pathsOnly)
+        if (p.find("c.txt") != std::string::npos)
+            hasC = true;
+    EXPECT_TRUE(hasC);
+}

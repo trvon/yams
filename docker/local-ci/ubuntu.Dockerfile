@@ -26,6 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
+    ccache \
     cmake \
     ninja-build \
     pkg-config \
@@ -39,8 +40,17 @@ RUN apt-get update && \
     libssl-dev \
     libsqlite3-dev \
     libncurses-dev \
-    protobuf-compiler && \
+    protobuf-compiler \
+    meson \
+    python3 \
+    python3-pip \
+    python3-venv && \
+    python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir "conan<3" && \
     rm -rf /var/lib/apt/lists/*
+
+# Ensure venv tools (including conan) are on PATH
+ENV PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /work
 
@@ -48,4 +58,6 @@ WORKDIR /work
 RUN echo "gcc: $(gcc --version | head -n1)" && \
     echo "cmake: $(cmake --version | head -n1)" && \
     echo "ninja: $(ninja --version || true)" && \
-    echo "git: $(git --version)"
+    echo "git: $(git --version)" && \
+    echo "conan: $(conan --version)" && \
+    echo "ccache: $(ccache --version | head -n1)"

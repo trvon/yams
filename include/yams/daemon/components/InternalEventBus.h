@@ -14,13 +14,61 @@
 
 namespace yams::daemon {
 
-// Simple lock-free SPSC ring buffer for intra-process events.
-// Single-producer, single-consumer; capacity must be > 0 (not required to be power-of-two).
+// Simple ring buffer for intra-process events.
+// Compile-time selectable mode:
+//   - YAMS_INTERNAL_BUS_MPMC=1 (default): MPMC-safe using a small mutex
+//   - YAMS_INTERNAL_BUS_MPMC=0: original lock-free SPSC (single producer/consumer only)
+#ifndef YAMS_INTERNAL_BUS_MPMC
+#define YAMS_INTERNAL_BUS_MPMC 0
+#endif
+
+// Capacity must be > 0 (not required to be power-of-two).
 template <typename T> class SpscQueue {
 public:
     explicit SpscQueue(std::size_t capacity)
         : buf_(capacity ? capacity : 1), cap_(capacity ? capacity : 1), head_(0), tail_(0) {}
 
+#if YAMS_INTERNAL_BUS_MPMC
+    // MPMC-safe variant guarded by a lightweight mutex.
+    bool try_push(const T& v) noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto head = head_.load(std::memory_order_relaxed);
+        auto next = inc(head);
+        if (next == tail_.load(std::memory_order_acquire))
+            return false; // full
+        buf_[head] = v;
+        head_.store(next, std::memory_order_release);
+        return true;
+    }
+    bool try_push(T&& v) noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto head = head_.load(std::memory_order_relaxed);
+        auto next = inc(head);
+        if (next == tail_.load(std::memory_order_acquire))
+            return false; // full
+        buf_[head] = std::move(v);
+        head_.store(next, std::memory_order_release);
+        return true;
+    }
+    bool try_pop(T& out) noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto tail = tail_.load(std::memory_order_relaxed);
+        if (tail == head_.load(std::memory_order_acquire))
+            return false; // empty
+        out = std::move(buf_[tail]);
+        tail_.store(inc(tail), std::memory_order_release);
+        return true;
+    }
+    bool empty() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire);
+    }
+    bool full() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        return inc(head_.load(std::memory_order_acquire)) == tail_.load(std::memory_order_acquire);
+    }
+#else
+    // Original lock-free SPSC variant (unsafe for multiple producers/consumers).
     bool try_push(const T& v) noexcept {
         auto head = head_.load(std::memory_order_relaxed);
         auto next = inc(head);
@@ -34,7 +82,7 @@ public:
         auto head = head_.load(std::memory_order_relaxed);
         auto next = inc(head);
         if (next == tail_.load(std::memory_order_acquire))
-            return false;
+            return false; // full
         buf_[head] = std::move(v);
         head_.store(next, std::memory_order_release);
         return true;
@@ -53,10 +101,12 @@ public:
     bool full() const noexcept {
         return inc(head_.load(std::memory_order_acquire)) == tail_.load(std::memory_order_acquire);
     }
+#endif
     std::size_t capacity() const noexcept { return cap_; }
 
 private:
     std::size_t inc(std::size_t i) const noexcept { return (++i == cap_) ? 0 : i; }
+    mutable std::mutex mu_;
     std::vector<T> buf_;
     const std::size_t cap_;
     std::atomic<std::size_t> head_;

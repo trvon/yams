@@ -70,6 +70,8 @@ unit_daemon = files(
   'daemon/plugin_host_test.cpp',
   'daemon/plugin_loader_test.cpp',
   'daemon/post_ingest_queue_test.cpp',
+  'daemon/internal_event_bus_concurrency_test.cpp',
+  'daemon/post_ingest_queue_bus_stress_test.cpp',
   'daemon/repair_coordinator_test.cpp',
   'daemon/repair_scheduling_adapter_test.cpp',
   'daemon/request_dispatcher_status_vectordb_test.cpp',
@@ -99,6 +101,10 @@ unit_integrity = files(
   # excluded: integrity_verifier_test.cpp
 )
 
+unit_repair = files(
+  'repair/embedding_repair_scan_test.cpp',
+)
+
 unit_manifest = files(
   # excluded: manifest/manifest_test.cpp
 )
@@ -111,6 +117,7 @@ unit_mcp = files(
   'mcp/mcp_tools_schema_and_smoke_test.cpp',
   'mcp/stdio_transport_test.cpp',
   'mcp/websocket_transport_test.cpp',
+  'mcp/mcp_socket_resolution_test.cpp',
 )
 
 unit_metadata = files(
@@ -177,6 +184,7 @@ unit_srcs += unit_compression_opt
 unit_srcs += unit_daemon
 unit_srcs += unit_downloader
 unit_srcs += unit_integrity
+unit_srcs += unit_repair
 unit_srcs += unit_manifest
 unit_srcs += unit_mcp
 unit_srcs += unit_metadata

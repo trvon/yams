@@ -281,15 +281,12 @@ public:
             return Error{ErrorCode::InvalidArgument, "Pattern is required"};
         }
 
-        // Build regex
-        std::string pat = req.pattern;
+        // Prepare pattern variants
+        const std::string rawPattern = req.pattern; // literal needle
+        std::string regexPattern = req.pattern;     // regex source
         if (req.literalText) {
-            // Escape regex special characters for literal matching
-            pat = escapeRegex(pat);
-        }
-        if (req.word) {
-            // Wrap with word boundaries; use a non-capturing group to avoid precedence issues
-            pat = "\\b(?:" + pat + ")\\b";
+            // Escape regex special characters for the regex path only
+            regexPattern = escapeRegex(regexPattern);
         }
 
         std::regex_constants::syntax_option_type flags = std::regex::ECMAScript;
@@ -298,7 +295,7 @@ public:
 
         std::regex re;
         try {
-            re = std::regex(pat, flags);
+            re = std::regex(regexPattern, flags);
         } catch (const std::regex_error& e) {
             return Error{ErrorCode::InvalidArgument, std::string("Invalid regex: ") + e.what()};
         }
@@ -781,15 +778,46 @@ public:
                     }
                 }
 
-                auto literalMatch = [&](const std::string& line,
-                                        const std::string& needle) -> bool {
-                    return line.find(needle) != std::string::npos;
+                auto isWordCharExtended = [](char c) -> bool {
+                    // Treat '-' as part of a word to avoid counting 'foo' in 'foo-bar'
+                    return std::isalnum(static_cast<unsigned char>(c)) || c == '-';
                 };
-                auto evalMatch = [&](const std::string& line) -> bool {
-                    if (req.literalText && !req.word && !req.ignoreCase) {
-                        return literalMatch(line, pat);
+                auto boundaryOk = [&](const std::string& line, size_t pos, size_t len) -> bool {
+                    if (!req.word)
+                        return true;
+                    bool beforeOk = (pos == 0) || !isWordCharExtended(line[pos - 1]);
+                    bool afterOk =
+                        (pos + len >= line.size()) || !isWordCharExtended(line[pos + len]);
+                    return beforeOk && afterOk;
+                };
+                auto countMatches = [&](const std::string& line) -> size_t {
+                    size_t count = 0;
+                    // Fast path: pure literal, case-sensitive
+                    if (req.literalText && !req.ignoreCase) {
+                        size_t from = 0;
+                        while (true) {
+                            auto pos = line.find(rawPattern, from);
+                            if (pos == std::string::npos)
+                                break;
+                            if (boundaryOk(line, pos, rawPattern.size()))
+                                ++count;
+                            from = pos + 1;
+                        }
+                        return count;
                     }
-                    return std::regex_search(line, re);
+                    // Regex/case-insensitive path: scan all occurrences and enforce boundaries when
+                    // needed
+                    std::cmatch cm;
+                    const char* start = line.c_str();
+                    const char* end = start + line.size();
+                    while (std::regex_search(start, end, cm, re)) {
+                        auto pos = static_cast<size_t>(cm.position(0) + (start - line.c_str()));
+                        auto len = static_cast<size_t>(cm.length(0));
+                        if (boundaryOk(line, pos, len))
+                            ++count;
+                        start = cm.suffix().first;
+                    }
+                    return count;
                 };
 
                 GrepFileResult fileResult;
@@ -799,12 +827,13 @@ public:
                 size_t ln_counter = 0;
                 auto onLine = [&](const std::string& line) {
                     ++ln_counter;
-                    bool matched = evalMatch(line);
+                    size_t n = countMatches(line);
+                    bool matched = (n > 0);
                     if (req.invert)
                         matched = !matched;
                     if (!matched)
                         return;
-                    fileResult.matchCount++;
+                    fileResult.matchCount += n;
                     if (req.count)
                         return;
                     GrepMatch gm;
@@ -820,10 +849,10 @@ public:
                             gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length());
                         }
                     } else if (!req.invert && req.literalText) {
-                        auto pos = line.find(pat);
+                        auto pos = line.find(rawPattern);
                         if (pos != std::string::npos) {
                             gm.columnStart = pos + 1;
-                            gm.columnEnd = gm.columnStart + pat.size();
+                            gm.columnEnd = gm.columnStart + rawPattern.size();
                         }
                     }
                     fileResult.matches.push_back(std::move(gm));
@@ -990,7 +1019,7 @@ public:
         response.filesWith = std::move(filesWith);
         response.filesWithout = std::move(filesWithout);
         if (req.pathsOnly) {
-            response.pathsOnly = response.filesWith;
+            response.pathsOnly = req.invert ? response.filesWithout : response.filesWith;
         }
         spdlog::debug(
             "[GrepService] filesWith={} filesWithout={} results={} pathsOnly={} totalMatches={}",

@@ -131,6 +131,15 @@ public:
     void stop();
     bool isRunning() const { return running_.load(); }
 
+#if defined(YAMS_TESTING)
+    // Testing hooks: allow unit tests to intercept daemon client creation and
+    // validate the resolved socket path and dataDir without making a real connection.
+    void
+    setEnsureDaemonClientHook(std::function<Result<void>(const yams::daemon::ClientConfig&)> fn) {
+        testEnsureDaemonClientHook_ = std::move(fn);
+    }
+#endif
+
     // Public wrappers for HTTP mode (bridge to internal handlers)
     MessageResult handleRequestPublic(const nlohmann::json& request) {
         return handleRequest(request);

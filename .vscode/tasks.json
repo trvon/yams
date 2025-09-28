@@ -33,9 +33,7 @@
 			"label": "meson: setup (Debug)",
 			"type": "shell",
 			"command": "meson setup build/debug --reconfigure --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini",
-			"problemMatcher": [
-				"$meson-gcc"
-			]
+			"problemMatcher": ["$meson-gcc"]
 		},
 		{
 			"label": "meson: setup (Release)",
@@ -64,10 +62,8 @@
 			"label": "Build (Meson Debug)",
 			"type": "shell",
 			"command": "meson compile -C build/debug",
-			"problemMatcher": [
-				"$meson-gcc"
-			],
-			"group": "build"
+			"group": "build",
+			"problemMatcher": ["$meson-gcc"]
 		},
 		{
 			"label": "Test (Meson Debug)",
@@ -79,10 +75,8 @@
 			"label": "meson: compile -C build/debug",
 			"type": "shell",
 			"command": "meson compile -C build/debug",
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "build"
+			"group": "build",
+			"problemMatcher": ["$gcc"]
 		},
 		{
 			"label": "regen-protos + rebuild (Debug)",
@@ -98,40 +92,75 @@
 			"label": "build (ninja default)",
 			"type": "shell",
 			"command": "ninja -C builddir",
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "build"
+			"group": "build",
+			"problemMatcher": ["$gcc"]
 		},
 		{
 			"label": "meson: build (explicit)",
 			"type": "shell",
 			"command": "meson compile -C build/debug",
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "build"
+			"group": "build",
+			"problemMatcher": ["$gcc"]
 		},
 		{
 			"label": "meson: tests (explicit)",
 			"type": "shell",
 			"command": "meson test -C build/debug --print-errorlogs",
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "test"
+			"group": "test",
+			"problemMatcher": ["$gcc"]
 		},
 		{
-			"label": "meson: compile (debug)",
+			"label": "docker: build test image (ubuntu 24.04)",
 			"type": "shell",
-			"command": "meson compile -C build/debug",
-			"group": "build"
+			"command": "(docker context inspect colima >/dev/null 2>&1 && docker context use colima || true) && (docker buildx inspect yams-colima >/dev/null 2>&1 || docker buildx create --name yams-colima --use) && docker buildx use yams-colima && docker buildx build --builder yams-colima --platform linux/amd64 --load -t yams/tests:ubuntu-24.04 -f docker/local-ci/ubuntu.Dockerfile .",
+			"problemMatcher": []
 		},
 		{
-			"label": "meson: compile (debug)",
+			"label": "docker: build test image (ubuntu 22.04)",
 			"type": "shell",
-			"command": "meson compile -C build/debug",
-			"group": "build"
+			"command": "(docker context inspect colima >/dev/null 2>&1 && docker context use colima || true) && (docker buildx inspect yams-colima >/dev/null 2>&1 || docker buildx create --name yams-colima --use) && docker buildx use yams-colima && docker buildx build --builder yams-colima --platform linux/amd64 --load -t yams/tests:ubuntu-22.04 -f docker/local-ci/ubuntu-22.04.Dockerfile .",
+			"problemMatcher": []
+		},
+
+		{
+			"label": "docker: meson tests (Debug, ubuntu 24.04) [cached]",
+			"type": "shell",
+			"command": "cname=yams-test-ubuntu-24.04-cached; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; docker --context colima create --platform linux/amd64 --name \"$cname\" -e CONAN_HOME=/tmp/.conan2 -e CC='ccache gcc' -e CXX='ccache g++' -v yams_conan_cache:/tmp/.conan2 -v yams_build_cache:/work/build/docker-debug -v yams_ccache:/root/.ccache -w /work yams/tests:ubuntu-24.04 bash -lc \"conan profile detect --force && conan install conanfile.py -of build/docker-debug -s build_type=Debug -b missing && meson setup build/docker-debug --prefix /usr/local -Dbuild-tests=true --native-file build/docker-debug/build-debug/conan/conan_meson_native.ini || meson setup build/docker-debug --prefix /usr/local -Dbuild-tests=true --native-file build/docker-debug/build-debug/conan/conan_meson_native.ini --reconfigure && meson compile -C build/docker-debug && meson test -C build/docker-debug --print-errorlogs\" && docker --context colima cp \"${workspaceFolder}/.\" \"$cname\":/work && docker --context colima start -a \"$cname\"; ec=$?; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; exit $ec",
+			"group": {
+				"kind": "test",
+				"isDefault": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "docker: meson tests (Debug, ubuntu 22.04) [cached]",
+			"type": "shell",
+			"command": "cname=yams-test-ubuntu-22.04-cached; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; docker --context colima create --platform linux/amd64 --name \"$cname\" -e CONAN_HOME=/tmp/.conan2 -e CC='ccache gcc' -e CXX='ccache g++' -v yams_conan_cache:/tmp/.conan2 -v yams_build_cache:/work/build/docker-debug -v yams_ccache:/root/.ccache -w /work yams/tests:ubuntu-22.04 bash -lc \"conan profile detect --force && conan install conanfile.py -of build/docker-debug -s build_type=Debug -b missing && meson setup build/docker-debug --prefix /usr/local -Dbuild-tests=true --native-file build/docker-debug/build-debug/conan/conan_meson_native.ini || meson setup build/docker-debug --prefix /usr/local -Dbuild-tests=true --native-file build/docker-debug/build-debug/conan/conan_meson_native.ini --reconfigure && meson compile -C build/docker-debug && meson test -C build/docker-debug --print-errorlogs\" && docker --context colima cp \"${workspaceFolder}/.\" \"$cname\":/work && docker --context colima start -a \"$cname\"; ec=$?; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; exit $ec",
+			"group": {
+				"kind": "test",
+				"isDefault": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "docker: meson tests (Debug, ubuntu 24.04) [copy]",
+			"type": "shell",
+			"command": "cname=yams-test-ubuntu-24.04; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; docker --context colima create --platform linux/amd64 --name \"$cname\" -e CONAN_HOME=/tmp/.conan2 -v yams_conan_cache:/tmp/.conan2 -w /work yams/tests:ubuntu-24.04 bash -lc \"rm -rf build/docker-debug && conan profile detect --force && conan install conanfile.py -of build/docker-debug -s build_type=Debug -b missing && meson setup build/docker-debug --prefix /usr/local -Dbuild-tests=true --native-file build/docker-debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/docker-debug && meson test -C build/docker-debug --print-errorlogs\" && docker --context colima cp \"${workspaceFolder}/.\" \"$cname\":/work && docker --context colima start -a \"$cname\"; ec=$?; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; exit $ec",
+			"group": {
+				"kind": "test",
+				"isDefault": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "docker: meson tests (Debug, ubuntu 22.04) [copy]",
+			"type": "shell",
+			"command": "cname=yams-test-ubuntu-22.04; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; docker --context colima create --platform linux/amd64 --name \"$cname\" -e CONAN_HOME=/tmp/.conan2 -v yams_conan_cache:/tmp/.conan2 -w /work yams/tests:ubuntu-22.04 bash -lc \"rm -rf build/docker-debug && conan profile detect --force && conan install conanfile.py -of build/docker-debug -s build_type=Debug -b missing && meson setup build/docker-debug --prefix /usr/local -Dbuild-tests=true --native-file build/docker-debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/docker-debug && meson test -C build/docker-debug --print-errorlogs\" && docker --context colima cp \"${workspaceFolder}/.\" \"$cname\":/work && docker --context colima start -a \"$cname\"; ec=$?; docker --context colima rm -f \"$cname\" >/dev/null 2>&1 || true; exit $ec",
+			"group": {
+				"kind": "test",
+				"isDefault": false
+			},
+			"problemMatcher": []
 		}
 	]
 }

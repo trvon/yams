@@ -1,6 +1,6 @@
 ### YAMS‑First Agent Protocol (Codex CLI) — **Revised**
 
-**Version:** 2025‑09‑26
+**Version: 3** 2025‑09‑27
 
 #### 0) Scope & Tooling (Codex Defaults)
 
@@ -11,51 +11,72 @@
 * **Encoding:** Default ASCII; introduce Unicode only if file already uses it or needed.
 
 ---
+### 0) Operating Modes & Budgets (Agentic)
 
-## 1) Agent Operating Loop (**Mandatory**)
+* **Autonomy Mode (AM):** `focus` (safe default), `explore` (wide search), `fix` (bugfix), `migrate` (multi‑file/refactor), `design` (arch changes).
+* **Budgets (per AM):**
 
-Before any multi‑step task:
+  * `risk_budget`: low|med|high
+  * `edit_budget`: max files / max LOC before checkpoint
+  * `knowledge_budget`: max YAMS/Web lookups before acting
+* The agent may **act immediately** within budgets. When any budget is exceeded → **checkpoint** (see §1.5) or **escalate** (ask user or switch AM).
 
-1. **PLAN** — 3–7 bullets, concrete steps (edits, tests, indexing).
+---
 
-2. **SEARCH (YAMS‑first):**
+### 1) Agent Operating Loop (Agentic + YAMS‑anchored)
 
-   * Run **one compound** `yams search` (keywords + quoted phrases).
-   * If zero relevant hits, **retry once** with `--fuzzy --similarity 0.7`.
-   * If still empty, **append `--no-session`** to widen scope. **RESTORED**
-   * Only if still empty → minimal web research; then **immediately cache** the findings to YAMS (see §3.5) **before using them**. **RESTORED order**
+1. **PLAN** (3–7 bullets) with **AM** and budgets.
+2. **EXPLORE (local first):** use `rg`, tags, LSIF, or editor LSP to get bearings.
 
-3. **CODE CONTEXT (optional helpers):**
+   * If you make a consequential decision (pick an API, adopt a pattern), **mirror with `yams grep/search`** to confirm prior art (YAMS‑echo).
+3. **PROTOTYPE & EDIT:** make the smallest viable change set within budgets.
+4. **TEST:** run targeted tests; expand to broader tests if green.
+5. **CHECKPOINT (flush + proof):** *(triggered by on_save | on_test_pass | N_files | N_minutes | pre_commit)*
 
-   * You may use `rg` to list paths or sanity‑check patterns, **but** you must confirm any actionable finding with `yams grep`. **Hard rule**
+   * Build changed set: `git diff --name-only <last_checkpoint>...HEAD`
+   * `yams add <changed_files>` with **CSV includes** (no brace expansion).
+   * If you used external sources, **cache them now** (`yams add - --tags "web,cache" --metadata url=...`).
+   * **Proof:** `yams grep "<distinct token or symbol>" --include="**/*.cpp,**/*.hpp,**/*.md" --paths-only` should return touched files.
+6. **TRACE:** append decisions/refs/hashes to YAMS metadata and PBI docs.
+7. **SUMMARY**: status, artifacts, next steps.
 
-4. **EXECUTE EDITS** — perform the smallest viable change.
+## Product Backlog Item (PBI) Management
 
-5. **INDEX SYNC (Required after every edit):**
+### Canonical Structure (resolved)
+* **Per‑PBI directory:** `docs/delivery/<PBIID>/`
+  * Must contain: `prd.md` (goals/spec/acceptance), `tasks.md` (task table with IDs & statuses)
+* **Master backlog:** `docs/delivery/backlog.md`
+### Conventions
+* Task IDs: `<PBIID>-<nn>` (e.g., `001-1`). Use `-E2E` for end‑to‑end validations.
+* Keep PRDs concise; mirror scope changes immediately.
 
-   * `yams add <paths>` with **CSV includes**, not brace expansion.
-   * Update tags/metadata as appropriate.
-
-6. **VALIDATE (Required after each YAMS command or edit):**
-
-   * Emit `VALIDATE: PASS|FAIL — 1–2 lines why → Next: <action>`.
-   * If indexing occurred, prove it: a targeted `yams grep "<token>" --include="**/*.cpp,**/*.hpp,**/*.md"` returning the touched path(s). **NEW proof**
-
-7. **TRACE:** Record decisions, references, and hashes in PBI docs and/or YAMS metadata.
-
-8. **SUMMARY:** status, artifacts (names/hashes), next steps.
-
+### Lifecycle Flow
+1. **Plan** — update `prd.md` (goals & acceptance), list granular tasks in `tasks.md`.
+2. **Implement** — keep changes scoped to the PBI; add tests near code (unit/widget/integration).
+3. **Validate** — run targeted then broader tests; update `tasks.md` and `backlog.md` status/history.
+4. **Document** — update READMEs/migrations; record acceptance status.
+### Consolidation
+* When consolidating into a new PBI:
+  * Add **“Consolidated into: \<new‑PBI>”** at top of each original `prd.md`.
+  * Append history in `backlog.md` (e.g., `consolidate_to: 002`).
+  * Move execution/tasks to the new PBI’s `tasks.md`.
 **Response template (literal):**
 
 ```
+AM: <focus|explore|fix|migrate|design>  Budgets: risk=<low|med|high> edits=<files/LOC> knowledge=<lookups>
+
 PLAN:
 - ...
 
-CMD:
-<exact command + workdir>
+ACT:
+<concise actions taken; key diffs/paths>
+
+CHECKPOINT:
+yams add <changed_paths> --tags "code,working"
+yams grep "<distinct_token>" --include="**/*.cpp,**/*.hpp,**/*.md" --paths-only
 
 VALIDATE:
-PASS|FAIL — <1–2 lines why> → Next: <action>
+PASS|FAIL — <1–2 lines> → Next: <action>
 
 SUMMARY:
 - Status: <pending|in_progress|completed|blocked>
@@ -64,21 +85,6 @@ SUMMARY:
 ```
 
 ---
-
-## 2) YAMS Usage (Search, Grep, Index)
-
-### 2.1 Search & Retrieval (always first)
-
-```bash
-# Compound query (single call)
-yams search "term1 term2 \"important phrase\"" --limit 50
-
-# Optional broader match:
-yams search "term1 term2 \"important phrase\"" --fuzzy --similarity 0.7 --limit 50
-
-# Queries that start with '-' or look like flags:
-yams search -- "--start-group --end-group -force_load" --paths-only
-```
 
 **Session scope safeguards (common pitfall):**
 
@@ -174,5 +180,3 @@ Same as your Prompt 2 section, **plus**: destructive YAMS ops (`yams rm`, `yam
 * **If YAMS search is empty:** `--fuzzy` → `--no-session` → then (only then) web, cached back into YAMS **before** usage.
 * **Emit hashes/paths in SUMMARY Artifacts** (keeps the index auditable).
 * **Run a one‑time health check** at session start (`yams status` or equivalent).
-
----

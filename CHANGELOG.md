@@ -15,16 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.2] - 2025-09-27
-
-### Added
-- UI/CLI expectations as services-layer integration tests with a custom Meson shard `integration_ui`.
-  - Suites: `UiCliExpectationsIT.*` (search/list/get structure checks) and `GrepServiceExpectationsIT.*` (regex pathsOnly, count mode, negatives).
-  - Run with: `meson test -C build/debug integration_ui -v`.
-- Tests cover:
-  - Search verbose mode structure (score fields when `verbose=true`).
-  - Paths-only behavior with `pathPattern` + tag filters combined.
-  - Fuzzy search bounds (low vs. high `similarity`) and negative cases.
+## [v0.7.1] - 2025-09-26
 
 ### Changed
 - GrepService: expanded candidate discovery to preselect from `req.paths` using SQL LIKE prefix scans, aligning service behavior with CLI expectations for directory patterns.
@@ -32,10 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - GrepService streaming: flushes the final partial line when scanning cold CAS streams so single-line files are matched reliably (e.g., `hello.txt`).
 - Reduced GrepService log verbosity to `debug` for internal counters and match traces.
-
-## [v0.7.1] - 2025-09-256
-
-### Fixed
 - Fixed IPC protocol regression where grep and list commands failed to properly communicate with the daemon after migration, causing incomplete results or timeouts in multi-service environments.
   - This issue impacted other tools result output 
 - Guarded compression monitor global statistics with a dedicated mutex to stop concurrent tracker

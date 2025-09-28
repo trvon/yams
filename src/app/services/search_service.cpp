@@ -283,6 +283,38 @@ public:
         }
     }
 
+    // Minimal JSON emission for LLM/CLI when requested.
+    static void maybeEmitJson(const SearchRequest& req, SearchResponse& resp) {
+        if (!req.jsonOutput)
+            return;
+        std::ostringstream os;
+        os << "{";
+        os << "\"type\":\"" << (resp.type.empty() ? (req.fuzzy ? "fuzzy" : "keyword") : resp.type)
+           << "\",";
+        os << "\"total\":" << resp.total << ",";
+        if (req.pathsOnly) {
+            os << "\"paths\":[";
+            for (size_t i = 0; i < resp.paths.size(); ++i) {
+                if (i)
+                    os << ",";
+                os << "\"" << resp.paths[i] << "\"";
+            }
+            os << "]";
+        } else {
+            os << "\"results\":[";
+            for (size_t i = 0; i < resp.results.size(); ++i) {
+                if (i)
+                    os << ",";
+                const auto& it = resp.results[i];
+                os << "{\"path\":\"" << it.path << "\",\"title\":\"" << it.title
+                   << "\",\"score\":" << (it.score < 0.0 ? 0.0 : it.score) << "}";
+            }
+            os << "]";
+        }
+        os << "}";
+        resp.jsonOutput = os.str();
+    }
+
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
@@ -326,12 +358,22 @@ public:
             }
             auto result = searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
+            if (result) {
+                auto r = std::move(result).value();
+                maybeEmitJson(req, r);
+                co_return Result<SearchResponse>(std::move(r));
+            }
             co_return result;
         }
 
         if (looksLikeHash(normalizedReq.query)) {
             auto result = searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
+            if (result) {
+                auto r = std::move(result).value();
+                maybeEmitJson(req, r);
+                co_return Result<SearchResponse>(std::move(r));
+            }
             co_return result;
         }
 
@@ -361,6 +403,7 @@ public:
                     if (ctx_.searchRepairProgress > 0)
                         resp.searchStats["repair_progress"] =
                             std::to_string(ctx_.searchRepairProgress);
+                    maybeEmitJson(req, resp);
                     result = Result<SearchResponse>(std::move(resp));
                 }
             } else if (ctx_.hybridEngine) {
@@ -372,6 +415,7 @@ public:
                     auto resp = std::move(result).value();
                     resp.searchStats["mode"] = "degraded";
                     resp.queryInfo = "hybrid unavailable — metadata fallback";
+                    maybeEmitJson(req, resp);
                     result = Result<SearchResponse>(std::move(resp));
                 }
             }
@@ -428,6 +472,11 @@ public:
             result = Result<SearchResponse>(std::move(resp));
         }
 
+        if (result) {
+            auto r = std::move(result).value();
+            maybeEmitJson(req, r);
+            co_return Result<SearchResponse>(std::move(r));
+        }
         co_return result;
     }
 
@@ -719,77 +768,90 @@ private:
 
     Result<SearchResponse> searchByHashPrefix(const SearchRequest& req,
                                               MetadataTelemetry* telemetry = nullptr) {
-        auto docsResult =
-            retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                            std::chrono::milliseconds(25), telemetry);
-        if (!docsResult) {
-            return Error{ErrorCode::InternalError,
-                         "Failed to enumerate documents for hash search: " +
-                             docsResult.error().message};
-        }
+        auto fetchAll = [&]() {
+            return retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                                   std::chrono::milliseconds(25), telemetry);
+        };
 
-        const std::string& prefix = !req.hash.empty() ? req.hash : req.query;
+        const std::string& rawPrefix = !req.hash.empty() ? req.hash : req.query;
+        std::string prefix = rawPrefix;
+        std::transform(prefix.begin(), prefix.end(), prefix.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         SearchResponse resp;
         resp.type = "hash";
         resp.usedHybrid = false;
 
-        const auto& docs = docsResult.value();
         std::size_t count = 0;
-        for (const auto& doc : docs) {
-            if (doc.sha256Hash.size() < prefix.size())
-                continue;
-            if (doc.sha256Hash.compare(0, prefix.size(), prefix) != 0)
-                continue;
+        for (int attempt = 0; attempt < 10 && count == 0; ++attempt) {
+            auto docsResult = fetchAll();
+            if (!docsResult) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to enumerate documents for hash search: " +
+                                 docsResult.error().message};
+            }
+            const auto& docs = docsResult.value();
+            for (const auto& doc : docs) {
+                if (doc.sha256Hash.size() < prefix.size())
+                    continue;
+                // Normalize doc hash to lowercase once for robust compare
+                std::string dh = doc.sha256Hash;
+                std::transform(dh.begin(), dh.end(), dh.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (dh.compare(0, prefix.size(), prefix) != 0)
+                    continue;
 
-            // Optional path and tag filters for CLI parity
-            bool pathOk = true;
-            if (!req.pathPattern.empty()) {
-                if (hasWildcard(req.pathPattern)) {
-                    std::string pattern = req.pathPattern;
-                    if (pattern.front() != '*' && pattern.front() != '/' &&
-                        pattern.find(":/") == std::string::npos) {
-                        pattern = "*" + pattern;
+                // Optional path and tag filters for CLI parity
+                bool pathOk = true;
+                if (!req.pathPattern.empty()) {
+                    if (hasWildcard(req.pathPattern)) {
+                        std::string pattern = req.pathPattern;
+                        if (pattern.front() != '*' && pattern.front() != '/' &&
+                            pattern.find(":/") == std::string::npos) {
+                            pattern = "*" + pattern;
+                        }
+                        pathOk = wildcardMatch(doc.filePath, pattern);
+                    } else {
+                        pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
                     }
-                    pathOk = wildcardMatch(doc.filePath, pattern);
-                } else {
-                    pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
                 }
-            }
-            // Enforce ext/mime filters when available
-            bool metaFiltersOk = true;
-            if (!req.fileType.empty()) {
-                // keep current behavior (type handled elsewhere)
-            }
-            if (!req.extension.empty()) {
-                if (doc.fileExtension != req.extension &&
-                    doc.fileExtension != ("." + req.extension)) {
+                // Enforce ext/mime filters when available
+                bool metaFiltersOk = true;
+                if (!req.fileType.empty()) {
+                    // keep current behavior (type handled elsewhere)
+                }
+                if (!req.extension.empty()) {
+                    if (doc.fileExtension != req.extension &&
+                        doc.fileExtension != ("." + req.extension)) {
+                        metaFiltersOk = false;
+                    }
+                }
+                if (!req.mimeType.empty() && doc.mimeType != req.mimeType) {
                     metaFiltersOk = false;
                 }
-            }
-            if (!req.mimeType.empty() && doc.mimeType != req.mimeType) {
-                metaFiltersOk = false;
-            }
-            if (!pathOk || !metaFiltersOk ||
-                !metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags,
-                                 telemetry)) {
-                continue;
-            }
+                if (!pathOk || !metaFiltersOk ||
+                    !metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags,
+                                     telemetry)) {
+                    continue;
+                }
 
-            if (req.pathsOnly) {
-                resp.paths.push_back(doc.filePath);
-            } else {
-                SearchItem it;
-                it.id = doc.id;
-                it.hash = req.showHash ? doc.sha256Hash : "";
-                it.title = doc.fileName;
-                it.path = doc.filePath;
-                it.score = 1.0;  // Exact/prefix match
-                it.snippet = ""; // not available here
-                resp.results.push_back(std::move(it));
-            }
+                if (req.pathsOnly) {
+                    resp.paths.push_back(doc.filePath);
+                } else {
+                    SearchItem it;
+                    it.id = doc.id;
+                    it.hash = req.showHash ? doc.sha256Hash : "";
+                    it.title = doc.fileName;
+                    it.path = doc.filePath;
+                    it.score = 1.0;  // Exact/prefix match
+                    it.snippet = ""; // not available here
+                    resp.results.push_back(std::move(it));
+                }
 
-            if (++count >= req.limit)
-                break;
+                if (++count >= req.limit)
+                    break;
+            }
+            if (count == 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
         resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();

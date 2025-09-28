@@ -32,11 +32,47 @@ PostIngestQueue::PostIngestQueue(
                  flag};
         threads_.emplace_back(std::move(w));
     }
+
+#if !YAMS_INTERNAL_BUS_MPMC
+    // When bus is SPSC, create a single dispatcher thread that drains the bus
+    // and enqueues into the internal deques under lock, preserving SPSC semantics.
+    if (TuneAdvisor::useInternalBusForPostIngest()) {
+        busDispatcher_ = std::thread([this] {
+            auto bus =
+                InternalEventBus::instance()
+                    .get_or_create_channel<InternalEventBus::PostIngestTask>("post_ingest", 4096);
+            while (!stop_.load(std::memory_order_relaxed)) {
+                InternalEventBus::PostIngestTask bt;
+                if (bus && bus->try_pop(bt)) {
+                    std::unique_lock<std::mutex> lk(mtx_);
+                    if (inflight_.find(bt.hash) == inflight_.end()) {
+                        inflight_.insert(bt.hash);
+                        Task t{bt.hash, bt.mime, /*session*/ "", {}, Task::Stage::Metadata};
+                        t.enqueuedAt = std::chrono::steady_clock::now();
+                        qMeta_.push_back(std::move(t));
+                        lk.unlock();
+                        cv_.notify_one();
+                        InternalEventBus::instance().incPostConsumed();
+                    } else {
+                        InternalEventBus::instance().incPostDropped();
+                    }
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+        });
+    }
+#endif
 }
 
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true);
     cv_.notify_all();
+#if !YAMS_INTERNAL_BUS_MPMC
+    if (busDispatcher_.joinable()) {
+        busDispatcher_.join();
+    }
+#endif
     for (auto& w : threads_) {
         if (w.th.joinable())
             w.th.join();
@@ -119,7 +155,9 @@ void PostIngestQueue::workerLoop() {
     Task task;
     bool haveTask = false;
     const bool busEnabled = TuneAdvisor::useInternalBusForPostIngest();
-    // Try InternalEventBus first when enabled
+#if YAMS_INTERNAL_BUS_MPMC
+    // Try InternalEventBus first when enabled (MPMC mode only). In SPSC mode, a single
+    // dispatcher thread fills internal queues instead.
     if (busEnabled) {
         static std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> bus =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
@@ -143,13 +181,18 @@ void PostIngestQueue::workerLoop() {
             }
         }
     }
+#endif
     if (!haveTask) {
         std::unique_lock<std::mutex> lk(mtx_);
         auto predicate = [&] {
             return stop_.load() || (!qMeta_.empty() || !qKg_.empty() || !qEmb_.empty());
         };
         if (busEnabled) {
+#if YAMS_INTERNAL_BUS_MPMC
             cv_.wait_for(lk, std::chrono::milliseconds(50), predicate);
+#else
+            cv_.wait(lk, predicate);
+#endif
         } else {
             cv_.wait(lk, predicate);
         }
