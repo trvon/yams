@@ -35,7 +35,6 @@ conan install . -of build/release -s build_type=Release -b missing
 
 # 2. Configure
 meson setup build/release \
-  --prefix /usr/local \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
   --buildtype=release
 
@@ -43,7 +42,7 @@ meson setup build/release \
 meson compile -C build/release
 
 # 4. (Optional) Install
-sudo meson install -C build/release
+meson install -C build/release
 ```
 
 

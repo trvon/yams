@@ -1,7 +1,4 @@
 {
-  "languages": {
-    "CMake": {
-      "format_on_save": "off"
-    }
-  }
+    "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
+    "C_Cpp.default.compileCommands": "/Volumes/picaso/work/tools/yams/builddir/compile_commands.json"
 }

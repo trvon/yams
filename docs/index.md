@@ -70,14 +70,13 @@ conan install . -of build/debug -s build_type=Debug -b missing
 
 # 2. Configure (first time)
 meson setup build/debug \
-  --prefix /usr/local \
   --native-file build/debug/build-debug/conan/conan_meson_native.ini
 
 # 3. Build
 meson compile -C build/debug
 
 # 4. Install (optional)
-sudo meson install -C build/debug
+meson install -C build/debug
 ```
 
 ## Quick start
