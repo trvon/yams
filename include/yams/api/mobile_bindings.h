@@ -223,9 +223,9 @@ yams_mobile_search_result_json(const yams_mobile_search_result_t* result);
 YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_list_documents(
-    yams_mobile_context_t* ctx, const yams_mobile_list_request* request,
-    yams_mobile_list_result_t** out_result);
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_list_documents(yams_mobile_context_t* ctx, const yams_mobile_list_request* request,
+                           yams_mobile_list_result_t** out_result);
 
 YAMS_MOBILE_API void yams_mobile_list_result_destroy(yams_mobile_list_result_t* result);
 

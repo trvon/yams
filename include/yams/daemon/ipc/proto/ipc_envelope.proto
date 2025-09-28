@@ -421,8 +421,31 @@ message ModelLoadEvent {
 
 message ModelLoadResponse { bool loaded = 1; string message = 2; }
 message ModelStatusResponse { string model_name = 1; string status = 2; }
-message AddDocumentResponse { string hash = 1; string message = 2; }
-message GrepResponse { repeated string lines = 1; }
+// Extended to include path, documents_added, and size for richer client feedback
+message AddDocumentResponse {
+  string hash = 1;
+  string message = 2;
+  string path = 3;             // absolute or provided path for the request
+  uint64 documents_added = 4;  // number of documents added (directories may add multiple)
+  uint64 size = 5;             // size of added content if applicable (single-file adds)
+}
+// First-class grep match with full context
+message GrepMatch {
+  string file = 1;
+  int64 line_number = 2;
+  string line = 3;
+  repeated string context_before = 4;
+  repeated string context_after = 5;
+  string match_type = 6;
+  double confidence = 7;
+}
+
+message GrepResponse {
+  // Preferred field
+  repeated GrepMatch matches = 1;
+  // Backward compatibility for legacy clients/servers (deprecated)
+  repeated string lines = 2;
+}
 message UpdateDocumentResponse { bool updated = 1; }
 message EmbedDocumentsResponse {
   uint64 requested = 1;
@@ -454,6 +477,45 @@ message GetStatsResponse {
 }
 message DeleteResponse { bool success = 1; uint64 count = 2; }
 message PrepareSessionResponse { uint64 warmed_count = 1; string message = 2; }
+
+message CancelRequest {
+  uint64 target_request_id = 1;
+}
+
+message CatRequest {
+  string hash = 1;
+  string name = 2;
+}
+
+message CatResponse {
+  string hash = 1;
+  string name = 2;
+  bytes content = 3;
+  uint64 size = 4;
+}
+
+// Session management
+message ListSessionsRequest {}
+message ListSessionsResponse {
+  repeated string session_names = 1;
+  string current_session = 2;
+}
+
+message UseSessionRequest {
+  string session_name = 1;
+}
+
+message AddPathSelectorRequest {
+  string session_name = 1; // optional, defaults to current
+  string path = 2;
+  repeated string tags = 3;
+  repeated KvPair metadata = 4;
+}
+
+message RemovePathSelectorRequest {
+  string session_name = 1; // optional, defaults to current
+  string path = 2;
+}
 
 // ENVELOPE
 message Envelope {
@@ -494,6 +556,13 @@ message Envelope {
     PluginTrustListRequest plugin_trust_list_request = 36;
     PluginTrustAddRequest plugin_trust_add_request = 37;
     PluginTrustRemoveRequest plugin_trust_remove_request = 38;
+    CancelRequest cancel_request = 39;
+    CatRequest cat_request = 40;
+    // Session requests
+    ListSessionsRequest list_sessions_request = 41;
+    UseSessionRequest use_session_request = 42;
+    AddPathSelectorRequest add_path_selector_request = 43;
+    RemovePathSelectorRequest remove_path_selector_request = 44;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -525,5 +594,7 @@ message Envelope {
     PluginScanResponse plugin_scan_response = 124;
     PluginLoadResponse plugin_load_response = 125;
     PluginTrustListResponse plugin_trust_list_response = 126;
+    CatResponse cat_response = 127;
+    ListSessionsResponse list_sessions_response = 128;
   }
 }

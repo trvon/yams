@@ -24,6 +24,39 @@ meson test -C build/debug -t stress       # stress (long-running)
 meson test -C build/debug -l
 ```
 
+### Services Integration Suite (isolated)
+
+The Services suite exercises add/list/get/grep via a live daemon in a temporary sandbox.
+
+```bash
+# Run only the services integration executable (isolated; serial)
+meson test -C build/debug integration_services -v
+
+# Notes
+# - Requires AF_UNIX socket availability (macOS/Linux). If your environment forbids AF_UNIX
+#   binds, affected tests will GTEST_SKIP with an explanatory message.
+# - Logs: build/debug/meson-logs/testlog.txt
+```
+
+### UI/CLI Integration (services layer)
+
+We mirror CLI expectations at the services layer to keep tests fast and
+deterministic (no external shell). The custom shard `integration_ui` runs these
+checks serially against a temporary daemon sandbox.
+
+```bash
+# Run only the UI/CLI expectations shard
+meson test -C build/debug integration_ui -v
+
+# What it includes
+# - UiCliExpectationsIT.* (search/list/get structure and options)
+# - GrepServiceExpectationsIT.* (regex pathsOnly, count mode, negatives)
+
+# Notes
+# - Tests bring up their own daemon with mock embeddings
+# - AF_UNIX is required; tests skip with a helpful message if unavailable
+```
+
 ### Legacy CMake/CTest (for reference)
 These commands are retained for contributors still using the legacy build. Prefer Meson going forward.
 

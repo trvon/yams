@@ -136,6 +136,11 @@ private:
     std::atomic<std::uint64_t> totalBacklog_{0};
     std::atomic<std::uint64_t> processed_{0};
     void update_progress_pct();
+
+    // Graceful shutdown coordination for detached coroutine
+    std::atomic<bool> finished_{false};
+    std::mutex doneMutex_;
+    std::condition_variable doneCv_;
 };
 
 } // namespace yams::daemon

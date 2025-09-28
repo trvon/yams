@@ -23,6 +23,8 @@ namespace daemon {
 using Envelope = yams::daemon::ipc::Envelope;
 namespace pb = yams::daemon::ipc;
 
+// (bindings inserted later, after ProtoBinding primary template)
+
 // Map helpers for common structures
 static void to_kv_pairs(const std::map<std::string, std::string>& in,
                         google::protobuf::RepeatedPtrField<pb::KvPair>* out) {
@@ -46,11 +48,8 @@ from_kv_pairs(const google::protobuf::RepeatedPtrField<pb::KvPair>& in) {
 static void set_string_list(const std::vector<std::string>& in,
                             google::protobuf::RepeatedPtrField<std::string>* out) {
     out->Clear();
-    out->Reserve(static_cast<int>(in.size()));
-    for (const auto& s : in) {
-        auto* elem = out->Add();
-        elem->assign(s);
-    }
+    for (const auto& s : in)
+        out->Add(std::string{s});
 }
 
 static std::vector<std::string>
@@ -165,10 +164,8 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_before_context(r.beforeContext);
         o->set_context(r.context);
         o->set_hash_query(r.hashQuery);
-        // New filtering fields
         o->set_path_pattern(r.pathPattern);
-        for (const auto& t : r.tags)
-            o->add_tags(t);
+        set_string_list(r.tags, o->mutable_tags());
         o->set_match_all_tags(r.matchAllTags);
         o->set_extension(r.extension);
         o->set_mime_type(r.mimeType);
@@ -201,9 +198,8 @@ template <> struct ProtoBinding<SearchRequest> {
         r.beforeContext = i.before_context();
         r.context = i.context();
         r.hashQuery = i.hash_query();
-        // New filtering fields (proto3 scalars default when absent)
         r.pathPattern = i.path_pattern();
-        r.tags.assign(i.tags().begin(), i.tags().end());
+        r.tags = get_string_list(i.tags());
         r.matchAllTags = i.match_all_tags();
         r.extension = i.extension();
         r.mimeType = i.mime_type();
@@ -547,8 +543,7 @@ template <> struct ProtoBinding<EmbedDocumentsRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kEmbedDocumentsRequest;
     static void set(Envelope& env, const EmbedDocumentsRequest& r) {
         auto* o = env.mutable_embed_documents_request();
-        for (const auto& h : r.documentHashes)
-            o->add_document_hashes(h);
+        set_string_list(r.documentHashes, o->mutable_document_hashes());
         o->set_model_name(r.modelName);
         o->set_normalize(r.normalize);
         o->set_batch_size(static_cast<uint32_t>(r.batchSize));
@@ -557,18 +552,14 @@ template <> struct ProtoBinding<EmbedDocumentsRequest> {
     static EmbedDocumentsRequest get(const Envelope& env) {
         const auto& i = env.embed_documents_request();
         EmbedDocumentsRequest r{};
-        r.documentHashes.reserve(i.document_hashes_size());
-        for (const auto& h : i.document_hashes())
-            r.documentHashes.push_back(h);
+        r.documentHashes = get_string_list(i.document_hashes());
         r.modelName = i.model_name();
         r.normalize = i.normalize();
-        r.batchSize = i.batch_size();
+        r.batchSize = static_cast<size_t>(i.batch_size());
         r.skipExisting = i.skip_existing();
         return r;
     }
 };
-
-// EmbedDocumentsRequest (daemon-side embedding/persist)
 
 template <> struct ProtoBinding<LoadModelRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kLoadModelRequest;
@@ -1513,12 +1504,18 @@ template <> struct ProtoBinding<AddDocumentResponse> {
         auto* o = env.mutable_add_document_response();
         o->set_hash(r.hash);
         o->set_message(r.message);
+        o->set_path(r.path);
+        o->set_documents_added(static_cast<uint64_t>(r.documentsAdded));
+        o->set_size(static_cast<uint64_t>(r.size));
     }
     static AddDocumentResponse get(const Envelope& env) {
         const auto& i = env.add_document_response();
         AddDocumentResponse r{};
         r.hash = i.hash();
         r.message = i.message();
+        r.path = i.path();
+        r.documentsAdded = static_cast<size_t>(i.documents_added());
+        r.size = static_cast<size_t>(i.size());
         return r;
     }
 };
@@ -1527,21 +1524,42 @@ template <> struct ProtoBinding<GrepResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGrepResponse;
     static void set(Envelope& env, const GrepResponse& r) {
         auto* o = env.mutable_grep_response();
-        // Best-effort: only emit lines
-        for (const auto& m : r.matches)
-            o->add_lines(m.line);
+        for (const auto& match : r.matches) {
+            auto* m = o->add_matches();
+            m->set_file(match.file);
+            m->set_line_number(match.lineNumber);
+            m->set_line(match.line);
+            for (const auto& before : match.contextBefore) {
+                m->add_context_before(before);
+            }
+            for (const auto& after : match.contextAfter) {
+                m->add_context_after(after);
+            }
+            m->set_match_type(match.matchType);
+            m->set_confidence(match.confidence);
+        }
     }
     static GrepResponse get(const Envelope& env) {
         const auto& i = env.grep_response();
         GrepResponse r{};
-        r.matches.reserve(i.lines_size());
-        for (const auto& line : i.lines()) {
-            GrepMatch m{};
-            m.line = line;
-            r.matches.emplace_back(std::move(m));
+        r.matches.reserve(i.matches_size());
+        for (const auto& m : i.matches()) {
+            GrepMatch match{};
+            match.file = m.file();
+            match.lineNumber = m.line_number();
+            match.line = m.line();
+            for (const auto& before : m.context_before()) {
+                match.contextBefore.push_back(before);
+            }
+            for (const auto& after : m.context_after()) {
+                match.contextAfter.push_back(after);
+            }
+            match.matchType = m.match_type();
+            match.confidence = m.confidence();
+            r.matches.push_back(std::move(match));
         }
         r.totalMatches = r.matches.size();
-        r.filesSearched = 0;
+        r.filesSearched = 0; // This info is not in the protobuf message
         return r;
     }
 };
@@ -1728,6 +1746,117 @@ template <> struct ProtoBinding<DeleteResponse> {
         r.dryRun = false;
         r.successCount = i.count();
         r.failureCount = 0;
+        return r;
+    }
+};
+
+// --- Session / Cat bindings (must appear after ProtoBinding primary template) ---
+template <> struct ProtoBinding<CatRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kCatRequest;
+    static void set(Envelope& env, const CatRequest& r) {
+        auto* o = env.mutable_cat_request();
+        o->set_hash(r.hash);
+        o->set_name(r.name);
+    }
+    static CatRequest get(const Envelope& env) {
+        const auto& i = env.cat_request();
+        CatRequest r{};
+        r.hash = i.hash();
+        r.name = i.name();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<CatResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kCatResponse;
+    static void set(Envelope& env, const CatResponse& r) {
+        auto* o = env.mutable_cat_response();
+        o->set_hash(r.hash);
+        o->set_name(r.name);
+        o->set_content(r.content);
+        o->set_size(r.size);
+    }
+    static CatResponse get(const Envelope& env) {
+        const auto& i = env.cat_response();
+        CatResponse r{};
+        r.hash = i.hash();
+        r.name = i.name();
+        r.content = i.content();
+        r.size = i.size();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<ListSessionsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListSessionsRequest;
+    static void set(Envelope& env, const ListSessionsRequest&) {
+        (void)env.mutable_list_sessions_request();
+    }
+    static ListSessionsRequest get(const Envelope&) { return ListSessionsRequest{}; }
+};
+
+template <> struct ProtoBinding<ListSessionsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListSessionsResponse;
+    static void set(Envelope& env, const ListSessionsResponse& r) {
+        auto* o = env.mutable_list_sessions_response();
+        set_string_list(r.session_names, o->mutable_session_names());
+        o->set_current_session(r.current_session);
+    }
+    static ListSessionsResponse get(const Envelope& env) {
+        const auto& i = env.list_sessions_response();
+        ListSessionsResponse r{};
+        r.session_names = get_string_list(i.session_names());
+        r.current_session = i.current_session();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<UseSessionRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kUseSessionRequest;
+    static void set(Envelope& env, const UseSessionRequest& r) {
+        auto* o = env.mutable_use_session_request();
+        o->set_session_name(r.session_name);
+    }
+    static UseSessionRequest get(const Envelope& env) {
+        const auto& i = env.use_session_request();
+        UseSessionRequest r{};
+        r.session_name = i.session_name();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<AddPathSelectorRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kAddPathSelectorRequest;
+    static void set(Envelope& env, const AddPathSelectorRequest& r) {
+        auto* o = env.mutable_add_path_selector_request();
+        o->set_session_name(r.session_name);
+        o->set_path(r.path);
+        set_string_list(r.tags, o->mutable_tags());
+        to_kv_pairs(r.metadata, o->mutable_metadata());
+    }
+    static AddPathSelectorRequest get(const Envelope& env) {
+        const auto& i = env.add_path_selector_request();
+        AddPathSelectorRequest r{};
+        r.session_name = i.session_name();
+        r.path = i.path();
+        r.tags = get_string_list(i.tags());
+        r.metadata = from_kv_pairs(i.metadata());
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RemovePathSelectorRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRemovePathSelectorRequest;
+    static void set(Envelope& env, const RemovePathSelectorRequest& r) {
+        auto* o = env.mutable_remove_path_selector_request();
+        o->set_session_name(r.session_name);
+        o->set_path(r.path);
+    }
+    static RemovePathSelectorRequest get(const Envelope& env) {
+        const auto& i = env.remove_path_selector_request();
+        RemovePathSelectorRequest r{};
+        r.session_name = i.session_name();
+        r.path = i.path();
         return r;
     }
 };
@@ -1944,6 +2073,31 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kCatRequest: {
+            auto v = ProtoBinding<CatRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kListSessionsRequest: {
+            auto v = ProtoBinding<ListSessionsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kUseSessionRequest: {
+            auto v = ProtoBinding<UseSessionRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kAddPathSelectorRequest: {
+            auto v = ProtoBinding<AddPathSelectorRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kRemovePathSelectorRequest: {
+            auto v = ProtoBinding<RemovePathSelectorRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kPluginScanRequest: {
             auto v = ProtoBinding<PluginScanRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -2089,6 +2243,16 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
         case Envelope::kPluginTrustListResponse: {
             auto v = ProtoBinding<PluginTrustListResponse>::get(env);
             m.payload = Response{std::in_place_type<PluginTrustListResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kCatResponse: {
+            auto v = ProtoBinding<CatResponse>::get(env);
+            m.payload = Response{std::in_place_type<CatResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kListSessionsResponse: {
+            auto v = ProtoBinding<ListSessionsResponse>::get(env);
+            m.payload = Response{std::in_place_type<ListSessionsResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

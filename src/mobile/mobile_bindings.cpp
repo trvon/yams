@@ -47,9 +47,9 @@ using yams::app::services::GrepResponse;
 using yams::app::services::ListDocumentsRequest;
 using yams::app::services::ListDocumentsResponse;
 using yams::app::services::RelatedDocument;
+using yams::app::services::RetrievedDocument;
 using yams::app::services::RetrieveDocumentRequest;
 using yams::app::services::RetrieveDocumentResponse;
-using yams::app::services::RetrievedDocument;
 using yams::app::services::StoreDocumentRequest;
 using yams::app::services::StoreDocumentResponse;
 using yams::metadata::ConnectionMode;
@@ -1052,8 +1052,7 @@ yams_mobile_search_result_stats_json(const yams_mobile_search_result_t* result) 
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-yams_mobile_string_view
-yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
+yams_mobile_string_view yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
     if (!result)
         return {nullptr, 0};
 
@@ -1135,9 +1134,7 @@ yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-
-yams_mobile_string_view
-yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
+yams_mobile_string_view yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
     if (!result)
         return {nullptr, 0};
 
@@ -1209,9 +1206,7 @@ yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-
-yams_mobile_string_view
-yams_mobile_list_result_json(const yams_mobile_list_result_t* result) {
+yams_mobile_string_view yams_mobile_list_result_json(const yams_mobile_list_result_t* result) {
     if (!result)
         return {nullptr, 0};
     return {result->json.c_str(), result->json.size()};

@@ -82,6 +82,8 @@ COPY . .
 # Configure & build (reuse Conan cache) — keep runtime lean by default
 RUN --mount=type=cache,target=/root/.conan2 \
   POLICY_TC=/tmp/yams_policy_toolchain.cmake; echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"; \
+  conan profile detect --force; \
+  sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' /root/.conan2/profiles/default || true; \
   PROFILE=./conan/profiles/host-linux-gcc; ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then PROFILE=./conan/profiles/host-linux-gcc-arm; fi; \
   if command -v g++ >/dev/null 2>&1; then GCC_MAJOR=$(g++ -dumpfullversion -dumpversion | cut -d. -f1); if [ -n "$GCC_MAJOR" ]; then sed -i -E "s/^compiler.version=.*/compiler.version=${GCC_MAJOR}/" "$PROFILE" || true; fi; fi; \
   conan install . -pr:h "$PROFILE" -pr:b=default \

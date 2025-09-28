@@ -4,6 +4,9 @@
 #include <thread>
 #include "common/daemon_preflight.h"
 #include <gtest/gtest.h>
+// Local-socket bind probe for sandboxed environments
+#include <boost/asio/local/stream_protocol.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/daemon.h>
@@ -51,6 +54,32 @@ protected:
 };
 
 TEST_F(DaemonIngestionReliabilitySmoke, IngestRetriesUntilDaemonReady) {
+    // Skip if AF_UNIX bind is forbidden
+    auto canBind = []() {
+        try {
+            boost::asio::io_context io;
+            boost::asio::local::stream_protocol::acceptor acc(io);
+            auto path = fs::path("/tmp") /
+                        (std::string("yams-ingest-probe-") + std::to_string(::getpid()) + ".sock");
+            std::error_code ec;
+            fs::remove(path, ec);
+            boost::system::error_code bec;
+            acc.open(boost::asio::local::stream_protocol::endpoint(path.string()).protocol(), bec);
+            if (bec)
+                return false;
+            acc.bind(boost::asio::local::stream_protocol::endpoint(path.string()), bec);
+            if (bec)
+                return false;
+            acc.close();
+            fs::remove(path, ec);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }();
+    if (!canBind) {
+        GTEST_SKIP() << "Skipping smoke: environment forbids AF_UNIX bind (sandbox).";
+    }
     ASSERT_TRUE(fixtures_) << "Fixture manager not initialized";
 
     yams::test::TestDataGenerator generator(4242);

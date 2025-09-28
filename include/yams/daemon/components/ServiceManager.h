@@ -317,6 +317,10 @@ public:
     }
 
 private:
+    // Invoke init completion callback exactly once in a thread-safe manner.
+    // Returns true if this call fired the callback; false if it was already invoked.
+    bool invokeInitCompleteOnce(bool success, const std::string& error);
+
     // Awaitable phase helpers (coroutine-based)
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
@@ -361,6 +365,7 @@ private:
     mutable std::mutex searchEngineMutex_;
 
     InitCompleteCallback initCompleteCallback_;
+    std::atomic<bool> initCompleteInvoked_{false};
     std::filesystem::path resolvedDataDir_;
 
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
@@ -398,6 +403,9 @@ private:
 
     // Diagnostics: track last content store init error (empty when none)
     std::string contentStoreError_;
+
+    // Idempotence: guard against double shutdown (stop() plus destructor)
+    std::atomic<bool> shutdownInvoked_{false};
 };
 
 } // namespace yams::daemon

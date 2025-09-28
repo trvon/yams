@@ -1,64 +1,137 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "meson: build",
-      "type": "shell",
-      "command": "meson compile -C ${command:meson.buildDirectory}",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    },
-    {
-      "label": "meson: test",
-      "type": "shell",
-      "command": "meson test -C ${command:meson.buildDirectory} --print-errorlogs",
-      "group": {
-        "kind": "test",
-        "isDefault": true
-      }
-    },
-    {
-      "label": "conan: install (Debug)",
-      "type": "shell",
-      "command": "conan install . -of build/debug -s build_type=Debug -b missing"
-    },
-    {
-      "label": "conan: install (Release)",
-      "type": "shell",
-      "command": "conan install . -of build/release -s build_type=Release -b missing"
-    },
-    {
-      "label": "meson: setup (Debug)",
-      "type": "shell",
-      "command": "meson setup build/debug --reconfigure --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini",
-      "problemMatcher": [
-        "$meson-gcc"
-      ]
-    },
-    {
-      "label": "meson: setup (Release)",
-      "type": "shell",
-      "command": "meson setup build/release --reconfigure --prefix /usr/local --native-file build/release/build-release/conan/conan_meson_native.ini"
-    },
-    {
-      "label": "full: clean+conan+meson (Debug)",
-      "type": "shell",
-      "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": []
-    },
-    {
-      "label": "full: clean+conan+meson+tests (Debug)",
-      "type": "shell",
-      "command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local -Dbuild-tests=true --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug && meson test -C build/debug",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": []
-    }
-  ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "meson: build",
+			"type": "shell",
+			"command": "meson compile -C ${command:meson.buildDirectory}",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "meson: test",
+			"type": "shell",
+			"command": "meson test -C ${command:meson.buildDirectory} --print-errorlogs",
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "conan: install (Debug)",
+			"type": "shell",
+			"command": "conan install . -of build/debug -s build_type=Debug -b missing"
+		},
+		{
+			"label": "conan: install (Release)",
+			"type": "shell",
+			"command": "conan install . -of build/release -s build_type=Release -b missing"
+		},
+		{
+			"label": "meson: setup (Debug)",
+			"type": "shell",
+			"command": "meson setup build/debug --reconfigure --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini",
+			"problemMatcher": [
+				"$meson-gcc"
+			]
+		},
+		{
+			"label": "meson: setup (Release)",
+			"type": "shell",
+			"command": "meson setup build/release --reconfigure --prefix /usr/local --native-file build/release/build-release/conan/conan_meson_native.ini"
+		},
+		{
+			"label": "full: clean+conan+meson (Debug)",
+			"type": "shell",
+			"command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "full: clean+conan+meson+tests (Debug)",
+			"type": "shell",
+			"command": "rm -rf build/debug && conan install . -of build/debug -s build_type=Debug -b missing && meson setup build/debug --prefix /usr/local -Dbuild-tests=true --native-file build/debug/build-debug/conan/conan_meson_native.ini && meson compile -C build/debug && meson test -C build/debug",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build (Meson Debug)",
+			"type": "shell",
+			"command": "meson compile -C build/debug",
+			"problemMatcher": [
+				"$meson-gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Test (Meson Debug)",
+			"type": "shell",
+			"command": "meson test -C build/debug --print-errorlogs --suite integration",
+			"group": "test"
+		},
+		{
+			"label": "meson: compile -C build/debug",
+			"type": "shell",
+			"command": "meson compile -C build/debug",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "regen-protos + rebuild (Debug)",
+			"type": "shell",
+			"command": "meson compile -C build/debug && true"
+		},
+		{
+			"label": "meson: regenerate protobuf + rebuild (Debug)",
+			"type": "shell",
+			"command": "meson compile -C build/debug ipc_envelope_pb && meson compile -C build/debug"
+		},
+		{
+			"label": "build (ninja default)",
+			"type": "shell",
+			"command": "ninja -C builddir",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "meson: build (explicit)",
+			"type": "shell",
+			"command": "meson compile -C build/debug",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "meson: tests (explicit)",
+			"type": "shell",
+			"command": "meson test -C build/debug --print-errorlogs",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "test"
+		},
+		{
+			"label": "meson: compile (debug)",
+			"type": "shell",
+			"command": "meson compile -C build/debug",
+			"group": "build"
+		},
+		{
+			"label": "meson: compile (debug)",
+			"type": "shell",
+			"command": "meson compile -C build/debug",
+			"group": "build"
+		}
+	]
 }

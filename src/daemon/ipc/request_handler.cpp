@@ -1026,19 +1026,22 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             co_return Result<void>();
         }
 
-        // We have a complete response. For control/health requests, emit a single non-chunked
-        // frame to preserve classic unary semantics; otherwise, write header + immediate final
-        // chunk (one-shot streaming).
+        // We have a complete response. Honor the client's streaming expectation:
+        // - If the client does NOT expect streaming or this is a control/health request,
+        //   emit a single non-chunked frame (classic unary semantics).
+        // - Otherwise, write header + immediate final chunk (one-shot streaming) so clients
+        //   consuming streaming APIs can start reading as soon as the header is available.
         auto& response = response_opt.value();
         const bool is_control = std::holds_alternative<ShutdownRequest>(request) ||
                                 std::holds_alternative<PingRequest>(request) ||
                                 std::holds_alternative<StatusRequest>(request) ||
                                 std::holds_alternative<GetStatsRequest>(request) ||
                                 std::holds_alternative<PrepareSessionRequest>(request);
-        if (is_control) {
-            spdlog::debug("handle_streaming_request: writing classic unary for control type={} "
-                          "(request_id={})",
-                          static_cast<int>(getMessageType(response)), request_id);
+        if (!client_expects_streaming || is_control) {
+            spdlog::debug("handle_streaming_request: writing classic unary (request_id={} type={} "
+                          "expects_streaming={} is_control={})",
+                          request_id, static_cast<int>(getMessageType(response)),
+                          client_expects_streaming, is_control);
             // Frame a complete non-chunked message and send with write_message helper
             Message response_msg;
             response_msg.version = PROTOCOL_VERSION;
@@ -1095,39 +1098,6 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                               request_id, chk_res.error().message);
                 co_return chk_res.error();
             }
-        }
-
-        // Write header frame (no payload)
-        if (fsm) {
-            try {
-                fsm_helpers::require_can_write(*fsm, "handle_streaming_request:write_header");
-            } catch (const std::exception& ex) {
-                spdlog::error("FSM write guard failed before header write (request_id={}): {}",
-                              request_id, ex.what());
-                co_return Error{ErrorCode::InternalError,
-                                std::string{"Invalid state before header write: "} + ex.what()};
-            }
-        }
-        {
-            int mt = static_cast<int>(getMessageType(response));
-            spdlog::debug("handle_streaming_request: writing header for request_id={} type={}",
-                          request_id, mt);
-        }
-        auto hdr_res = co_await write_header(socket, response, request_id, true, fsm);
-        if (!hdr_res) {
-            spdlog::debug("handle_streaming_request: write_header failed (request_id={}): {}",
-                          request_id, hdr_res.error().message);
-            co_return hdr_res.error();
-        }
-        if (fsm)
-            fsm->on_stream_next(false);
-
-        // Write final chunk with the same response payload
-        auto chk_res = co_await write_chunk(socket, response, request_id, true, true, fsm);
-        if (!chk_res) {
-            spdlog::debug("handle_streaming_request: write_chunk failed (request_id={}): {}",
-                          request_id, chk_res.error().message);
-            co_return chk_res.error();
         }
 
         // Signal FSM that response has completed
