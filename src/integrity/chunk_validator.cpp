@@ -67,7 +67,7 @@ ValidationReport ChunkValidator::validateManifest(
                                          .isValid = false,
                                          .errorMessage = "Failed to retrieve chunk: " +
                                                          chunkResult.error().message,
-                    .chunkOffset = static_cast<size_t>(chunkRef.offset),
+                                         .chunkOffset = static_cast<size_t>(chunkRef.offset),
                                          .chunkSize = chunkRef.size,
                                          .validationTime = std::chrono::milliseconds(0)};
 
@@ -95,7 +95,7 @@ ValidationReport ChunkValidator::validateManifest(
                                          .errorMessage =
                                              yamsfmt::format("Size mismatch: expected {}, got {}",
                                                              chunkRef.size, chunkData.size()),
-                    .chunkOffset = static_cast<size_t>(chunkRef.offset),
+                                         .chunkOffset = static_cast<size_t>(chunkRef.offset),
                                          .chunkSize = chunkRef.size,
                                          .validationTime = std::chrono::milliseconds(0)};
 
