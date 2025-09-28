@@ -5,6 +5,7 @@ integration_smoke_srcs = files(
   'cli_config_smoke_test.cpp',
   'daemon_embeddings_regression_smoke_test.cpp',
   'daemon_ingestion_reliability_smoke_test.cpp',
+  'mcp_doctor_positive_smoke_test.cpp',
   'integrity_auto_repair_smoke_test.cpp',
   'smoke_link_test.cpp',
   'storage_compression_policy_builder_smoke_test.cpp',

@@ -1,3 +1,4 @@
+#include <boost/asio/local/stream_protocol.hpp>
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -8,6 +9,7 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/socket_utils.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
@@ -3849,47 +3851,76 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
 boost::asio::awaitable<Result<MCPDoctorResponse>>
 MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     (void)req;
-    // Fetch daemon status first
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
+    // Resolve socket and probe connectivity first so we can return structured info even if daemon
+    // is unreachable.
+    std::filesystem::path sock = daemon_client_config_.socketPath;
+    if (sock.empty()) {
+        try {
+            sock = yams::daemon::socket_utils::resolve_socket_path_config_first();
+            daemon_client_config_.socketPath = sock;
+        } catch (...) {
+        }
     }
-    auto sres = co_await daemon_client_->status();
-    if (!sres)
-        co_return sres.error();
-    const auto& s = sres.value();
+    bool socketExists = false;
+    bool connectable = false;
+    try {
+        std::error_code ec;
+        socketExists = !sock.empty() && std::filesystem::exists(sock, ec) && !ec;
+        auto exec = co_await boost::asio::this_coro::executor;
+        boost::asio::local::stream_protocol::socket probe(exec);
+        if (!sock.empty()) {
+            boost::system::error_code bec;
+            probe.connect(boost::asio::local::stream_protocol::endpoint(sock.string()), bec);
+            connectable = !bec;
+            probe.close();
+        }
+    } catch (...) {
+    }
+
+    // Try daemon status; tolerate failure and still return a response with diagnostics
+    yams::daemon::StatusResponse s{};
+    bool haveStatus = false;
+    if (auto ensure = ensureDaemonClient(); ensure) {
+        auto sres = co_await daemon_client_->status();
+        if (sres) {
+            s = sres.value();
+            haveStatus = true;
+        }
+    }
 
     MCPDoctorResponse out;
     std::vector<std::string> issues;
     json details;
-    details["overallStatus"] = s.overallStatus;
-    details["lifecycleState"] = s.lifecycleState;
-    details["lastError"] = s.lastError;
-    details["readiness"] = s.readinessStates;
-    details["counters"] = s.requestCounts;
-    // Echo resolved socket path to help clients verify MCP/daemon alignment
-    try {
-        details["socketPath"] = daemon_client_config_.socketPath.string();
-    } catch (...) {
-    }
+    details["overallStatus"] = haveStatus ? s.overallStatus : std::string("unknown");
+    details["lifecycleState"] = haveStatus ? s.lifecycleState : std::string("unknown");
+    details["lastError"] = haveStatus ? s.lastError : std::string("unreachable");
+    if (haveStatus)
+        details["readiness"] = s.readinessStates;
+    if (haveStatus)
+        details["counters"] = s.requestCounts;
+    details["socketPath"] = sock.empty() ? std::string("") : sock.string();
+    details["socketExists"] = socketExists;
+    details["connectable"] = connectable;
 
-    if (!s.running) {
+    if (!haveStatus || !s.running) {
         issues.push_back("daemon_not_running");
     }
-    if (!s.ready) {
+    if (haveStatus && !s.ready) {
         issues.push_back("daemon_not_ready");
         for (const auto& [k, v] : s.readinessStates) {
             if (!v)
                 issues.push_back(std::string("subsystem_not_ready:") + k);
         }
     }
-    if (s.requestCounts.count("post_ingest_queued") &&
+    if (haveStatus && s.requestCounts.count("post_ingest_queued") &&
         s.requestCounts.at("post_ingest_queued") > 1000) {
         issues.push_back("post_ingest_backlog_high");
     }
-    if (s.requestCounts.count("worker_queued") && s.requestCounts.at("worker_queued") > 1000) {
+    if (haveStatus && s.requestCounts.count("worker_queued") &&
+        s.requestCounts.at("worker_queued") > 1000) {
         issues.push_back("worker_queue_high");
     }
-    if (s.readinessStates.count("vector_embeddings_available") &&
+    if (haveStatus && s.readinessStates.count("vector_embeddings_available") &&
         !s.readinessStates.at("vector_embeddings_available")) {
         issues.push_back("vector_embeddings_unavailable");
     }

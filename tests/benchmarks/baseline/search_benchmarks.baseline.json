@@ -1,0 +1,9 @@
+{
+  "summary": {
+    "ExactMatch_1K": { "latest": 2000.0, "unit": "ms" },
+    "BKTree_Construction_256": { "latest": 3000.0, "unit": "ms" },
+    "BKTree_Construction_4096": { "latest": 5000.0, "unit": "ms" },
+    "QueryParser_Simple": { "latest": 2000.0, "unit": "ms" },
+    "QueryParser_Complex": { "latest": 3000.0, "unit": "ms" }
+  }
+}

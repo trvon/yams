@@ -341,6 +341,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
 # Prefer Meson-native subdirs over shell discovery for services integration tests
 subdir('integration/services')
 
+# Benchmarks (standalone executables, not part of "meson test")
+subdir('benchmarks')
+
 # Stress tests can be heavy; register but mark as long-running via suite name
 if all_stress.length() > 0
   stress_exe = executable('yams_stress_tests', all_stress + test_main,

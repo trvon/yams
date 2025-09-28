@@ -119,6 +119,8 @@ unit_mcp = files(
   'mcp/stdio_transport_test.cpp',
   'mcp/websocket_transport_test.cpp',
   'mcp/mcp_socket_resolution_test.cpp',
+  'mcp/mcp_doctor_flags_test.cpp',
+  'mcp/mcp_add_disconnect_test.cpp',
 )
 
 unit_metadata = files(

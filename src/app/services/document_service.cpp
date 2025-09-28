@@ -710,7 +710,6 @@ public:
         }
 
         CatDocumentResponse out;
-        CatDocumentResponse out;
         out.hash = hash;
         out.name = name;
         out.content = oss.str();
