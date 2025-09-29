@@ -84,7 +84,7 @@ TEST_F(ModelManagementTest, DISABLED_GetModel) {
     auto result = registry_->getModel("test_model_1");
     EXPECT_TRUE(result.has_value());
     EXPECT_EQ(result.value().model_id, "test_model_1");
-    EXPECT_EQ(result.value().embedding_dimension, 384);
+    EXPECT_EQ(result.value().embedding_dimension, 384u);
 }
 
 // Test get models by dimension
@@ -97,7 +97,7 @@ TEST_F(ModelManagementTest, DISABLED_GetModelsByDimension) {
 
     auto result = registry_->getModelsByDimension(384);
     EXPECT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().size(), 2);
+    EXPECT_EQ(result.value().size(), 2u);
 
     auto result2 = registry_->getModelsByDimension(768);
     EXPECT_TRUE(result2.has_value());
@@ -153,11 +153,11 @@ TEST_F(ModelManagementTest, DISABLED_RegistryStatistics) {
 
     auto stats = registry_->getStats();
 
-    EXPECT_EQ(stats.total_models, 3);
-    EXPECT_EQ(stats.available_models, 3);
-    EXPECT_EQ(stats.models_by_dimension[384], 2);
-    EXPECT_EQ(stats.models_by_dimension[768], 1);
-    EXPECT_GT(stats.total_model_size_bytes, 0);
+    EXPECT_EQ(stats.total_models, 3u);
+    EXPECT_EQ(stats.available_models, 3u);
+    EXPECT_EQ(stats.models_by_dimension[384], 2u);
+    EXPECT_EQ(stats.models_by_dimension[768], 1u);
+    EXPECT_GT(stats.total_model_size_bytes, 0u);
 }
 
 // Test model compatibility

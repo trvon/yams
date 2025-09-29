@@ -216,28 +216,6 @@ template <> struct ProtoBinding<SearchRequest> {
     }
 };
 
-template <> struct ProtoBinding<AddRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kAddRequest;
-    static void set(Envelope& env, const AddRequest& r) {
-        auto* o = env.mutable_add_request();
-        o->set_path(r.path.string());
-        set_string_list(r.tags, o->mutable_tags());
-        to_kv_pairs(r.metadata, o->mutable_metadata());
-        o->set_recursive(r.recursive);
-        o->set_include_pattern(r.includePattern);
-    }
-    static AddRequest get(const Envelope& env) {
-        const auto& i = env.add_request();
-        AddRequest r{};
-        r.path = i.path();
-        r.tags = get_string_list(i.tags());
-        r.metadata = from_kv_pairs(i.metadata());
-        r.recursive = i.recursive();
-        r.includePattern = i.include_pattern();
-        return r;
-    }
-};
-
 template <> struct ProtoBinding<GetRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGetRequest;
     static void set(Envelope& env, const GetRequest& r) {
@@ -1965,11 +1943,6 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
         // Additional requests
         case Envelope::kSearchRequest: {
             auto v = ProtoBinding<SearchRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kAddRequest: {
-            auto v = ProtoBinding<AddRequest>::get(env);
             m.payload = Request{std::move(v)};
             break;
         }

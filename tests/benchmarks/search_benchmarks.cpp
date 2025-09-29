@@ -98,7 +98,15 @@ protected:
     std::string query_;
 };
 
+} // namespace yams::benchmark
+
 // --- Main Runner ---
+
+using yams::benchmark::BenchmarkBase;
+using yams::benchmark::BKTreeConstructionBenchmark;
+using yams::benchmark::QueryParserBenchmark;
+using yams::benchmark::SearchBenchmark;
+using yams::test::BenchmarkTracker;
 
 int main(int argc, char** argv) {
     BenchmarkBase::Config config;
@@ -119,7 +127,18 @@ int main(int argc, char** argv) {
     std::cout << "YAMS Search Performance Benchmarks\n";
     std::cout << "====================================\n\n";
 
-    test::BenchmarkTracker tracker("search_benchmarks.json");
+    std::filesystem::path outDir = "bench_results";
+    std::error_code ec_mkdir;
+    std::filesystem::create_directories(outDir, ec_mkdir);
+    if (ec_mkdir) {
+        std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
+                  << std::endl;
+    }
+    if (config.output_file.empty()) {
+        config.output_file = (outDir / "search_benchmarks.json").string();
+    }
+
+    BenchmarkTracker tracker(outDir / "search_benchmarks.json");
     std::vector<std::unique_ptr<BenchmarkBase>> benchmarks;
 
     // Search benchmarks
@@ -139,7 +158,7 @@ int main(int argc, char** argv) {
 
     for (auto& benchmark : benchmarks) {
         auto result = benchmark->run();
-        test::BenchmarkTracker::BenchmarkResult trackerResult;
+        BenchmarkTracker::BenchmarkResult trackerResult;
         trackerResult.name = result.name;
         trackerResult.value = result.duration_ms;
         trackerResult.unit = "ms";
@@ -148,13 +167,11 @@ int main(int argc, char** argv) {
         tracker.recordResult(trackerResult);
     }
 
-    tracker.generateReport("search_benchmark_report.json");
-    tracker.generateMarkdownReport("search_benchmark_report.md");
+    tracker.generateReport(outDir / "search_benchmark_report.json");
+    tracker.generateMarkdownReport(outDir / "search_benchmark_report.md");
 
     std::cout << "\n====================================\n";
     std::cout << "Benchmark complete. Reports generated.\n";
 
     return 0;
 }
-
-} // namespace yams::benchmark

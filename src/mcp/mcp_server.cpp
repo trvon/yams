@@ -233,8 +233,9 @@ StdioTransport::StdioTransport() {
         if (const char* ct = std::getenv("YAMS_MCP_CONTENT_TYPE"); ct && *ct) {
             contentTypeHeader_ = ct;
         } else {
-            // Default to LSP-compatible header for broad client compatibility
-            contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
+            // Default to a widely compatible JSON content type. Some MCP clients expect
+            // 'application/json' and will ignore 'application/vscode-jsonrpc'.
+            contentTypeHeader_ = "application/json; charset=utf-8";
         }
     } catch (...) {
         contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
@@ -3372,6 +3373,20 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             daemon_req.metadata[key] = value.dump();
         }
     }
+    // Validate request before we ever contact the daemon. The dispatcher/ingest pipeline now
+    // expects either a resolved path or (content + name); enforcing it here avoids enqueueing
+    // malformed tasks that previously triggered ingest crashes.
+    if (daemon_req.path.empty()) {
+        if (daemon_req.content.empty()) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            "Provide either 'path' or 'content' + 'name'"};
+        }
+        if (daemon_req.name.empty()) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            "Provide 'name' when sending inline 'content'"};
+        }
+    }
+
     // Single-path daemon call with bounded retries; always use streaming path
     {
         using namespace std::chrono_literals;

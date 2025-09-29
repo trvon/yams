@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -12,12 +13,15 @@
 #include <boost/system/error_code.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/mcp/mcp_server.h>
 
 using namespace std::chrono_literals;
 using yams::daemon::ClientConfig;
 using yams::daemon::DaemonClient;
 using yams::daemon::Request;
 using yams::daemon::Response;
+using yams::mcp::ITransport;
+using yams::mcp::MCPServer;
 
 namespace {
 
@@ -44,6 +48,21 @@ static bool canBindUnixSocketHere() {
         return false;
     }
 }
+
+namespace {
+class NullTransport : public ITransport {
+public:
+    yams::mcp::MessageResult receive() override {
+        return yams::Error{yams::ErrorCode::NetworkError, "closed"};
+    }
+    void send(const nlohmann::json&) override {}
+    yams::mcp::TransportState getState() const override {
+        return yams::mcp::TransportState::Connected;
+    }
+    bool isConnected() const override { return true; }
+    void close() override {}
+};
+} // namespace
 
 TEST(IpcConformanceIT, CatAndCancelAndSessions) {
     if (!canBindUnixSocketHere()) {
@@ -113,4 +132,51 @@ TEST(IpcConformanceIT, CatAndCancelAndSessions) {
     // We don't assert counts; only conformance of the IPC roundtrip
 }
 
+// Phase 1: Unreachable socket returns actionable error (tolerant envelope)
+TEST(IpcConformanceIT, UnreachableSocketErrorShape) {
+    if (!canBindUnixSocketHere()) {
+        GTEST_SKIP() << "Skipping IPC unreachable: AF_UNIX not available.";
+    }
+    ClientConfig cc;
+    cc.socketPath = std::filesystem::path("/tmp") /
+                    (std::string("yams-no-listener-") + std::to_string(::getpid()) + ".sock");
+    cc.autoStart = false;
+    cc.requestTimeout = 500ms;
+    DaemonClient client(cc);
+
+    // A simple ping should fail quickly with a transport/connect error, not crash
+    auto res = yams::test_async::res(client.ping(), 1s);
+    ASSERT_FALSE(res);
+    // Minimal assertion: transport/connect failure without crashing. Hints are optional.
+}
+
+// PBI028-45-MCP-PARITY-MOVE: Parity test moved to smoke shard to reduce
+// interference from services daemon lifecycle and avoid flakiness here.
+
+// Final lightweight stress: ping loop to ensure stable IPC handling.
+TEST(IpcConformanceIT, StressTail) {
+    if (!canBindUnixSocketHere()) {
+        GTEST_SKIP() << "Skipping IPC stress: AF_UNIX not available.";
+    }
+    yams::test::DaemonHarness h;
+    ASSERT_TRUE(h.start());
+    ClientConfig cc;
+    cc.socketPath = h.socketPath();
+    cc.autoStart = false;
+    cc.requestTimeout = 2s;
+    DaemonClient client(cc);
+    auto stress_iters = []() {
+        if (const char* s = std::getenv("YAMS_STRESS_ITERS")) {
+            int v = std::atoi(s);
+            if (v > 0 && v < 100000)
+                return v;
+        }
+        return 100;
+    }();
+    for (int i = 0; i < stress_iters; ++i) {
+        auto pr = yams::test_async::res(client.ping(), 1s);
+        ASSERT_TRUE(pr) << (pr ? "" : pr.error().message);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
 } // namespace

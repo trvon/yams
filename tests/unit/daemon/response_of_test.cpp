@@ -14,7 +14,7 @@ TEST_F(ResponseOfTest, CompileTimeMappings) {
     static_assert(std::is_same_v<ResponseOfT<SearchRequest>, SearchResponse>);
 
     // Document operations
-    static_assert(std::is_same_v<ResponseOfT<AddRequest>, AddResponse>);
+    static_assert(std::is_same_v<ResponseOfT<AddDocumentRequest>, AddDocumentResponse>);
     static_assert(std::is_same_v<ResponseOfT<GetRequest>, GetResponse>);
     static_assert(std::is_same_v<ResponseOfT<DeleteRequest>, DeleteResponse>);
 
@@ -183,7 +183,7 @@ TEST_F(ResponseOfTest, AllRequestsHaveMapping) {
 
     EXPECT_TRUE(testMapping(SearchRequest{
         "", 10, false, false, 0.7, {}, "keyword", false, false, false, false, false, 0, 0, 0, ""}));
-    EXPECT_TRUE(testMapping(AddRequest{}));
+    EXPECT_TRUE(testMapping(AddDocumentRequest{}));
     EXPECT_TRUE(testMapping(GetRequest{}));
     EXPECT_TRUE(testMapping(DeleteRequest{}));
     EXPECT_TRUE(testMapping(StatusRequest{}));

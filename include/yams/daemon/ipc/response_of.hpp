@@ -12,9 +12,6 @@ struct ResponseOf; // primary template left undefined to force specializations
 template <> struct ResponseOf<SearchRequest> {
     using type = SearchResponse;
 };
-template <> struct ResponseOf<AddRequest> {
-    using type = AddResponse;
-};
 template <> struct ResponseOf<GetRequest> {
     using type = GetResponse;
 };

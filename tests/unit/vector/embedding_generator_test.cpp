@@ -101,12 +101,12 @@ TEST_F(EmbeddingGeneratorTest, InitializationAndBasicInfo) {
     EXPECT_TRUE(generator_->isInitialized());
     EXPECT_FALSE(generator_->hasError());
 
-    EXPECT_EQ(generator_->getEmbeddingDimension(), 384);
-    EXPECT_EQ(generator_->getMaxSequenceLength(), 512); // MiniLM-L6-v2 supports 512 tokens
+    EXPECT_EQ(generator_->getEmbeddingDimension(), 384u);
+    EXPECT_EQ(generator_->getMaxSequenceLength(), 512u); // MiniLM-L6-v2 supports 512 tokens
 
     auto& config = generator_->getConfig();
     EXPECT_EQ(config.model_name, "all-MiniLM-L6-v2");
-    EXPECT_EQ(config.embedding_dim, 384);
+    EXPECT_EQ(config.embedding_dim, 384u);
 }
 
 TEST_F(EmbeddingGeneratorTest, MPNetModelTest) {
@@ -384,16 +384,16 @@ TEST_F(EmbeddingGeneratorTest, StatisticsTracking) {
         return;
     }
 
-    EXPECT_EQ(final_stats.total_texts_processed.load(), 5); // 2 single + 3 batch
-    EXPECT_GT(final_stats.total_tokens_processed.load(), 0);
-    EXPECT_GT(final_stats.total_inference_time.load(), 0);
-    EXPECT_EQ(final_stats.batch_count.load(), 1);
+    EXPECT_EQ(final_stats.total_texts_processed.load(), 5u); // 2 single + 3 batch
+    EXPECT_GT(final_stats.total_tokens_processed.load(), 0u);
+    EXPECT_GT(final_stats.total_inference_time.load(), 0u);
+    EXPECT_EQ(final_stats.batch_count.load(), 1u);
     EXPECT_GT(final_stats.throughput_texts_per_sec.load(), 0.0);
 
     // Reset stats
     generator_->resetStats();
     auto reset_stats = generator_->getStats();
-    EXPECT_EQ(reset_stats.total_texts_processed.load(), 0);
+    EXPECT_EQ(reset_stats.total_texts_processed.load(), 0u);
 }
 
 TEST_F(EmbeddingGeneratorTest, TextValidation) {
@@ -415,12 +415,12 @@ TEST_F(EmbeddingGeneratorTest, TokenEstimation) {
     ASSERT_TRUE(generator_->initialize());
 
     // Test token count estimation
-    EXPECT_GT(generator_->estimateTokenCount("hello world"), 0);
+    EXPECT_GT(generator_->estimateTokenCount("hello world"), 0u);
     EXPECT_GT(generator_->estimateTokenCount("A longer sentence with more words"),
               generator_->estimateTokenCount("short"));
 
     // Empty text
-    EXPECT_GE(generator_->estimateTokenCount(""), 1); // Should return at least 1
+    EXPECT_GE(generator_->estimateTokenCount(""), 1u); // Should return at least 1
 }
 
 TEST_F(EmbeddingGeneratorTest, ModelInformation) {

@@ -46,7 +46,7 @@ TEST_F(ReferenceCounterTest, BasicIncrementDecrement) {
     // Initially, reference count should be 0
     auto count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 0);
+    EXPECT_EQ(count.value(), 0u);
 
     // Increment
     auto result = refCounter->increment(hash, blockSize);
@@ -54,7 +54,7 @@ TEST_F(ReferenceCounterTest, BasicIncrementDecrement) {
 
     count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 1);
+    EXPECT_EQ(count.value(), 1u);
 
     // Increment again
     result = refCounter->increment(hash, blockSize);
@@ -62,7 +62,7 @@ TEST_F(ReferenceCounterTest, BasicIncrementDecrement) {
 
     count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 2);
+    EXPECT_EQ(count.value(), 2u);
 
     // Decrement
     result = refCounter->decrement(hash);
@@ -70,7 +70,7 @@ TEST_F(ReferenceCounterTest, BasicIncrementDecrement) {
 
     count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 1);
+    EXPECT_EQ(count.value(), 1u);
 
     // Decrement to zero
     result = refCounter->decrement(hash);
@@ -549,7 +549,7 @@ TEST_F(GarbageCollectorTest, BasicCollection) {
     const auto& stats = result.value();
     EXPECT_EQ(stats.blocksScanned, 3); // 3 unreferenced blocks
     EXPECT_EQ(stats.blocksDeleted, 3);
-    EXPECT_GT(stats.bytesReclaimed, 0);
+    EXPECT_GT(stats.bytesReclaimed, 0u);
     EXPECT_TRUE(stats.errors.empty());
 
     // Verify unreferenced blocks were deleted
@@ -590,8 +590,8 @@ TEST_F(GarbageCollectorTest, DryRunCollection) {
     ASSERT_TRUE(result.has_value());
 
     const auto& stats = result.value();
-    EXPECT_EQ(stats.blocksScanned, 3);
-    EXPECT_EQ(stats.blocksDeleted, 3); // Counted but not actually deleted
+    EXPECT_EQ(stats.blocksScanned, 3u);
+    EXPECT_EQ(stats.blocksDeleted, 3u); // Counted but not actually deleted
 
     // Verify blocks still exist (dry run)
     for (int i = 0; i < 3; ++i) {
@@ -683,8 +683,8 @@ TEST_F(GarbageCollectorTest, ConcurrentCollectionPrevented) {
 TEST_F(GarbageCollectorTest, GetLastStats) {
     // Initially empty stats
     auto stats = gc->getLastStats();
-    EXPECT_EQ(stats.blocksScanned, 0);
-    EXPECT_EQ(stats.blocksDeleted, 0);
+    EXPECT_EQ(stats.blocksScanned, 0u);
+    EXPECT_EQ(stats.blocksDeleted, 0u);
 
     // Run collection
     GCOptions options{
@@ -694,6 +694,6 @@ TEST_F(GarbageCollectorTest, GetLastStats) {
 
     // Get updated stats
     stats = gc->getLastStats();
-    EXPECT_GE(stats.blocksScanned, 0);
+    EXPECT_GE(stats.blocksScanned, 0u);
     EXPECT_GE(stats.duration.count(), 0); // Duration can be 0 for very fast operations
 }

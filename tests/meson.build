@@ -159,7 +159,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   include_directories: incs,
   dependencies: [gtest_dep, test_deps],
   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  link_with: yams_unit_objs,
+  # Ensure all test objects from the static library are linked on all platforms.
+  # macOS in particular drops unreferenced objects without whole-archive semantics.
+  link_whole: yams_unit_objs,
   install: false,
 )
   # Give the aggregated unit binary more time; default 30s was tight on CI/macOS

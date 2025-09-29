@@ -199,6 +199,8 @@ private:
     class BenchName##Benchmark : public ClassName {                                                \
     public:                                                                                        \
         BenchName##Benchmark() : ClassName(#BenchName) {}                                          \
+        explicit BenchName##Benchmark(const ::yams::benchmark::BenchmarkBase::Config& cfg)         \
+            : ClassName(#BenchName, cfg) {}                                                        \
                                                                                                    \
     protected:                                                                                     \
         size_t runIteration() override;                                                            \

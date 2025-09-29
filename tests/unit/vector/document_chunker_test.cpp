@@ -189,7 +189,7 @@ TEST_F(DocumentChunkerTest, SentenceBasedChunker_SingleSentence) {
     std::string single_sentence = "This is just one sentence.";
     auto chunks = chunker.chunkDocument(single_sentence, "doc_hash");
 
-    ASSERT_EQ(chunks.size(), 1);
+    ASSERT_EQ(chunks.size(), 1u);
     EXPECT_EQ(chunks[0].content, single_sentence);
 }
 
@@ -207,7 +207,7 @@ TEST_F(DocumentChunkerTest, SentenceBasedChunker_LongSentence) {
     auto chunks = chunker.chunkDocument(long_sentence, "doc_hash");
 
     // Long sentence should be split even if it means breaking sentences
-    ASSERT_GT(chunks.size(), 1);
+    ASSERT_GT(chunks.size(), 1u);
 }
 
 // =============================================================================
@@ -243,7 +243,7 @@ TEST_F(DocumentChunkerTest, ParagraphBasedChunker_SingleParagraph) {
         "This is a single paragraph with multiple sentences. But no paragraph breaks.";
     auto chunks = chunker.chunkDocument(single_para, "doc_hash");
 
-    ASSERT_EQ(chunks.size(), 1);
+    ASSERT_EQ(chunks.size(), 1u);
     EXPECT_EQ(chunks[0].content, single_para);
 }
 
@@ -310,8 +310,8 @@ TEST_F(DocumentChunkerTest, SlidingWindowChunker_BasicChunking) {
         // All chunks except last should be reasonable size
         // Very generous tolerance when word preservation is enabled (can be 2x target)
         if (i < chunks.size() - 1) {
-            EXPECT_GE(chunk.content.size(), 20);  // At least 40% of 50
-            EXPECT_LE(chunk.content.size(), 120); // Up to 240% of 50 for word boundaries
+            EXPECT_GE(chunk.content.size(), 20u);  // At least 40% of 50
+            EXPECT_LE(chunk.content.size(), 120u); // Up to 240% of 50 for word boundaries
         }
 
         // Verify reasonable chunk positioning (overlapping or reasonably adjacent)

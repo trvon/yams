@@ -10,6 +10,7 @@ integration_smoke_srcs = files(
   'smoke_link_test.cpp',
   'storage_compression_policy_builder_smoke_test.cpp',
   'storage_compression_smoke_test.cpp',
+  'pdf_search_smoke_test.cpp',
 )
 
 integ_exe = executable('yams_integration_smoke_tests', integration_smoke_srcs + files('test_main_smoke.cpp'),
@@ -23,5 +24,5 @@ test('integration_smoke', integ_exe,
   suite: ['integration', 'isolated'],
   env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
   is_parallel: false,
-  timeout: 120,
+  timeout: get_option('integration-smoke-timeout'),
 )

@@ -246,53 +246,6 @@ struct SearchRequest {
     }
 };
 
-struct AddRequest {
-    std::filesystem::path path;
-    std::vector<std::string> tags;
-    std::map<std::string, std::string> metadata;
-    bool recursive = false;
-    std::string includePattern;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << path.string() << tags << metadata << recursive << includePattern;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<AddRequest> deserialize(Deserializer& deser) {
-        AddRequest req;
-
-        auto pathResult = deser.readString();
-        if (!pathResult)
-            return pathResult.error();
-        req.path = pathResult.value();
-
-        auto tagsResult = deser.readStringVector();
-        if (!tagsResult)
-            return tagsResult.error();
-        req.tags = std::move(tagsResult.value());
-
-        auto metadataResult = deser.readStringMap();
-        if (!metadataResult)
-            return metadataResult.error();
-        req.metadata = std::move(metadataResult.value());
-
-        auto recursiveResult = deser.template read<bool>();
-        if (!recursiveResult)
-            return recursiveResult.error();
-        req.recursive = recursiveResult.value();
-
-        auto patternResult = deser.readString();
-        if (!patternResult)
-            return patternResult.error();
-        req.includePattern = std::move(patternResult.value());
-
-        return req;
-    }
-};
-
 struct GetRequest {
     // Target selection (basic)
     std::string hash;
@@ -2181,9 +2134,9 @@ struct RemovePathSelectorRequest;
 
 // Variant type for all requests
 using Request =
-    std::variant<SearchRequest, AddRequest, GetRequest, GetInitRequest, GetChunkRequest,
-                 GetEndRequest, DeleteRequest, ListRequest, ShutdownRequest, StatusRequest,
-                 PingRequest, GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
+    std::variant<SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest,
+                 DeleteRequest, ListRequest, ShutdownRequest, StatusRequest, PingRequest,
+                 GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
                  UnloadModelRequest, ModelStatusRequest, AddDocumentRequest, GrepRequest,
                  UpdateDocumentRequest, DownloadRequest, GetStatsRequest, PrepareSessionRequest,
                  EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest, PluginUnloadRequest,

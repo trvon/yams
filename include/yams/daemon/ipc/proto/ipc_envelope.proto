@@ -46,14 +46,6 @@ message SearchRequest {
   string indexed_before = 30;
 }
 
-message AddRequest {
-  string path = 1;
-  repeated string tags = 2;
-  repeated KvPair metadata = 3;
-  bool recursive = 4;
-  string include_pattern = 5;
-}
-
 message GetRequest {
   string hash = 1;
   string name = 2;
@@ -444,7 +436,8 @@ message GrepResponse {
   // Preferred field
   repeated GrepMatch matches = 1;
   // Backward compatibility for legacy clients/servers (deprecated)
-  repeated string lines = 2;
+  // Use bytes to avoid libprotobuf UTF-8 validation failures when binary data is present.
+  repeated bytes lines = 2;
 }
 message UpdateDocumentResponse { bool updated = 1; }
 message EmbedDocumentsResponse {
@@ -528,7 +521,6 @@ message Envelope {
     // Requests
     PingRequest ping_request = 10;
     SearchRequest search_request = 11;
-    AddRequest add_request = 12;
     GetRequest get_request = 13;
     GetInitRequest get_init_request = 14;
     GetChunkRequest get_chunk_request = 15;

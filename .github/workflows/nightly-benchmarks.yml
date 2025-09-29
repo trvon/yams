@@ -1,0 +1,175 @@
+name: Nightly Benchmarks
+
+on:
+  schedule:
+    - cron: '0 7 * * *' # 07:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-linux:
+    name: Benchmarks (Linux x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BUILD_DIR: build/yams-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config meson ninja-build cmake python3-pip libboost-all-dev
+
+      - name: Install Conan
+        shell: bash
+        run: |
+          python3 -m pip install --user --upgrade pipx || true
+          python3 -m pipx ensurepath || true
+          pipx install --python python3 conan || pipx install conan
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          conan --version
+
+      - name: Cache Conan
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          key: nightly-conan2-linux-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          restore-keys: |
+            nightly-conan2-linux-
+
+      - name: Configure (Release) and Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$BUILD_DIR"
+          conan profile detect --force
+          conan install . -of "$BUILD_DIR" -pr:b=default -pr:h=./conan/profiles/host-linux-clang -s build_type=Release --build=missing
+          # Use Conan-generated Meson toolchain when present
+          TOOLCHAIN_DIR="$BUILD_DIR/build-release/conan"
+          NATIVE_FILE=$(find "$TOOLCHAIN_DIR" "$BUILD_DIR" -name 'conan_meson_native.ini' -print -quit 2>/dev/null || true)
+          CROSS_FILE=$(find "$TOOLCHAIN_DIR" "$BUILD_DIR" -name 'conan_meson_cross.ini' -print -quit 2>/dev/null || true)
+          if [ -n "$NATIVE_FILE" ]; then
+            TOOL_ARG=(--native-file "$NATIVE_FILE")
+          elif [ -n "$CROSS_FILE" ]; then
+            TOOL_ARG=(--cross-file "$CROSS_FILE")
+          else
+            echo '::warning:: Conan Meson toolchain not found; relying on system toolchain'
+            TOOL_ARG=()
+          fi
+          # Keep AF_UNIX socket path short
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          mkdir -p "$XDG_RUNTIME_DIR" || true
+          meson setup "$BUILD_DIR" "${TOOL_ARG[@]}" -Dbuildtype=release -Dbuild-tests=true -Denable-onnx=disabled
+          meson compile -C "$BUILD_DIR"
+
+      - name: Run Bus Micro-benchmark
+        id: bench
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_DIR/bench_results"
+          echo "Running yams_bus_bench (SPSC default)..."
+          RAW=$("$BUILD_DIR"/src/benchmarks/yams_bus_bench)
+          echo "$RAW"
+          # Convert key=value pairs to JSON using bash
+          ts=$(date -Is)
+          json='{"timestamp":"'"$ts"'","bench":{'
+          first=1
+          for kv in $RAW; do
+            case "$kv" in
+              *=*)
+                key="${kv%%=*}"
+                val="${kv#*=}"
+                if [ $first -eq 0 ]; then json="$json,"; else first=0; fi
+                json="$json\"$key\":\"$val\""
+                ;;
+            esac
+          done
+          json="$json}}"
+          printf '%s\n' "$json" > "$BUILD_DIR/bench_results/bus_bench.json"
+          echo "Wrote bench_results/bus_bench.json"
+
+      - name: Run API Benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running yams_api_benchmarks..."
+          ( cd "$BUILD_DIR" && ./tests/benchmarks/yams_api_benchmarks ) || exit 1
+
+      - name: Run Search Benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running yams_search_benchmarks..."
+          ( cd "$BUILD_DIR" && ./tests/benchmarks/yams_search_benchmarks ) || exit 1
+
+      - name: Regression Check (API)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/scripts/check_regression.py \
+            "$BUILD_DIR/bench_results/api_benchmarks.json" \
+            tests/benchmarks/baseline/api_benchmarks.baseline.json \
+            --threshold 0.5 \
+            --output "$BUILD_DIR/bench_results/api_benchmarks_regression.json" \
+            --fail-on-regression
+
+      - name: Regression Check (Search)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/scripts/check_regression.py \
+            "$BUILD_DIR/bench_results/search_benchmarks.json" \
+            tests/benchmarks/baseline/search_benchmarks.baseline.json \
+            --threshold 0.5 \
+            --output "$BUILD_DIR/bench_results/search_benchmarks_regression.json" \
+            --fail-on-regression
+
+      - name: Summarize Benchmarks in Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUMMARY_FILE="$GITHUB_STEP_SUMMARY"
+          echo "### Bench Results" >> "$SUMMARY_FILE"
+          if [ -d "$BUILD_DIR/bench_results" ] && ls "$BUILD_DIR/bench_results"/*.json >/dev/null 2>&1; then
+            for json in "$BUILD_DIR/bench_results"/*.json; do
+              echo >> "$SUMMARY_FILE"
+              echo "#### $(basename "$json")" >> "$SUMMARY_FILE"
+              echo '```json' >> "$SUMMARY_FILE"
+              sed -e 's/[[:cntrl:]]//g' "$json" | head -c 120000 >> "$SUMMARY_FILE" || true
+              echo >> "$SUMMARY_FILE"
+              echo '```' >> "$SUMMARY_FILE"
+            done
+          else
+            echo "_No bench_results found._" >> "$SUMMARY_FILE"
+          fi
+
+      - name: Upload Benchmark Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmarks-${{ github.run_number }}
+          path: |
+            ${{ env.BUILD_DIR }}/bench_results/bus_bench.json
+            ${{ env.BUILD_DIR }}/bench_results/api_benchmarks.json
+            ${{ env.BUILD_DIR }}/bench_results/api_benchmark_report.json
+            ${{ env.BUILD_DIR }}/bench_results/api_benchmark_report.md
+            ${{ env.BUILD_DIR }}/bench_results/search_benchmarks.json
+            ${{ env.BUILD_DIR }}/bench_results/search_benchmark_report.json
+            ${{ env.BUILD_DIR }}/bench_results/search_benchmark_report.md
+            ${{ env.BUILD_DIR }}/bench_results/api_benchmarks_regression.json
+            ${{ env.BUILD_DIR }}/bench_results/search_benchmarks_regression.json
+          retention-days: 7

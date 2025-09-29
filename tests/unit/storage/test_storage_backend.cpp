@@ -138,7 +138,7 @@ TEST_F(StorageBackendTest, FilesystemBackendList) {
     // List all
     auto listResult = backend->list();
     ASSERT_TRUE(listResult);
-    EXPECT_GE(listResult.value().size(), 4);
+    EXPECT_GE(listResult.value().size(), 4u);
 
     // List with prefix
     listResult = backend->list("prefix");
@@ -146,7 +146,7 @@ TEST_F(StorageBackendTest, FilesystemBackendList) {
     auto& results = listResult.value();
     EXPECT_EQ(std::count_if(results.begin(), results.end(),
                             [](const auto& s) { return s.starts_with("prefix"); }),
-              3);
+              3u);
 }
 
 TEST_F(StorageBackendTest, FilesystemBackendAsyncOperations) {
@@ -259,7 +259,7 @@ TEST_F(StorageBackendTest, ParseURLWithQueryParams) {
     auto config = StorageBackendFactory::parseURL(
         "s3://bucket/path?cache_size=1048576&cache_ttl=7200&timeout=60");
     EXPECT_EQ(config.type, "s3");
-    EXPECT_EQ(config.cacheSize, 1048576);
+    EXPECT_EQ(config.cacheSize, 1048576u);
     EXPECT_EQ(config.cacheTTL, 7200);
     EXPECT_EQ(config.requestTimeout, 60);
 }

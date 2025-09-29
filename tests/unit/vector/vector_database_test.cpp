@@ -88,7 +88,7 @@ protected:
 TEST_F(VectorDatabaseTest, InitializationAndBasicOperations) {
     EXPECT_TRUE(db_->isInitialized());
     EXPECT_TRUE(db_->tableExists());
-    EXPECT_EQ(db_->getVectorCount(), 0);
+    EXPECT_EQ(db_->getVectorCount(), 0u);
     EXPECT_FALSE(db_->hasError());
 }
 
@@ -96,7 +96,7 @@ TEST_F(VectorDatabaseTest, InsertSingleVector) {
     auto record = createTestRecord("chunk_1", "doc_hash_1", "This is a test document.");
 
     EXPECT_TRUE(db_->insertVector(record));
-    EXPECT_EQ(db_->getVectorCount(), 1);
+    EXPECT_EQ(db_->getVectorCount(), 1u);
 
     auto retrieved = db_->getVector("chunk_1");
     ASSERT_TRUE(retrieved.has_value());
@@ -210,7 +210,7 @@ TEST_F(VectorDatabaseTest, SimilaritySearch) {
 
     auto results = db_->searchSimilar(query_embedding, params);
 
-    EXPECT_GE(results.size(), 1);
+    EXPECT_GE(results.size(), 1u);
 
     // The similar vector should have a higher relevance score
     if (results.size() >= 2) {
@@ -329,10 +329,10 @@ TEST_F(VectorDatabaseTest, DatabaseStats) {
     EXPECT_TRUE(db_->insertVectorsBatch(records));
 
     auto stats = db_->getStats();
-    EXPECT_EQ(stats.total_vectors, 5);
-    EXPECT_EQ(stats.total_documents, 3); // doc_0, doc_1, doc_2
+    EXPECT_EQ(stats.total_vectors, 5u);
+    EXPECT_EQ(stats.total_documents, 3u); // doc_0, doc_1, doc_2
     EXPECT_GT(stats.avg_embedding_magnitude, 0.0);
-    EXPECT_GT(stats.index_size_bytes, 0);
+    EXPECT_GT(stats.index_size_bytes, 0u);
 }
 
 TEST_F(VectorDatabaseTest, UtilityFunctions) {

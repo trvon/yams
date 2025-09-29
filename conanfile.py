@@ -3,9 +3,10 @@ import os
 from conan.tools.layout import basic_layout
 from conan.tools.build import check_min_cppstd
 
+
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.6.0"
+    version = "0.7.1"
     license = "APACHE 2.0"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
@@ -30,7 +31,7 @@ class YamsConan(ConanFile):
         "build_benchmarks": False,
         "enable_pdf": True,  # PDF support enabled by default
         "enable_tui": False,  # TUI disabled by default to reduce dependencies
-        "enable_onnx": True,      # ONNX enabled by default; can be disabled to drop Boost
+        "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
     }
 
@@ -49,8 +50,10 @@ class YamsConan(ConanFile):
         self.requires("libcurl/8.10.1")
         self.requires("protobuf/3.21.12")
         self.requires("taglib/2.0")
-        self.requires('tl-expected/1.1.0')
-        self.requires("boost/1.86.0", override=True)
+        self.requires("tl-expected/1.1.0")
+        # Boost is used directly (e.g., boost.asio for daemon comms); declare as a direct requirement
+        # Using only override=True will not pull Boost into the graph when no transitive dep needs it
+        self.requires("boost/1.83.0")
         if self.options.enable_tui:
             self.requires("ncurses/6.4")
         if self.options.enable_onnx:

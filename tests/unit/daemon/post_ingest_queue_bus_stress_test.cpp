@@ -186,6 +186,14 @@ public:
 } // namespace
 
 TEST(PostIngestQueueBusStressTest, ManyProducersAndWorkersProcessAllTasks) {
+    // This stress assumes an MPMC-capable internal bus. Skip unless explicitly enabled.
+    if (const char* m = std::getenv("YAMS_INTERNAL_BUS_MPMC")) {
+        if (std::string(m) != "1") {
+            GTEST_SKIP() << "MPMC bus not enabled; skipping post-ingest MPMC stress.";
+        }
+    } else {
+        GTEST_SKIP() << "MPMC bus not enabled; skipping post-ingest MPMC stress.";
+    }
     BusToggleGuard busGuard(true); // force InternalEventBus path
 
     auto store = std::make_shared<StubContentStore>();

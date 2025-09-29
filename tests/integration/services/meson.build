@@ -17,16 +17,22 @@ services_integ_exe = executable('yams_integration_services_tests', services_inte
 
 test('integration_services', services_integ_exe,
   suite: ['integration', 'isolated'],
-  env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
+  env: {
+    'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+    'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+  },
   is_parallel: false,
-  timeout: 120,
+  timeout: get_option('integration-timeout'),
 )
 
 # Custom shard for UI/CLI expectations at the services layer
 test('integration_ui', services_integ_exe,
   suite: ['integration', 'ui'],
-  env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
+  env: {
+    'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+    'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+  },
   is_parallel: false,
-  timeout: 120,
+  timeout: get_option('integration-ui-timeout'),
   args: ['--gtest_filter=UiCliExpectationsIT.*:GrepServiceExpectationsIT.*']
 )

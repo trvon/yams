@@ -132,7 +132,18 @@ int main(int argc, char** argv) {
     std::cout << "YAMS Core Performance Benchmarks\n";
     std::cout << "====================================\n\n";
 
-    test::BenchmarkTracker tracker("core_benchmarks.json");
+    std::filesystem::path outDir = "bench_results";
+    std::error_code ec_mkdir;
+    std::filesystem::create_directories(outDir, ec_mkdir);
+    if (ec_mkdir) {
+        std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
+                  << std::endl;
+    }
+    if (config.output_file.empty()) {
+        config.output_file = (outDir / "core_benchmarks.json").string();
+    }
+
+    test::BenchmarkTracker tracker(outDir / "core_benchmarks.json");
     std::vector<std::unique_ptr<BenchmarkBase>> benchmarks;
 
     // Hashing benchmarks
@@ -162,8 +173,8 @@ int main(int argc, char** argv) {
         tracker.recordResult(trackerResult);
     }
 
-    tracker.generateReport("core_benchmark_report.json");
-    tracker.generateMarkdownReport("core_benchmark_report.md");
+    tracker.generateReport(outDir / "core_benchmark_report.json");
+    tracker.generateMarkdownReport(outDir / "core_benchmark_report.md");
 
     std::cout << "\n====================================\n";
     std::cout << "Benchmark complete. Reports generated.\n";

@@ -22,8 +22,11 @@ unit_app_services = files(
   'app/services/document_service_test.cpp',
   'app/services/document_service_errors_test.cpp',
   'app/services/grep_service_test.cpp',
+  'app/services/grep_service_edge_cases_test.cpp',
+  'app/services/grep_service_unicode_test.cpp',
   'app/services/indexing_service_test.cpp',
   'app/services/search_service_test.cpp',
+  'app/services/search_hash_edge_cases_test.cpp',
   'app/services/session_service_test.cpp',
   'app/services/utils_test.cpp',
 )
@@ -121,6 +124,7 @@ unit_mcp = files(
   'mcp/mcp_socket_resolution_test.cpp',
   'mcp/mcp_doctor_flags_test.cpp',
   'mcp/mcp_add_disconnect_test.cpp',
+  'mcp/mcp_disconnect_uniform_errors_test.cpp',
 )
 
 unit_metadata = files(

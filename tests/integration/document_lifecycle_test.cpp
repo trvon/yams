@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <thread>
 #include "common/fixture_manager.h"
@@ -346,5 +347,22 @@ TEST_F(DocumentLifecycleTest, TransactionConsistency) {
             auto metaResult = metadataRepo_->getMetadata(docId, key);
             EXPECT_FALSE(metaResult.has_value()) << "Partial update detected for " << key;
         }
+    }
+}
+
+// Final lightweight stress: repeat document count queries to exercise repository under light load.
+TEST_F(DocumentLifecycleTest, StressTail) {
+    auto stress_iters = []() {
+        if (const char* s = std::getenv("YAMS_STRESS_ITERS")) {
+            int v = std::atoi(s);
+            if (v > 0 && v < 100000)
+                return v;
+        }
+        return 100;
+    }();
+    for (int i = 0; i < stress_iters; ++i) {
+        auto countRes = metadataRepo_->getDocumentCount();
+        ASSERT_TRUE(countRes.isOk());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }

@@ -94,6 +94,8 @@ public:
 
         cmd->add_option("paths", paths_,
                         "Files or directories to search (default: all indexed files)");
+        // Alias: --path (singular) maps to paths
+        cmd->add_option("--path", paths_, "Alias for --paths (can be repeated)");
 
         // Pattern filtering
         cmd->add_option("--include", includePatterns_,

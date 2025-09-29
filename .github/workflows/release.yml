@@ -396,18 +396,18 @@ jobs:
         run: |
           set -euo pipefail
           # Prefer clang++, fallback to clang
-            if command -v clang++ >/dev/null 2>&1; then
-              RAW_VER=$(clang++ --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
-            elif command -v clang >/dev/null 2>&1; then
-              RAW_VER=$(clang --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
-            else
-              RAW_VER=""
-            fi
-            if [ -z "$RAW_VER" ]; then
-              echo "Could not auto-detect clang version; using profile defaults" >&2
-            else
-              echo "Detected clang major: $RAW_VER"
-            fi
+          if command -v clang++ >/dev/null 2>&1; then
+            RAW_VER=$(clang++ --version | sed -E -n 's/.*version ([0-9]+).*/\1/p' | head -1 || true)
+          elif command -v clang >/dev/null 2>&1; then
+            RAW_VER=$(clang --version | sed -E -n 's/.*version ([0-9]+).*/\1/p' | head -1 || true)
+          else
+            RAW_VER=""
+          fi
+          if [ -z "$RAW_VER" ]; then
+            echo "Could not auto-detect clang version; using profile defaults" >&2
+          else
+            echo "Detected clang major: $RAW_VER"
+          fi
       - name: Compare profile vs detected clang (advice)
         shell: bash
         run: |
@@ -419,9 +419,9 @@ jobs:
             PROFILE_VER="(missing profile)"
           fi
           if command -v clang++ >/dev/null 2>&1; then
-            SYS_VER=$(clang++ --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
+            SYS_VER=$(clang++ --version | sed -E -n 's/.*version ([0-9]+).*/\1/p' | head -1 || true)
           elif command -v clang >/dev/null 2>&1; then
-            SYS_VER=$(clang --version | sed -n 's/.*version recently[0-9][0-9]*).*/\1/p' | head -1 || true)
+            SYS_VER=$(clang --version | sed -E -n 's/.*version ([0-9]+).*/\1/p' | head -1 || true)
           else
             SYS_VER="unknown"
           fi
@@ -724,8 +724,8 @@ jobs:
         shell: bash
         run: |
           # Only generate once (linux-hosted) to avoid artifact name collision across matrix entries.
-          # Update to reflect current matrix total (3 platforms)
-          echo '{"total": 3}' > matrix.json
+          # Update to reflect current matrix total (4 platforms)
+          echo '{"total": 4}' > matrix.json
 
       - name: Upload matrix metadata
         if: matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
@@ -932,7 +932,7 @@ jobs:
           # Resolve bucket name: prefer secret R2_BUCKET, else parse wrangler.toml if present
           BUCKET="${R2_BUCKET:-}"
           if [ -z "$BUCKET" ] && [ -f "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" ]; then
-            BUCKET=$(sed -n 's/^bucket_name\s*=\s*"\(.*\)"/ recently1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
+            BUCKET=$(sed -E -n 's/^bucket_name\s*=\s*"(.*)"/\1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
           fi
           if [ -z "$BUCKET" ]; then
             echo "Skipping R2 upload: no R2_BUCKET secret and wrangler.toml missing or without bucket_name." >&2

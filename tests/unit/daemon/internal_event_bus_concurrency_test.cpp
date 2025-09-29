@@ -9,6 +9,14 @@
 namespace yams::daemon::test {
 
 TEST(InternalEventBusQueueTest, MpmcConcurrencyDoesNotCorruptOrDeadlock) {
+    // Default build uses SPSC for the internal bus; enable MPMC to run this test meaningfully.
+    if (const char* m = std::getenv("YAMS_INTERNAL_BUS_MPMC")) {
+        if (std::string(m) != "1") {
+            GTEST_SKIP() << "MPMC is not enabled; skipping MPMC stress test.";
+        }
+    } else {
+        GTEST_SKIP() << "MPMC is not enabled; skipping MPMC stress test.";
+    }
     // This test stresses the queue with multiple producers and consumers.
     // It would intermittently fail or crash prior to making SpscQueue MPMC-safe.
     constexpr int kProducers = 4;

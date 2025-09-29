@@ -1804,38 +1804,6 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
     }
 }
 
-boost::asio::awaitable<Result<AddResponse>> DaemonClient::add(const AddRequest& req) {
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* s = std::get_if<AddResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (auto* s = std::get_if<AddResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        std::optional<AddResponse> value;
-    };
-    auto h = std::make_shared<Handler>();
-    auto r = co_await sendRequestStreaming(req, h);
-    if (!r)
-        co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
-    co_return Error{ErrorCode::InvalidData, "Missing AddResponse in stream"};
-}
-
 boost::asio::awaitable<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& r) override {

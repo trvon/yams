@@ -1,5 +1,4 @@
-# syntax=docker/dockerfile:1.5
-FROM --platform=linux/amd64 ubuntu:24.04
+FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -8,46 +7,77 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     LANG=C.UTF-8
 
-# Local CI container for building/testing/installing YAMS on Ubuntu
-# Usage example (from repo root):
-#   docker build -t yams/ci-ubuntu:24.04 -f docker/local-ci/ubuntu.Dockerfile .
-#   docker run --rm -v "$PWD:/work" -w /work yams/ci-ubuntu:24.04 bash -lc '
-#     rm -rf build prefix consumer_build || true &&
-#     cmake -S . -B build -G Ninja -DYAMS_BUILD_PROFILE=dev -DCMAKE_INSTALL_PREFIX=/work/prefix &&
-#     cmake --build build -j &&
-#     ctest --test-dir build --output-on-failure &&
-#     cmake --install build &&
-#     cmake -S test/consumer -B consumer_build -G Ninja -DCMAKE_PREFIX_PATH=/work/prefix &&
-#     cmake --build consumer_build -j &&
-#     ctest --test-dir consumer_build --output-on-failure
-#   '
+RUN set -euxo pipefail; \
+    for i in 1 2 3; do \
+      apt-get update && \
+      apt-get install -y --no-install-recommends ca-certificates && \
+      update-ca-certificates && break || { \
+        echo "[apt] ca-certificates bootstrap attempt $i failed, retrying..."; \
+        apt-get clean; rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+        sleep $((i*2)); \
+      }; \
+    done
 
-# Base toolchain + CI dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    ccache \
-    cmake \
-    ninja-build \
-    pkg-config \
-    git \
-    curl \
-    jq \
-    zip \
-    unzip \
-    tar \
-    ca-certificates \
-    libssl-dev \
-    libsqlite3-dev \
-    libncurses-dev \
-    protobuf-compiler \
-    meson \
-    python3 \
-    python3-pip \
-    python3-venv && \
-    python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir "conan<3" && \
-    rm -rf /var/lib/apt/lists/*
+RUN set -euxo pipefail; \
+    # Disable default sources and write a clean sources.list, selecting the right mirror for the architecture
+    rm -f /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/* || true; \
+    arch="$(dpkg --print-architecture)"; \
+    if [[ "$arch" == "arm64" || "$arch" == "armhf" ]]; then \
+      printf '%s\n' \
+        'deb https://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse' \
+        'deb https://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse' \
+        'deb https://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse' \
+        'deb https://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse' \
+        > /etc/apt/sources.list; \
+    else \
+      printf '%s\n' \
+        'deb https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse' \
+        'deb https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse' \
+        'deb https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse' \
+        'deb https://archive.ubuntu.com/ubuntu noble-backports main restricted universe multiverse' \
+        > /etc/apt/sources.list; \
+    fi
+
+RUN set -euxo pipefail; \
+    # Harden apt behavior
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries; \
+    echo 'Acquire::http::No-Cache "true"; Acquire::https::No-Cache "true";' > /etc/apt/apt.conf.d/99-no-cache; \
+    echo 'Acquire::By-Hash "yes";' > /etc/apt/apt.conf.d/99-by-hash; \
+    echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99-ipv4; \
+    # Install build dependencies with retries
+    for i in 1 2 3 4 5; do \
+      apt-get update && \
+      apt-get -y dist-upgrade && \
+      apt-get install -y --no-install-recommends \
+        build-essential \
+        ccache \
+        cmake \
+        ninja-build \
+        pkg-config \
+        git \
+        curl \
+        jq \
+        zip \
+        unzip \
+        tar \
+        libkrb5-3 \
+        libssl-dev \
+        libsqlite3-dev \
+        libncurses-dev \
+        protobuf-compiler \
+        meson \
+        python3 \
+        python3-pip \
+        python3-venv && break; \
+      echo "[apt] install attempt $i failed, retrying..."; \
+      apt-get clean; rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+      sleep $((i*2)); \
+    done; \
+    command -v python3 >/dev/null && command -v cmake >/dev/null && command -v git >/dev/null || { echo "[apt] install failed after retries"; exit 1; }; \
+    python3 -m venv /opt/venv; \
+    /opt/venv/bin/pip install --no-cache-dir "conan<3"; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
 
 # Ensure venv tools (including conan) are on PATH
 ENV PATH="/opt/venv/bin:${PATH}"

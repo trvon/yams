@@ -100,7 +100,7 @@ TEST_F(VectorIndexManagerTest, GetVector) {
     ASSERT_TRUE(ids_result.has_value());
 
     const auto& ids = ids_result.value();
-    EXPECT_EQ(ids.size(), 1);
+    EXPECT_EQ(ids.size(), 1u);
     EXPECT_EQ(ids[0], id);
 
     // Add more vectors and verify
@@ -367,7 +367,7 @@ TEST_F(VectorIndexManagerTest, HNSWIndex) {
     SearchFilter filter;
     auto results = hnsw_manager->search(query, 10, filter);
     EXPECT_TRUE(results.has_value());
-    EXPECT_GT(results.value().size(), 0);
+    EXPECT_GT(results.value().size(), 0u);
 }
 
 // Test batch operations
@@ -398,7 +398,7 @@ TEST_F(VectorIndexManagerTest, BatchOperations) {
 TEST_F(VectorIndexManagerTest, MemoryUsage) {
     auto stats = manager_->getStats();
     size_t initial_memory = stats.index_size_bytes;
-    EXPECT_GE(initial_memory, 0);
+    EXPECT_GE(initial_memory, 0u);
 
     // Add vectors and check memory increase
     const size_t num_vectors = 100;

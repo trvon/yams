@@ -11,7 +11,8 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
   dependencies: [
     dependency('yams_core'),
     dependency('spdlog'),
-    dependency('boost'),
+    # Boost.Asio relies on these Boost components at link time
+    dependency('Boost', modules: ['system', 'thread'], method: 'cmake'),
     tl_expected_dep,
   ],
   include_directories: include_directories('../../../include'),

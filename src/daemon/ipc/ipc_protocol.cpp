@@ -9,8 +9,6 @@ MessageType getMessageType(const Request& req) {
 
             if constexpr (std::is_same_v<T, SearchRequest>) {
                 return MessageType::SearchRequest;
-            } else if constexpr (std::is_same_v<T, AddRequest>) {
-                return MessageType::AddRequest;
             } else if constexpr (std::is_same_v<T, GetRequest>) {
                 return MessageType::GetRequest;
             } else if constexpr (std::is_same_v<T, GetInitRequest>) {
@@ -137,8 +135,6 @@ std::string getRequestName(const Request& req) {
 
             if constexpr (std::is_same_v<T, SearchRequest>) {
                 return "Search";
-            } else if constexpr (std::is_same_v<T, AddRequest>) {
-                return "Add";
             } else if constexpr (std::is_same_v<T, GetRequest>) {
                 return "Get";
             } else if constexpr (std::is_same_v<T, GetInitRequest>) {

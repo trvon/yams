@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <vector>
@@ -364,4 +365,21 @@ TEST_F(MultiCommandTest, ErrorPropagation) {
     auto validGet = contentStore_->getContent(hash);
     ASSERT_TRUE(validGet.has_value());
     EXPECT_EQ(std::string(validGet->begin(), validGet->end()), content);
+}
+
+// Final lightweight stress: metadataRepo count loop to catch flakiness.
+TEST_F(MultiCommandTest, StressTail) {
+    auto stress_iters = []() {
+        if (const char* s = std::getenv("YAMS_STRESS_ITERS")) {
+            int v = std::atoi(s);
+            if (v > 0 && v < 100000)
+                return v;
+        }
+        return 100;
+    }();
+    for (int i = 0; i < stress_iters; ++i) {
+        auto c = metadataRepo_->getDocumentCount();
+        ASSERT_TRUE(c.isOk());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }

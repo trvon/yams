@@ -61,7 +61,6 @@ public:
 
     // High-level request methods
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req);
-    boost::asio::awaitable<Result<AddResponse>> add(const AddRequest& req);
     boost::asio::awaitable<Result<GetResponse>> get(const GetRequest& req);
     boost::asio::awaitable<Result<GetInitResponse>> getInit(const GetInitRequest& req) {
         return call<GetInitRequest>(req);
@@ -365,18 +364,17 @@ template <class Req>
 boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& req) {
     static_assert(
         std::disjunction_v<
-            std::is_same<Req, SearchRequest>, std::is_same<Req, AddRequest>,
-            std::is_same<Req, GetRequest>, std::is_same<Req, GetInitRequest>,
-            std::is_same<Req, GetChunkRequest>, std::is_same<Req, GetEndRequest>,
-            std::is_same<Req, DeleteRequest>, std::is_same<Req, ListRequest>,
-            std::is_same<Req, ShutdownRequest>, std::is_same<Req, StatusRequest>,
-            std::is_same<Req, PingRequest>, std::is_same<Req, GenerateEmbeddingRequest>,
-            std::is_same<Req, BatchEmbeddingRequest>, std::is_same<Req, LoadModelRequest>,
-            std::is_same<Req, UnloadModelRequest>, std::is_same<Req, ModelStatusRequest>,
-            std::is_same<Req, AddDocumentRequest>, std::is_same<Req, GrepRequest>,
-            std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
-            std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>,
-            std::is_same<Req, EmbedDocumentsRequest>,
+            std::is_same<Req, SearchRequest>, std::is_same<Req, GetRequest>,
+            std::is_same<Req, GetInitRequest>, std::is_same<Req, GetChunkRequest>,
+            std::is_same<Req, GetEndRequest>, std::is_same<Req, DeleteRequest>,
+            std::is_same<Req, ListRequest>, std::is_same<Req, ShutdownRequest>,
+            std::is_same<Req, StatusRequest>, std::is_same<Req, PingRequest>,
+            std::is_same<Req, GenerateEmbeddingRequest>, std::is_same<Req, BatchEmbeddingRequest>,
+            std::is_same<Req, LoadModelRequest>, std::is_same<Req, UnloadModelRequest>,
+            std::is_same<Req, ModelStatusRequest>, std::is_same<Req, AddDocumentRequest>,
+            std::is_same<Req, GrepRequest>, std::is_same<Req, UpdateDocumentRequest>,
+            std::is_same<Req, DownloadRequest>, std::is_same<Req, GetStatsRequest>,
+            std::is_same<Req, PrepareSessionRequest>, std::is_same<Req, EmbedDocumentsRequest>,
             // Plugin management requests
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,

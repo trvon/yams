@@ -24,6 +24,33 @@ meson test -C build/debug -t stress       # stress (long-running)
 meson test -C build/debug -l
 ```
 
+Integration timeouts and stress iters (Meson options)
+
+You can tune integration-suite timeouts without editing sources by passing Meson options at setup/configure time:
+
+```bash
+# Examples (defaults: services=900s, ui=600s, smoke=300s)
+meson configure build/debug -Dintegration-timeout=900 -Dintegration-ui-timeout=600 -Dintegration-smoke-timeout=300 -Dstress-iters=100
+
+# Or set at setup:
+meson setup build/debug --buildtype=debug -Dbuild-tests=true \
+  -Dintegration-timeout=900 -Dintegration-ui-timeout=600 -Dintegration-smoke-timeout=300 -Dstress-iters=100
+```
+
+Profiles via native files (no scripts)
+
+You can also use Meson native files to version preset profiles:
+
+```bash
+# quicker local runs
+meson setup build/fast --buildtype=debug -Dbuild-tests=true --native-file meson/profiles/ci-fast.ini
+meson test -C build/fast integration_services -t 1
+
+# nightly soak
+meson setup build/soak --buildtype=debug -Dbuild-tests=true --native-file meson/profiles/nightly-soak.ini
+meson test -C build/soak integration_services
+```
+
 ### Services Integration Suite (isolated)
 
 The Services suite exercises add/list/get/grep via a live daemon in a temporary sandbox.

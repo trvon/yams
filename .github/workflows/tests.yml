@@ -56,8 +56,8 @@ jobs:
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
-    # Allow extra time on slower hosted x86_64 runners.
-    timeout-minutes: ${{ matrix.arch == 'x86_64' && 75 || 50 }}
+    # Allow extra time for safety across runners.
+    timeout-minutes: 70
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -81,7 +81,7 @@ jobs:
           set -euo pipefail
           brew update
           # Align with release workflow to ensure Meson builds have required toolchain bits.
-          brew install pkg-config cmake ninja meson ccache || true
+          brew install pkg-config cmake ninja meson ccache boost || true
           # Guard against Homebrew reporting success without linking binaries (nondefault prefixes).
           command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
           command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
@@ -205,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           brew update || true
-          brew install pkg-config cmake ninja meson || true
+          brew install pkg-config cmake ninja meson boost || true
           command -v meson >/dev/null 2>&1 || {
             python3 -m pip install --user --upgrade meson || pip3 install --user --upgrade meson || true
             [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
@@ -287,11 +287,14 @@ jobs:
           echo "Using Meson toolchain arg: ${MESON_TOOL_ARG[*]}"
           # Keep AF_UNIX socket path short on Linux to avoid sun_path length limits
           if [ "$RUNNER_OS" = "Linux" ]; then
-            export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+            XDG_RUNTIME_DIR="/run/user/$(id -u)"
             mkdir -p "$XDG_RUNTIME_DIR" || true
+            echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           fi
           meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
           meson compile -C ${{ env.BUILD_DIR }}
+
+      
 
       - name: Run Tests with Meson (native)
         id: meson_tests_native
@@ -299,6 +302,10 @@ jobs:
         shell: bash
         continue-on-error: true
         run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            mkdir -p "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" || true
+            echo "Using XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          fi
           cd ${{ env.BUILD_DIR }}
           meson test --print-errorlogs
 
@@ -373,7 +380,7 @@ jobs:
           if-no-files-found: error
           retention-days: 5
       - name: Upload Benchmark Results
-        if: github.actor != 'nektos/act' && matrix.arch == 'x86_64'
+        if: github.actor != 'nektos/act' && matrix.conan_arch == 'x86_64'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-linux-hosted-yams
