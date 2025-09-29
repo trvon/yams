@@ -5,8 +5,37 @@ threads_dep = dependency('threads')
 yams_core = dependency('yams_core', required: false)
 
 lzma_opt = get_option('enable-lzma')
-lzma_dep = dependency('lzma', required: lzma_opt.enabled())
-have_lzma = lzma_dep.found() and lzma_opt.allowed()
+lzma_dep = dependency('lzma', required: false, allow_fallback: false)
+if not lzma_dep.found()
+  lzma_dep = dependency('liblzma', required: false, allow_fallback: false)
+endif
+if not lzma_dep.found()
+  lzma_dep = dependency('LZMA', method: 'cmake', required: false, allow_fallback: false)
+endif
+
+if lzma_opt.enabled() and not lzma_dep.found()
+  error('LZMA support was requested but liblzma could not be located. Install the xz development package or disable it via -Denable-lzma=disabled.')
+endif
+
+cpp = meson.get_compiler('cpp')
+have_lzma_headers = false
+if lzma_dep.found()
+  have_lzma_headers = (
+    cpp.has_header('LzmaEnc.h', dependencies: [lzma_dep]) or
+    cpp.has_header('lzma/LzmaEnc.h', dependencies: [lzma_dep])
+  ) and (
+    cpp.has_header('Alloc.h', dependencies: [lzma_dep]) or
+    cpp.has_header('7z/Alloc.h', dependencies: [lzma_dep])
+  )
+endif
+
+have_lzma = lzma_dep.found() and have_lzma_headers and lzma_opt.allowed()
+if lzma_dep.found() and not have_lzma_headers
+  message('LZMA library was located but LZMA SDK headers (LzmaEnc.h) were missing; disabling LZMA support.')
+endif
+if lzma_opt.auto() and not have_lzma
+  message('LZMA support disabled: liblzma not found or headers unavailable (install liblzma-dev/xz-devel to enable).')
+endif
 
 compression_src = files(
   'zstandard_compressor.cpp',

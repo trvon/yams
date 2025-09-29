@@ -1,66 +1,49 @@
 # Developer Architecture Notes
 
-This index collects architecture materials for YAMS. It points to system overviews, component designs, and related references. Keep documents technical, accurate, and concise.
+This index points to architecture references that mirror the live implementation. Always validate statements against the cited source modules.
 
-## Core architecture
+## Core Architecture References
 
-- Search system
-  - Search pipeline, FTS, metadata, and query flows:
-    - [Architecture: Search System](../../architecture/search_system.md)
-- Vector search
-  - Embedding ingestion, index layout, retrieval, and fusion strategies:
-    - [Architecture: Vector Search](../../architecture/vector_search_architecture.md)
+- Daemon and services — lifecycle, IPC, plugin hosting
+  - [Architecture: Daemon and Services](../../architecture/daemon_architecture.md)
+- Plugin pipeline — manifest parsing, trust, runtime loaders
+  - [Architecture: Plugin and Content Extraction](../../architecture/plugin_architecture.md)
+- Search pipeline — ingestion, ranking, hybrid fusion
+  - [Architecture: Search System](../../architecture/search_system.md)
+- Vector subsystem — embedding providers, storage, repair routines
+  - [Architecture: Vector Search](../../architecture/vector_search_architecture.md)
 
-## Design notes
+## Supporting Design Notes
 
-- Content handlers and extensibility: adapters, media types, and normalization
+- Content handlers and normalization pathways
   - [Design: Content Handler Architecture](../../design/content-handler-architecture.md)
-- Synchronization model and consistency guarantees
+- Synchronization protocol details
   - [Design: Sync Protocol](../../design/sync-protocol.md)
 
-## APIs
+## API References
 
-- High‑level API documentation and OpenAPI
-  - [API Overview](../../api/README.md)
-  - [Search API](../../api/search_api.md)
-  - [Vector Search API](../../api/vector_search_api.md)
-  - [OpenAPI (YAML)](../../api/openapi.yaml)
-  - [MCP Tools](../../api/mcp_tools.md)
+- [API Overview](../../api/README.md)
+- [Search API](../../api/search_api.md)
+- [Vector Search API](../../api/vector_search_api.md)
+- [OpenAPI Definition](../../api/openapi.yaml)
+- [MCP Tools](../../api/mcp_tools.md)
 
-## Operations and tuning (reference)
+## Operations and Performance Guides
 
-- Admin
-  - [Configuration](../../admin/configuration.md)
-  - [Performance Tuning](../../admin/performance_tuning.md)
-  - [Vector Search Tuning](../../admin/vector_search_tuning.md)
-- Operations
-  - [Deployment](../../operations/deployment.md)
-  - [Monitoring](../../operations/monitoring.md)
-  - [Backup](../../operations/backup.md)
-- Benchmarks
-  - [Performance Report](../../benchmarks/performance_report.md)
+- [Admin Configuration](../../admin/configuration.md)
+- [Performance Tuning](../../admin/performance_tuning.md)
+- [Vector Search Tuning](../../admin/vector_search_tuning.md)
+- [Deployment Guide](../../operations/deployment.md)
+- [Monitoring Guide](../../operations/monitoring.md)
+- [Backup Procedures](../../operations/backup.md)
+- [Performance Report](../../benchmarks/performance_report.md)
 
-## Data and engine quick facts
+## Contribution Workflow
 
-- Storage: content‑addressed (SHA‑256), block‑level deduplication (Rabin), compression (zstd/LZMA).
-- Indexing: SQLite FTS5 for full‑text; vector index for semantic retrieval.
-- Consistency: WAL for crash safety; explicit snapshot and collection semantics where applicable.
-- Interfaces: CLI and API; MCP server support for tool integrations.
+1. Update architecture docs and the traceability table (`docs/delivery/038/artifacts/architecture-traceability.md`) in the same change set.
+2. Anchor new prose to specific functions, classes, or modules under `src/`.
+3. Capture validation evidence (integration logs, benchmarks) in `docs/delivery/038/artifacts/` with timestamps.
+4. Run `mkdocs build --strict` and archive the log before submitting changes.
+5. Flag future work explicitly with issue references; avoid speculative language.
 
-## Additional overviews
-
-- Daemon and services
-  - [Architecture: Daemon](../../architecture/daemon_architecture.md)
-- Plugin and content extraction
-  - [Architecture: Plugin](../../architecture/plugin_architecture.md)
-- Disaster Recovery
-  - [Architecture: DR](../../architecture/dr_architecture.md)
-
-## Contributing to architecture docs
-
-- Location: add new overviews under `docs/developer/architecture/`; component/feature deep‑dives under `docs/design/`.
-- Scope: one topic per document; link related docs at top.
-- Style: concise, diagrams optional (store sources alongside images).
-- Versioning: note behavioral differences if the doc applies to specific versions. Pre‑1.0 (v0.x) may change; call out stability caveats.
-
-If a topic is missing, open an issue proposing the outline and intended placement before submitting a PR.
+Missing topics should be proposed via issue (outline + intended source references) prior to documentation work.

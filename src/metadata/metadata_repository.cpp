@@ -900,9 +900,9 @@ Result<SearchResults> MetadataRepository::search(const std::string& query, int l
             spdlog::debug("FTS5 search prepare failed: {}", stmtResult.error().message);
         }
 
-        // If FTS5 search failed, fall back to fuzzy search
+        // If FTS5 search failed, fall back to fuzzy search (noise-reduced to debug)
         if (!ftsSearchSucceeded) {
-            spdlog::info("FTS5 search failed for query '{}', falling back to fuzzy search", query);
+            spdlog::debug("FTS5 search failed for query '{}', falling back to fuzzy search", query);
 
             // Use fuzzy search as fallback (note: fuzzy search doesn't support offset)
             auto fuzzyResults = fuzzySearch(query, 0.3, limit);

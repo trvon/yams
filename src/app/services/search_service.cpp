@@ -86,6 +86,22 @@ static bool wildcardMatch(const std::string& text, const std::string& pattern) {
     return dp[n][m];
 }
 
+// Heuristic: treat as path/filename when the query contains a separator
+// or looks like a single token with an extension and no spaces.
+static bool looksLikePathQuery(const std::string& q) {
+    if (q.find('/') != std::string::npos || q.find('\\') != std::string::npos)
+        return true;
+    if (q.find(' ') != std::string::npos)
+        return false;
+    auto dot = q.rfind('.');
+    if (dot != std::string::npos && dot > 0 && dot + 1 < q.size()) {
+        // Has an extension-like suffix
+        return true;
+    }
+    // Wildcards also indicate a path-style intent
+    return hasWildcard(q);
+}
+
 // Presence-based tag match using metadata repository
 static bool isTransientMetadataError(const Error& err) {
     switch (err.code) {
@@ -386,6 +402,22 @@ public:
                      req.matchAllTags);
 
         Result<SearchResponse> result(Error{ErrorCode::Unknown, "Search path not taken"});
+
+        // Path/filename-first heuristic: if the user likely typed a path-like query,
+        // avoid noisy FTS5 attempts and go straight to metadata path/name contains.
+        if (looksLikePathQuery(normalizedReq.query)) {
+            auto pathResult = pathSearch(normalizedReq, &metadataTelemetry);
+            setExecTime(pathResult, t0);
+            if (pathResult) {
+                auto resp = std::move(pathResult).value();
+                resp.type = "path";
+                resp.searchStats["mode"] = "path";
+                resp.queryInfo = "path/name contains match";
+                maybeEmitJson(req, resp);
+                co_return Result<SearchResponse>(std::move(resp));
+            }
+            // Fall through to standard paths on error.
+        }
 
         if (type == "hybrid" || type == "semantic") {
             if (degraded_) {
@@ -745,6 +777,84 @@ private:
         }
 
         resp.paths = std::move(foundPaths);
+    }
+
+    Result<SearchResponse> pathSearch(const SearchRequest& req,
+                                      MetadataTelemetry* telemetry = nullptr) {
+        if (!ctx_.metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+        }
+        SearchResponse resp;
+        resp.type = "path";
+        resp.usedHybrid = false;
+        std::vector<metadata::DocumentInfo> docs;
+        // If the query contains wildcards, fetch all and filter locally; otherwise use LIKE
+        const bool wildcard = hasWildcard(req.query);
+        if (!wildcard) {
+            std::string like = "%" + req.query + "%";
+            auto r = retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath(like); },
+                                     4, std::chrono::milliseconds(25), telemetry);
+            if (r)
+                docs = std::move(r.value());
+        }
+        if (wildcard || docs.empty()) {
+            auto rAll =
+                retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
+                                std::chrono::milliseconds(25), telemetry);
+            if (!rAll)
+                return rAll.error();
+            const auto& all = rAll.value();
+            docs.reserve(all.size());
+            for (const auto& d : all) {
+                const std::string& p = !d.filePath.empty() ? d.filePath : d.fileName;
+                bool match = false;
+                if (wildcard) {
+                    // Treat wildcard patterns as glob over full path
+                    match = wildcardMatch(p, req.query);
+                } else {
+                    match = (p.find(req.query) != std::string::npos);
+                }
+                if (match)
+                    docs.push_back(d);
+            }
+        }
+        // Apply additional filters and shape results
+        auto push_path = [&](const metadata::DocumentInfo& d) {
+            if (!req.extension.empty()) {
+                if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
+                    return;
+            }
+            if (!req.mimeType.empty() && d.mimeType != req.mimeType)
+                return;
+            if (!metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags,
+                                 telemetry))
+                return;
+            if (req.pathsOnly) {
+                resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
+            } else {
+                SearchItem it;
+                it.id = d.id;
+                it.hash = req.showHash ? d.sha256Hash : "";
+                it.title = d.fileName;
+                it.path = d.filePath;
+                it.score = 1.0; // neutral score for path matches
+                resp.results.push_back(std::move(it));
+            }
+        };
+        for (const auto& d : docs) {
+            push_path(d);
+            if (req.limit != 0) {
+                if (req.pathsOnly && resp.paths.size() >= req.limit)
+                    break;
+                if (!req.pathsOnly && resp.results.size() >= req.limit)
+                    break;
+            }
+        }
+        if (req.pathsOnly)
+            resp.total = resp.paths.size();
+        else
+            resp.total = resp.results.size();
+        return resp;
     }
 
     template <typename T> void setExecTime(Result<T>& r, std::chrono::steady_clock::time_point t0) {

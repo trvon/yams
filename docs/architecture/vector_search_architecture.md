@@ -1,30 +1,29 @@
 # Architecture: Vector Search
 
-This document outlines the embedding and vector search subsystem: how embeddings are generated, stored, and used for retrieval and hybrid ranking.
+Implementation-oriented overview of the embedding and vector retrieval subsystem.
 
-## Responsibilities
+## Embedding Providers (`src/vector/embedding_generator.cpp`, `src/vector/model_loader.cpp`)
 
-- Generate dense embeddings for ingested text using a configured provider.
-- Persist vectors in a local vector database, keyed to document or chunk IDs.
-- Serve k-NN queries for hybrid searches and similarity operations.
+- `EmbeddingGenerator::generate` selects providers (mock vs ONNX) and streams text through tokenizer/model pipelines.
+- `ModelLoader::load` resolves model assets, handles cache directories, and returns provider instances consumed by the generator.
 
-## Data model and constraints
+## Dimension Management (`src/vector/dim_resolver.cpp`)
 
-- The vector DB uses a fixed embedding dimension determined at initialization.
-- The embedding generator reports its dimension; mismatches are rejected early.
-- Records store: `{id, vector, metadata}` where metadata links back to source.
+- `DimResolver::ensureDimension` cross-checks requested dimensions with persisted metadata and raises errors when mismatches occur.
+- Sentinel helpers write dimension metadata beside vector stores so future startups can detect incompatible configurations.
 
-## Initialization and repair
+## Persistence (`src/vector/sqlite_vec_backend.cpp`, `src/vector/vector_database.cpp`)
 
-- The system validates or infers the embedding dimension at startup.
-- A repair utility can backfill embeddings for existing content.
+- `SqliteVecBackend::initialize` opens the underlying SQLite database, configures vector tables, and surfaces schema versions.
+- `VectorDatabase::insert` and `VectorDatabase::search` manage transactional writes and range queries for embedding vectors.
 
-## Code references
+## Index Coordination (`src/vector/vector_index_manager.cpp`)
 
-- Vector DB config and initialization: `src/repair/embedding_repair_util.cpp`
-- Dimension resolver: `src/vector/dim_resolver.cpp`
+- `VectorIndexManager::start` wires the backend, cache, and executor threads; `VectorIndexManager::search` serves k-NN requests and merges filters supplied by higher layers.
+- `VectorIndexManager::scheduleMaintenance` triggers background rebuilds when embedding dimensions change or vector corruption is detected.
 
-See also
-- API: Vector Search API (`docs/api/vector_search_api.md`)
-- Admin: Vector Search Tuning (`docs/admin/vector_search_tuning.md`)
+## Repair Flows (`src/repair/embedding_repair_util.cpp`)
 
+- `run_embedding_repair` iterates stored documents, regenerates embeddings when providers change, and updates vector tables without full re-ingest.
+
+Use this module map alongside `docs/delivery/038/artifacts/architecture-traceability.md` when cross-referencing documentation with source.

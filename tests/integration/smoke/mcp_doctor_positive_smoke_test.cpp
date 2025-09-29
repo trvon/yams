@@ -204,6 +204,43 @@ TEST(MCPSmoke, DocOpsRoundTrip) {
     fs::remove_all(root, ec);
 }
 
+// Pagination and dry-run behaviors should be accepted and return structured JSON.
+TEST(MCPSmoke, ListPaginationAndDryRunDelete) {
+    using namespace std::chrono_literals;
+    namespace fs = std::filesystem;
+    using nlohmann::json;
+
+    auto t = std::make_unique<NullTransport>();
+    MCPServer svr(std::move(t));
+
+    // Force unreachable daemon for delete_by_name; ensure error is structured (no crash)
+    svr.setEnsureDaemonClientHook([](const yams::daemon::ClientConfig&) -> yams::Result<void> {
+        return yams::Error{yams::ErrorCode::NetworkError, "dial error"};
+    });
+
+    // list with pagination params present should return an object with or without results
+    auto listRes =
+        svr.callToolPublic("list", json{{"limit", 2}, {"offset", 0}, {"paths_only", true}});
+    ASSERT_TRUE(listRes.is_object()) << listRes.dump();
+
+    // delete_by_name with dry_run should return an error (unreachable) but remain structured
+    auto delRes =
+        svr.callToolPublic("delete_by_name", json{{"name", "nope.txt"}, {"dry_run", true}});
+    ASSERT_TRUE(delRes.is_object()) << delRes.dump();
+    ASSERT_TRUE(delRes.contains("error"));
+}
+
+// Update metadata by hash should be accepted when daemon is reachable; here we only assert schema
+// roundtrip (no crash)
+TEST(MCPSmoke, UpdateMetadataSchemaRoundTrip) {
+    auto t = std::make_unique<NullTransport>();
+    MCPServer svr(std::move(t));
+    auto upd = svr.callToolPublic("update", nlohmann::json{{"hash", "deadbeef"},
+                                                           {"type", "metadata"},
+                                                           {"metadata", nlohmann::json::object()}});
+    ASSERT_TRUE(upd.is_object()) << upd.dump();
+}
+
 // Minimal list success-shape (daemon-first path, but tolerant structure check).
 TEST(MCPSmoke, ListDocumentsResponds) {
     using nlohmann::json;

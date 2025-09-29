@@ -1122,7 +1122,7 @@ private:
     }
 
     bool matchesPattern(const std::string& text, const std::string& pattern) {
-        // Simple wildcard matching (* and ?)
+        // Simple wildcard matching (* and ?) with unanchored search semantics for path patterns.
         std::string regexString = pattern;
 
         // Escape regex special characters except * and ?
@@ -1143,6 +1143,12 @@ private:
 
         try {
             std::regex regexPattern(escaped, std::regex_constants::icase);
+            // If pattern contains a path separator, treat it as a substring match over full path.
+            // This makes patterns like "packages/cli/**/*.js" match absolute stored paths too.
+            if (pattern.find('/') != std::string::npos) {
+                return std::regex_search(text, regexPattern);
+            }
+            // Otherwise (basename patterns like "*.js"), exact-match against the provided text.
             return std::regex_match(text, regexPattern);
         } catch (const std::regex_error&) {
             // If regex fails, fall back to simple string comparison

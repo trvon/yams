@@ -199,12 +199,37 @@ public:
 
                 // Process each path with per-path fallback; collect remaining for services
                 size_t ok = 0, failed = 0;
+                size_t totalAdded = 0;
                 bool hasStdin = std::any_of(paths.begin(), paths.end(),
                                             [](const auto& p) { return p.string() == "-"; });
                 std::vector<std::filesystem::path> serviceDirs;
                 for (const auto& path : paths) {
                     if (path.string() == "-") {
                         continue; // handled later via services path (stdin)
+                    }
+
+                    // Early sanity: surface missing-path errors before contacting the daemon
+                    if (!std::filesystem::exists(path)) {
+                        std::ostringstream oss;
+                        oss << "Path not found: " << path.string();
+                        // Helpful hint: common singular/plural mix-up (test/ vs tests/)
+                        try {
+                            const auto s = path.string();
+                            auto alt = s;
+                            if (s.find("/tests/") != std::string::npos) {
+                                alt = std::regex_replace(s, std::regex("/tests/"), "/test/");
+                            } else if (s.find("/test/") != std::string::npos) {
+                                alt = std::regex_replace(s, std::regex("/test/"), "/tests/");
+                            }
+                            if (alt != s && std::filesystem::exists(alt)) {
+                                oss << ". Did you mean: " << alt;
+                            }
+                        } catch (...) {
+                            // ignore best-effort hint errors
+                        }
+                        spdlog::error("{}", oss.str());
+                        failed++;
+                        continue;
                     }
 
                     // Build daemon add options
@@ -257,6 +282,35 @@ public:
                             std::cout << "Added " << resp.documentsAdded << " documents"
                                       << std::endl;
                         }
+
+                        // If no documents were added, provide actionable diagnostics.
+                        if (resp.documentsAdded == 0) {
+                            // Always surface server-side message when present.
+                            if (!resp.message.empty()) {
+                                std::cout << "  Note: " << resp.message << std::endl;
+                            }
+                            // Directory case: include/exclude filter summary and tips
+                            if (std::error_code dir_ec;
+                                std::filesystem::is_directory(path, dir_ec)) {
+                                std::cout << "  No files were ingested under: " << path.string()
+                                          << std::endl;
+                                if (!includePatterns_.empty()) {
+                                    std::cout << "  include filters: ";
+                                    for (size_t i = 0; i < includePatterns_.size(); ++i) {
+                                        std::cout << (i ? "," : "") << includePatterns_[i];
+                                    }
+                                    std::cout << std::endl;
+                                    std::cout
+                                        << "  Hint: patterns are CSV globs and should be quoted to "
+                                           "avoid shell expansion (e.g., --include=\"**/*.js\")."
+                                        << std::endl;
+                                } else {
+                                    std::cout << "  Hint: use --include to target specific "
+                                                 "extensions (e.g., --include=\"**/*.js\")."
+                                              << std::endl;
+                                }
+                            }
+                        }
                         // After a successful single-file add, perform lightweight
                         // text extraction + FTS index so search works immediately.
                         if (resp.documentsAdded == 1) {
@@ -276,6 +330,7 @@ public:
                         yams::app::services::DocumentIngestionService ing;
                         auto result = ing.addViaDaemon(aopts);
                         if (result) {
+                            totalAdded += result.value().documentsAdded;
                             render(result.value());
                             success = true;
                         } else {
@@ -301,8 +356,13 @@ public:
 
                 // If there were any non-stdin paths processed, report summary here
                 if (ok + failed > 0) {
-                    std::cout << "Daemon add completed: " << ok << " ok, " << failed << " failed"
-                              << std::endl;
+                    std::cout << "Daemon add completed: " << ok << " ok, " << failed << " failed";
+                    if (totalAdded == 0) {
+                        std::cout << " (no changes)";
+                    } else {
+                        std::cout << ", documents added: " << totalAdded;
+                    }
+                    std::cout << std::endl;
                 }
                 // If there were any failures, abort before considering stdin
                 if (failed > 0) {

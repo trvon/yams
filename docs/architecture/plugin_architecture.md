@@ -1,41 +1,30 @@
 # Architecture: Plugin and Content Extraction
 
-This document describes the plugin system and content extraction architecture, consolidating the trust model, manifest schema, and runtimes.
+This overview reflects the current implementation of the plugin stack. Every item below maps directly to production code.
 
-## Goals
+## Manifests and Capability Negotiation (`src/daemon/resource/plugin_loader.cpp`)
 
-- Safely extend YAMS with storage, model, and extraction capabilities.
-- Support both native ABI and sandboxed WASM plugins.
-- Provide clear metadata and interface contracts for discovery and loading.
+- `PluginLoader::loadPlugin` opens a shared object, probes exported functions such as `getProviderName`, `createOnnxProvider`, and `createGraphAdapterV1`, and records which interfaces the plugin implements.
+- Manifests declared in `docs/spec/plugin_metadata.schema.json` describe versioning and required capabilities; loader logic validates the manifest against this schema before registering providers.
+- Graph adapter factories are tracked in an in-process registry via `registerGraphAdapter` / `createGraphAdapter` so knowledge-graph integrations can be selected at runtime.
 
-## Manifests and interfaces
+## Trust and Admission (`src/daemon/resource/plugin_host.cpp`)
 
-- Each plugin provides a manifest describing name, version, capabilities, and interface versions.
-- Manifests conform to `docs/spec/plugin_metadata.schema.json`.
-- Interfaces are versioned; see `docs/spec/plugin_spec.md` and `docs/spec/wit/*`.
+- `PluginHost::trust`/`untrust` maintain a canonicalized allow-list persisted alongside the daemon data directory.
+- `PluginHost::enumerateTrusted` filters discovered libraries against that list, which `ServiceManager::autoloadPluginsNow` uses to decide which plugins can be materialized.
 
-### Provider categories (examples)
-- Storage: `object_storage_v1`
-- DR: `dr_provider_v1`
-- Models: `model_provider_v1`
-- Graphs: `graph_adapter_v1` (property-graph read interface with optional import/export/deltas)
+## Native ABI Loader (`src/daemon/resource/abi_plugin_loader.cpp`)
 
-## Runtimes
+- Resolves ABI entry points, maps them to C++ adapter classes, and converts plugin callbacks into daemon-facing interfaces (storage, model providers, etc.).
+- Handles symbol version mismatches and throws structured errors that bubble back to the caller.
 
-- ABI loader: loads native libraries, fetches manifest via exported symbol, and enforces name policy from manifest when configured.
-- WASM host: loads WIT-defined interfaces and executes in a sandboxed runtime.
+## WASM Runtime (`src/daemon/resource/wasm_runtime.cpp`)
 
-## Trust model
+- Loads WIT-defined interfaces, applies sandbox limits, and connects WASM-based plugins to host services like logging and content extraction.
+- Provides factory helpers so the daemon can treat WASM plugins the same as native ones once instantiated.
 
-- Plugins must be explicitly trusted; paths are stored and compared by canonical path.
-- Trust add/remove updates are reflected immediately in the host’s trust list.
+## Content Extraction Adapters (`src/daemon/resource/abi_content_extractor_adapter.cpp`)
 
-## Code references
+- Bridges ABI plugins that implement the content extraction contract into the ingestion pipeline by wrapping them in a uniform C++ interface.
 
-- Host logic: `src/daemon/resource/plugin_host.cpp`
-- ABI loader: `src/daemon/resource/abi_plugin_loader.cpp`
-- Manifest schema: `docs/spec/plugin_metadata.schema.json`
-
-See also
-- API examples: `docs/api/examples/storage_plugin/*.manifest.json`
-- Design: Content Handler Architecture (`docs/design/content-handler-architecture.md`)
+The modules above comprise the plugin pipeline referenced by tracing artifacts in `docs/delivery/038/artifacts/architecture-traceability.md`.
