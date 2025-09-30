@@ -714,8 +714,9 @@ jobs:
         if: ${{ matrix.build_packages == true && matrix.os == 'linux-hosted' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
         shell: bash
         run: |
+          # Package-only: reuse staged install without triggering a rebuild
           chmod +x scripts/build-deb.sh
-          scripts/build-deb.sh "${{ steps.meta.outputs.version }}" "${{ env.BUILD_DIR }}"
+          scripts/build-deb.sh package_only "${{ steps.meta.outputs.version }}" "${{ env.BUILD_DIR }}" "stage"
 
       # Release notes are sourced directly from CHANGELOG.md during release creation
 
