@@ -712,9 +712,12 @@ jobs:
 
       - name: Build Linux packages (DEB/RPM)
         if: ${{ matrix.build_packages == true && matrix.os == 'linux-hosted' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
+        env:
+          BASE_VERSION: ${{ steps.meta.outputs.base_version }}
         shell: bash
         run: |
           # Package-only: reuse staged install without triggering a rebuild
+          # Use BASE_VERSION to generate Debian/RPM policy-compliant versions for nightly/weekly
           chmod +x scripts/build-deb.sh
           scripts/build-deb.sh package_only "${{ steps.meta.outputs.version }}" "${{ env.BUILD_DIR }}" "stage"
 

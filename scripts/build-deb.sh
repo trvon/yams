@@ -27,8 +27,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d /workspace/yams ]; then
   REPO_ROOT="/workspace/yams"
 else
-  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
+
+allowed_deb_ver_chars='A-Za-z0-9.+:~'
+allowed_rpm_ver_chars='A-Za-z0-9._+'
 
 normalize_arch_label() {
   local arch="$1"
@@ -188,6 +191,95 @@ run_meson_build() {
   meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
 }
 
+# --- Version sanitization helpers -------------------------------------------------
+
+get_base_version() {
+  # Prefer explicit env from CI; otherwise attempt to derive from git; fallback 0.0.0
+  if [ -n "${BASE_VERSION:-}" ]; then
+    echo "${BASE_VERSION}"
+    return
+  fi
+  if git -C "${REPO_ROOT}" describe --tags --abbrev=0 >/dev/null 2>&1; then
+    git -C "${REPO_ROOT}" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'
+    return
+  fi
+  echo "0.0.0"
+}
+
+sanitize_for_deb_upstream() {
+  # Map arbitrary string to Debian upstream version-safe token (no hyphens)
+  # Allowed: ${allowed_deb_ver_chars}; convert others to '.' and collapse repeats
+  local s="$1"
+  s="${s//-/.}"
+  s="${s//_/.}"
+  s="$(echo "$s" | sed -E "s/[^${allowed_deb_ver_chars}]+/./g" | sed -E 's/\.+/./g' | sed -E 's/^\.|\.$//g')"
+  echo "$s"
+}
+
+compute_deb_version() {
+  local in_ver="$1"
+  local base_ver
+  base_ver="$(get_base_version)"
+  # Stable numeric-ish versions without hyphens are acceptable as-is
+  if [[ "$in_ver" =~ ^[0-9][0-9A-Za-z.+:~]*$ ]] && [[ "$in_ver" != *-* ]]; then
+    echo "$in_ver"
+    return
+  fi
+  # Nightly: nightly-YYYYMMDD-<hash>
+  if [[ "$in_ver" =~ ^nightly-([0-9]{8})-([0-9a-fA-F]{7,40})$ ]]; then
+    echo "${base_ver}~nightly.${BASH_REMATCH[1]}+g${BASH_REMATCH[2],,}"
+    return
+  fi
+  # Weekly: weekly-YYYYwWW-<hash>
+  if [[ "$in_ver" =~ ^weekly-([0-9]{4}w[0-9]{2})-([0-9a-fA-F]{7,40})$ ]]; then
+    echo "${base_ver}~weekly.${BASH_REMATCH[1]}+g${BASH_REMATCH[2],,}"
+    return
+  fi
+  # Fallback: general sanitize
+  local token
+  token="$(sanitize_for_deb_upstream "$in_ver")"
+  echo "${base_ver}~${token}"
+}
+
+sanitize_for_rpm_token() {
+  # Allowed in rpm Version/Release: ${allowed_rpm_ver_chars} and '~' (for pre-release)
+  local s="$1"
+  s="${s//-/.}"
+  s="${s//_/.}"
+  s="$(echo "$s" | sed -E "s/[^${allowed_rpm_ver_chars}~]+/./g" | sed -E 's/\.+/./g' | sed -E 's/^\.|\.$//g')"
+  echo "$s"
+}
+
+compute_rpm_nv() {
+  # Outputs two values via echoes: rpm_version rpm_release
+  local in_ver="$1"
+  local base_ver
+  base_ver="$(get_base_version)"
+  # Stable numeric-ish with no hyphen: put all in Version and keep Release=1
+  if [[ "$in_ver" =~ ^[0-9][0-9A-Za-z._+]*$ ]]; then
+    echo "$in_ver"
+    echo "1"
+    return
+  fi
+  # Nightly pattern
+  if [[ "$in_ver" =~ ^nightly-([0-9]{8})-([0-9a-fA-F]{7,40})$ ]]; then
+    echo "$base_ver"
+    echo "0.1~nightly.${BASH_REMATCH[1]}.g${BASH_REMATCH[2],,}"
+    return
+  fi
+  # Weekly pattern
+  if [[ "$in_ver" =~ ^weekly-([0-9]{4}w[0-9]{2})-([0-9a-fA-F]{7,40})$ ]]; then
+    echo "$base_ver"
+    echo "0.1~weekly.${BASH_REMATCH[1]}.g${BASH_REMATCH[2],,}"
+    return
+  fi
+  # Fallback: generic sanitize in Release, keep Version as base
+  local token
+  token="$(sanitize_for_rpm_token "$in_ver")"
+  echo "$base_ver"
+  echo "0.1~${token}"
+}
+
 prepare_stage_docs() {
   local stage_root="$1"
   install -Dm644 "${REPO_ROOT}/LICENSE" "${stage_root}/usr/share/doc/yams/LICENSE"
@@ -235,7 +327,9 @@ Depends: @DEPENDENCIES@
 Description: Yet Another Memory System - persistent memory for LLMs
  YAMS provides content-addressed storage, deduplication, and search for long-term LLM memory.
 __DEB_CONTROL__
-  sed -i "s|__VERSION__|${version}|" "${control}"
+  local deb_version
+  deb_version="$(compute_deb_version "$version")"
+  sed -i "s|__VERSION__|${deb_version}|" "${control}"
   sed -i "s|__ARCH__|${deb_arch}|" "${control}"
 
   local -a binaries=()
@@ -312,7 +406,7 @@ package_rpm() {
 %global __strip /bin/true
 Name: yams
 Version: __VERSION__
-Release: 1%{?dist}
+Release: __RELEASE__%{?dist}
 Summary: Yet Another Memory System
 License: Apache-2.0
 URL: https://git.sr.ht/~trevon/yams
@@ -336,7 +430,10 @@ cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 %files -f %{_sourcedir}/filelist
 %defattr(-,root,root,-)
 __RPM_SPEC__
-  sed -i "s|__VERSION__|${version}|" "${spec}"
+  local rpm_version rpm_release
+  read -r rpm_version rpm_release < <(compute_rpm_nv "$version")
+  sed -i "s|__VERSION__|${rpm_version}|" "${spec}"
+  sed -i "s|__RELEASE__|${rpm_release}|" "${spec}"
   sed -i "s|__RPM_ARCH__|${rpm_arch}|" "${spec}"
 
   rpmbuild --define "_topdir ${rpm_root}" -bb "${spec}"
