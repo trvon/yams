@@ -53,16 +53,72 @@ public:
             if (!explicitEntries.empty()) {
                 entries = std::move(explicitEntries);
             } else {
+                std::error_code ec;
+                // Configure directory iteration options to handle problematic files gracefully
+                auto options = std::filesystem::directory_options::skip_permission_denied;
+
                 if (req.recursive) {
-                    for (const auto& entry :
-                         std::filesystem::recursive_directory_iterator(dirPath)) {
-                        if (entry.is_regular_file())
-                            entries.push_back(entry);
+                    // Use error_code version to avoid exceptions from circular symlinks
+                    std::filesystem::recursive_directory_iterator it(dirPath, options, ec);
+                    std::filesystem::recursive_directory_iterator end;
+
+                    while (it != end) {
+                        std::error_code entry_ec;
+
+                        // Check if entry is accessible before processing
+                        try {
+                            if (it->is_regular_file(entry_ec) && !entry_ec) {
+                                entries.push_back(*it);
+                            } else if (entry_ec) {
+                                // Log but don't fail - common with broken/circular symlinks
+                                spdlog::warn(
+                                    "[IndexingService] Skipping inaccessible entry '{}': {}",
+                                    it->path().string(), entry_ec.message());
+                            }
+                        } catch (const std::filesystem::filesystem_error& e) {
+                            // Handle circular symlinks and other iteration errors
+                            spdlog::warn("[IndexingService] Skipping problematic entry: {}",
+                                         e.what());
+                        }
+
+                        // Advance iterator with error handling
+                        it.increment(ec);
+                        if (ec) {
+                            spdlog::warn("[IndexingService] Error advancing iterator: {}",
+                                         ec.message());
+                            ec.clear();
+                        }
                     }
                 } else {
-                    for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
-                        if (entry.is_regular_file())
-                            entries.push_back(entry);
+                    std::filesystem::directory_iterator it(dirPath, options, ec);
+                    std::filesystem::directory_iterator end;
+
+                    if (ec) {
+                        spdlog::error("[IndexingService] Failed to open directory '{}': {}",
+                                      dirPath.string(), ec.message());
+                    } else {
+                        while (it != end) {
+                            std::error_code entry_ec;
+                            try {
+                                if (it->is_regular_file(entry_ec) && !entry_ec) {
+                                    entries.push_back(*it);
+                                } else if (entry_ec) {
+                                    spdlog::warn(
+                                        "[IndexingService] Skipping inaccessible entry '{}': {}",
+                                        it->path().string(), entry_ec.message());
+                                }
+                            } catch (const std::filesystem::filesystem_error& e) {
+                                spdlog::warn("[IndexingService] Skipping problematic entry: {}",
+                                             e.what());
+                            }
+
+                            it.increment(ec);
+                            if (ec) {
+                                spdlog::warn("[IndexingService] Error advancing iterator: {}",
+                                             ec.message());
+                                ec.clear();
+                            }
+                        }
                     }
                 }
             }

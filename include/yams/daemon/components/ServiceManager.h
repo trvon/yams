@@ -112,23 +112,10 @@ public:
         }
         if (routedViaBus)
             return;
-        // TODO(021-38-remove-ipc): This direct enqueue is kept for rollback safety.
-        // After the InternalEventBus consumer path is stable, remove and always use the bus.
+        // Direct blocking enqueue for predictable latency and throughput
         if (postIngest_) {
             PostIngestQueue::Task t{
                 hash, mime, /*session*/ "", {}, PostIngestQueue::Task::Stage::Metadata};
-            // Try fast non-blocking path with brief backoff to avoid hot locks under burst load.
-            constexpr int kMaxAttempts = 5;
-            int attempts = 0;
-            while (attempts++ < kMaxAttempts) {
-                if (postIngest_->tryEnqueue(t)) {
-                    postIngest_->notifyWorkers();
-                    return;
-                }
-                // Backoff: 10,20,30,40ms
-                std::this_thread::sleep_for(std::chrono::milliseconds(10 * attempts));
-            }
-            // Fallback to legacy blocking enqueue to preserve correctness
             postIngest_->enqueue(std::move(t));
             postIngest_->notifyWorkers();
         }

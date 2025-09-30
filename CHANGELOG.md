@@ -15,10 +15,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.1] - 2025-09-26
+## [v0.7.1] - 2025-09-29
 
 ### Changed
 - GrepService: expanded candidate discovery to preselect from `req.paths` using SQL LIKE prefix scans, aligning service behavior with CLI expectations for directory patterns.
+
+- Post‑ingest pipeline: refactored `PostIngestQueue` into true staged processing
+  (Metadata → Knowledge Graph → Embeddings). Metadata extraction persists text and indexes FTS
+  first; completion enqueues independent KG and Embedding tasks so slow extractors no longer
+  block vector availability. Weighted‑fair scheduling across queues maintains fairness.
+
+- Embeddings integrated into the main pipeline: the new Embedding stage generates vectors
+  immediately after extraction using the daemon’s configured model and inserts into the vector
+  DB, marking embedding status in metadata. Initial embedding generation is no longer coupled to
+  the RepairCoordinator’s idle window.
+
+- ServiceManager enqueue path: simplified `enqueuePostIngest` to a direct blocking enqueue
+  (removed busy‑wait retry loop). This improves predictability and throughput under high load.
+
+- CLI Download UX: `yams download` now clearly displays the ingested content hash
+  (labeled "Content Hash") rather than a transfer/download hash. The success tip also shows
+  both retrieval options when a friendly name is present: `yams get --name "<name>"` or
+  `yams get <content-hash>`. JSON output shape is unchanged and still returns `hash`, which
+  now prefers the ingested hash when available.
 
 ### Fixed
 - GrepService streaming: flushes the final partial line when scanning cold CAS streams so single-line files are matched reliably (e.g., `hello.txt`).
@@ -30,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --print-errorlogs`).
 - Repaired the `document_service` metadata pipeline regression so fixture-driven search tests no
   longer observe missing extracted content.
+
+- MCP stdio transport: replaced unused static output mutex with an instance mutex to satisfy
+  ODR/build on certain platforms.
+
+### Maintenance
+- RepairCoordinator refocus: on live `DocumentAdded` events, skip queuing when the post‑ingest
+  pipeline is active (embeddings are now scheduled by `PostIngestQueue`). Coordinator continues
+  to scan/repair missed or failed embeddings opportunistically.
 
 ## [v0.7.0] - 2025-09-25
 

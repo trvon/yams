@@ -6,7 +6,11 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
+#include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/vector/document_chunker.h>
+#include <yams/vector/embedding_generator.h>
+#include <yams/vector/vector_database.h>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -45,8 +49,9 @@ PostIngestQueue::PostIngestQueue(
                 InternalEventBus::PostIngestTask bt;
                 if (bus && bus->try_pop(bt)) {
                     std::unique_lock<std::mutex> lk(mtx_);
-                    if (inflight_.find(bt.hash) == inflight_.end()) {
-                        inflight_.insert(bt.hash);
+                    auto it = inflight_.find(bt.hash);
+                    if (it == inflight_.end()) {
+                        inflight_.emplace(bt.hash, 1u);
                         Task t{bt.hash, bt.mime, /*session*/ "", {}, Task::Stage::Metadata};
                         t.enqueuedAt = std::chrono::steady_clock::now();
                         qMeta_.push_back(std::move(t));
@@ -93,7 +98,7 @@ void PostIngestQueue::enqueue(Task t) {
             // Drop duplicate task while one is already queued or processing
             return;
         }
-        inflight_.insert(t.hash);
+        inflight_.emplace(t.hash, 1u);
         t.enqueuedAt = std::chrono::steady_clock::now();
         if (t.session.empty())
             t.session = "default";
@@ -125,7 +130,7 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     copy.enqueuedAt = std::chrono::steady_clock::now();
     if (copy.session.empty())
         copy.session = "default";
-    inflight_.insert(copy.hash);
+    inflight_.emplace(copy.hash, 1u);
     switch (copy.stage) {
         case Task::Stage::KnowledgeGraph:
             qKg_.push_back(std::move(copy));
@@ -171,7 +176,7 @@ void PostIngestQueue::workerLoop() {
                     // Already queued/processing, skip
                     haveTask = false;
                 } else {
-                    inflight_.insert(bt.hash);
+                    inflight_.emplace(bt.hash, 1u);
                     task.hash = std::move(bt.hash);
                     task.mime = std::move(bt.mime);
                     task.enqueuedAt = std::chrono::steady_clock::now();
@@ -234,106 +239,99 @@ void PostIngestQueue::workerLoop() {
                 if (!info.fileExtension.empty())
                     extension = info.fileExtension;
             }
-            auto txt = extractDocumentText(store_, task.hash, mime, extension, extractors_);
-            if (!txt || txt->empty()) {
-                spdlog::debug("PostIngest: no text extracted for {} (mime={})", task.hash, mime);
-                if (docId >= 0) {
-                    auto d = meta_->getDocument(docId);
-                    if (d && d.value().has_value()) {
-                        auto updated = d.value().value();
-                        updated.contentExtracted = false;
-                        updated.extractionStatus = metadata::ExtractionStatus::Skipped;
-                        (void)meta_->updateDocument(updated);
+            if (task.stage == Task::Stage::Metadata) {
+                auto txt = extractDocumentText(store_, task.hash, mime, extension, extractors_);
+                if (!txt || txt->empty()) {
+                    spdlog::debug("PostIngest: no text extracted for {} (mime={})", task.hash,
+                                  mime);
+                    if (docId >= 0) {
+                        auto d = meta_->getDocument(docId);
+                        if (d && d.value().has_value()) {
+                            auto updated = d.value().value();
+                            updated.contentExtracted = false;
+                            updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                            (void)meta_->updateDocument(updated);
+                        }
                     }
-                }
-            } else if (docId >= 0) {
-                {
-                    metadata::DocumentContent contentRow;
-                    contentRow.documentId = docId;
-                    contentRow.contentText = *txt;
-                    contentRow.contentLength = static_cast<int64_t>(contentRow.contentText.size());
-                    contentRow.extractionMethod = "post_ingest";
-                    double langConfidence = 0.0;
-                    contentRow.language = yams::extraction::LanguageDetector::detectLanguage(
-                        contentRow.contentText, &langConfidence);
-                    auto contentUpsert = meta_->insertContent(contentRow);
-                    if (!contentUpsert) {
-                        spdlog::warn("PostIngest: failed to upsert content for {}: {}", task.hash,
-                                     contentUpsert.error().message);
+                } else if (docId >= 0) {
+                    {
+                        auto pr = yams::ingest::persist_content_and_index(
+                            *meta_, docId, fileName, *txt, mime, "post_ingest");
+                        if (!pr) {
+                            spdlog::warn("PostIngest: persist/index failed for {}: {}", task.hash,
+                                         pr.error().message);
+                        }
                     }
+                    // Enqueue next stages after metadata is persisted
+                    addNextStagesLocked(task.hash, mime, task.session);
                 }
-                (void)meta_->indexDocumentContent(docId, fileName, *txt, mime);
-                (void)meta_->updateFuzzyIndex(docId);
-                auto d = meta_->getDocument(docId);
-                if (d && d.value().has_value()) {
-                    auto updated = d.value().value();
-                    updated.contentExtracted = true;
-                    updated.extractionStatus = metadata::ExtractionStatus::Success;
-                    (void)meta_->updateDocument(updated);
-                }
-                // KG upsert (best-effort)
-                try {
-                    if (kg_) {
-                        auto infoRes2 = meta_->getDocumentByHash(task.hash);
-                        if (infoRes2 && infoRes2.value().has_value()) {
-                            const auto& doc = *infoRes2.value();
-                            metadata::KGNode docNode;
-                            docNode.nodeKey = std::string("doc:") + task.hash;
-                            docNode.type = std::string("document");
-                            docNode.label = !doc.fileName.empty()
-                                                ? std::optional<std::string>(doc.fileName)
-                                                : std::nullopt;
-                            std::int64_t docNodeId = -1;
-                            if (TuneAdvisor::kgBatchNodesEnabled()) {
-                                auto ids = kg_->upsertNodes({docNode});
-                                if (ids && !ids.value().empty())
-                                    docNodeId = ids.value()[0];
-                            } else {
-                                auto r = kg_->upsertNode(docNode);
-                                if (r)
-                                    docNodeId = r.value();
-                            }
-                            if (docNodeId >= 0) {
-                                auto tagsRes = meta_->getDocumentTags(doc.id);
-                                std::vector<metadata::KGEdge> edges;
-                                if (tagsRes && !tagsRes.value().empty()) {
-                                    std::vector<metadata::KGNode> tagNodes;
-                                    tagNodes.reserve(tagsRes.value().size());
-                                    for (const auto& t : tagsRes.value()) {
-                                        metadata::KGNode tagNode;
-                                        tagNode.nodeKey = std::string("tag:") + t;
-                                        tagNode.type = std::string("tag");
-                                        tagNodes.push_back(std::move(tagNode));
-                                    }
-                                    std::vector<std::int64_t> tagIds;
-                                    if (TuneAdvisor::kgBatchNodesEnabled()) {
-                                        auto rids = kg_->upsertNodes(tagNodes);
-                                        if (rids)
-                                            tagIds = std::move(rids.value());
-                                    } else {
-                                        for (const auto& n : tagNodes) {
-                                            auto rr = kg_->upsertNode(n);
-                                            if (rr)
-                                                tagIds.push_back(rr.value());
-                                        }
-                                    }
-                                    for (auto tid : tagIds) {
-                                        metadata::KGEdge e;
-                                        e.srcNodeId = docNodeId;
-                                        e.dstNodeId = tid;
-                                        e.relation = "HAS_TAG";
-                                        edges.push_back(std::move(e));
-                                    }
-                                    if (!edges.empty()) {
-                                        if (TuneAdvisor::kgBatchEdgesEnabled())
-                                            (void)kg_->addEdgesUnique(edges);
-                                        else
-                                            for (const auto& e : edges)
-                                                (void)kg_->addEdge(e);
+            }
+            // KG upsert (best-effort) — handled only in KG stage below
+            try {
+                if (task.stage == Task::Stage::KnowledgeGraph && kg_) {
+                    auto infoRes2 = meta_->getDocumentByHash(task.hash);
+                    if (infoRes2 && infoRes2.value().has_value()) {
+                        const auto& doc = *infoRes2.value();
+                        metadata::KGNode docNode;
+                        docNode.nodeKey = std::string("doc:") + task.hash;
+                        docNode.type = std::string("document");
+                        docNode.label = !doc.fileName.empty()
+                                            ? std::optional<std::string>(doc.fileName)
+                                            : std::nullopt;
+                        std::int64_t docNodeId = -1;
+                        if (TuneAdvisor::kgBatchNodesEnabled()) {
+                            auto ids = kg_->upsertNodes({docNode});
+                            if (ids && !ids.value().empty())
+                                docNodeId = ids.value()[0];
+                        } else {
+                            auto r = kg_->upsertNode(docNode);
+                            if (r)
+                                docNodeId = r.value();
+                        }
+                        if (docNodeId >= 0) {
+                            auto tagsRes = meta_->getDocumentTags(doc.id);
+                            std::vector<metadata::KGEdge> edges;
+                            if (tagsRes && !tagsRes.value().empty()) {
+                                std::vector<metadata::KGNode> tagNodes;
+                                tagNodes.reserve(tagsRes.value().size());
+                                for (const auto& t : tagsRes.value()) {
+                                    metadata::KGNode tagNode;
+                                    tagNode.nodeKey = std::string("tag:") + t;
+                                    tagNode.type = std::string("tag");
+                                    tagNodes.push_back(std::move(tagNode));
+                                }
+                                std::vector<std::int64_t> tagIds;
+                                if (TuneAdvisor::kgBatchNodesEnabled()) {
+                                    auto rids = kg_->upsertNodes(tagNodes);
+                                    if (rids)
+                                        tagIds = std::move(rids.value());
+                                } else {
+                                    for (const auto& n : tagNodes) {
+                                        auto rr = kg_->upsertNode(n);
+                                        if (rr)
+                                            tagIds.push_back(rr.value());
                                     }
                                 }
-                                // Lightweight entity extraction
-                                if (txt && !txt->empty()) {
+                                for (auto tid : tagIds) {
+                                    metadata::KGEdge e;
+                                    e.srcNodeId = docNodeId;
+                                    e.dstNodeId = tid;
+                                    e.relation = "HAS_TAG";
+                                    edges.push_back(std::move(e));
+                                }
+                                if (!edges.empty()) {
+                                    if (TuneAdvisor::kgBatchEdgesEnabled())
+                                        (void)kg_->addEdgesUnique(edges);
+                                    else
+                                        for (const auto& e : edges)
+                                            (void)kg_->addEdge(e);
+                                }
+                            }
+                            // Lightweight entity extraction (from persisted content)
+                            auto contentOpt = meta_->getContent(docId);
+                            if (contentOpt && contentOpt.value().has_value()) {
+                                const std::string& s = contentOpt.value().value().contentText;
+                                if (!s.empty()) {
                                     static const std::regex url_re(R"((https?:\/\/[^\s)]+))",
                                                                    std::regex::icase);
                                     static const std::regex email_re(
@@ -351,7 +349,6 @@ void PostIngestQueue::workerLoop() {
                                     size_t added = 0;
                                     const size_t kMax = TuneAdvisor::maxEntitiesPerDoc();
                                     std::smatch m;
-                                    std::string s = *txt;
                                     auto it = s.cbegin();
                                     if (TuneAdvisor::analyzerUrls()) {
                                         while (added < kMax &&
@@ -413,7 +410,60 @@ void PostIngestQueue::workerLoop() {
                             }
                         }
                     }
+                }
+            } catch (...) {
+            }
+
+            // Embedding stage: generate vectors as soon as text is available
+            if (task.stage == Task::Stage::Embeddings) {
+                try {
+                    std::shared_ptr<yams::vector::EmbeddingGenerator> gen;
+                    std::shared_ptr<yams::vector::VectorDatabase> vdb;
+                    {
+                        std::lock_guard<std::mutex> lk(mtx_);
+                        if (getEmbeddingGenerator_)
+                            gen = getEmbeddingGenerator_();
+                        if (getVectorDatabase_)
+                            vdb = getVectorDatabase_();
+                    }
+                    if (gen && vdb) {
+                        if (!gen->isInitialized())
+                            (void)gen->initialize();
+                        if (docId >= 0) {
+                            auto contentOpt = meta_->getContent(docId);
+                            if (contentOpt && contentOpt.value().has_value()) {
+                                const auto& text = contentOpt.value().value().contentText;
+                                if (!text.empty()) {
+                                    auto infoRes3 = meta_->getDocumentByHash(task.hash);
+                                    std::string pathMeta, nameMeta;
+                                    std::string mimeMeta = mime;
+                                    if (infoRes3 && infoRes3.value().has_value()) {
+                                        const auto& d = *infoRes3.value();
+                                        nameMeta = d.fileName;
+                                        pathMeta = d.filePath;
+                                        if (!d.mimeType.empty())
+                                            mimeMeta = d.mimeType;
+                                    }
+                                    yams::vector::ChunkingConfig ccfg{};
+                                    auto r = yams::ingest::embed_and_insert_document(
+                                        *gen, *vdb, *meta_, task.hash, text, nameMeta, pathMeta,
+                                        mimeMeta, ccfg);
+                                    if (!r) {
+                                        spdlog::warn("PostIngest: embed/insert failed for {}: {}",
+                                                     task.hash, r.error().message);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        spdlog::debug("PostIngest: embedding providers unavailable for {}",
+                                      task.hash);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("PostIngest: embedding stage error for {}: {}", task.hash,
+                                  e.what());
                 } catch (...) {
+                    spdlog::debug("PostIngest: embedding stage unknown error for {}", task.hash);
                 }
             }
         }
@@ -428,10 +478,16 @@ void PostIngestQueue::workerLoop() {
     }
 
     processed_.fetch_add(1, std::memory_order_relaxed);
-    // Finalize: clear inflight and update EMAs
+    // Finalize: decrement inflight for this hash and update EMAs
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        inflight_.erase(task.hash);
+        auto it = inflight_.find(task.hash);
+        if (it != inflight_.end()) {
+            if (it->second > 1)
+                --(it->second);
+            else
+                inflight_.erase(it);
+        }
         try {
             auto now = std::chrono::steady_clock::now();
             if (task.enqueuedAt.time_since_epoch().count() != 0) {
@@ -569,6 +625,22 @@ bool PostIngestQueue::resize(std::size_t target) {
     }
     spdlog::info("PostIngestQueue resized down to {} threads", threads_.size());
     return true;
+}
+
+void PostIngestQueue::addNextStagesLocked(const std::string& hash, const std::string& mime,
+                                          const std::string& session) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    Task tKg{hash, mime, session, std::chrono::steady_clock::now(), Task::Stage::KnowledgeGraph};
+    Task tEmb{hash, mime, session, std::chrono::steady_clock::now(), Task::Stage::Embeddings};
+    qKg_.push_back(std::move(tKg));
+    qEmb_.push_back(std::move(tEmb));
+    auto it = inflight_.find(hash);
+    if (it != inflight_.end()) {
+        it->second += 2u;
+    } else {
+        inflight_[hash] = 2u; // edge case: ensure consistency if missing
+    }
+    cv_.notify_one();
 }
 
 } // namespace yams::daemon

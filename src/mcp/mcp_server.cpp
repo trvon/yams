@@ -92,8 +92,7 @@ static nlohmann::json createLogNotification(const std::string& level, const std:
     return {{"jsonrpc", "2.0"}, {"method", "notifications/message"}, {"params", params}};
 }
 
-// Define static mutex for StdioTransport
-std::mutex StdioTransport::out_mutex_;
+// Using instance mutex (outMutex_) declared in header; no static needed
 
 // Unified send helper: prefers non-blocking transports and posts async sends when possible
 void MCPServer::sendResponse(const nlohmann::json& message) {
@@ -258,7 +257,7 @@ void StdioTransport::send(const json& message) {
     auto currentState = state_.load();
     if (currentState == TransportState::Connected) {
         try {
-            std::lock_guard<std::mutex> lock(out_mutex_);
+            std::lock_guard<std::mutex> lock(outMutex_);
             const std::string payload = message.dump();
             auto& out = std::cout;
             // Minimal MCP framing, always including Content-Type header for interop
@@ -280,7 +279,7 @@ void StdioTransport::sendNdjson(const json& message) {
         return;
     }
     try {
-        std::lock_guard<std::mutex> lock(out_mutex_);
+        std::lock_guard<std::mutex> lock(outMutex_);
         const std::string payload = message.dump();
         auto& out = std::cout;
         out << payload << "\n";
@@ -298,7 +297,7 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
         return;
     }
     try {
-        std::lock_guard<std::mutex> lock(out_mutex_);
+        std::lock_guard<std::mutex> lock(outMutex_);
         auto& out = std::cout;
         out << "Content-Length: " << payload.size() << "\r\n";
         out << "Content-Type: " << contentTypeHeader_ << "\r\n";

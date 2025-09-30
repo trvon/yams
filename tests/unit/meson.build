@@ -82,6 +82,7 @@ unit_daemon = files(
   'daemon/request_handler_io_edge_test.cpp',
   'daemon/resource_pool_test.cpp',
   'daemon/response_of_test.cpp',
+  'daemon/service_manager_test.cpp',
   'daemon/socket_server_lifecycle_test.cpp',
   'daemon/status_embedding_test.cpp',
   'daemon/status_response_proto_test.cpp',

@@ -291,13 +291,14 @@ public:
         } else {
             std::cout << "Download successful!" << std::endl;
             std::cout << "  URL: " << resp.url << std::endl;
-            std::cout << "  Hash: " << resp.hash << std::endl;
+            // Show the ingested content hash (DownloadServiceResponse.hash prefers ingested hash)
+            std::cout << "  Content Hash: " << resp.hash << std::endl;
             std::cout << "  Size: " << resp.sizeBytes << " bytes" << std::endl;
             std::cout << "  Stored at: " << resp.storedPath.string() << std::endl;
             if (!resp.indexName.empty()) {
                 std::cout << "  Name: " << resp.indexName << std::endl;
-                std::cout << "  Tip: yams get --name \"" << resp.indexName << "\" --extract-text"
-                          << std::endl;
+                std::cout << "  Tip: yams get --name \"" << resp.indexName << "\"  (or: yams get "
+                          << resp.hash << ")" << std::endl;
             } else {
                 std::cout << "  Tip: yams get " << resp.hash << std::endl;
             }

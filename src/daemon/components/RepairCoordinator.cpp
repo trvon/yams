@@ -82,10 +82,22 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
         return;
     }
 
+    // If the main post-ingest pipeline is active, it will schedule embeddings
+    // immediately after text extraction. Avoid duplicate scheduling here.
+    try {
+        if (services_ && services_->getPostIngestQueue()) {
+            spdlog::debug(
+                "RepairCoordinator: skipping DocumentAdded {} — handled by PostIngestQueue",
+                event.hash);
+            return;
+        }
+    } catch (...) {
+        // fall through to best-effort queue if introspection fails
+    }
+
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         pendingDocuments_.push(event.hash);
-        // Update queue depth metric
         if (state_)
             state_->stats.repairQueueDepth.store(static_cast<uint64_t>(pendingDocuments_.size()));
     }

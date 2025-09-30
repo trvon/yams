@@ -159,20 +159,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   include_directories: incs,
   dependencies: [gtest_dep, test_deps],
   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  # Ensure all test objects from the static library are linked on all platforms.
-  # macOS in particular drops unreferenced objects without whole-archive semantics.
   link_whole: yams_unit_objs,
   install: false,
 )
-  # Give the aggregated unit binary more time; default 30s was tight on CI/macOS
-  # Exclude a few flaky/heavy tests in the aggregate run; they still run in their suites when targeted.
-  # - ResourcePoolTest.MaxSizeEnforcement occasionally trips a platform-specific CV/queue edge case.
-  # - StreamingProcessorTest.* depends on optional model plumbing and can be flaky locally.
-  # - ZstandardCompressorTest.DecompressionPerformance is environment-sensitive on developer machines.
-  # GoogleTest filter syntax is:
-  #   <positive patterns>-<negative patterns>
-  # Patterns are colon-separated; only a single '-' separates the two sections.
-  # Our previous form passed '-' on each negative entry, which prevented matching.
   unit_exclude = (
     '*-' +
     'ResourcePoolTest.MaxSizeEnforcement:' +
@@ -292,10 +281,16 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     timeout: unit_timeout,
   )
 
-  # Pin a targeted shard-style runner for the new DaemonMetrics vectordb readiness test.
-  # Note: regular unit shards already include this test automatically. This explicit entry
-  # guarantees coverage even when sharding is disabled and provides an easy way to
-  # re-run just this test in CI logs.
+  test('unit_isolated_service_manager', unit_exe,
+    suite: ['unit', 'isolated'],
+    args: ['--gtest_filter=ServiceManagerTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: unit_timeout,
+  )
+
   test('unit_shard_vectordb_metrics', unit_exe,
     suite: ['unit'],
     args: ['--gtest_filter=DaemonMetrics.VectorDbReadyHealsFromHandle'],

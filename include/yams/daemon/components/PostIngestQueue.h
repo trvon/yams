@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -22,6 +23,10 @@ class MetadataRepository;
 namespace extraction {
 class IContentExtractor;
 }
+namespace vector {
+class EmbeddingGenerator;
+class VectorDatabase;
+} // namespace vector
 } // namespace yams
 
 namespace yams::daemon {
@@ -83,6 +88,17 @@ public:
         return QueueGauges{qMeta_.size() + qKg_.size() + qEmb_.size(), inflight_.size(), capacity_};
     }
 
+    // Configure providers for embedding stage (optional). These are invoked at run-time to
+    // retrieve the current instances; allows ServiceManager to wire dependencies without
+    // tight coupling or lifetime issues.
+    void setEmbeddingProviders(
+        std::function<std::shared_ptr<yams::vector::EmbeddingGenerator>()> genGetter,
+        std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        getEmbeddingGenerator_ = std::move(genGetter);
+        getVectorDatabase_ = std::move(dbGetter);
+    }
+
 private:
     void workerLoop();
 
@@ -101,7 +117,8 @@ private:
     std::deque<Task> qMeta_;
     std::deque<Task> qKg_;
     std::deque<Task> qEmb_;
-    std::unordered_set<std::string> inflight_;
+    // Track outstanding stage count per document hash so dedupe spans all stages.
+    std::unordered_map<std::string, uint32_t> inflight_;
     std::size_t capacity_{1000};
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> processed_{0};
@@ -128,6 +145,14 @@ private:
     // Internal helpers
     bool admitSessionLocked(const std::string& session);
     bool popNextTaskLocked(Task& out);
+
+    // Embedding stage providers (set by ServiceManager)
+    std::function<std::shared_ptr<yams::vector::EmbeddingGenerator>()> getEmbeddingGenerator_;
+    std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
+
+    // Helper: enqueue KG and Embeddings stages for a document and bump inflight counter.
+    void addNextStagesLocked(const std::string& hash, const std::string& mime,
+                             const std::string& session);
 };
 
 } // namespace yams::daemon

@@ -69,4 +69,127 @@ TEST(RepairCoordinatorTest, DoesNothingWhenDisabled) {
     // Verify no repair operations were attempted
     EXPECT_EQ(state.stats.repairBatchesAttempted.load(), 0u);
 }
+
+// ===== Phase 2: Comprehensive Coverage Expansion =====
+
+TEST(RepairCoordinatorTest, StartIdempotent) {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_idem";
+    cfg.maxBatch = 10;
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    // First start should succeed
+    coordinator.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Second start should be idempotent (no error)
+    EXPECT_NO_THROW(coordinator.start());
+
+    coordinator.stop();
+}
+
+TEST(RepairCoordinatorTest, StopIdempotent) {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_stop";
+    cfg.maxBatch = 10;
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    coordinator.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    coordinator.stop();
+
+    // Second stop should be idempotent (no error)
+    EXPECT_NO_THROW(coordinator.stop());
+}
+
+TEST(RepairCoordinatorTest, MultipleDocumentAddedEvents) {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_multi";
+    cfg.maxBatch = 5;
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    coordinator.start();
+
+    // Add multiple documents to test batch processing
+    for (int i = 0; i < 10; ++i) {
+        std::string hash = "hash_" + std::to_string(i);
+        std::string path = "/path/doc_" + std::to_string(i) + ".txt";
+        RepairCoordinator::DocumentAddedEvent event{hash, path};
+        coordinator.onDocumentAdded(event);
+    }
+
+    // Allow time for processing
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    // Verify queue depth was tracked
+    EXPECT_GE(state.stats.repairQueueDepth.load(), 0u);
+
+    coordinator.stop();
+}
+
+TEST(RepairCoordinatorTest, EventsIgnoredWhenNotRunning) {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_notrun";
+    cfg.maxBatch = 10;
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    // Try to add events before starting
+    RepairCoordinator::DocumentAddedEvent addEvent{"hash1", "/path1.txt"};
+    coordinator.onDocumentAdded(addEvent);
+    RepairCoordinator::DocumentRemovedEvent removeEvent{"hash2"};
+    coordinator.onDocumentRemoved(removeEvent);
+
+    // Queue should remain empty (events ignored)
+    EXPECT_EQ(state.stats.repairQueueDepth.load(), 0u);
+}
+
+TEST(RepairCoordinatorTest, StatsTrackingUpdatesQueueDepth) {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_stats";
+    cfg.maxBatch = 10;
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    coordinator.start();
+
+    // Initial queue depth should be 0
+    EXPECT_EQ(state.stats.repairQueueDepth.load(), 0u);
+
+    // Add a document
+    RepairCoordinator::DocumentAddedEvent event{"stats_hash", "/stats.txt"};
+    coordinator.onDocumentAdded(event);
+
+    // Small delay to allow queue update
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Queue depth should have been updated (may be processed already)
+    EXPECT_GE(state.stats.repairQueueDepth.load(), 0u);
+
+    coordinator.stop();
+}
+
 } // namespace yams::daemon

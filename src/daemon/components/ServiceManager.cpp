@@ -1099,6 +1099,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         std::size_t qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         postIngest_ = std::make_unique<PostIngestQueue>(contentStore_, metadataRepo_,
                                                         contentExtractors_, kgStore, threads, qcap);
+        // Wire embedding providers so PostIngestQueue can run the Embeddings stage
+        try {
+            postIngest_->setEmbeddingProviders([this]() { return this->embeddingGenerator_; },
+                                               [this]() { return this->vectorDatabase_; });
+        } catch (...) {
+        }
         // Apply daemon tuning config (capacity/min threads) now that queue exists
         try {
             if (config_.tuning.postIngestCapacity > 0)

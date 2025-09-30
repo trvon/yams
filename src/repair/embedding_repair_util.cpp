@@ -1,6 +1,8 @@
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
+#include <yams/ingest/ingest_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/vector/document_chunker.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -204,32 +206,15 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         }
 
         if (!texts.empty()) {
-            // Generate embeddings for batch
-            auto embeddings = embeddingGenerator->generateEmbeddings(texts);
-            if (embeddings.empty()) {
-                stats.failedOperations += texts.size();
-                spdlog::debug("Failed to generate embeddings for batch of {} texts", texts.size());
-                continue;
-            }
+            // Insert per document with a bounded advisory lock; helper handles chunking/embeds.
+            for (size_t k = 0; k < batchDocs.size() && k < texts.size(); ++k) {
+                const auto& doc = batchDocs[k];
+                const auto& text = texts[k];
+                if (text.empty()) {
+                    stats.failedOperations += 1;
+                    continue;
+                }
 
-            // Store embeddings in vector database (acquire short-lived lock per batch)
-            std::vector<vector::VectorRecord> records;
-            records.reserve(embeddings.size());
-
-            for (size_t k = 0; k < embeddings.size() && k < batchDocs.size(); ++k) {
-                vector::VectorRecord record;
-                record.document_hash = batchDocs[k].sha256Hash;
-                record.chunk_id = vector::utils::generateChunkId(batchDocs[k].sha256Hash, 0);
-                record.embedding = embeddings[k];
-                record.content = texts[k].substr(0, 1000); // Store snippet
-                record.metadata["name"] = batchDocs[k].fileName;
-                record.metadata["mime_type"] = batchDocs[k].mimeType;
-                record.metadata["path"] = batchDocs[k].filePath;
-                records.push_back(std::move(record));
-            }
-
-            if (!records.empty()) {
-                // Bounded wait/backoff for the DB lock
                 const auto lockPath = config.dataPath / "vectors.db.lock";
                 auto now = std::chrono::steady_clock::now();
                 uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
@@ -241,55 +226,33 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                 }
                 const auto deadline = now + std::chrono::milliseconds(timeout_ms);
                 uint64_t sleep_ms = 50;
-                bool locked = false;
-                while (!locked) {
+                bool done = false;
+                while (!done) {
                     VectorDbLock vlock(lockPath);
                     if (vlock.isLocked()) {
-                        // Insert while holding the lock, then release at scope end
-                        if (vectorDb->insertVectorsBatch(records)) {
-                            locked = true; // success path exits loop
-                            // vlock destructs here after insert
+                        yams::vector::ChunkingConfig ccfg{};
+                        auto r = yams::ingest::embed_and_insert_document(
+                            *embeddingGenerator, *vectorDb, *metadataRepo, doc.sha256Hash, text,
+                            doc.fileName, doc.filePath, doc.mimeType, ccfg);
+                        if (r) {
+                            stats.embeddingsGenerated += r.value();
+                            done = true;
                         } else {
-                            // Insert failed while holding the lock; treat as batch failure
-                            stats.failedOperations += records.size();
-                            spdlog::debug("Failed to insert {} embeddings into vector database",
-                                          records.size());
+                            stats.failedOperations += 1;
+                            spdlog::debug("[repair] embed/insert failed for {}: {}", doc.sha256Hash,
+                                          r.error().message);
                             break;
                         }
                     } else {
-                        spdlog::debug("Another process is updating the vector database");
-                        if (progressCallback) {
+                        if (progressCallback)
                             progressCallback(0, 0, "Waiting for vector DB lock...");
-                        }
                         if (std::chrono::steady_clock::now() >= deadline) {
-                            spdlog::warn("Vector database lock timeout; skipping current batch of "
-                                         "{} records",
-                                         records.size());
-                            stats.failedOperations += records.size();
+                            spdlog::warn("Vector DB lock timeout; skipping doc {}", doc.sha256Hash);
+                            stats.failedOperations += 1;
                             break;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
                         sleep_ms = std::min<uint64_t>(sleep_ms * 2, 2000);
-                    }
-                }
-
-                if (locked) {
-                    stats.embeddingsGenerated += records.size();
-
-                    // Update metadata repository to track embedding status
-                    for (const auto& record : records) {
-                        auto updateResult = metadataRepo->updateDocumentEmbeddingStatusByHash(
-                            record.document_hash, true, embeddingGenerator->getConfig().model_name);
-                        if (!updateResult) {
-                            spdlog::warn("Failed to update embedding status for {}: {}",
-                                         record.document_hash, updateResult.error().message);
-                        }
-                    }
-                } else {
-                    try {
-                        spdlog::error("[vectordb] batch insert failed: {}",
-                                      vectorDb->getLastError());
-                    } catch (...) {
                     }
                 }
             }

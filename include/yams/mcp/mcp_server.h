@@ -95,8 +95,8 @@ private:
     // Outbound content type header for framed messages (configurable via YAMS_MCP_CONTENT_TYPE)
     std::string contentTypeHeader_;
 
-    // Mutex for thread-safe output operations (sending only)
-    static std::mutex out_mutex_;
+    // Mutex for thread-safe output operations (sending only) - instance member for proper RAII
+    mutable std::mutex outMutex_;
     // Outbound writer queue + thread to avoid blocking on stdout writes
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
