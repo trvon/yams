@@ -230,6 +230,7 @@ message GrepRequest {
   string color_mode = 23;
   int32 before_context = 24;
   int32 after_context = 25;
+  bool show_diff = 26;
 }
 
 message UpdateDocumentRequest {
@@ -445,7 +446,18 @@ message GrepResponse {
   // Backward compatibility for legacy clients/servers (deprecated)
   // Use bytes to avoid libprotobuf UTF-8 validation failures when binary data is present.
   repeated bytes lines = 2;
+  uint64 total_matches = 3;
+  uint64 files_searched = 4;
+  uint64 regex_matches = 5;
+  uint64 semantic_matches = 6;
+  int64 execution_time_ms = 7;
+  string query_info = 8;
+  repeated KvPair search_stats = 9;
+  repeated string files_with = 10;
+  repeated string files_without = 11;
+  repeated string paths_only = 12;
 }
+
 message UpdateDocumentResponse { bool updated = 1; }
 message EmbedDocumentsResponse {
   uint64 requested = 1;

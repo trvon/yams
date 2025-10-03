@@ -75,6 +75,12 @@ jobs:
           meson setup "$BUILD_DIR" "${TOOL_ARG[@]}" -Dbuildtype=release -Dbuild-tests=true -Denable-onnx=disabled
           meson compile -C "$BUILD_DIR"
 
+      - name: Run Bench Test Suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          meson test -C "$BUILD_DIR" --suite bench -t 5 --no-rebuild
+
       - name: Run Bus Micro-benchmark
         id: bench
         shell: bash

@@ -15,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.2] - 2025-09-30
+## [v0.7.3] - Unreleased
 
-## [Unreleased] - 2025-10-03
+### Fixed
+- **Daemon IPC:** Fixed a regression in the `grep` IPC protocol where `GrepRequest` and `GrepResponse` messages were not fully serialized, causing data loss. The protocol definitions and serializers have been updated to correctly handle all fields, including `show_diff` in requests and detailed statistics in responses.
+
+## [v0.7.2] - 2025-10-03
 
 ### Added
 - Automatic directory snapshot generation with ISO 8601 timestamp IDs and git metadata detection (commit, branch, remote). Every `yams add <directory>` now creates a timestamped snapshot stored in the `tree_snapshots` table.

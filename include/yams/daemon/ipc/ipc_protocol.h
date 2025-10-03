@@ -3772,42 +3772,86 @@ struct GrepMatch {
 
 struct GrepResponse {
     std::vector<GrepMatch> matches;
-    size_t totalMatches = 0;
-    size_t filesSearched = 0;
+    uint64_t totalMatches = 0;
+    uint64_t filesSearched = 0;
+    uint64_t regexMatches = 0;
+    uint64_t semanticMatches = 0;
+    int64_t executionTimeMs = 0;
+    std::string queryInfo;
+    std::map<std::string, std::string> searchStats;
+    std::vector<std::string> filesWith;
+    std::vector<std::string> filesWithout;
+    std::vector<std::string> pathsOnly;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << static_cast<uint32_t>(matches.size());
-        for (const auto& m : matches) {
-            m.serialize(ser);
-        }
-        ser << static_cast<uint64_t>(totalMatches) << static_cast<uint64_t>(filesSearched);
+        for (const auto& it : matches)
+            it.serialize(ser);
+        ser << totalMatches << filesSearched << regexMatches << semanticMatches << executionTimeMs
+            << queryInfo << searchStats << filesWith << filesWithout << pathsOnly;
     }
 
     template <typename Deserializer>
     requires IsDeserializer<Deserializer>
     static Result<GrepResponse> deserialize(Deserializer& deser) {
-        GrepResponse res;
+        GrepResponse r;
         auto cnt = deser.template read<uint32_t>();
         if (!cnt)
             return cnt.error();
-        res.matches.reserve(cnt.value());
+        r.matches.reserve(cnt.value());
         for (uint32_t i = 0; i < cnt.value(); ++i) {
-            auto m = GrepMatch::deserialize(deser);
-            if (!m)
-                return m.error();
-            res.matches.push_back(std::move(m.value()));
+            auto e = GrepMatch::deserialize(deser);
+            if (!e)
+                return e.error();
+            r.matches.push_back(std::move(e.value()));
         }
-        auto tm = deser.template read<uint64_t>();
-        if (!tm)
-            return tm.error();
-        res.totalMatches = tm.value();
-        auto fs = deser.template read<uint64_t>();
-        if (!fs)
-            return fs.error();
-        res.filesSearched = fs.value();
-        return res;
+
+        auto totalMatches_ = deser.template read<uint64_t>();
+        if (!totalMatches_)
+            return totalMatches_.error();
+        r.totalMatches = totalMatches_.value();
+
+        auto filesSearched_ = deser.template read<uint64_t>();
+        if (!filesSearched_)
+            return filesSearched_.error();
+        r.filesSearched = filesSearched_.value();
+
+        // For backward compatibility, new fields are optional
+        auto regexMatches_ = deser.template read<uint64_t>();
+        if (regexMatches_)
+            r.regexMatches = regexMatches_.value();
+
+        auto semanticMatches_ = deser.template read<uint64_t>();
+        if (semanticMatches_)
+            r.semanticMatches = semanticMatches_.value();
+
+        auto executionTimeMs_ = deser.template read<int64_t>();
+        if (executionTimeMs_)
+            r.executionTimeMs = executionTimeMs_.value();
+
+        auto queryInfo_ = deser.readString();
+        if (queryInfo_)
+            r.queryInfo = queryInfo_.value();
+
+        auto searchStats_ = deser.readStringMap();
+        if (searchStats_)
+            r.searchStats = searchStats_.value();
+
+        auto filesWith_ = deser.readStringVector();
+        if (filesWith_)
+            r.filesWith = filesWith_.value();
+
+        auto filesWithout_ = deser.readStringVector();
+        if (filesWithout_)
+            r.filesWithout = filesWithout_.value();
+
+        auto pathsOnly_ = deser.readStringVector();
+        if (pathsOnly_)
+            r.pathsOnly = pathsOnly_.value();
+
+        return r;
     }
 };
 

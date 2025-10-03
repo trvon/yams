@@ -667,6 +667,7 @@ template <> struct ProtoBinding<GrepRequest> {
         o->set_color_mode(r.colorMode);
         o->set_before_context(r.beforeContext);
         o->set_after_context(r.afterContext);
+        o->set_show_diff(r.showDiff);
     }
     static GrepRequest get(const Envelope& env) {
         const auto& i = env.grep_request();
@@ -696,6 +697,7 @@ template <> struct ProtoBinding<GrepRequest> {
         r.colorMode = i.color_mode();
         r.beforeContext = i.before_context();
         r.afterContext = i.after_context();
+        r.showDiff = i.show_diff();
         return r;
     }
 };
@@ -1532,6 +1534,16 @@ template <> struct ProtoBinding<GrepResponse> {
             m->set_match_type(match.matchType);
             m->set_confidence(match.confidence);
         }
+        o->set_total_matches(r.totalMatches);
+        o->set_files_searched(r.filesSearched);
+        o->set_regex_matches(r.regexMatches);
+        o->set_semantic_matches(r.semanticMatches);
+        o->set_execution_time_ms(r.executionTimeMs);
+        o->set_query_info(r.queryInfo);
+        to_kv_pairs(r.searchStats, o->mutable_search_stats());
+        set_string_list(r.filesWith, o->mutable_files_with());
+        set_string_list(r.filesWithout, o->mutable_files_without());
+        set_string_list(r.pathsOnly, o->mutable_paths_only());
     }
     static GrepResponse get(const Envelope& env) {
         const auto& i = env.grep_response();
@@ -1553,8 +1565,16 @@ template <> struct ProtoBinding<GrepResponse> {
             match.confidence = m.confidence();
             r.matches.push_back(std::move(match));
         }
-        r.totalMatches = r.matches.size();
-        r.filesSearched = 0; // This info is not in the protobuf message
+        r.totalMatches = i.total_matches();
+        r.filesSearched = i.files_searched();
+        r.regexMatches = i.regex_matches();
+        r.semanticMatches = i.semantic_matches();
+        r.executionTimeMs = i.execution_time_ms();
+        r.queryInfo = i.query_info();
+        r.searchStats = from_kv_pairs(i.search_stats());
+        r.filesWith = get_string_list(i.files_with());
+        r.filesWithout = get_string_list(i.files_without());
+        r.pathsOnly = get_string_list(i.paths_only());
         return r;
     }
 };

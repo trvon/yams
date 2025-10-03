@@ -1041,7 +1041,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
-          TAP_PATH="taps/homebrew-yams"
+          TAP_PATH="homebrew-yams"
           if [ ! -d "$TAP_PATH" ]; then
             echo "Tap submodule not found at $TAP_PATH; skipping tap update" >&2
             exit 0
